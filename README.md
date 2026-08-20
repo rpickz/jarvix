@@ -94,22 +94,21 @@ All options: [docs/configuration.md](docs/configuration.md).
 
 | Interaction | How |
 |---|---|
-| Talk to Jarvix | Hold `Super+Alt+V`, speak, release |
+| Talk to Jarvix | Tap `Super+Alt+V`, speak, tap again |
+| …or hold-to-talk | Hold `F10`, speak, release |
 | Cancel / stop speech | `Super+Alt+Escape` (or `jarvix cancel`) |
-| Interrupt mid-speech | Just start talking again (hold `Super+Alt+V`) |
+| Interrupt mid-speech | Tap `Super+Alt+V` again — it stops talking and listens |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
 
-Why `Super+Alt+V`? Plain `Super+V` is Omarchy's universal paste. To rebind,
-edit the managed block in `~/.config/hypr/bindings.lua` — a dedicated key like
-`F10` works well:
-
-```lua
-o.bind("F10", "Talk to Jarvix (hold)", "jarvix ptt start")
-o.bind("F10", "Submit to Jarvix", "jarvix ptt stop", { release = true })
-```
+Why these keys? Plain `Super+V` is Omarchy's universal paste, and Hyprland
+only delivers reliable *release* events for bare keys — so the chord taps to
+toggle and the bare key holds (the same split voxtype uses). Both live in a
+managed block in `~/.config/hypr/bindings.lua` and are one-line edits; the
+installer and `jarvix doctor` verify Jarvix never clashes with another
+binding. See [docs/adr/0004-keyboard-activation.md](docs/adr/0004-keyboard-activation.md).
 
 ## Troubleshooting
 

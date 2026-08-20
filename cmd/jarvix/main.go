@@ -16,7 +16,8 @@ Usage:
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
-  jarvix ptt start|stop         Push-to-talk half-commands (used by keybindings)
+  jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
+  jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix doctor                 Check every dependency and explain failures
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
   jarvix config                 Show effective configuration
@@ -50,8 +51,8 @@ func main() {
 	case "cancel":
 		err = cmdCancel(paths)
 	case "ptt":
-		if len(args) < 1 || (args[0] != "start" && args[0] != "stop") {
-			fatal(fmt.Errorf("usage: jarvix ptt start|stop"))
+		if len(args) < 1 || (args[0] != "start" && args[0] != "stop" && args[0] != "toggle") {
+			fatal(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
 		}
 		err = cmdPTT(paths, args[0])
 	case "doctor":

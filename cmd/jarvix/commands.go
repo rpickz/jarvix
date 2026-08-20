@@ -41,24 +41,51 @@ func cmdCancel(paths config.Paths) error {
 	return client.Call("session.cancel", nil, nil)
 }
 
-// cmdPTT implements the push-to-talk halves bound to key press and release.
-// They must return fast — a human is holding a key.
+// cmdPTT implements the push-to-talk commands bound to keys. They must
+// return fast — a human is at the keyboard.
+//
+// "toggle" is the primary binding (tap to listen, tap again to submit):
+// Hyprland release-binds are only reliable for bare keys, not modifier
+// chords, so the chord gets tap semantics and hold-to-talk lives on a bare
+// key using start/stop (see ADR 0004).
 func cmdPTT(paths config.Paths, phase string) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	if phase == "start" {
+
+	beginListening := func() error {
 		if err := client.Call("session.start", nil, nil); err != nil {
 			return err
 		}
 		return client.Call("voice.start", nil, nil)
 	}
-	if err := client.Call("voice.stop", nil, nil); err != nil {
-		return err
+	submit := func() error {
+		if err := client.Call("voice.stop", nil, nil); err != nil {
+			return err
+		}
+		return client.Call("session.submit", nil, nil)
 	}
-	return client.Call("session.submit", nil, nil)
+
+	switch phase {
+	case "start":
+		return beginListening()
+	case "stop":
+		return submit()
+	default: // toggle
+		var status map[string]any
+		if err := client.Call("status.get", nil, &status); err != nil {
+			return err
+		}
+		if status["state"] == "listening" {
+			return submit()
+		}
+		// Idle: start listening. Any other active state (thinking, speaking,
+		// ...): interrupt it and start listening — session.start cancels the
+		// running session first.
+		return beginListening()
+	}
 }
 
 func cmdAsk(paths config.Paths, question string) error {

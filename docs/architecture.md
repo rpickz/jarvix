@@ -147,14 +147,16 @@ Assumptions about the installed Omarchy version are recorded in
 
 ## Keyboard activation
 
-Omarchy's Lua binding API supports release bindings, which gives real
-push-to-talk semantics:
+Hyprland delivers reliable release events only for bare keys, so the chord
+taps and the bare key holds ([ADR 0004](adr/0004-keyboard-activation.md)):
 
 ```lua
-o.bind("SUPER + ALT + V", "Talk to Jarvix (hold)", "jarvix ptt start")
-o.bind("SUPER + ALT + V", "Submit to Jarvix", "jarvix ptt stop", { release = true })
+o.bind("SUPER + ALT + V", "Talk to Jarvix (tap to start/stop)", "jarvix ptt toggle")
+o.bind("F10", "Talk to Jarvix (hold)", "jarvix ptt start")
+o.bind("F10", "Submit to Jarvix", "jarvix ptt stop", { release = true })
 ```
 
-`jarvix ptt start` = `session.start` + `voice.start`;
-`jarvix ptt stop` = `voice.stop` + `session.submit`. The CLI halves must
-return in milliseconds — they only make socket calls.
+`jarvix ptt toggle` checks daemon state: idle → `session.start` +
+`voice.start`; listening → `voice.stop` + `session.submit`; anything else
+active → interrupt and listen. `start`/`stop` are the raw halves for the
+hold binding. All are thin socket calls returning in milliseconds.
