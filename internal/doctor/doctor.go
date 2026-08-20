@@ -53,6 +53,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkProviderConfigured,
 		checkProviderReachable,
 		checkPlugin,
+		checkKeybindings,
 	}
 	results := make([]Result, 0, len(checks))
 	for _, check := range checks {

@@ -114,8 +114,11 @@ o.bind("F10", "Submit to Jarvix", "jarvix ptt stop", { release = true })
 ## Troubleshooting
 
 Start with `jarvix doctor` — it checks PipeWire, microphone, speakers,
-whisper.cpp, the model, Piper, the voice, the daemon, the AI provider, and
-the Omarchy plugin, and tells you how to fix whatever is broken.
+whisper.cpp, the model, Piper, the voice, the daemon, the AI provider, the
+Omarchy plugin, and that no other Hyprland binding (Omarchy default or
+personal) shares a Jarvix key chord — and tells you how to fix whatever is
+broken. The bindings installer performs the same conflict check and refuses
+to leave a clashing chord in place.
 
 Daemon logs:
 
