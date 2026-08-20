@@ -1,0 +1,151 @@
+# Jarvix
+
+**Voice → Computer.** A voice-native interaction layer for
+[Omarchy](https://omarchy.org) (Arch Linux / Hyprland / Wayland).
+
+Hold a key, speak, release. Jarvix transcribes locally, streams an AI response
+into a minimal native overlay, and speaks it aloud — with instant,
+first-class interruption. The inspiration is the Star Trek computer / JARVIS
+interaction model: the computer feels present, immediate, and unobtrusive,
+not like a chat app you have to operate.
+
+```text
+Hold Super+Alt+V   →  overlay appears: ◉ Listening
+Speak              →  "why is my build failing?"
+Release            →  transcribed (whisper.cpp, on device)
+                   →  response streams into the overlay
+                   →  Jarvix speaks it aloud (Piper, on device)
+                   →  overlay fades
+```
+
+Jarvix is not dictation, and it is not a voice wrapper around a chatbot. The
+long-term goal is a system that routes natural intent to the right mechanism:
+deterministic local commands, desktop context, AI reasoning, tools, or
+speech — see [docs/roadmap.md](docs/roadmap.md).
+
+## Status
+
+**Milestone 1 (voice conversation vertical slice) — working.**
+One-turn interactions: push-to-talk → local STT → streaming AI → local TTS,
+with an Omarchy overlay and full cancellation. See
+[docs/implementation-plan.md](docs/implementation-plan.md) for what's next.
+
+## Requirements
+
+- Omarchy 4.x (Quickshell shell with the plugin registry), Hyprland, Wayland
+- PipeWire (`pw-record` / `pw-play`)
+- Go ≥ 1.25 (to build)
+- [whisper.cpp](https://github.com/ggerganov/whisper.cpp): `sudo pacman -S whisper-cpp`
+- [Piper](https://github.com/rhasspy/piper) + a voice:
+  `paru -S piper-tts-bin piper-voices-en-us` (AUR)
+- An AI backend: [Ollama](https://ollama.com) locally (default), or any
+  OpenAI-compatible endpoint (OpenAI, OpenRouter, LM Studio, …)
+
+## Installation
+
+```bash
+git clone https://github.com/rpickz/jarvix.git
+cd jarvix
+
+make install            # builds and installs jarvix + jarvixd to ~/.local/bin
+make install-systemd    # installs the user service
+systemctl --user enable --now jarvixd
+
+jarvix setup whisper    # downloads the Whisper model (~148 MB, one-time)
+
+make install-plugin     # links the Omarchy overlay plugin and enables it
+make install-hyprland   # adds the push-to-talk keybindings
+
+jarvix doctor           # verifies every dependency, explains anything missing
+```
+
+For the default local setup, make sure Ollama is running with the model:
+
+```bash
+sudo systemctl enable --now ollama
+ollama pull llama3.2:3b
+```
+
+## Configuration
+
+Jarvix works with **no configuration file** on a machine with Ollama and
+Piper installed. To customise, create `~/.config/jarvix/config.toml`:
+
+```toml
+[ai]
+provider = "ollama"        # or "openai", "openrouter", "lmstudio", or your own
+model = "llama3.2:3b"
+
+[tts.piper]
+voice = "en_US-amy-medium"
+```
+
+Cloud providers read API keys from the environment (`OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`) — never from the config file. For the daemon:
+
+```bash
+systemctl --user set-environment OPENAI_API_KEY=sk-...
+systemctl --user restart jarvixd
+```
+
+All options: [docs/configuration.md](docs/configuration.md).
+
+## Using Jarvix
+
+| Interaction | How |
+|---|---|
+| Talk to Jarvix | Hold `Super+Alt+V`, speak, release |
+| Cancel / stop speech | `Super+Alt+Escape` (or `jarvix cancel`) |
+| Interrupt mid-speech | Just start talking again (hold `Super+Alt+V`) |
+| Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
+| Voice from a terminal | `jarvix listen` |
+| Health check | `jarvix doctor` |
+| Daemon state | `jarvix status` |
+
+Why `Super+Alt+V`? Plain `Super+V` is Omarchy's universal paste. To rebind,
+edit the managed block in `~/.config/hypr/bindings.lua` — a dedicated key like
+`F10` works well:
+
+```lua
+o.bind("F10", "Talk to Jarvix (hold)", "jarvix ptt start")
+o.bind("F10", "Submit to Jarvix", "jarvix ptt stop", { release = true })
+```
+
+## Troubleshooting
+
+Start with `jarvix doctor` — it checks PipeWire, microphone, speakers,
+whisper.cpp, the model, Piper, the voice, the daemon, the AI provider, and
+the Omarchy plugin, and tells you how to fix whatever is broken.
+
+Daemon logs:
+
+```bash
+journalctl --user -u jarvixd -f
+```
+
+The overlay is display-only. If it doesn't appear:
+`omarchy plugin list` should show `jarvix` enabled; `omarchy-shell shell rescanPlugins`
+re-discovers it; saving any file in `~/.config/omarchy/plugins/jarvix/`
+hot-reloads it.
+
+## Development
+
+```bash
+make build   # binaries into ./bin
+make test    # unit + integration tests (no hardware or network needed)
+make lint    # go vet (+ staticcheck when installed)
+```
+
+The entire session lifecycle is testable with fakes — `internal/session`'s
+tests run fake speech → fake transcript → fake AI stream → fake TTS through
+the real engine and real IPC. Architecture, protocol, and design decisions:
+
+- [docs/architecture.md](docs/architecture.md) — components and session lifecycle
+- [docs/ipc.md](docs/ipc.md) — the JSON-RPC protocol
+- [docs/providers.md](docs/providers.md) — provider abstractions
+- [docs/adr/](docs/adr/) — architecture decision records
+- [docs/CHECKLIST.md](docs/CHECKLIST.md) — development checklist
+
+## License
+
+MIT — see [LICENSE](LICENSE).
