@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "jarvix",
+  "name": "Jarvix",
+  "version": "0.1.0",
+  "author": "Rich Pickering",
+  "description": "Voice-native computer interaction: listening, transcript, and streaming response overlay for the Jarvix daemon.",
+  "kinds": ["panel"],
+  "keepLoaded": true,
+  "entryPoints": { "panel": "JarvixOverlay.qml" }
+}

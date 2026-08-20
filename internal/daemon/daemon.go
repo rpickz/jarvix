@@ -1,0 +1,165 @@
+// Package daemon wires configuration into a running jarvixd: engines built
+// from config, the session engine, and the IPC surface.
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/rpickz/jarvix/internal/ai"
+	"github.com/rpickz/jarvix/internal/ai/openaicompat"
+	"github.com/rpickz/jarvix/internal/audio"
+	"github.com/rpickz/jarvix/internal/build"
+	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/session"
+	"github.com/rpickz/jarvix/internal/stt"
+	"github.com/rpickz/jarvix/internal/stt/whispercpp"
+	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/tts/piper"
+)
+
+// Daemon is a fully wired jarvixd instance.
+type Daemon struct {
+	engine *session.Engine
+	server *ipc.Server
+	bus    *session.Bus
+	log    *slog.Logger
+}
+
+// Deps are the engine's collaborators, injectable for tests. Zero-value
+// fields are built from configuration.
+type Deps struct {
+	Provider    ai.Provider
+	Transcriber stt.Transcriber
+	Synthesizer tts.Synthesizer
+	Recorder    audio.Recorder
+	Player      audio.Player
+}
+
+// New builds a daemon from configuration. cfg must already be validated.
+func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) (*Daemon, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if deps.Provider == nil {
+		ep, ok := cfg.Endpoint()
+		if !ok {
+			return nil, fmt.Errorf("no endpoint for ai.provider %q", cfg.AI.Provider)
+		}
+		deps.Provider = openaicompat.New(cfg.AI.Provider, ep.BaseURL, ep.Key())
+	}
+	if deps.Transcriber == nil {
+		deps.Transcriber = &whispercpp.Transcriber{
+			Binary:    cfg.STT.Whisper.Binary,
+			ModelPath: whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
+			Language:  cfg.STT.Whisper.Language,
+		}
+	}
+	if deps.Synthesizer == nil {
+		deps.Synthesizer = &piper.Synthesizer{
+			Binary: cfg.TTS.Piper.Binary,
+			Voice:  cfg.TTS.Piper.Voice,
+		}
+	}
+	if deps.Recorder == nil {
+		deps.Recorder = &audio.PipeWireRecorder{
+			Dir:         paths.Runtime,
+			Device:      cfg.Audio.InputDevice,
+			MaxDuration: time.Duration(cfg.Audio.MaxRecordingSec) * time.Second,
+		}
+	}
+	if deps.Player == nil {
+		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
+	}
+
+	bus := session.NewBus(logger)
+	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
+		deps.Recorder, deps.Player, bus, logger, session.Options{
+			Model:          cfg.AI.Model,
+			SystemPrompt:   cfg.AI.SystemPrompt,
+			MaxTokens:      cfg.AI.MaxTokens,
+			Temperature:    cfg.AI.Temperature,
+			SpeakResponses: cfg.Conversation.SpeakResponses,
+		})
+
+	server := ipc.NewServer(paths.Socket, bus, logger)
+	d := &Daemon{engine: engine, server: server, bus: bus, log: logger}
+	d.registerMethods()
+	return d, nil
+}
+
+// Run listens on the socket and serves until ctx is cancelled.
+func (d *Daemon) Run(ctx context.Context) error {
+	if err := d.server.Listen(); err != nil {
+		return err
+	}
+	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
+	return d.server.Serve(ctx)
+}
+
+// Bus exposes the event bus (used by tests).
+func (d *Daemon) Bus() *session.Bus { return d.bus }
+
+func (d *Daemon) registerMethods() {
+	type submitParams struct {
+		Text string `json:"text"`
+	}
+
+	d.server.Handle("session.start", func(json.RawMessage) (any, error) {
+		id, err := d.engine.StartSession()
+		if err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return map[string]string{"session_id": id}, nil
+	})
+	d.server.Handle("session.submit", func(params json.RawMessage) (any, error) {
+		var p submitParams
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "session.submit params: %v", err)
+			}
+		}
+		if err := d.engine.Submit(p.Text); err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return nil, nil
+	})
+	d.server.Handle("session.cancel", func(json.RawMessage) (any, error) {
+		if err := d.engine.Cancel(); err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return nil, nil
+	})
+	d.server.Handle("voice.start", func(json.RawMessage) (any, error) {
+		if err := d.engine.StartVoice(); err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return nil, nil
+	})
+	d.server.Handle("voice.stop", func(json.RawMessage) (any, error) {
+		if err := d.engine.StopVoice(); err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return nil, nil
+	})
+	d.server.Handle("speech.cancel", func(json.RawMessage) (any, error) {
+		if err := d.engine.CancelSpeech(); err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return nil, nil
+	})
+	d.server.Handle("status.get", func(json.RawMessage) (any, error) {
+		state, id := d.engine.State()
+		return map[string]any{
+			"state":      string(state),
+			"session_id": id,
+			"version":    build.Version,
+			"protocol":   ipc.ProtocolVersion,
+		}, nil
+	})
+}
