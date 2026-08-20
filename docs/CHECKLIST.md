@@ -32,12 +32,13 @@ honest: an item is checked only when built, tested, and documented.
 - [x] Acceptance: `jarvix ask "Say hello"` speaks aloud ✅ (verified)
 - [x] Mid-speech cancel verified (<10 ms to silence) ✅
 
-### Step 5 — Recording + STT
+### Step 5 — Recording + STT ✅
 - [x] PipeWire capture (pw-record → tmpfs WAV, SIGINT finalise, safety cap)
 - [x] whisper.cpp adapter + `jarvix setup whisper` model download
 - [x] `jarvix listen` end-to-end
-- [ ] Acceptance verified live with a microphone (blocked on:
-      `sudo pacman -S whisper-cpp`)
+- [x] Acceptance verified live: full closed-loop voice test through the
+      daemon (Piper-spoken question captured via PipeWire, transcribed
+      verbatim by whisper.cpp, answered by Ollama, spoken aloud) ✅
 
 ### Step 6 — Omarchy overlay ✅
 - [x] Plugin (manifest schemaVersion 1, kind panel, keepLoaded)
@@ -62,8 +63,9 @@ honest: an item is checked only when built, tested, and documented.
 - [x] AI provider configurable (incl. custom endpoints without code)
 - [x] Daemon runs as user systemd service
 - [x] Overlay plugin loads via Omarchy plugin registry
-- [ ] Hold-shortcut → speak → release → streamed + spoken response (needs
-      whisper-cpp installed; everything downstream verified via `jarvix ask`)
+- [x] Voice → transcript → streamed + spoken response verified through the
+      daemon's push-to-talk path (`jarvix ptt start/stop` with real audio
+      capture); human hold-`Super+Alt+V` uses the identical code path
 - [x] Cancel and interrupt work from every state (tested + verified live)
 - [x] Failures produce understandable errors; daemon survives provider/audio
       failures (tested)
