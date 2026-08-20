@@ -27,7 +27,9 @@ var transitions = map[State][]State{
 	// Thinking. Cancellation is legal from every active state.
 	StateTranscribing: {StateThinking, StateCancelling, StateError},
 	StateThinking:     {StateResponding, StateCancelling, StateError},
-	StateResponding:   {StateSpeaking, StateIdle, StateCancelling, StateError},
+	// Responding → Thinking happens when the model streamed some text and
+	// then asked to call a tool: it goes back to working before answering.
+	StateResponding: {StateSpeaking, StateThinking, StateIdle, StateCancelling, StateError},
 	StateSpeaking:     {StateIdle, StateCancelling, StateError},
 	StateCancelling:   {StateIdle},
 	StateError:        {StateIdle},

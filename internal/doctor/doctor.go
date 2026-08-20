@@ -17,6 +17,7 @@ import (
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
+	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
 )
 
@@ -48,8 +49,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkOutput,
 		checkWhisperBinary,
 		checkWhisperModel,
-		checkPiperBinary,
-		checkPiperVoice,
+		checkTTS,
 		checkDaemon,
 		checkProviderConfigured,
 		checkProviderReachable,
@@ -170,16 +170,21 @@ func checkWhisperModel(cfg config.Config, paths config.Paths) Result {
 	return Result{Status: OK, Name: "Whisper model available", Detail: cfg.STT.Whisper.Model}
 }
 
-func checkPiperBinary(cfg config.Config, _ config.Paths) Result {
+func checkTTS(cfg config.Config, _ config.Paths) Result {
+	if cfg.TTS.Provider == "kokoro" {
+		k := &kokoro.Synthesizer{Voice: cfg.TTS.Kokoro.Voice, Speed: cfg.TTS.Kokoro.Speed}
+		if err := k.Ready(); err != nil {
+			return Result{Status: Fail, Name: "Kokoro TTS ready", Detail: err.Error(),
+				Fix: "Install it: scripts/setup-kokoro.sh"}
+		}
+		return Result{Status: OK, Name: "Kokoro TTS ready", Detail: "voice " + cfg.TTS.Kokoro.Voice}
+	}
+	// Piper (default).
 	if _, err := exec.LookPath(cfg.TTS.Piper.Binary); err != nil {
 		return Result{Status: Fail, Name: "Piper installed",
 			Detail: cfg.TTS.Piper.Binary + " not found in PATH",
 			Fix:    "Install it: sudo pacman -S piper-tts-bin (AUR) or pip install piper-tts"}
 	}
-	return Result{Status: OK, Name: "Piper installed"}
-}
-
-func checkPiperVoice(cfg config.Config, _ config.Paths) Result {
 	s := &piper.Synthesizer{Binary: cfg.TTS.Piper.Binary, Voice: cfg.TTS.Piper.Voice}
 	if err := s.ResolveVoice(); err != nil {
 		return Result{Status: Fail, Name: "Piper voice available",

@@ -5,7 +5,10 @@
 // Cancellation happens through the context passed to Chat.
 package ai
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Role identifies the author of a message.
 type Role string
@@ -21,6 +24,29 @@ const (
 type Message struct {
 	Role    Role
 	Content string
+	// ToolCalls is set on assistant messages that requested tool use, so the
+	// exchange can be replayed to the provider on the next round.
+	ToolCalls []ToolCall
+	// ToolCallID is set on RoleTool messages: the call this result answers.
+	ToolCallID string
+}
+
+// RoleTool marks a message carrying a tool execution result.
+const RoleTool Role = "tool"
+
+// ToolDef advertises one callable tool to the provider.
+type ToolDef struct {
+	Name        string
+	Description string
+	// Schema is the JSON Schema of the tool's input object.
+	Schema json.RawMessage
+}
+
+// ToolCall is a provider request to execute one tool.
+type ToolCall struct {
+	ID        string // provider-assigned id, echoed back in the result message
+	Name      string
+	Arguments string // raw JSON arguments as produced by the model
 }
 
 // ChatRequest describes one assistant invocation.
@@ -29,6 +55,8 @@ type ChatRequest struct {
 	Messages    []Message
 	MaxTokens   int
 	Temperature float64
+	// Tools the provider may call. Providers without tool support ignore it.
+	Tools []ToolDef
 }
 
 // EventType classifies stream events.
@@ -36,15 +64,17 @@ type EventType string
 
 // Stream event types.
 const (
-	EventDelta EventType = "delta" // Content carries a text fragment
-	EventDone  EventType = "done"  // stream completed normally
-	EventError EventType = "error" // Err carries the failure; stream ends
+	EventDelta    EventType = "delta"     // Content carries a text fragment
+	EventToolCall EventType = "tool_call" // Call carries a tool invocation request
+	EventDone     EventType = "done"      // stream completed normally
+	EventError    EventType = "error"     // Err carries the failure; stream ends
 )
 
 // Event is one element of a streamed response.
 type Event struct {
 	Type    EventType
 	Content string
+	Call    ToolCall
 	Err     error
 }
 

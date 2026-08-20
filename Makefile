@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test vet lint install install-plugin install-systemd install-hyprland uninstall clean
+.PHONY: all build test vet lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean
 
 all: build
 
@@ -25,6 +25,9 @@ lint: vet
 install: build
 	install -Dm755 bin/jarvix  $(BINDIR)/jarvix
 	install -Dm755 bin/jarvixd $(BINDIR)/jarvixd
+
+install-kokoro:
+	scripts/setup-kokoro.sh
 
 install-plugin:
 	scripts/install-plugin.sh

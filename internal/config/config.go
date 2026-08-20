@@ -22,9 +22,18 @@ type Config struct {
 	STT          STT          `toml:"stt"`
 	TTS          TTS          `toml:"tts"`
 	Conversation Conversation `toml:"conversation"`
+	Tools        Tools        `toml:"tools"`
 	Audio        Audio        `toml:"audio"`
 	UI           UI           `toml:"ui"`
 	Log          Log          `toml:"log"`
+}
+
+// Tools configures the assistant's tool access. Tools are opt-in: enabling
+// shell.run gives the assistant the same authority as the user's shell.
+type Tools struct {
+	Shell            bool `toml:"shell"`              // enable shell.run
+	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`  // per-command timeout
+	ShellMaxOutputKB int  `toml:"shell_max_output_kb"` // captured output cap
 }
 
 // Activation configures how sessions are initiated.
@@ -88,14 +97,21 @@ type Whisper struct {
 
 // TTS selects and configures text-to-speech.
 type TTS struct {
-	Provider string `toml:"provider"` // "piper" (kokoro planned)
+	Provider string `toml:"provider"` // "piper" or "kokoro"
 	Piper    Piper  `toml:"piper"`
+	Kokoro   Kokoro `toml:"kokoro"`
 }
 
 // Piper configures the Piper adapter.
 type Piper struct {
 	Voice  string `toml:"voice"`  // voice name ("en_US-amy-medium") or absolute path to .onnx
 	Binary string `toml:"binary"` // piper binary; searched on PATH when relative
+}
+
+// Kokoro configures the Kokoro adapter (more natural voice, heavier setup).
+type Kokoro struct {
+	Voice string  `toml:"voice"` // Kokoro voice id, e.g. "af_heart"
+	Speed float64 `toml:"speed"` // speech rate multiplier, default 1.0
 }
 
 // Conversation configures assistant behaviour.
@@ -152,8 +168,10 @@ func Default() Config {
 		TTS: TTS{
 			Provider: "piper",
 			Piper:    Piper{Voice: "en_US-amy-medium", Binary: "piper-tts"},
+			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
 		Conversation: Conversation{SpeakResponses: true},
+		Tools:        Tools{Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16},
 		Audio:        Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		UI:           UI{ShowTranscript: true, ShowResponse: true},
 		Log:          Log{Level: "info"},
@@ -163,6 +181,16 @@ func Default() Config {
 const defaultSystemPrompt = "You are Jarvix, a voice assistant built into the user's Linux computer. " +
 	"Your responses are spoken aloud, so answer concisely in plain prose: no markdown, " +
 	"no lists, no code blocks, no preamble. Get straight to the point."
+
+// ToolSystemPrompt is appended to the system prompt when tools are enabled.
+// It tells the model to act on its own rather than instruct the user, and to
+// keep spoken answers about command output brief.
+const ToolSystemPrompt = " You can run shell commands yourself with the shell.run tool to answer " +
+	"questions about the computer's live state and to carry out tasks. When the user asks what is " +
+	"happening with something (Docker, git, processes, disk, services), run the appropriate command " +
+	"and summarise the result — do not tell the user which command to run, run it. Prefer read-only " +
+	"commands; before anything destructive or irreversible, ask for confirmation first. Summarise " +
+	"command output for speech: report what matters, not raw tables."
 
 // Load reads the config file at path, applying defaults for anything unset.
 // A missing file is not an error; defaults are returned.
@@ -250,9 +278,9 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"stt.provider %q is not supported; use \"whisper\"", c.STT.Provider))
 	}
-	if c.TTS.Provider != "piper" {
+	if c.TTS.Provider != "piper" && c.TTS.Provider != "kokoro" {
 		problems = append(problems, fmt.Sprintf(
-			"tts.provider %q is not supported yet; use \"piper\"", c.TTS.Provider))
+			"tts.provider %q is not supported; use \"piper\" or \"kokoro\"", c.TTS.Provider))
 	}
 	if c.Audio.MaxRecordingSec <= 0 {
 		problems = append(problems, "audio.max_recording_sec must be positive")

@@ -51,12 +51,21 @@ binary = "whisper-cli"           # found on PATH, or absolute path
 language = "en"                  # "auto" to detect
 
 [tts]
-provider = "piper"               # the only supported TTS in V1 (kokoro planned)
+provider = "piper"               # "piper" (zero-setup default) or "kokoro" (more natural)
 
 [tts.piper]
 voice = "en_US-amy-medium"       # voice name searched under /usr/share/piper-voices,
                                  # or absolute path to a .onnx model
 binary = "piper-tts"
+
+[tts.kokoro]                     # requires scripts/setup-kokoro.sh first
+voice = "af_heart"               # Kokoro voice id
+speed = 1.0                      # speech rate multiplier
+
+[tools]                          # the assistant can act on your computer
+shell = false                    # enable shell.run — see the Tools section below
+shell_timeout_sec = 30           # per-command timeout
+shell_max_output_kb = 16         # captured output cap fed back to the model
 
 [conversation]
 speak_responses = true           # false = text-only sessions
@@ -108,6 +117,42 @@ Voice names resolve by searching `/usr/share/piper-voices` (the Arch
 [Piper voices collection](https://huggingface.co/rhasspy/piper-voices) works:
 download the `.onnx` + `.onnx.json` pair and point `tts.piper.voice` at the
 `.onnx` path.
+
+## Tools (assistant actions)
+
+With `[tools] shell = true`, the assistant can run shell commands itself to
+answer questions about your system and carry out tasks — "what's happening in
+docker?" makes it run `docker ps` and summarise the result, rather than
+telling you the command. This is **opt-in** because it gives the assistant
+the same authority as your own shell:
+
+- Every command is logged (`journalctl --user -u jarvixd`).
+- Each command has a timeout (`shell_timeout_sec`) and an output cap.
+- The default system prompt tells the model to prefer read-only commands and
+  to ask before anything destructive — but a capable model with shell access
+  can still do real things. Enable it deliberately.
+- Commands run under the session context: cancelling a session (Escape /
+  `jarvix cancel`) kills any command in flight.
+
+Use a tool-capable model — `qwen2.5:7b` (local) or any OpenAI/Anthropic model
+with tool support. Small models without tool training will not call tools.
+
+A per-tool permission gate (allow / ask / deny, with spoken confirmation) is
+the next step on the roadmap; today `shell` is a single on/off switch.
+
+## Natural voice (Kokoro)
+
+Piper (the default) needs no setup but sounds robotic. Kokoro is markedly
+more natural:
+
+```bash
+scripts/setup-kokoro.sh          # Python venv + kokoro-onnx + models (~340 MB)
+# then set tts.provider = "kokoro" and: systemctl --user restart jarvixd
+```
+
+Assistant answers are normalised before they are spoken — markdown, code
+fences, and list bullets are stripped so nothing reads "asterisk" or
+"backtick" aloud — while the overlay still shows the formatted text.
 
 ## XDG paths
 

@@ -1,6 +1,6 @@
 # ADR 0007 — Piper first, Kokoro next
 
-**Status:** accepted
+**Status:** accepted — Kokoro shipped (see Update)
 
 ## Context
 
@@ -25,3 +25,15 @@ server, e.g. kokoro-fastapi or a kokoro-onnx wrapper), selected by
   Piper-medium rather than Kokoro (a real, audible trade-off).
 - Nothing outside `internal/tts/piper` knows Piper exists; the Kokoro
   adapter is additive.
+
+## Update — Kokoro implemented
+
+`internal/tts/kokoro` now ships behind the same `tts.Synthesizer` interface,
+selected with `tts.provider = "kokoro"`. It runs kokoro-onnx through a small
+Python helper (`tts/kokoro/kokoro_stream.py`) in a dedicated venv — text in
+on stdin, streamed s16le PCM out on stdout, killed to cancel — exactly the
+short-lived-subprocess pattern of ADR 0002/0003. `scripts/setup-kokoro.sh`
+provisions the venv, models (~340 MB), and helper; `jarvix doctor` verifies
+readiness. Piper stays the zero-setup default (Kokoro needs Python + ONNX),
+so the original decision holds; Kokoro is the opt-in upgrade for natural
+voice. Confirmed audibly better in live testing.

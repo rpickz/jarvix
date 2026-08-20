@@ -19,6 +19,8 @@ import (
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
+	"github.com/rpickz/jarvix/internal/tools"
+	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts"
 	"github.com/rpickz/jarvix/internal/tts/piper"
 )
@@ -64,9 +66,17 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		}
 	}
 	if deps.Synthesizer == nil {
-		deps.Synthesizer = &piper.Synthesizer{
-			Binary: cfg.TTS.Piper.Binary,
-			Voice:  cfg.TTS.Piper.Voice,
+		switch cfg.TTS.Provider {
+		case "kokoro":
+			deps.Synthesizer = &kokoro.Synthesizer{
+				Voice: cfg.TTS.Kokoro.Voice,
+				Speed: cfg.TTS.Kokoro.Speed,
+			}
+		default:
+			deps.Synthesizer = &piper.Synthesizer{
+				Binary: cfg.TTS.Piper.Binary,
+				Voice:  cfg.TTS.Piper.Voice,
+			}
 		}
 	}
 	if deps.Recorder == nil {
@@ -80,11 +90,23 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
 	}
 
+	registry := tools.NewRegistry(logger)
+	systemPrompt := cfg.AI.SystemPrompt
+	if cfg.Tools.Shell {
+		registry.Register(&tools.Shell{
+			Timeout:   time.Duration(cfg.Tools.ShellTimeoutSec) * time.Second,
+			MaxOutput: cfg.Tools.ShellMaxOutputKB * 1024,
+			Log:       logger,
+		})
+		systemPrompt += config.ToolSystemPrompt
+		logger.Info("tool enabled", "component", "tools", "tool", "shell.run")
+	}
+
 	bus := session.NewBus(logger)
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, bus, logger, session.Options{
+		deps.Recorder, deps.Player, registry, bus, logger, session.Options{
 			Model:          cfg.AI.Model,
-			SystemPrompt:   cfg.AI.SystemPrompt,
+			SystemPrompt:   systemPrompt,
 			MaxTokens:      cfg.AI.MaxTokens,
 			Temperature:    cfg.AI.Temperature,
 			SpeakResponses: cfg.Conversation.SpeakResponses,

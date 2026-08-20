@@ -1,6 +1,8 @@
 package session
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/stt"
+	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
 )
 
@@ -21,6 +24,7 @@ type harness struct {
 	tts      *tts.Fake
 	recorder *audio.FakeRecorder
 	player   *audio.FakePlayer
+	tools    *tools.Registry
 	events   <-chan Event
 	cancel   func()
 }
@@ -40,7 +44,7 @@ func newHarness(t *testing.T, opts Options) *harness {
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
 	t.Cleanup(h.cancel)
-	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, bus, nil, opts)
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, bus, nil, opts)
 	return h
 }
 
@@ -389,6 +393,108 @@ func TestMinRecordingAllowsNormalHold(t *testing.T) {
 	h.waitFor(t, "transcript.final")
 	h.waitFor(t, "session.finished")
 	h.waitIdle(t)
+}
+
+func TestToolCallLoop(t *testing.T) {
+	h := newHarness(t, Options{SpeakResponses: true})
+	// A registry with one tool that records its calls.
+	rec := &recordingTool{result: "3 containers running: web, db, cache"}
+	h.tools = tools.NewRegistry(nil)
+	h.tools.Register(rec)
+	bus := NewBus(nil)
+	h.events, h.cancel = bus.Subscribe()
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, bus, nil,
+		Options{Model: "m", SpeakResponses: true})
+
+	// Round 0: model asks to run the tool. Round 1: final spoken answer.
+	h.provider.ToolCallsByRound = [][]ai.ToolCall{
+		{{ID: "c1", Name: "run", Arguments: `{"command":"docker ps"}`}},
+	}
+	h.provider.Response = "You have three containers running: web, db, and cache."
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what's happening in docker")
+
+	started := h.waitFor(t, "tool.started")
+	if started.Data["tool"] != "run" {
+		t.Errorf("tool = %v", started.Data["tool"])
+	}
+	h.waitFor(t, "tool.finished")
+	fin := h.waitFor(t, "assistant.finished")
+	if fin.Data["content"] != "You have three containers running: web, db, and cache." {
+		t.Errorf("answer = %v", fin.Data["content"])
+	}
+	h.waitFor(t, "session.finished")
+	h.waitIdle(t)
+
+	// The tool actually ran, and its result was fed back to the model.
+	if rec.calls != 1 {
+		t.Errorf("tool called %d times", rec.calls)
+	}
+	last := h.provider.Requests[len(h.provider.Requests)-1]
+	foundResult := false
+	for _, m := range last.Messages {
+		if m.Role == ai.RoleTool && strings.Contains(m.Content, "web, db, cache") {
+			foundResult = true
+		}
+	}
+	if !foundResult {
+		t.Error("tool result was not sent back to the provider")
+	}
+}
+
+func TestToolLoopRunawayIsBounded(t *testing.T) {
+	h := newHarness(t, Options{SpeakResponses: true})
+	rec := &recordingTool{result: "ok"}
+	h.tools = tools.NewRegistry(nil)
+	h.tools.Register(rec)
+	bus := NewBus(nil)
+	h.events, h.cancel = bus.Subscribe()
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, bus, nil,
+		Options{Model: "m", SpeakResponses: true})
+
+	// Model always asks for a tool, never answers.
+	rounds := make([][]ai.ToolCall, maxToolRounds+2)
+	for i := range rounds {
+		rounds[i] = []ai.ToolCall{{ID: "c", Name: "run", Arguments: `{"command":"x"}`}}
+	}
+	h.provider.ToolCallsByRound = rounds
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("loop forever")
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-h.events:
+			if ev.Type == "error" {
+				if !strings.Contains(ev.Data["message"].(string), "tool rounds") {
+					t.Errorf("message = %v", ev.Data["message"])
+				}
+				h.waitIdle(t)
+				if rec.calls != maxToolRounds {
+					t.Errorf("tool ran %d times, want %d", rec.calls, maxToolRounds)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("runaway tool loop was not bounded")
+		}
+	}
+}
+
+// recordingTool is a Tool that counts invocations and returns a fixed result.
+type recordingTool struct {
+	result string
+	calls  int
+}
+
+func (r *recordingTool) Name() string                { return "run" }
+func (r *recordingTool) Description() string          { return "run something" }
+func (r *recordingTool) Schema() json.RawMessage      { return json.RawMessage(`{"type":"object"}`) }
+func (r *recordingTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
+	r.calls++
+	return r.result, nil
 }
 
 func TestVoiceWithoutSessionFails(t *testing.T) {

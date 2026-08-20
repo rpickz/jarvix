@@ -18,10 +18,11 @@ Release            →  transcribed (whisper.cpp, on device)
                    →  overlay fades
 ```
 
-Jarvix is not dictation, and it is not a voice wrapper around a chatbot. The
-long-term goal is a system that routes natural intent to the right mechanism:
-deterministic local commands, desktop context, AI reasoning, tools, or
-speech — see [docs/roadmap.md](docs/roadmap.md).
+Jarvix is not dictation, and it is not a voice wrapper around a chatbot. Ask
+"what's happening in docker?" and it runs `docker ps` itself and summarises
+the result aloud. The long-term goal is a system that routes natural intent
+to the right mechanism: deterministic local commands, desktop context, AI
+reasoning, tools, or speech — see [docs/roadmap.md](docs/roadmap.md).
 
 ## Status
 
@@ -36,8 +37,9 @@ with an Omarchy overlay and full cancellation. See
 - PipeWire (`pw-record` / `pw-play`)
 - Go ≥ 1.25 (to build)
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp): `sudo pacman -S whisper-cpp`
-- [Piper](https://github.com/rhasspy/piper) + a voice:
-  `paru -S piper-tts-bin piper-voices-en-us` (AUR)
+- [Piper](https://github.com/rhasspy/piper) + a voice (zero-setup default):
+  `paru -S piper-tts-bin piper-voices-en-us` (AUR); or Kokoro for a much more
+  natural voice via `scripts/setup-kokoro.sh`
 - An AI backend: [Ollama](https://ollama.com) locally (default), or any
   OpenAI-compatible endpoint (OpenAI, OpenRouter, LM Studio, …)
 

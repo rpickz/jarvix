@@ -31,13 +31,14 @@ STT ──► Intent Router ──► deterministic intent ("volume 30", "mute",
 Common commands execute in milliseconds without any model. The router starts
 as an explicit grammar/pattern table — not a machine-learning system.
 
-## Phase 4 — AI tools
+## Phase 4 — AI tools (started)
 
-The model can act, not just answer, through the `Tool` interface sketched in
-`docs/adr/0006-future-tool-boundary.md`: `desktop.*`, `clipboard.*`,
-`apps.*`, `system.*`, `hyprland.*`, `files.*`, `shell.run` — each gated by
-the permissions architecture, with spoken confirmation for destructive
-actions.
+The model can act, not just answer. `shell.run` ships now
+([ADR 0009](adr/0009-tool-calling.md)): the assistant runs commands itself
+and summarises the result. Remaining: the permission gate (allow / ask / deny
+with spoken confirmation), then structured tools — `desktop.*`,
+`clipboard.*`, `apps.*`, `system.*`, `hyprland.*`, `files.*` — each behind
+that gate. The engine's tool loop already generalises to all of them.
 
 ## Phase 5 — Persistent conversational mode
 

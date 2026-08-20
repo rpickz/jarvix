@@ -12,6 +12,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/stt"
+	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
 )
 
@@ -36,6 +37,7 @@ type Engine struct {
 	tts      tts.Synthesizer
 	recorder audio.Recorder
 	player   audio.Player
+	tools    *tools.Registry
 	bus      *Bus
 	log      *slog.Logger
 	opts     Options
@@ -62,9 +64,10 @@ type sess struct {
 	submitted       bool
 }
 
-// NewEngine wires the engine. logger may be nil.
+// NewEngine wires the engine. logger and registry may be nil (no tools).
 func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tts.Synthesizer,
-	recorder audio.Recorder, player audio.Player, bus *Bus, logger *slog.Logger, opts Options) *Engine {
+	recorder audio.Recorder, player audio.Player, registry *tools.Registry,
+	bus *Bus, logger *slog.Logger, opts Options) *Engine {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -74,6 +77,7 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 		tts:      synthesizer,
 		recorder: recorder,
 		player:   player,
+		tools:    registry,
 		bus:      bus,
 		log:      logger,
 		opts:     opts,
@@ -370,26 +374,72 @@ func (e *Engine) transcribe(s *sess, rec audio.Recording) {
 	}
 }
 
-// think streams the assistant response, then speaks it.
-func (e *Engine) think(s *sess) {
-	req := ai.ChatRequest{
-		Model:       e.opts.Model,
-		MaxTokens:   e.opts.MaxTokens,
-		Temperature: e.opts.Temperature,
-	}
-	if e.opts.SystemPrompt != "" {
-		req.Messages = append(req.Messages, ai.Message{Role: ai.RoleSystem, Content: e.opts.SystemPrompt})
-	}
-	req.Messages = append(req.Messages, ai.Message{Role: ai.RoleUser, Content: s.transcript})
+// maxToolRounds bounds the tool-call loop so a model that keeps requesting
+// tools without answering cannot loop forever.
+const maxToolRounds = 6
 
+// think drives the assistant: it streams a response, and whenever the model
+// requests tools it executes them (under the session context), feeds the
+// results back, and continues — until the model produces a spoken answer or
+// the round budget is exhausted.
+func (e *Engine) think(s *sess) {
+	messages := make([]ai.Message, 0, 4)
+	if e.opts.SystemPrompt != "" {
+		messages = append(messages, ai.Message{Role: ai.RoleSystem, Content: e.opts.SystemPrompt})
+	}
+	messages = append(messages, ai.Message{Role: ai.RoleUser, Content: s.transcript})
+
+	var tools []ai.ToolDef
+	if e.tools != nil && !e.tools.Empty() {
+		tools = e.tools.Defs()
+	}
+
+	e.publish(Event{Type: "assistant.started", Data: map[string]any{"session_id": s.id, "provider": e.provider.Name()}})
+
+	for round := 0; round < maxToolRounds; round++ {
+		text, calls, ok := e.streamOnce(s, ai.ChatRequest{
+			Model:       e.opts.Model,
+			MaxTokens:   e.opts.MaxTokens,
+			Temperature: e.opts.Temperature,
+			Messages:    messages,
+			Tools:       tools,
+		})
+		if !ok {
+			return // failed, cancelled, or superseded — streamOnce reported it
+		}
+		if len(calls) == 0 {
+			e.finishThinking(s, text)
+			return
+		}
+
+		// The model wants tools. Record its request, run each call, append
+		// results, and loop. Tool rounds keep the session in Thinking.
+		messages = append(messages, ai.Message{Role: ai.RoleAssistant, Content: text, ToolCalls: calls})
+		for _, call := range calls {
+			if s.ctx.Err() != nil {
+				return
+			}
+			e.publish(Event{Type: "tool.started", Data: map[string]any{
+				"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}})
+			result := e.tools.Execute(s.ctx, call)
+			e.publish(Event{Type: "tool.finished", Data: map[string]any{
+				"session_id": s.id, "tool": call.Name}})
+			messages = append(messages, ai.Message{Role: ai.RoleTool, ToolCallID: call.ID, Content: result})
+		}
+	}
+	e.fail(s, "assistant", fmt.Errorf("stopped after %d tool rounds without a final answer", maxToolRounds))
+}
+
+// streamOnce runs one provider turn, forwarding text deltas and collecting
+// any tool calls. ok is false when it already handled a terminal condition
+// (error/cancel/supersede).
+func (e *Engine) streamOnce(s *sess, req ai.ChatRequest) (text string, calls []ai.ToolCall, ok bool) {
 	start := time.Now()
 	events, err := e.provider.Chat(s.ctx, req)
 	if err != nil {
 		e.fail(s, "assistant", err)
-		return
+		return "", nil, false
 	}
-	e.publish(Event{Type: "assistant.started", Data: map[string]any{"session_id": s.id, "provider": e.provider.Name()}})
-
 	var full strings.Builder
 	responded := false
 	for ev := range events {
@@ -397,25 +447,39 @@ func (e *Engine) think(s *sess) {
 		case ai.EventDelta:
 			if !responded {
 				if !e.advance(s, StateResponding) {
-					return
+					return "", nil, false
 				}
 				responded = true
+				e.publish(Event{Type: "assistant.delta", Data: map[string]any{"session_id": s.id, "content": ""}})
 			}
 			full.WriteString(ev.Content)
 			e.publish(Event{Type: "assistant.delta", Data: map[string]any{"session_id": s.id, "content": ev.Content}})
+		case ai.EventToolCall:
+			calls = append(calls, ev.Call)
 		case ai.EventError:
 			if s.ctx.Err() == nil {
 				e.fail(s, "assistant", ev.Err)
 			}
-			return
+			return "", nil, false
 		case ai.EventDone:
 		}
 	}
-	response := strings.TrimSpace(full.String())
-	e.log.Info("assistant finished", "component", "assistant", "session_id", s.id,
-		"provider", e.provider.Name(), "duration_ms", time.Since(start).Milliseconds())
-	e.publish(Event{Type: "assistant.finished", Data: map[string]any{"session_id": s.id, "content": response}})
+	e.log.Info("assistant turn finished", "component", "assistant", "session_id", s.id,
+		"provider", e.provider.Name(), "tool_calls", len(calls),
+		"duration_ms", time.Since(start).Milliseconds())
 
+	// A tool round happens while the model is still working: if it produced
+	// deltas before deciding to call tools, drop back to Thinking so the
+	// overlay does not read "responding" through a tool pause.
+	if len(calls) > 0 && responded {
+		e.demoteToThinking(s)
+	}
+	return strings.TrimSpace(full.String()), calls, true
+}
+
+// finishThinking handles a completed final answer: announce, then speak.
+func (e *Engine) finishThinking(s *sess, response string) {
+	e.publish(Event{Type: "assistant.finished", Data: map[string]any{"session_id": s.id, "content": response}})
 	if response == "" {
 		e.fail(s, "assistant", fmt.Errorf("the assistant returned an empty response"))
 		return
@@ -429,9 +493,26 @@ func (e *Engine) think(s *sess) {
 	e.speak(s, response)
 }
 
-// speak synthesizes and plays the response.
+// demoteToThinking returns Responding → Thinking between tool rounds.
+func (e *Engine) demoteToThinking(s *sess) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.current != s || s.ctx.Err() != nil || e.state != StateResponding {
+		return
+	}
+	e.state = StateThinking
+	e.publish(Event{Type: "state.changed", Data: map[string]any{"state": string(StateThinking), "session_id": s.id}})
+}
+
+// speak synthesizes and plays the response. The text is normalized for
+// speech first: the overlay shows the assistant's formatted answer, but TTS
+// never reads markdown punctuation aloud.
 func (e *Engine) speak(s *sess, text string) {
-	format, chunks, err := e.tts.Speak(s.ctx, tts.Request{Text: text})
+	spoken := speechText(text)
+	if spoken == "" {
+		spoken = text
+	}
+	format, chunks, err := e.tts.Speak(s.ctx, tts.Request{Text: spoken})
 	if err != nil {
 		e.fail(s, "tts", err)
 		return
