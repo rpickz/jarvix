@@ -29,6 +29,7 @@ clients must ignore unknown events and fields.
 | `session.submit` | `{text?}` | `{}` | With `text`: skip audio, go think. Without: proceed when the transcript lands |
 | `session.cancel` | — | `{}` | Stops everything; no-op when idle |
 | `speech.cancel` | — | `{}` | Stops spoken output only; no-op unless speaking |
+| `conversation.reset` | — | `{}` | Forget carried-over context; the next turn starts a fresh thread |
 | `status.get` | — | `{state, session_id, version, protocol, ptt}` | `ptt` is `"daemon"` when jarvixd watches the hold-to-talk chord itself (keybinding toggles must then no-op) or `"external"` when keybindings drive activation |
 
 Errors use JSON-RPC error objects. Application errors (wrong state, no active

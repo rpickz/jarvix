@@ -26,6 +26,13 @@ type Options struct {
 	// MinRecording discards captures shorter than this as accidental
 	// activations (a stray key tap) instead of transcribing them.
 	MinRecording time.Duration
+	// HistoryTurns is how many prior user+assistant exchanges to keep as
+	// conversation context. Zero disables memory (each turn is standalone).
+	HistoryTurns int
+	// FollowUpWindow resets the conversation when this long has passed since
+	// the last exchange, so an old thread does not bleed into a new one. Zero
+	// keeps history until an explicit reset.
+	FollowUpWindow time.Duration
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -46,6 +53,11 @@ type Engine struct {
 	state   State
 	current *sess
 	counter int
+
+	// Conversation memory: prior exchanges carried across sessions so
+	// follow-up questions have context. Guarded by mu.
+	history  []ai.Message
+	lastTurn time.Time
 }
 
 // sess is one interaction from start to finish.
@@ -378,45 +390,55 @@ func (e *Engine) transcribe(s *sess, rec audio.Recording) {
 // tools without answering cannot loop forever.
 const maxToolRounds = 6
 
-// think drives the assistant: it streams a response, and whenever the model
-// requests tools it executes them (under the session context), feeds the
-// results back, and continues — until the model produces a spoken answer or
-// the round budget is exhausted.
+// think drives the assistant: it streams a response — speaking each sentence
+// aloud as soon as it is complete — and whenever the model requests tools it
+// executes them (under the session context), feeds the results back, and
+// continues, until the model produces a final answer or the round budget is
+// exhausted. Prior exchanges are carried in as conversation context.
 func (e *Engine) think(s *sess) {
-	messages := make([]ai.Message, 0, 4)
-	if e.opts.SystemPrompt != "" {
-		messages = append(messages, ai.Message{Role: ai.RoleSystem, Content: e.opts.SystemPrompt})
-	}
-	messages = append(messages, ai.Message{Role: ai.RoleUser, Content: s.transcript})
+	messages := e.conversationMessages(s.transcript)
 
-	var tools []ai.ToolDef
+	var toolDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
-		tools = e.tools.Defs()
+		toolDefs = e.tools.Defs()
+	}
+
+	var speaker *streamingSpeaker
+	if e.opts.SpeakResponses && e.tts != nil {
+		speaker = newStreamingSpeaker(e, s)
 	}
 
 	e.publish(Event{Type: "assistant.started", Data: map[string]any{"session_id": s.id, "provider": e.provider.Name()}})
 
+	finalText := ""
 	for round := 0; round < maxToolRounds; round++ {
 		text, calls, ok := e.streamOnce(s, ai.ChatRequest{
 			Model:       e.opts.Model,
 			MaxTokens:   e.opts.MaxTokens,
 			Temperature: e.opts.Temperature,
 			Messages:    messages,
-			Tools:       tools,
-		})
+			Tools:       toolDefs,
+		}, speaker)
 		if !ok {
-			return // failed, cancelled, or superseded — streamOnce reported it
+			e.abortSpeaker(speaker) // failed/cancelled/superseded — already reported
+			return
 		}
 		if len(calls) == 0 {
-			e.finishThinking(s, text)
+			finalText = text
+			break
+		}
+		if round == maxToolRounds-1 {
+			e.abortSpeaker(speaker)
+			e.fail(s, "assistant", fmt.Errorf("stopped after %d tool rounds without a final answer", maxToolRounds))
 			return
 		}
 
 		// The model wants tools. Record its request, run each call, append
-		// results, and loop. Tool rounds keep the session in Thinking.
+		// results, and loop.
 		messages = append(messages, ai.Message{Role: ai.RoleAssistant, Content: text, ToolCalls: calls})
 		for _, call := range calls {
 			if s.ctx.Err() != nil {
+				e.abortSpeaker(speaker)
 				return
 			}
 			e.publish(Event{Type: "tool.started", Data: map[string]any{
@@ -427,13 +449,35 @@ func (e *Engine) think(s *sess) {
 			messages = append(messages, ai.Message{Role: ai.RoleTool, ToolCallID: call.ID, Content: result})
 		}
 	}
-	e.fail(s, "assistant", fmt.Errorf("stopped after %d tool rounds without a final answer", maxToolRounds))
+
+	e.publish(Event{Type: "assistant.finished", Data: map[string]any{"session_id": s.id, "content": finalText}})
+	if finalText == "" {
+		e.abortSpeaker(speaker)
+		e.fail(s, "assistant", fmt.Errorf("the assistant returned an empty response"))
+		return
+	}
+
+	// Wait for the last sentence to finish speaking, then record the exchange
+	// so the next turn has this one as context.
+	if speaker != nil {
+		if err := speaker.close(); err != nil {
+			if s.ctx.Err() == nil {
+				e.fail(s, "tts", err)
+			}
+			return
+		}
+	}
+	e.commitTurn(s.transcript, finalText)
+
+	e.mu.Lock()
+	e.finishLocked(s)
+	e.mu.Unlock()
 }
 
-// streamOnce runs one provider turn, forwarding text deltas and collecting
-// any tool calls. ok is false when it already handled a terminal condition
-// (error/cancel/supersede).
-func (e *Engine) streamOnce(s *sess, req ai.ChatRequest) (text string, calls []ai.ToolCall, ok bool) {
+// streamOnce runs one provider turn, forwarding text deltas to the overlay
+// and, when a speaker is present, feeding complete sentences to it as they
+// form. ok is false when it already handled a terminal condition.
+func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeaker) (text string, calls []ai.ToolCall, ok bool) {
 	start := time.Now()
 	events, err := e.provider.Chat(s.ctx, req)
 	if err != nil {
@@ -441,6 +485,7 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest) (text string, calls []a
 		return "", nil, false
 	}
 	var full strings.Builder
+	var sc sentencer
 	responded := false
 	for ev := range events {
 		switch ev.Type {
@@ -454,6 +499,11 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest) (text string, calls []a
 			}
 			full.WriteString(ev.Content)
 			e.publish(Event{Type: "assistant.delta", Data: map[string]any{"session_id": s.id, "content": ev.Content}})
+			if speaker != nil {
+				for _, sentence := range sc.push(ev.Content) {
+					speaker.speak(sentence)
+				}
+			}
 		case ai.EventToolCall:
 			calls = append(calls, ev.Call)
 		case ai.EventError:
@@ -464,99 +514,67 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest) (text string, calls []a
 		case ai.EventDone:
 		}
 	}
+	if speaker != nil {
+		for _, sentence := range sc.flush() {
+			speaker.speak(sentence)
+		}
+	}
 	e.log.Info("assistant turn finished", "component", "assistant", "session_id", s.id,
 		"provider", e.provider.Name(), "tool_calls", len(calls),
 		"duration_ms", time.Since(start).Milliseconds())
-
-	// A tool round happens while the model is still working: if it produced
-	// deltas before deciding to call tools, drop back to Thinking so the
-	// overlay does not read "responding" through a tool pause.
-	if len(calls) > 0 && responded {
-		e.demoteToThinking(s)
-	}
 	return strings.TrimSpace(full.String()), calls, true
 }
 
-// finishThinking handles a completed final answer: announce, then speak.
-func (e *Engine) finishThinking(s *sess, response string) {
-	e.publish(Event{Type: "assistant.finished", Data: map[string]any{"session_id": s.id, "content": response}})
-	if response == "" {
-		e.fail(s, "assistant", fmt.Errorf("the assistant returned an empty response"))
-		return
+// abortSpeaker closes a speaker without treating its result as a fresh error:
+// the session already failed or was cancelled, and that path owns the events.
+func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
+	if speaker != nil {
+		_ = speaker.close()
 	}
-	if !e.opts.SpeakResponses {
-		e.mu.Lock()
-		e.finishLocked(s)
-		e.mu.Unlock()
-		return
-	}
-	e.speak(s, response)
 }
 
-// demoteToThinking returns Responding → Thinking between tool rounds.
-func (e *Engine) demoteToThinking(s *sess) {
+// conversationMessages builds the provider message list for a new turn:
+// system prompt, carried-over history (reset if the follow-up window lapsed),
+// then the new user message.
+func (e *Engine) conversationMessages(userText string) []ai.Message {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.current != s || s.ctx.Err() != nil || e.state != StateResponding {
-		return
+	if e.opts.FollowUpWindow > 0 && !e.lastTurn.IsZero() &&
+		time.Since(e.lastTurn) > e.opts.FollowUpWindow {
+		e.history = nil
 	}
-	e.state = StateThinking
-	e.publish(Event{Type: "state.changed", Data: map[string]any{"state": string(StateThinking), "session_id": s.id}})
+	msgs := make([]ai.Message, 0, len(e.history)+2)
+	if e.opts.SystemPrompt != "" {
+		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: e.opts.SystemPrompt})
+	}
+	msgs = append(msgs, e.history...)
+	msgs = append(msgs, ai.Message{Role: ai.RoleUser, Content: userText})
+	return msgs
 }
 
-// speak synthesizes and plays the response. The text is normalized for
-// speech first: the overlay shows the assistant's formatted answer, but TTS
-// never reads markdown punctuation aloud.
-func (e *Engine) speak(s *sess, text string) {
-	spoken := speechText(text)
-	if spoken == "" {
-		spoken = text
-	}
-	format, chunks, err := e.tts.Speak(s.ctx, tts.Request{Text: spoken})
-	if err != nil {
-		e.fail(s, "tts", err)
+// commitTurn records a completed exchange as context for the next turn, kept
+// to the configured number of turns. Intermediate tool traffic is not stored;
+// the user question and the assistant's final answer are what carry meaning.
+func (e *Engine) commitTurn(userText, assistantText string) {
+	if e.opts.HistoryTurns <= 0 {
 		return
 	}
-	if !e.advance(s, StateSpeaking) {
-		// Superseded or cancelled; drain the synthesizer so it can exit.
-		for range chunks {
-		}
-		return
-	}
-	e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": s.id}})
-
-	// Adapt tts chunks to the player's byte stream, capturing any synthesis
-	// error on the way through.
-	pcm := make(chan []byte, 8)
-	var synthErr error
-	go func() {
-		defer close(pcm)
-		for c := range chunks {
-			if c.Err != nil {
-				synthErr = c.Err
-				return
-			}
-			select {
-			case pcm <- c.PCM:
-			case <-s.ctx.Done():
-				return
-			}
-		}
-	}()
-
-	err = e.player.Play(s.ctx, format.SampleRate, format.Channels, pcm)
-	if s.ctx.Err() != nil {
-		return // cancelled or interrupted; the cancel path emitted events
-	}
-	if err == nil && synthErr != nil && s.ctx.Err() == nil {
-		err = synthErr
-	}
-	if err != nil {
-		e.fail(s, "tts", err)
-		return
-	}
-	e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": s.id}})
 	e.mu.Lock()
-	e.finishLocked(s)
+	defer e.mu.Unlock()
+	e.history = append(e.history,
+		ai.Message{Role: ai.RoleUser, Content: userText},
+		ai.Message{Role: ai.RoleAssistant, Content: assistantText})
+	if max := e.opts.HistoryTurns * 2; len(e.history) > max {
+		e.history = append([]ai.Message(nil), e.history[len(e.history)-max:]...)
+	}
+	e.lastTurn = time.Now()
+}
+
+// ResetConversation clears the carried-over context so the next turn starts a
+// fresh thread.
+func (e *Engine) ResetConversation() {
+	e.mu.Lock()
+	e.history = nil
+	e.lastTurn = time.Time{}
 	e.mu.Unlock()
 }

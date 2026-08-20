@@ -16,6 +16,7 @@ Usage:
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
+  jarvix new                    Start a fresh conversation (forget context)
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix doctor                 Check every dependency and explain failures
@@ -51,6 +52,8 @@ func main() {
 		err = cmdListen(paths)
 	case "cancel":
 		err = cmdCancel(paths)
+	case "new":
+		err = cmdNewConversation(paths)
 	case "ptt":
 		if len(args) < 1 || (args[0] != "start" && args[0] != "stop" && args[0] != "toggle") {
 			fatal(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))

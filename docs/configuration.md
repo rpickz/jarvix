@@ -69,6 +69,10 @@ shell_max_output_kb = 16         # captured output cap fed back to the model
 
 [conversation]
 speak_responses = true           # false = text-only sessions
+history_turns = 16               # remember this many prior exchanges as context
+                                 # (0 = every question is standalone)
+follow_up_window_sec = 900       # forget the thread after this idle gap
+                                 # (0 = keep until restart or `jarvix new`)
 
 [audio]
 input_device = ""                # PipeWire target name/serial; empty = default

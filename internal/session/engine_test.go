@@ -67,6 +67,34 @@ func (h *harness) waitFor(t *testing.T, eventType string) Event {
 	}
 }
 
+// collectUntil drains events until one of terminalType arrives, returning
+// every event seen (keyed by type, last value wins). Order-independent, which
+// matters once speech streams: tts.started can precede assistant.finished.
+func (h *harness) collectUntil(t *testing.T, terminalType string) map[string]Event {
+	t.Helper()
+	seen := map[string]Event{}
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-h.events:
+			seen[ev.Type] = ev
+			if ev.Type == terminalType {
+				return seen
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %q; saw %v", terminalType, keysOf(seen))
+		}
+	}
+}
+
+func keysOf(m map[string]Event) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // waitIdle blocks until the engine returns to idle.
 func (h *harness) waitIdle(t *testing.T) {
 	t.Helper()
@@ -101,16 +129,18 @@ func TestVoiceSessionFullLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ev := h.waitFor(t, "transcript.final"); ev.Data["text"] != "explain recursion" {
-		t.Errorf("transcript = %v", ev.Data["text"])
+	seen := h.collectUntil(t, "session.finished")
+	if seen["transcript.final"].Data["text"] != "explain recursion" {
+		t.Errorf("transcript = %v", seen["transcript.final"].Data["text"])
 	}
-	h.waitFor(t, "assistant.started")
-	if ev := h.waitFor(t, "assistant.finished"); ev.Data["content"] != "Recursion is a function calling itself." {
-		t.Errorf("response = %v", ev.Data["content"])
+	if seen["assistant.finished"].Data["content"] != "Recursion is a function calling itself." {
+		t.Errorf("response = %v", seen["assistant.finished"].Data["content"])
 	}
-	h.waitFor(t, "tts.started")
-	h.waitFor(t, "tts.finished")
-	h.waitFor(t, "session.finished")
+	for _, want := range []string{"assistant.started", "tts.started", "tts.finished"} {
+		if _, ok := seen[want]; !ok {
+			t.Errorf("missing event %q", want)
+		}
+	}
 	h.waitIdle(t)
 
 	if h.tts.LastRequest.Text != "Recursion is a function calling itself." {
@@ -204,8 +234,9 @@ func TestCancelWhileListening(t *testing.T) {
 
 func TestCancelWhileSpeaking(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	// Slow provider so we can reliably catch active states.
-	h.provider.Delay = 5 * time.Millisecond
+	// Speech takes measurable time so there is a window to cancel within it.
+	h.tts.Delay = 100 * time.Millisecond
+	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
@@ -225,7 +256,9 @@ func TestCancelWithNoSessionIsNoop(t *testing.T) {
 
 func TestInterruptionStartsNewSessionImmediately(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	h.provider.Delay = 5 * time.Millisecond
+	// Keep the first session speaking so the interrupt lands mid-utterance.
+	h.tts.Delay = 100 * time.Millisecond
+	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
 	first, _ := h.engine.StartSession()
 	_ = h.engine.Submit("first question")
 	h.waitFor(t, "tts.started")
@@ -327,7 +360,8 @@ func TestEmptyTranscriptIsFriendlyError(t *testing.T) {
 
 func TestCancelSpeechStopsOnlySpeech(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	h.provider.Delay = 5 * time.Millisecond
+	h.tts.Delay = 100 * time.Millisecond
+	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
@@ -415,16 +449,16 @@ func TestToolCallLoop(t *testing.T) {
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("what's happening in docker")
 
-	started := h.waitFor(t, "tool.started")
-	if started.Data["tool"] != "run" {
-		t.Errorf("tool = %v", started.Data["tool"])
+	seen := h.collectUntil(t, "session.finished")
+	if seen["tool.started"].Data["tool"] != "run" {
+		t.Errorf("tool = %v", seen["tool.started"].Data["tool"])
 	}
-	h.waitFor(t, "tool.finished")
-	fin := h.waitFor(t, "assistant.finished")
-	if fin.Data["content"] != "You have three containers running: web, db, and cache." {
-		t.Errorf("answer = %v", fin.Data["content"])
+	if _, ok := seen["tool.finished"]; !ok {
+		t.Error("missing tool.finished")
 	}
-	h.waitFor(t, "session.finished")
+	if seen["assistant.finished"].Data["content"] != "You have three containers running: web, db, and cache." {
+		t.Errorf("answer = %v", seen["assistant.finished"].Data["content"])
+	}
 	h.waitIdle(t)
 
 	// The tool actually ran, and its result was fed back to the model.
@@ -472,8 +506,10 @@ func TestToolLoopRunawayIsBounded(t *testing.T) {
 					t.Errorf("message = %v", ev.Data["message"])
 				}
 				h.waitIdle(t)
-				if rec.calls != maxToolRounds {
-					t.Errorf("tool ran %d times, want %d", rec.calls, maxToolRounds)
+				// The final round fails before running its tools (they would
+				// have no round left to be used in), so tools run one fewer.
+				if rec.calls != maxToolRounds-1 {
+					t.Errorf("tool ran %d times, want %d", rec.calls, maxToolRounds-1)
 				}
 				return
 			}
@@ -495,6 +531,113 @@ func (r *recordingTool) Schema() json.RawMessage      { return json.RawMessage(`
 func (r *recordingTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
 	r.calls++
 	return r.result, nil
+}
+
+func TestConversationMemoryCarriesContext(t *testing.T) {
+	h := newHarness(t, Options{HistoryTurns: 8, FollowUpWindow: time.Hour})
+
+	ask := func(text string) {
+		_, _ = h.engine.StartSession()
+		_ = h.engine.Submit(text)
+		h.collectUntil(t, "session.finished")
+		h.waitIdle(t)
+	}
+	ask("why is my build failing?")
+	ask("what should I change?")
+
+	// The second turn's request must contain the first exchange as context.
+	last := h.provider.Requests[len(h.provider.Requests)-1]
+	var roles []string
+	for _, m := range last.Messages {
+		roles = append(roles, string(m.Role)+":"+m.Content)
+	}
+	joined := strings.Join(roles, " | ")
+	if !strings.Contains(joined, "why is my build failing?") {
+		t.Errorf("second turn lost the first question: %s", joined)
+	}
+	if !strings.Contains(joined, "what should I change?") {
+		t.Errorf("second turn missing its own question: %s", joined)
+	}
+}
+
+func TestConversationResetForgetsContext(t *testing.T) {
+	h := newHarness(t, Options{HistoryTurns: 8, FollowUpWindow: time.Hour})
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("first")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	h.engine.ResetConversation()
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("second")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	last := h.provider.Requests[len(h.provider.Requests)-1]
+	for _, m := range last.Messages {
+		if strings.Contains(m.Content, "first") {
+			t.Error("reset did not clear prior context")
+		}
+	}
+}
+
+func TestConversationFollowUpWindowExpires(t *testing.T) {
+	// A zero window with a non-zero lastTurn would keep history; a tiny window
+	// expires immediately, so the second turn starts fresh.
+	h := newHarness(t, Options{HistoryTurns: 8, FollowUpWindow: time.Nanosecond})
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("first")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+	time.Sleep(2 * time.Millisecond) // exceed the window
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("second")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	last := h.provider.Requests[len(h.provider.Requests)-1]
+	for _, m := range last.Messages {
+		if strings.Contains(m.Content, "first") {
+			t.Error("stale conversation was not reset after the follow-up window")
+		}
+	}
+}
+
+func TestHistoryDisabledByDefault(t *testing.T) {
+	h := newHarness(t, Options{}) // HistoryTurns 0
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("first")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("second")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+	last := h.provider.Requests[len(h.provider.Requests)-1]
+	if len(last.Messages) != 1 {
+		t.Errorf("history should be off: %d messages", len(last.Messages))
+	}
+}
+
+func TestStreamingSpeechSpeaksMultipleSentences(t *testing.T) {
+	h := newHarness(t, Options{SpeakResponses: true})
+	h.provider.Response = "First sentence here. Second sentence follows. Third one ends it."
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("tell me three things")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	// Each sentence is synthesized separately as it streams — proof that
+	// speech does not wait for the whole message.
+	if h.tts.Speaks() < 3 {
+		t.Errorf("expected >=3 sentence syntheses, got %d", h.tts.Speaks())
+	}
+	// But playback is one continuous stream, not one Play per sentence.
+	if _, plays := h.player.Played(); plays != 1 {
+		t.Errorf("player Play calls = %d, want 1 continuous stream", plays)
+	}
 }
 
 func TestVoiceWithoutSessionFails(t *testing.T) {

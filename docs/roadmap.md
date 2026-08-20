@@ -4,11 +4,13 @@ The premise: **talking to your Linux computer can be a first-class
 interaction model rather than a novelty bolted onto a chatbot.** Each phase
 keeps that experience coherent while widening what "the computer" can do.
 
-## Phase 1 — Voice conversation ✅ (current milestone)
+## Phase 1 — Voice conversation ✅
 
-Push-to-talk one-turn interactions: hold a key, speak, get a streamed and
-spoken response, interrupt at will. Local STT (whisper.cpp) and TTS (Piper),
-provider-independent AI, Omarchy overlay, `jarvix` CLI, `jarvix doctor`.
+Hold-to-talk interactions: hold a key, speak, get a response that streams
+into the overlay and is **spoken as it streams**, interrupt at will, with
+conversation memory across turns. Local STT (whisper.cpp), local TTS (Piper
+or the more natural Kokoro), provider-independent AI, tool calling
+(`shell.run`), Omarchy overlay, `jarvix` CLI, `jarvix doctor`.
 
 ## Phase 2 — Desktop context
 
@@ -40,13 +42,13 @@ with spoken confirmation), then structured tools — `desktop.*`,
 `clipboard.*`, `apps.*`, `system.*`, `hyprland.*`, `files.*` — each behind
 that gate. The engine's tool loop already generalises to all of them.
 
-## Phase 5 — Persistent conversational mode
+## Phase 5 — Conversational mode (in-memory: done; persistence: next)
 
-Multi-turn sessions with follow-ups ("What should I change?" … "Can you do
-that?"). The conversation engine keeps history; sessions outlive a single
-push-to-talk exchange. The session/state model already treats the transcript
-as session state rather than a stateless request, so this extends rather than
-replaces it.
+Multi-turn follow-ups work now ([ADR 0010](adr/0010-streaming-speech-and-memory.md)):
+the engine keeps a rolling history, so "why is my build failing?" → "what
+should I change?" retains context, bounded by a turn cap and an idle window,
+clearable with `jarvix new`. Remaining: persist history across daemon
+restarts, and per-conversation threads.
 
 ## Phase 6 — Wake word and realtime interaction
 

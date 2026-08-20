@@ -111,6 +111,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			Temperature:    cfg.AI.Temperature,
 			SpeakResponses: cfg.Conversation.SpeakResponses,
 			MinRecording:   time.Duration(cfg.Audio.MinRecordingMs) * time.Millisecond,
+			HistoryTurns:   cfg.Conversation.HistoryTurns,
+			FollowUpWindow: time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
 		})
 
 	server := ipc.NewServer(paths.Socket, bus, logger)
@@ -229,6 +231,10 @@ func (d *Daemon) registerMethods() {
 		if err := d.engine.CancelSpeech(); err != nil {
 			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
 		}
+		return nil, nil
+	})
+	d.server.Handle("conversation.reset", func(json.RawMessage) (any, error) {
+		d.engine.ResetConversation()
 		return nil, nil
 	})
 	d.server.Handle("status.get", func(json.RawMessage) (any, error) {

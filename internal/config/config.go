@@ -117,6 +117,13 @@ type Kokoro struct {
 // Conversation configures assistant behaviour.
 type Conversation struct {
 	SpeakResponses bool `toml:"speak_responses"`
+	// HistoryTurns is how many prior exchanges to remember as context for
+	// follow-up questions. 0 makes every turn standalone.
+	HistoryTurns int `toml:"history_turns"`
+	// FollowUpWindowSec resets the conversation after this many seconds of
+	// inactivity, so a new question does not inherit a stale thread. 0 keeps
+	// context until Jarvix restarts or the conversation is reset explicitly.
+	FollowUpWindowSec int `toml:"follow_up_window_sec"`
 }
 
 // Audio configures capture and playback.
@@ -170,7 +177,7 @@ func Default() Config {
 			Piper:    Piper{Voice: "en_US-amy-medium", Binary: "piper-tts"},
 			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
-		Conversation: Conversation{SpeakResponses: true},
+		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900},
 		Tools:        Tools{Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16},
 		Audio:        Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		UI:           UI{ShowTranscript: true, ShowResponse: true},

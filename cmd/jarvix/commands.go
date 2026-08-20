@@ -41,6 +41,19 @@ func cmdCancel(paths config.Paths) error {
 	return client.Call("session.cancel", nil, nil)
 }
 
+func cmdNewConversation(paths config.Paths) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if err := client.Call("conversation.reset", nil, nil); err != nil {
+		return err
+	}
+	fmt.Println("started a fresh conversation")
+	return nil
+}
+
 // cmdPTT implements the push-to-talk commands bound to keys. They must
 // return fast — a human is at the keyboard.
 //

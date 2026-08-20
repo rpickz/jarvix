@@ -101,8 +101,15 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Interrupt mid-speech | Hold the chord again — it stops talking and listens |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
+| Fresh conversation | `jarvix new` (forget the current thread) |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
+
+Jarvix remembers the conversation: ask a follow-up ("what should I change?")
+and it keeps the prior context, until the thread goes idle (configurable) or
+you run `jarvix new`. Answers are spoken **as they stream** — Jarvix starts
+talking on the first complete sentence rather than waiting for the whole
+reply.
 
 Hold-to-talk is watched by the daemon itself (evdev — the same mechanism
 Mumble and Discord use), because compositor release-binds are unreliable for
