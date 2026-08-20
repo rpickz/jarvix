@@ -4,6 +4,10 @@ Documentation=https://github.com/rpickz/jarvix
 # PipeWire is socket-activated; a hard dependency is unnecessary, but starting
 # after it avoids a startup race on login.
 After=pipewire.service
+# Tolerate transient startup failures (e.g. a stale socket race at login)
+# without tripping systemd's default start limit.
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=exec
