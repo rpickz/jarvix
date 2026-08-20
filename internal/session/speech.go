@@ -18,6 +18,13 @@ var (
 	reLink        = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
 	reMultiSpace  = regexp.MustCompile(`[ \t]+`)
 	reBlankLines  = regexp.MustCompile(`\n{2,}`)
+
+	// Technical strings that are unlistenable when read character by
+	// character. A bare URL collapses to its host; an absolute or ~ file
+	// path collapses to its final component. Single-slash tokens like
+	// "and/or" or "24/7" are prose and left alone.
+	reURL  = regexp.MustCompile(`https?://([^/\s]+)\S*`)
+	rePath = regexp.MustCompile(`(?:~(?:/[\w@.+-]+)+|(?:/[\w@.+-]+){2,})/?`)
 )
 
 // speechText turns assistant markdown into plain prose suitable for TTS.
@@ -28,6 +35,13 @@ func speechText(s string) string {
 	s = reCodeFence.ReplaceAllString(s, " ")
 	s = reLink.ReplaceAllString(s, "$1")
 	s = reInlineCode.ReplaceAllString(s, "$1")
+	// URLs before paths: once a URL is reduced to its host, its path part
+	// cannot be mistaken for a filesystem path.
+	s = reURL.ReplaceAllString(s, "$1")
+	s = rePath.ReplaceAllStringFunc(s, func(p string) string {
+		p = strings.TrimSuffix(p, "/")
+		return p[strings.LastIndexByte(p, '/')+1:]
+	})
 	s = reBold.ReplaceAllString(s, "$1")
 	s = reItalic.ReplaceAllStringFunc(s, func(m string) string {
 		return strings.Trim(m, "*_")
