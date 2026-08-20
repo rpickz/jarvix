@@ -3,3 +3,6 @@
 *.wav
 *.test
 coverage.out
+
+# Stray agent worktrees
+.claude/
