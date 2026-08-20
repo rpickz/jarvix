@@ -14,6 +14,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai/openaicompat"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tts/piper"
@@ -54,6 +55,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkProviderReachable,
 		checkPlugin,
 		checkKeybindings,
+		checkPushToTalk,
 	}
 	results := make([]Result, 0, len(checks))
 	for _, check := range checks {
@@ -242,6 +244,24 @@ func checkProviderReachable(cfg config.Config, _ config.Paths) Result {
 			Detail: err.Error(), Fix: fix}
 	}
 	return Result{Status: OK, Name: "provider authentication succeeded"}
+}
+
+func checkPushToTalk(cfg config.Config, _ config.Paths) Result {
+	if len(cfg.Activation.PTTChord) == 0 {
+		return Result{Status: OK, Name: "push-to-talk",
+			Detail: "daemon-side chord disabled; keybindings drive activation"}
+	}
+	if _, err := hotkey.ResolveChord(cfg.Activation.PTTChord); err != nil {
+		return Result{Status: Fail, Name: "push-to-talk chord valid", Detail: err.Error(),
+			Fix: "Fix activation.ptt_chord in the config"}
+	}
+	if !hotkey.Accessible() {
+		return Result{Status: Warn, Name: "push-to-talk (hold the chord)",
+			Detail: "input devices not readable, so hold-to-talk falls back to tap-to-toggle",
+			Fix:    "Grant the daemon read access to keyboards: jarvix setup input"}
+	}
+	return Result{Status: OK, Name: "push-to-talk (hold the chord)",
+		Detail: strings.Join(cfg.Activation.PTTChord, "+")}
 }
 
 func checkPlugin(_ config.Config, _ config.Paths) Result {

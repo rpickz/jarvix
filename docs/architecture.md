@@ -147,8 +147,17 @@ Assumptions about the installed Omarchy version are recorded in
 
 ## Keyboard activation
 
-Hyprland delivers reliable release events only for bare keys, so the chord
-taps and the bare key holds ([ADR 0004](adr/0004-keyboard-activation.md)):
+**Primary: daemon-side hold-to-talk.** jarvixd watches keyboard event
+devices (evdev) for the configured chord (`activation.ptt_chord`, default
+Super+Alt+V): all keys down → listening; any key released → submit. This
+bypasses compositor bindings entirely — Hyprland release-binds misfire for
+modifier chords — and is the mechanism every Linux push-to-talk app uses.
+Requires read access to keyboards (`jarvix setup input`); non-chord key
+events are discarded immediately and never logged
+([ADR 0008](adr/0008-daemon-side-push-to-talk.md)).
+
+**Fallback: Hyprland bindings** ([ADR 0004](adr/0004-keyboard-activation.md)),
+active automatically when input devices are not readable:
 
 ```lua
 o.bind("SUPER + ALT + V", "Talk to Jarvix (tap to start/stop)", "jarvix ptt toggle")
@@ -156,7 +165,7 @@ o.bind("F10", "Talk to Jarvix (hold)", "jarvix ptt start")
 o.bind("F10", "Submit to Jarvix", "jarvix ptt stop", { release = true })
 ```
 
-`jarvix ptt toggle` checks daemon state: idle → `session.start` +
-`voice.start`; listening → `voice.stop` + `session.submit`; anything else
-active → interrupt and listen. `start`/`stop` are the raw halves for the
-hold binding. All are thin socket calls returning in milliseconds.
+`jarvix ptt toggle` checks `status.get` first: when the daemon owns the
+chord (`ptt: "daemon"`) it no-ops so the two paths never fight; otherwise
+idle → listen, listening → submit, other active states → interrupt and
+listen. All are thin socket calls returning in milliseconds.

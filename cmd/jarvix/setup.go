@@ -14,6 +14,42 @@ import (
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 )
 
+// udevRule grants the active seat's logged-in user read access to keyboard
+// event devices via an ACL (TAG+="uaccess"), scoped to keyboards only. This
+// is what lets jarvixd see the push-to-talk chord's real press and release.
+const udevRule = `# Jarvix push-to-talk: let the logged-in user read keyboard events.
+# Installed by 'jarvix setup input'. Remove this file to revoke.
+KERNEL=="event*", SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+`
+
+const udevRulePath = "/etc/udev/rules.d/70-jarvix-input.rules"
+
+// cmdSetupInput installs the udev rule for daemon-side push-to-talk, or
+// prints the exact commands when not running as root.
+func cmdSetupInput() error {
+	fmt.Println("Daemon-side push-to-talk needs read access to keyboard event devices.")
+	fmt.Println("Note: this lets any process running as your user read key events —")
+	fmt.Println("the same trade-off every push-to-talk app on Linux makes. Jarvix only")
+	fmt.Println("tracks its configured chord and never logs keys (see docs/adr/0008).")
+	fmt.Println()
+	if os.Geteuid() == 0 {
+		if err := os.WriteFile(udevRulePath, []byte(udevRule), 0o644); err != nil {
+			return err
+		}
+		fmt.Println("Installed", udevRulePath)
+		fmt.Println("Now run: udevadm control --reload && udevadm trigger")
+		return nil
+	}
+	fmt.Println("Run these commands:")
+	fmt.Println()
+	fmt.Printf("  sudo tee %s <<'EOF'\n%sEOF\n", udevRulePath, udevRule)
+	fmt.Println("  sudo udevadm control --reload && sudo udevadm trigger")
+	fmt.Println("  systemctl --user restart jarvixd")
+	fmt.Println()
+	fmt.Println("Then verify with: jarvix doctor")
+	return nil
+}
+
 // cmdSetupWhisper downloads a Whisper model into the XDG data directory.
 func cmdSetupWhisper(paths config.Paths, model string) error {
 	url, ok := whispercpp.ModelURL(model)

@@ -84,6 +84,11 @@ func cmdPTT(paths config.Paths, phase string) error {
 		if err := client.Call("status.get", nil, &status); err != nil {
 			return err
 		}
+		if status["ptt"] == "daemon" {
+			// The daemon watches the chord itself (real hold-to-talk); the
+			// Hyprland tap binding must not drive the session as well.
+			return nil
+		}
 		if status["state"] == "listening" {
 			return submit()
 		}

@@ -17,6 +17,12 @@ jarvix config
 ```toml
 [activation]
 mode = "push_to_talk"            # the only supported mode in V1
+# Hold-to-talk chord, watched by the daemon via evdev (needs keyboard read
+# access: jarvix setup input). Key names are evdev names: letters, digits,
+# f1-f12, leftmeta/rightmeta, leftalt/rightalt, leftctrl/rightctrl,
+# leftshift/rightshift, space, esc (aliases: super, alt, ctrl, shift).
+# Empty list disables the watcher; keybindings then drive activation.
+ptt_chord = ["leftmeta", "leftalt", "v"]
 
 [ai]
 provider = "ollama"              # endpoint name: a preset or your own [ai.<name>]

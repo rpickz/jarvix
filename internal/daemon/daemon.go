@@ -14,6 +14,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
@@ -24,10 +25,12 @@ import (
 
 // Daemon is a fully wired jarvixd instance.
 type Daemon struct {
-	engine *session.Engine
-	server *ipc.Server
-	bus    *session.Bus
-	log    *slog.Logger
+	engine   *session.Engine
+	server   *ipc.Server
+	bus      *session.Bus
+	log      *slog.Logger
+	pttChord []uint16 // daemon-side hold-to-talk chord; empty = disabled
+	pttLive  bool     // watcher running (chord set + input devices readable)
 }
 
 // Deps are the engine's collaborators, injectable for tests. Zero-value
@@ -90,6 +93,13 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 
 	server := ipc.NewServer(paths.Socket, bus, logger)
 	d := &Daemon{engine: engine, server: server, bus: bus, log: logger}
+	if len(cfg.Activation.PTTChord) > 0 {
+		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
+		if err != nil {
+			return nil, err // Validate catches this first; belt and braces
+		}
+		d.pttChord = codes
+	}
 	d.registerMethods()
 	return d, nil
 }
@@ -99,8 +109,52 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.server.Listen(); err != nil {
 		return err
 	}
+	d.startPTT(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
 	return d.server.Serve(ctx)
+}
+
+// startPTT runs the daemon-side hold-to-talk watcher when a chord is
+// configured and input devices are readable. Without device access the
+// Hyprland tap-to-toggle binding remains the activation path; doctor
+// explains how to grant access.
+func (d *Daemon) startPTT(ctx context.Context) {
+	if len(d.pttChord) == 0 {
+		return
+	}
+	if !hotkey.Accessible() {
+		d.log.Warn("push-to-talk chord configured but input devices are not readable; "+
+			"falling back to the tap-to-toggle keybinding (run: jarvix doctor)",
+			"component", "hotkey")
+		return
+	}
+	watcher := hotkey.NewWatcher(d.pttChord,
+		func() { // chord held down → listen
+			if _, err := d.engine.StartSession(); err != nil {
+				d.log.Error("ptt press", "component", "hotkey", "error", err.Error())
+				return
+			}
+			if err := d.engine.StartVoice(); err != nil {
+				d.log.Error("ptt press", "component", "hotkey", "error", err.Error())
+			}
+		},
+		func() { // any chord key released → submit
+			discarded, err := d.engine.StopVoice()
+			if err != nil {
+				// Session may already be gone (cancelled mid-hold); not an event.
+				d.log.Debug("ptt release", "component", "hotkey", "error", err.Error())
+				return
+			}
+			if !discarded {
+				if err := d.engine.Submit(""); err != nil {
+					d.log.Error("ptt release", "component", "hotkey", "error", err.Error())
+				}
+			}
+		},
+		d.log)
+	d.pttLive = true
+	d.log.Info("daemon-side push-to-talk active", "component", "hotkey")
+	go watcher.Run(ctx)
 }
 
 // Bus exposes the event bus (used by tests).
@@ -157,11 +211,16 @@ func (d *Daemon) registerMethods() {
 	})
 	d.server.Handle("status.get", func(json.RawMessage) (any, error) {
 		state, id := d.engine.State()
+		ptt := "external" // activation comes from keybindings (toggle/hold CLI)
+		if d.pttLive {
+			ptt = "daemon" // the daemon watches the chord itself
+		}
 		return map[string]any{
 			"state":      string(state),
 			"session_id": id,
 			"version":    build.Version,
 			"protocol":   ipc.ProtocolVersion,
+			"ptt":        ptt,
 		}, nil
 	})
 }

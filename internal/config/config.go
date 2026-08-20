@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/rpickz/jarvix/internal/hotkey"
 )
 
 // Config is the root configuration document.
@@ -29,6 +30,12 @@ type Config struct {
 // Activation configures how sessions are initiated.
 type Activation struct {
 	Mode string `toml:"mode"` // "push_to_talk"
+	// PTTChord is the hold-to-talk key chord watched by the daemon (evdev
+	// key names, e.g. ["leftmeta","leftalt","v"]). Requires read access to
+	// input devices (jarvix doctor explains how to grant it); without
+	// access, the Hyprland tap-to-toggle binding is the fallback. Empty
+	// disables the daemon-side watcher.
+	PTTChord []string `toml:"ptt_chord"`
 }
 
 // AI selects and configures the assistant provider.
@@ -121,7 +128,10 @@ type Log struct {
 // work with an empty config file on a machine with Ollama and Piper present.
 func Default() Config {
 	return Config{
-		Activation: Activation{Mode: "push_to_talk"},
+		Activation: Activation{
+			Mode:     "push_to_talk",
+			PTTChord: []string{"leftmeta", "leftalt", "v"},
+		},
 		AI: AI{
 			Provider:     "ollama",
 			Model:        "llama3.2:3b",
@@ -220,6 +230,11 @@ func (c Config) Validate() error {
 	if c.Activation.Mode != "push_to_talk" {
 		problems = append(problems, fmt.Sprintf(
 			"activation.mode %q is not supported; use \"push_to_talk\"", c.Activation.Mode))
+	}
+	if len(c.Activation.PTTChord) > 0 {
+		if _, err := hotkey.ResolveChord(c.Activation.PTTChord); err != nil {
+			problems = append(problems, err.Error())
+		}
 	}
 	if c.AI.Provider == "" {
 		problems = append(problems, "ai.provider is empty; set it to a provider such as \"ollama\" or \"openai\"")

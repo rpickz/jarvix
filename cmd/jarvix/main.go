@@ -20,6 +20,7 @@ Usage:
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix doctor                 Check every dependency and explain failures
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
+  jarvix setup input            Grant keyboard access for real hold-to-talk
   jarvix config                 Show effective configuration
   jarvix version                Show version
 
@@ -58,14 +59,18 @@ func main() {
 	case "doctor":
 		err = cmdDoctor(cfg, paths)
 	case "setup":
-		if len(args) < 1 || args[0] != "whisper" {
-			fatal(fmt.Errorf("usage: jarvix setup whisper [model]"))
+		switch {
+		case len(args) >= 1 && args[0] == "whisper":
+			model := cfg.STT.Whisper.Model
+			if len(args) > 1 {
+				model = args[1]
+			}
+			err = cmdSetupWhisper(paths, model)
+		case len(args) >= 1 && args[0] == "input":
+			err = cmdSetupInput()
+		default:
+			fatal(fmt.Errorf("usage: jarvix setup whisper [model] | jarvix setup input"))
 		}
-		model := cfg.STT.Whisper.Model
-		if len(args) > 1 {
-			model = args[1]
-		}
-		err = cmdSetupWhisper(paths, model)
 	case "config":
 		err = cmdConfig(cfg, paths)
 	case "version", "--version", "-v":

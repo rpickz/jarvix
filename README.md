@@ -94,21 +94,30 @@ All options: [docs/configuration.md](docs/configuration.md).
 
 | Interaction | How |
 |---|---|
-| Talk to Jarvix | Tap `Super+Alt+V`, speak, tap again |
-| …or hold-to-talk | Hold `F10`, speak, release |
+| Talk to Jarvix | **Hold `Super+Alt+V`, speak, release** |
 | Cancel / stop speech | `Super+Alt+Escape` (or `jarvix cancel`) |
-| Interrupt mid-speech | Tap `Super+Alt+V` again — it stops talking and listens |
+| Interrupt mid-speech | Hold the chord again — it stops talking and listens |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
 
-Why these keys? Plain `Super+V` is Omarchy's universal paste, and Hyprland
-only delivers reliable *release* events for bare keys — so the chord taps to
-toggle and the bare key holds (the same split voxtype uses). Both live in a
-managed block in `~/.config/hypr/bindings.lua` and are one-line edits; the
-installer and `jarvix doctor` verify Jarvix never clashes with another
-binding. See [docs/adr/0004-keyboard-activation.md](docs/adr/0004-keyboard-activation.md).
+Hold-to-talk is watched by the daemon itself (evdev — the same mechanism
+Mumble and Discord use), because compositor release-binds are unreliable for
+modifier chords. It needs one-time read access to keyboard devices:
+
+```bash
+jarvix setup input     # prints the udev rule + commands, states the trade-off
+```
+
+Without that access Jarvix automatically falls back to tap-to-toggle on the
+same chord (tap to listen, tap to submit), plus `F10` as a bare-key hold.
+The chord is `activation.ptt_chord` in the config; plain `Super+V` stays
+Omarchy's universal paste, and the installer + `jarvix doctor` verify Jarvix
+never clashes with another binding. See
+[ADR 0004](docs/adr/0004-keyboard-activation.md) and
+[ADR 0008](docs/adr/0008-daemon-side-push-to-talk.md) (including the privacy
+model: non-chord key events are discarded immediately and never logged).
 
 ## Troubleshooting
 
