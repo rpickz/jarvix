@@ -22,6 +22,9 @@ type Options struct {
 	MaxTokens      int
 	Temperature    float64
 	SpeakResponses bool
+	// MinRecording discards captures shorter than this as accidental
+	// activations (a stray key tap) instead of transcribing them.
+	MinRecording time.Duration
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -45,11 +48,12 @@ type Engine struct {
 
 // sess is one interaction from start to finish.
 type sess struct {
-	id        string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	recording audio.Recording
-	started   time.Time
+	id           string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	recording    audio.Recording
+	started      time.Time
+	voiceStarted time.Time
 
 	// A session proceeds to Thinking only once both are true: the transcript
 	// is ready (from STT or provided directly) and the client has submitted.
@@ -126,26 +130,38 @@ func (e *Engine) StartVoice() error {
 		return err
 	}
 	s.recording = rec
+	s.voiceStarted = time.Now()
 	e.publish(Event{Type: "recording.started", Data: map[string]any{"session_id": s.id}})
 	return nil
 }
 
-// StopVoice ends capture and starts transcription in the background.
-func (e *Engine) StopVoice() error {
+// StopVoice ends capture and starts transcription in the background. A
+// capture shorter than Options.MinRecording is discarded as an accidental
+// activation: no transcription, no error — the session just ends quietly,
+// and discarded=true tells the caller to skip its follow-up submit.
+func (e *Engine) StopVoice() (discarded bool, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := e.current
 	if s == nil || s.recording == nil {
-		return fmt.Errorf("not recording")
+		return false, fmt.Errorf("not recording")
+	}
+	if held := time.Since(s.voiceStarted); held < e.opts.MinRecording {
+		e.log.Info("recording discarded as accidental", "component", "session",
+			"session_id", s.id, "held_ms", held.Milliseconds(),
+			"min_ms", e.opts.MinRecording.Milliseconds())
+		e.cancelLocked(fmt.Sprintf("recording too short (%dms, minimum %dms)",
+			held.Milliseconds(), e.opts.MinRecording.Milliseconds()))
+		return true, nil
 	}
 	if err := e.setStateLocked(StateTranscribing); err != nil {
-		return err
+		return false, err
 	}
 	rec := s.recording
 	s.recording = nil
 	e.publish(Event{Type: "recording.stopped", Data: map[string]any{"session_id": s.id}})
 	go e.transcribe(s, rec)
-	return nil
+	return false, nil
 }
 
 // Submit marks the session ready to proceed to the assistant. With text, the

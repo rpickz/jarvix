@@ -85,6 +85,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			MaxTokens:      cfg.AI.MaxTokens,
 			Temperature:    cfg.AI.Temperature,
 			SpeakResponses: cfg.Conversation.SpeakResponses,
+			MinRecording:   time.Duration(cfg.Audio.MinRecordingMs) * time.Millisecond,
 		})
 
 	server := ipc.NewServer(paths.Socket, bus, logger)
@@ -142,10 +143,11 @@ func (d *Daemon) registerMethods() {
 		return nil, nil
 	})
 	d.server.Handle("voice.stop", func(json.RawMessage) (any, error) {
-		if err := d.engine.StopVoice(); err != nil {
+		discarded, err := d.engine.StopVoice()
+		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
 		}
-		return nil, nil
+		return map[string]bool{"discarded": discarded}, nil
 	})
 	d.server.Handle("speech.cancel", func(json.RawMessage) (any, error) {
 		if err := d.engine.CancelSpeech(); err != nil {

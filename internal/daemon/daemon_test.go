@@ -27,6 +27,9 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 		Socket:  filepath.Join(dir, "j.sock"),
 	}
 	cfg := config.Default()
+	// Fake voice flows start and stop capture instantly; the accidental-tap
+	// guard has its own tests in internal/session.
+	cfg.Audio.MinRecordingMs = 0
 	provider := &ai.Fake{Response: "Streaming works."}
 	d, err := New(cfg, paths, nil, Deps{
 		Provider:    provider,

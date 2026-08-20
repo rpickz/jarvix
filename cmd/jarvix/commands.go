@@ -62,8 +62,14 @@ func cmdPTT(paths config.Paths, phase string) error {
 		return client.Call("voice.start", nil, nil)
 	}
 	submit := func() error {
-		if err := client.Call("voice.stop", nil, nil); err != nil {
+		var stopped struct {
+			Discarded bool `json:"discarded"`
+		}
+		if err := client.Call("voice.stop", nil, &stopped); err != nil {
 			return err
+		}
+		if stopped.Discarded {
+			return nil // too short to mean anything; the session already ended
 		}
 		return client.Call("session.submit", nil, nil)
 	}
@@ -133,8 +139,15 @@ func cmdListen(paths config.Paths) error {
 		return client.Call("session.cancel", nil, nil)
 	}
 
-	if err := client.Call("voice.stop", nil, nil); err != nil {
+	var stopped struct {
+		Discarded bool `json:"discarded"`
+	}
+	if err := client.Call("voice.stop", nil, &stopped); err != nil {
 		return err
+	}
+	if stopped.Discarded {
+		fmt.Println("recording too short — discarded")
+		return nil
 	}
 	if err := client.Call("session.submit", nil, nil); err != nil {
 		return err

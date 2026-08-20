@@ -101,6 +101,9 @@ type Audio struct {
 	InputDevice     string `toml:"input_device"`     // PipeWire target, empty = default
 	OutputDevice    string `toml:"output_device"`    // PipeWire target, empty = default
 	MaxRecordingSec int    `toml:"max_recording_sec"` // safety cap on recording length
+	// MinRecordingMs discards recordings shorter than this as accidental
+	// activations (a stray tap) instead of transcribing them.
+	MinRecordingMs int `toml:"min_recording_ms"`
 }
 
 // UI configures what the overlay is told to display.
@@ -141,7 +144,7 @@ func Default() Config {
 			Piper:    Piper{Voice: "en_US-amy-medium", Binary: "piper-tts"},
 		},
 		Conversation: Conversation{SpeakResponses: true},
-		Audio:        Audio{MaxRecordingSec: 60},
+		Audio:        Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		UI:           UI{ShowTranscript: true, ShowResponse: true},
 		Log:          Log{Level: "info"},
 	}
@@ -238,6 +241,11 @@ func (c Config) Validate() error {
 	}
 	if c.Audio.MaxRecordingSec <= 0 {
 		problems = append(problems, "audio.max_recording_sec must be positive")
+	}
+	if c.Audio.MinRecordingMs < 0 {
+		problems = append(problems, "audio.min_recording_ms must not be negative")
+	} else if c.Audio.MinRecordingMs >= c.Audio.MaxRecordingSec*1000 {
+		problems = append(problems, "audio.min_recording_ms must be smaller than audio.max_recording_sec")
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

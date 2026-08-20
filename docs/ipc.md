@@ -25,7 +25,7 @@ clients must ignore unknown events and fields.
 |---|---|---|---|
 | `session.start` | — | `{session_id}` | Cancels any active session first (interruption) |
 | `voice.start` | — | `{}` | Idle → Listening; starts capture |
-| `voice.stop` | — | `{}` | Listening → Transcribing; transcription runs async |
+| `voice.stop` | — | `{discarded}` | Listening → Transcribing; transcription runs async. `discarded: true` means the capture was shorter than `audio.min_recording_ms` and the session ended quietly (`session.cancelled`) — skip the follow-up `session.submit` |
 | `session.submit` | `{text?}` | `{}` | With `text`: skip audio, go think. Without: proceed when the transcript lands |
 | `session.cancel` | — | `{}` | Stops everything; no-op when idle |
 | `speech.cancel` | — | `{}` | Stops spoken output only; no-op unless speaking |

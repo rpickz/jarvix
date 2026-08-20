@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,7 +90,7 @@ func TestVoiceSessionFullLifecycle(t *testing.T) {
 	if s, _ := h.engine.State(); s != StateListening {
 		t.Errorf("state = %s, want listening", s)
 	}
-	if err := h.engine.StopVoice(); err != nil {
+	if _, err := h.engine.StopVoice(); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.engine.Submit(""); err != nil {
@@ -150,7 +151,7 @@ func TestStateSequenceThroughVoiceSession(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
 	_, _ = h.engine.StartSession()
 	_ = h.engine.StartVoice()
-	_ = h.engine.StopVoice()
+	_, _ = h.engine.StopVoice()
 	_ = h.engine.Submit("")
 
 	var states []string
@@ -280,7 +281,7 @@ func TestSTTFailureProducesError(t *testing.T) {
 	h.stt.Fail = errors.New("engine crashed")
 	_, _ = h.engine.StartSession()
 	_ = h.engine.StartVoice()
-	_ = h.engine.StopVoice()
+	_, _ = h.engine.StopVoice()
 	_ = h.engine.Submit("")
 	deadline := time.After(5 * time.Second)
 	for {
@@ -304,7 +305,7 @@ func TestEmptyTranscriptIsFriendlyError(t *testing.T) {
 	h.stt.Text = "  "
 	_, _ = h.engine.StartSession()
 	_ = h.engine.StartVoice()
-	_ = h.engine.StopVoice()
+	_, _ = h.engine.StopVoice()
 	_ = h.engine.Submit("")
 	deadline := time.After(5 * time.Second)
 	for {
@@ -337,6 +338,59 @@ func TestCancelSpeechStopsOnlySpeech(t *testing.T) {
 	h.waitIdle(t)
 }
 
+func TestAccidentalTapIsDiscardedQuietly(t *testing.T) {
+	h := newHarness(t, Options{SpeakResponses: true, MinRecording: time.Hour})
+	_, _ = h.engine.StartSession()
+	_ = h.engine.StartVoice()
+	h.waitFor(t, "recording.started")
+	// Released (almost) immediately: far below the minimum.
+	if _, err := h.engine.StopVoice(); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := h.waitFor(t, "session.cancelled")
+	reason, _ := ev.Data["reason"].(string)
+	if !strings.Contains(reason, "too short") {
+		t.Errorf("reason = %q", reason)
+	}
+	h.waitIdle(t)
+
+	// No transcription was attempted, no error event was published, and the
+	// recording itself was discarded.
+	if h.stt.LastInput.WAVPath != "" {
+		t.Error("transcriber must not run for a too-short recording")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, stopped, cancelled := h.recorder.Counts(); cancelled == 1 && stopped == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			_, stopped, cancelled := h.recorder.Counts()
+			t.Fatalf("recording stopped=%d cancelled=%d; want discarded", stopped, cancelled)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Submit from the already-dead session (the PTT release/toggle still
+	// sends it) must not resurrect anything.
+	if err := h.engine.Submit(""); err == nil {
+		t.Error("Submit after discard should report no active session")
+	}
+}
+
+func TestMinRecordingAllowsNormalHold(t *testing.T) {
+	h := newHarness(t, Options{SpeakResponses: true, MinRecording: 30 * time.Millisecond})
+	_, _ = h.engine.StartSession()
+	_ = h.engine.StartVoice()
+	h.waitFor(t, "recording.started")
+	time.Sleep(60 * time.Millisecond) // hold past the minimum
+	_, _ = h.engine.StopVoice()
+	_ = h.engine.Submit("")
+	h.waitFor(t, "transcript.final")
+	h.waitFor(t, "session.finished")
+	h.waitIdle(t)
+}
+
 func TestVoiceWithoutSessionFails(t *testing.T) {
 	h := newHarness(t, Options{})
 	if err := h.engine.StartVoice(); err == nil {
@@ -345,7 +399,7 @@ func TestVoiceWithoutSessionFails(t *testing.T) {
 	if err := h.engine.Submit("x"); err == nil {
 		t.Error("Submit without a session should fail")
 	}
-	if err := h.engine.StopVoice(); err == nil {
+	if _, err := h.engine.StopVoice(); err == nil {
 		t.Error("StopVoice without recording should fail")
 	}
 }

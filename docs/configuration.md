@@ -59,6 +59,8 @@ speak_responses = true           # false = text-only sessions
 input_device = ""                # PipeWire target name/serial; empty = default
 output_device = ""
 max_recording_sec = 60           # safety cap on capture length
+min_recording_ms = 300           # discard shorter captures as accidental taps
+                                 # (no transcription, no error; session ends quietly)
 
 [ui]                             # hints for the overlay
 show_transcript = true
