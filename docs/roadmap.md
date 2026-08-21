@@ -86,13 +86,27 @@ clearable with `jarvix new`. History also persists across daemon restarts
 ([ADR 0011](adr/0011-persistent-conversation-history.md)), honouring the
 same idle window. Remaining: per-conversation threads.
 
-## Phase 6 — Wake word and realtime interaction
+## Phase 6 — Wake word (done) and realtime interaction
 
-"Computer." — always-on summoning without a keyboard, plus support for
-realtime multimodal providers (`audio ↔ model ↔ audio`) as an alternative
-backend to the STT → LLM → TTS pipeline. The provider seam is per-session, so
-a realtime backend replaces the pipeline inside a session without changing
-the IPC surface.
+"Computer." — always-on summoning without a keyboard. Saying "Jarvix, …"
+mid-conversation activates the assistant: the rest of the sentence becomes the
+request, silence submits it, and a second wake word interrupts an answer in
+progress ([ADR 0024](adr/0024-background-wake-word-listening.md)).
+Push-to-talk is untouched and the two coexist.
+
+The trust story is as much the feature as the wake word. Detection runs in a
+local process; audio from before the wake word lives only in a fixed-size RAM
+ring (1.2 s by default, hard-capped at 3 s) and never reaches disk or a log;
+only the request itself is written, to tmpfs, and deleted after
+transcription. `jarvix mute` **kills the capture process** rather than
+ignoring it, so "nothing is listening" is checkable in `ps` — and the bar
+widget shows a hollow microphone whenever one is open. Off by default;
+`scripts/setup-wake.sh` installs the detector.
+
+Remaining: support for realtime multimodal providers (`audio ↔ model ↔
+audio`) as an alternative backend to the STT → LLM → TTS pipeline. The
+provider seam is per-session, so a realtime backend replaces the pipeline
+inside a session without changing the IPC surface.
 
 ## Phase 7 — Extensible tool ecosystem
 

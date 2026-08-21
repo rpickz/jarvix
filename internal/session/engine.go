@@ -70,6 +70,13 @@ type Options struct {
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.
 	Context ContextCollector
+	// WakeWord is the word background listening triggers on (ADR 0024). It
+	// is here because the wake word is *in* the transcript: the pre-roll
+	// deliberately includes it, so whisper returns "Jarvix, volume thirty".
+	// Left in place, that utterance would never match the intent router,
+	// which matches strictly against the whole thing. Empty (the default)
+	// strips nothing.
+	WakeWord string
 	// Lexicon respells terms the voice mispronounces, term → spoken form
 	// ([tts.lexicon]). Merged over the shipped defaults; nil is the defaults
 	// alone. Spoken output only — the overlay shows the original text.
@@ -180,6 +187,10 @@ type sess struct {
 	// interpreted as yes/no and resolves the confirmation instead of
 	// starting a think round.
 	replyCapture bool
+
+	// wake marks a session a wake word started (ADR 0024). Its transcript
+	// begins with the wake word, which is stripped before anything reads it.
+	wake bool
 }
 
 // NewEngine wires the engine. logger, registry, and store may be nil (no
@@ -591,6 +602,14 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		// session is already thinking or awaiting confirmation) must not
 		// start a second think round.
 		return
+	}
+	if s.wake {
+		// The wake word is at the front of the transcript because the pre-roll
+		// deliberately contains it. Nothing downstream wants it: the intent
+		// router matches whole utterances, the model reads it as the user
+		// addressing a third party, and the conversation history would carry
+		// it into every follow-up.
+		s.transcript = stripWakeWord(s.transcript, e.opts.WakeWord)
 	}
 	if strings.TrimSpace(s.transcript) == "" {
 		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))

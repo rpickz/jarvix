@@ -35,16 +35,21 @@ Panel {
   manageIpc: false
 
   // --- daemon state -------------------------------------------------------
-  // Three facts, straight off the wire. Everything visible derives from them.
+  // Four facts, straight off the wire. Everything visible derives from them.
   property bool socketReady: false
   property string sessionState: "idle"
   // Held until the next session starts, matching the conversation window's
   // banner rule: the daemon returns to idle after a failed turn, so clearing
   // this on `idle` would erase the failure the instant it happened.
   property string errorMessage: ""
+  // Background wake-word listening: "off", "armed", or "muted" (ADR 0024).
+  // This is the microphone indicator the privacy requirement asks for, and it
+  // is a second dimension rather than another session state — the session
+  // states describe a turn, this describes the microphone between turns.
+  property string wakeState: "off"
 
-  readonly property var status: BarState.statusFor(socketReady, sessionState, errorMessage)
-  readonly property var menuActions: BarState.actions(socketReady)
+  readonly property var status: BarState.statusFor(socketReady, sessionState, errorMessage, wakeState)
+  readonly property var menuActions: BarState.actions(socketReady, wakeState)
 
   // --- theme --------------------------------------------------------------
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -132,8 +137,12 @@ Panel {
           root.handleEvent(frame.method, frame.params || {})
         } else if (frame.result && frame.result.state !== undefined) {
           // Answer to the status.get sent on connect: the daemon may already
-          // be mid-session when the bar loads.
+          // be mid-session — and already listening in the background — when
+          // the bar loads. Both come from the one call, so the indicator is
+          // right immediately rather than after the next event.
           root.sessionState = String(frame.result.state)
+          if (frame.result.wake_state !== undefined)
+            root.wakeState = String(frame.result.wake_state)
         }
       }
     }
@@ -144,9 +153,13 @@ Panel {
         write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "status.get" }) + "\n")
       } else {
         // Not "unknown" — "not running", which is what the icon says. The
-        // held error goes with the connection that reported it.
+        // held error goes with the connection that reported it, and so does
+        // the wake state: with no daemon there is no capture process, and
+        // leaving a stale "armed" on screen would be the worst possible lie
+        // for this particular indicator to tell.
         root.sessionState = "idle"
         root.errorMessage = ""
+        root.wakeState = "off"
         reconnect.start()
       }
     }
@@ -169,6 +182,9 @@ Panel {
       break
     case "error":
       errorMessage = String(params.message || "something went wrong")
+      break
+    case "wake.changed":
+      wakeState = String(params.state || "off")
       break
     }
   }

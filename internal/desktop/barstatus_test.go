@@ -36,7 +36,7 @@ func barStateJSPath(t *testing.T) string {
 // plugin that was never installed.
 func TestBarStatusDaemonDownBeatsEverything(t *testing.T) {
 	for _, state := range []string{"", "idle", "listening", "thinking", "banana"} {
-		got := BarStatusFor(false, state, "the assistant failed")
+		got := BarStatusFor(false, state, "the assistant failed", WakeArmed)
 		if got.Key != BarKeyNotRunning {
 			t.Errorf("state %q with the socket down: got %q, want %q", state, got.Key, BarKeyNotRunning)
 		}
@@ -54,7 +54,7 @@ func TestBarStatusDaemonDownBeatsEverything(t *testing.T) {
 // error stands until the next session starts — the window's banner rule, and
 // the widget must not disagree with the window.
 func TestBarStatusHeldErrorBeatsTheState(t *testing.T) {
-	got := BarStatusFor(true, "idle", "whisper.cpp exited with status 1")
+	got := BarStatusFor(true, "idle", "whisper.cpp exited with status 1", WakeOff)
 	if got.Key != BarKeyError {
 		t.Fatalf("got %q, want %q", got.Key, BarKeyError)
 	}
@@ -68,12 +68,12 @@ func TestBarStatusHeldErrorBeatsTheState(t *testing.T) {
 	// Cleared error: straight back to the state's own row. This is what makes
 	// "until the next session starts" work — the widget clears the message,
 	// and the table stops reporting an error without being told twice.
-	if got := BarStatusFor(true, "listening", ""); got.Key != "listening" {
+	if got := BarStatusFor(true, "listening", "", WakeOff); got.Key != "listening" {
 		t.Errorf("with the error cleared: got %q, want listening", got.Key)
 	}
 	// Whitespace is not a message. An `error` event with a blank body would
 	// otherwise pin the widget in a red state saying nothing.
-	if got := BarStatusFor(true, "idle", "   \n"); got.Key != "idle" {
+	if got := BarStatusFor(true, "idle", "   \n", WakeOff); got.Key != "idle" {
 		t.Errorf("a blank error message must not hold the widget in the error state, got %q", got.Key)
 	}
 }
@@ -82,7 +82,7 @@ func TestBarStatusHeldErrorBeatsTheState(t *testing.T) {
 // so an older widget will meet states it has never heard of. Reporting "ready"
 // while Jarvix is plainly busy is the failure worth guarding against.
 func TestBarStatusUnknownStateReadsAsBusyNotReady(t *testing.T) {
-	got := BarStatusFor(true, "dreaming", "")
+	got := BarStatusFor(true, "dreaming", "", WakeOff)
 	if got.Key != BarKeyUnknown {
 		t.Fatalf("got %q, want %q", got.Key, BarKeyUnknown)
 	}
@@ -91,7 +91,7 @@ func TestBarStatusUnknownStateReadsAsBusyNotReady(t *testing.T) {
 	}
 	// An empty state is different: that is the widget before its first event,
 	// and idle is exactly right.
-	if got := BarStatusFor(true, "", ""); got.Key != "idle" {
+	if got := BarStatusFor(true, "", "", WakeOff); got.Key != "idle" {
 		t.Errorf("no state yet should read as idle, got %q", got.Key)
 	}
 }
@@ -137,7 +137,7 @@ func TestBarStateCoversEveryDocumentedDaemonState(t *testing.T) {
 		"awaiting_confirmation", "acting", "speaking", "cancelling", "error",
 	}
 	for _, state := range documented {
-		if got := BarStatusFor(true, state, ""); got.Key != state {
+		if got := BarStatusFor(true, state, "", WakeOff); got.Key != state {
 			t.Errorf("daemon state %q has no row of its own (fell back to %q)", state, got.Key)
 		}
 	}
@@ -149,7 +149,7 @@ func TestBarStateCoversEveryDocumentedDaemonState(t *testing.T) {
 // window would hand the user two of them.
 func TestBarActionsReuseExistingEntryPoints(t *testing.T) {
 	byKey := map[string]BarAction{}
-	for _, a := range BarActionsFor(false) {
+	for _, a := range BarActionsFor(false, WakeOff) {
 		if a.Command == "" {
 			t.Errorf("%s: an action with no command is a dead menu row", a.Key)
 		}
@@ -183,13 +183,13 @@ func TestBarActionsReuseExistingEntryPoints(t *testing.T) {
 // "Start Jarvix" beside a running daemon is noise; beside a stopped one it is
 // the whole reason the panel opened. Nothing else changes with the socket.
 func TestBarActionsOfferTheStartHintOnlyWhenTheDaemonIsDown(t *testing.T) {
-	up := BarActionsFor(true)
+	up := BarActionsFor(true, WakeOff)
 	for _, a := range up {
 		if a.Key == "start" {
 			t.Fatal("a running daemon must not be offered a start command")
 		}
 	}
-	down := BarActionsFor(false)
+	down := BarActionsFor(false, WakeOff)
 	if len(down) != len(up)+1 {
 		t.Fatalf("down offers %d actions, up offers %d — only the start action should differ", len(down), len(up))
 	}
@@ -260,20 +260,27 @@ func TestBarStateJSMirrorsGo(t *testing.T) {
 		Connected bool   `json:"connected"`
 		State     string `json:"state"`
 		Error     string `json:"error"`
+		Wake      string `json:"wake"`
 	}
 	var cases []jsCase
 	for _, key := range BarStateKeys() {
-		cases = append(cases,
-			jsCase{Connected: true, State: key},
-			jsCase{Connected: false, State: key},
-			jsCase{Connected: true, State: key, Error: "the assistant failed"},
-		)
+		for _, wake := range []string{WakeOff, WakeArmed, WakeMuted, "who knows"} {
+			cases = append(cases,
+				jsCase{Connected: true, State: key, Wake: wake},
+				jsCase{Connected: false, State: key, Wake: wake},
+				jsCase{Connected: true, State: key, Error: "the assistant failed", Wake: wake},
+			)
+		}
 	}
 	cases = append(cases,
 		jsCase{Connected: true, State: ""},
+		jsCase{Connected: true, State: "", Wake: WakeArmed},
+		jsCase{Connected: true, State: "", Wake: WakeMuted},
 		jsCase{Connected: true, State: "dreaming"},
+		jsCase{Connected: true, State: "dreaming", Wake: WakeArmed},
 		jsCase{Connected: true, State: "idle", Error: "   \n"},
-		jsCase{Connected: false, State: "", Error: "boom"},
+		jsCase{Connected: true, State: "idle", Error: "   \n", Wake: WakeArmed},
+		jsCase{Connected: false, State: "", Error: "boom", Wake: WakeMuted},
 	)
 	encoded, err := json.Marshal(cases)
 	if err != nil {
@@ -289,7 +296,7 @@ func TestBarStateJSMirrorsGo(t *testing.T) {
 	script := strings.Replace(string(library), ".pragma library", "", 1) + `
 var cases = ` + string(encoded) + `
 var out = cases.map(function (c) {
-  var status = statusFor(c.connected, c.state, c.error)
+  var status = statusFor(c.connected, c.state, c.error, c.wake)
   return {
     key: status.key, glyph: status.glyph, label: status.label,
     detail: status.detail, urgent: status.urgent, pulse: status.pulse,
@@ -298,8 +305,10 @@ var out = cases.map(function (c) {
 })
 console.log(JSON.stringify({
   statuses: out,
-  actionsUp: actions(true).map(function (a) { return a.key + " " + a.command }),
-  actionsDown: actions(false).map(function (a) { return a.key + " " + a.command }),
+  actionsUp: actions(true, "off").map(function (a) { return a.key + " " + a.command }),
+  actionsDown: actions(false, "off").map(function (a) { return a.key + " " + a.command }),
+  actionsArmed: actions(true, "armed").map(function (a) { return a.key + " " + a.command }),
+  actionsMuted: actions(true, "muted").map(function (a) { return a.key + " " + a.command }),
   glyphs: ["diagram", "document", "spreadsheet", "sketch", "source", "wat", ""]
     .map(function (k) { return artifactGlyph(k) })
 }))
@@ -324,27 +333,38 @@ console.log(JSON.stringify({
 		Tooltip string `json:"tooltip"`
 	}
 	var answers struct {
-		Statuses    []jsStatus `json:"statuses"`
-		ActionsUp   []string   `json:"actionsUp"`
-		ActionsDown []string   `json:"actionsDown"`
-		Glyphs      []string   `json:"glyphs"`
+		Statuses     []jsStatus `json:"statuses"`
+		ActionsUp    []string   `json:"actionsUp"`
+		ActionsDown  []string   `json:"actionsDown"`
+		ActionsArmed []string   `json:"actionsArmed"`
+		ActionsMuted []string   `json:"actionsMuted"`
+		Glyphs       []string   `json:"glyphs"`
 	}
 	if err := json.Unmarshal(out, &answers); err != nil {
 		t.Fatalf("decoding the library's answers: %v\n%s", err, out)
 	}
 
-	goActions := func(connected bool) []string {
+	goActions := func(connected bool, wake string) []string {
 		var list []string
-		for _, a := range BarActionsFor(connected) {
+		for _, a := range BarActionsFor(connected, wake) {
 			list = append(list, a.Key+" "+a.Command)
 		}
 		return list
 	}
-	if strings.Join(answers.ActionsUp, "|") != strings.Join(goActions(true), "|") {
-		t.Errorf("actions with the daemon up:\n  js: %v\n  go: %v", answers.ActionsUp, goActions(true))
-	}
-	if strings.Join(answers.ActionsDown, "|") != strings.Join(goActions(false), "|") {
-		t.Errorf("actions with the daemon down:\n  js: %v\n  go: %v", answers.ActionsDown, goActions(false))
+	for _, c := range []struct {
+		label     string
+		js        []string
+		connected bool
+		wake      string
+	}{
+		{"daemon up", answers.ActionsUp, true, WakeOff},
+		{"daemon down", answers.ActionsDown, false, WakeOff},
+		{"listening in the background", answers.ActionsArmed, true, WakeArmed},
+		{"muted", answers.ActionsMuted, true, WakeMuted},
+	} {
+		if strings.Join(c.js, "|") != strings.Join(goActions(c.connected, c.wake), "|") {
+			t.Errorf("actions (%s):\n  js: %v\n  go: %v", c.label, c.js, goActions(c.connected, c.wake))
+		}
 	}
 	for i, kind := range []string{"diagram", "document", "spreadsheet", "sketch", "source", "wat", ""} {
 		if answers.Glyphs[i] != BarArtifactGlyph(kind) {
@@ -357,13 +377,13 @@ console.log(JSON.stringify({
 		t.Fatalf("got %d answers for %d cases", len(got), len(cases))
 	}
 	for i, c := range cases {
-		want := BarStatusFor(c.Connected, c.State, c.Error)
+		want := BarStatusFor(c.Connected, c.State, c.Error, c.Wake)
 		have := got[i]
 		if have.Key != want.Key || have.Glyph != want.Glyph || have.Label != want.Label ||
 			have.Detail != want.Detail || have.Urgent != want.Urgent ||
 			have.Pulse != want.Pulse || have.Dim != want.Dim || have.Tooltip != want.Tooltip() {
-			t.Errorf("connected=%t state=%q error=%q:\n  js: %+v\n  go: %+v (tooltip %q)",
-				c.Connected, c.State, c.Error, have, want, want.Tooltip())
+			t.Errorf("connected=%t state=%q error=%q wake=%q:\n  js: %+v\n  go: %+v (tooltip %q)",
+				c.Connected, c.State, c.Error, c.Wake, have, want, want.Tooltip())
 		}
 	}
 }

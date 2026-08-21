@@ -134,6 +134,8 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Interaction | How |
 |---|---|
 | Talk to Jarvix | **Hold `Super+Alt+V`, speak, release** |
+| Talk to Jarvix hands-free | **Say "Jarvix, …"** — off by default; see [Hands-free](#hands-free-say-jarvix) |
+| Close the microphone | `jarvix mute` (and `jarvix unmute`) |
 | Cancel / stop speech | `Super+Alt+Escape` (or `jarvix cancel`) |
 | Interrupt mid-speech | Hold the chord again — it stops talking and listens |
 | Type instead of speaking | **Type in the conversation window and press Enter** — same conversation, same tools, same spoken answer |
@@ -153,15 +155,18 @@ Jarvix lives in the top-right of the Omarchy bar, next to the tray and the
 network and audio widgets. The icon says what Jarvix is doing at a glance —
 ready, listening, thinking, responding, speaking, waiting for a confirmation,
 or stopped — with a different **shape** for each state, and the same thing in
-words on hover, so it never depends on colour alone. A stopped daemon dims the
+words on hover, so it never depends on colour alone. With background listening
+on it is also the microphone indicator: a hollow microphone whenever a capture
+process is open, struck through when muted. A stopped daemon dims the
 icon and offers the start command; it never disappears, because an icon that
 is not there cannot be told apart from a plugin that was never installed.
 
 - **Left click** toggles the conversation window (the same route `jarvix
   window` and a clicked notification take — there is only ever one window).
-- **Right click** opens the panel: the conversation window, a new
-  conversation, settings, and the recent artifacts, each one row you can also
-  reach with the arrow keys and Enter.
+- **Right click** opens the panel: mute or unmute the microphone (when
+  background listening is on), the conversation window, a new conversation,
+  settings, and the recent artifacts, each one row you can also reach with the
+  arrow keys and Enter.
 - **Middle click** starts a fresh conversation.
 
 `make install-plugin` puts it in the bar's `right` section. To place it
@@ -176,6 +181,42 @@ Everything the widget shows is decided in Go (`internal/desktop/barstatus.go`)
 and compiled into `plugin/omarchy/BarState.js` by `go generate
 ./internal/desktop`; the QML only draws it. Change a label or a glyph there,
 regenerate, and the tests keep the two in step.
+
+### Hands-free: say "Jarvix, …"
+
+Optional, and off by default. With background listening on, saying "Jarvix,
+what's my disk usage?" activates the assistant: the rest of the sentence is
+the request, the silence after it submits, and a second "Jarvix, …" interrupts
+an answer in progress. Push-to-talk keeps working exactly as before.
+
+```bash
+scripts/setup-wake.sh                        # a local detector, in its own venv
+jarvix config set activation.mode=wake_word
+systemctl --user restart jarvixd
+```
+
+Leaving a microphone open is a big ask, so here is exactly what it means
+([ADR 0024](docs/adr/0024-background-wake-word-listening.md)):
+
+- Detection runs **on this machine**, in a local process. There is no network
+  path in the wake code.
+- Audio from *before* the wake word lives only in a **fixed-size RAM ring** —
+  1.2 seconds by default, hard-capped at 3 — and is **never written to disk or
+  logged**. Wake events record a timestamp and a confidence, nothing else.
+- Only the request *after* the wake word becomes a file, on tmpfs, deleted the
+  moment it is transcribed — exactly what a push-to-talk capture does.
+- **`jarvix mute` kills the capture process.** Not a flag that makes Jarvix
+  ignore what it hears: `jarvix status` prints the pid, and after muting `ps`
+  will not find it.
+- The **bar icon shows a hollow microphone** whenever a capture process is
+  running, and a struck-through one when you have muted. Right-click to mute
+  or unmute.
+
+Two things worth knowing before you leave it on. openWakeWord ships no model
+for "Jarvix", so the installer uses `hey_jarvis` — `jarvix status` reports
+what is really loaded, and it answers to "hey Jarvis" far more reliably than
+to "Jarvix". And there is no echo cancellation, so Jarvix saying its own name
+in an answer can retrigger it; PipeWire's `module-echo-cancel` is the fix.
 
 ### Typing to Jarvix
 

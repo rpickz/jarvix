@@ -24,6 +24,7 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/wake"
 	"github.com/rpickz/jarvix/internal/warm"
 )
 
@@ -54,6 +55,22 @@ type Daemon struct {
 	policy   config.ToolsPolicy // effective gate config, reported by status.get
 	pttChord []uint16           // daemon-side hold-to-talk chord; empty = disabled
 	pttLive  bool               // watcher running (chord set + input devices readable)
+
+	// Background wake-word listening (ADR 0024), nil unless activation.mode
+	// is "wake_word" and its detector is installed. wakeSession is the
+	// session the current wake word started, held between the detection and
+	// the end of the sentence; wakeState is what the microphone indicator
+	// should show. Guarded by wakeMu — a separate lock from the rest because
+	// it is taken from the listener's own goroutine on every state change.
+	wakeMu      sync.Mutex
+	wake        *wake.Listener
+	wakeSession string
+	wakeState   string
+	// wakeDone closes when the listener's goroutine has finished shutting
+	// down. The daemon waits on it before exiting: pw-record runs in its own
+	// process group and would survive a bare exit, which would leave the
+	// user's microphone open after they logged out.
+	wakeDone chan struct{}
 
 	// Desktop notification dispatch (ui.notifications); see notifications.go.
 	notifier   desktop.Notifier
@@ -139,6 +156,13 @@ type Deps struct {
 	// the XDG state dir. Injectable so a test can hold a write open across
 	// shutdown — the one thing a real file store cannot be asked to do.
 	HistoryStore history.Store
+	// WakeSource opens the background capture stream; nil uses pw-record.
+	// Injected by tests so no test ever opens the user's microphone.
+	WakeSource wake.Source
+	// WakeDetector spawns the wake-word detector; nil runs the configured
+	// helper process. Injected by tests, which also skips the "is the helper
+	// installed" probe — a fake detector is installed by definition.
+	WakeDetector func(context.Context) (wake.Detector, error)
 }
 
 // New builds a daemon from configuration. cfg must already be validated.
@@ -394,6 +418,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	events, unsubscribe := d.bus.Subscribe()
 	d.post.Go(func() { d.watchSessions(ctx, events, unsubscribe) })
 	d.startPTT(ctx)
+	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
 	return d.server.Serve(ctx)
 }
@@ -450,6 +475,11 @@ func (d *Daemon) shutdown() {
 		}
 	}
 
+	// The wake listener goes first, and it is the one stage of shutdown that
+	// is urgent rather than tidy: one of its children is holding the
+	// microphone open, and pw-record's process group would survive a bare
+	// exit (ADR 0024).
+	d.stopWake()
 	// Warm workers die with the daemon. Their process groups would survive a
 	// bare exit — that is the whole point of a persistent worker — so the exit
 	// path has to say so explicitly (ADR 0018).
@@ -652,6 +682,12 @@ func (d *Daemon) registerMethods() {
 			"ptt":        ptt,
 			"policy":     d.effectivePolicy(),
 			"warm":       d.warmReport(),
+			// Background listening: the mode, whether it is muted, and the
+			// pid of the capture process. A client that connects mid-life
+			// gets the microphone indicator right from this one call rather
+			// than waiting for the next wake.changed.
+			"wake":       d.wakeReport(),
+			"wake_state": d.wakeStateKey(),
 			// The last session's latency budget, so `jarvix status --last`
 			// answers "why did that feel slow" without tailing the journal.
 			"last_timings": d.lastTimingsReport(),
@@ -663,6 +699,7 @@ func (d *Daemon) registerMethods() {
 	d.registerConfigMethods()
 	d.registerContextMethods()
 	d.registerTextMethods()
+	d.registerWakeMethods()
 }
 
 // effectivePolicy reports the permission gate as it actually applies: the

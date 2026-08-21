@@ -166,6 +166,34 @@ func Settings() []Setting {
 			Get: func(c Config) any { return append([]string(nil), c.Activation.PTTChord...) },
 			set: func(c *Config, v any) { c.Activation.PTTChord = v.([]string) }},
 
+		// Background listening (ADR 0024). Restart class, all of it, for the
+		// same reason the chord is: the wake listener and its two supervised
+		// children are wired at daemon construction, and a microphone is not
+		// something to hot-swap underneath itself. The knob that *is* live is
+		// `jarvix mute`, which is the one a user reaches for in the moment.
+		{Key: "activation.mode", Label: "Activation", Type: TypeString, Reload: ReloadRestart,
+			Enum: []string{ModePushToTalk, ModeWakeWord},
+			Get:  func(c Config) any { return c.Activation.Mode },
+			set:  func(c *Config, v any) { c.Activation.Mode = v.(string) }},
+		{Key: "activation.wake_word", Label: "Wake word", Type: TypeString, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Activation.WakeWord },
+			set: func(c *Config, v any) { c.Activation.WakeWord = v.(string) }},
+		{Key: "activation.wake_command", Label: "Wake detector command", Type: TypeStringList, Reload: ReloadRestart,
+			Get: func(c Config) any { return append([]string(nil), c.Activation.WakeCommand...) },
+			set: func(c *Config, v any) { c.Activation.WakeCommand = v.([]string) }},
+		{Key: "activation.wake_sensitivity", Label: "Wake sensitivity", Type: TypeFloat, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Activation.WakeSensitivity },
+			set: func(c *Config, v any) { c.Activation.WakeSensitivity = v.(float64) }},
+		{Key: "activation.endpoint_silence_ms", Label: "Submit after silence (milliseconds)", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Activation.EndpointSilenceMs },
+			set: func(c *Config, v any) { c.Activation.EndpointSilenceMs = v.(int) }},
+		{Key: "activation.wake_ring_ms", Label: "Audio kept before the wake word (milliseconds)", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Activation.WakeRingMs },
+			set: func(c *Config, v any) { c.Activation.WakeRingMs = v.(int) }},
+		{Key: "activation.max_utterance_sec", Label: "Longest hands-free request (seconds)", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Activation.MaxUtteranceSec },
+			set: func(c *Config, v any) { c.Activation.MaxUtteranceSec = v.(int) }},
+
 		{Key: "conversation.speak_responses", Label: "Speak responses aloud", Type: TypeBool, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Conversation.SpeakResponses },
 			set: func(c *Config, v any) { c.Conversation.SpeakResponses = v.(bool) }},

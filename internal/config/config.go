@@ -235,14 +235,60 @@ type ToolsPolicy struct {
 
 // Activation configures how sessions are initiated.
 type Activation struct {
-	Mode string `toml:"mode"` // "push_to_talk"
+	// Mode is "push_to_talk" or "wake_word". The two are not alternatives in
+	// the way the name suggests: "wake_word" *adds* background listening, and
+	// the chord keeps working exactly as before (ADR 0024). A user who has
+	// enabled hands-free activation has not given up their keyboard.
+	Mode string `toml:"mode"`
 	// PTTChord is the hold-to-talk key chord watched by the daemon (evdev
 	// key names, e.g. ["leftmeta","leftalt","v"]). Requires read access to
 	// input devices (jarvix doctor explains how to grant it); without
 	// access, the Hyprland tap-to-toggle binding is the fallback. Empty
 	// disables the daemon-side watcher.
 	PTTChord []string `toml:"ptt_chord"`
+
+	// WakeWord is what has to be said, e.g. "jarvix". Jarvix does not match
+	// it itself — it is passed to the detector, which is the thing that owns
+	// what a wake word sounds like.
+	WakeWord string `toml:"wake_word"`
+	// WakeCommand is the detector helper's argv (ADR 0002: engines are
+	// external processes). Missing or unrunnable degrades to push-to-talk
+	// with one warning; `jarvix doctor` explains the fix.
+	WakeCommand []string `toml:"wake_command"`
+	// WakeSensitivity is 0..1, higher being more eager. It maps onto the
+	// detector's score threshold; the default 0.5 is the threshold every
+	// openWakeWord example uses, so published guidance transfers directly.
+	WakeSensitivity float64 `toml:"wake_sensitivity"`
+	// EndpointSilenceMs is how long a lull ends a hands-free request. With no
+	// key to release, this is the only "I have finished" signal there is.
+	EndpointSilenceMs int `toml:"endpoint_silence_ms"`
+	// WakeRingMs is how much audio is held *before* the wake word, so the
+	// first syllables of a request are not lost. It is the only ambient audio
+	// that can ever reach a transcript, so it is deliberately short by
+	// default and hard-capped at 3000 ms — a limit the wake listener enforces
+	// as well, because a privacy boundary should not depend on validation
+	// having been run.
+	WakeRingMs int `toml:"wake_ring_ms"`
+	// MaxUtteranceSec bounds one hands-free request.
+	MaxUtteranceSec int `toml:"max_utterance_sec"`
 }
+
+// WakeWordEnabled reports whether background listening is configured.
+func (a Activation) WakeWordEnabled() bool { return a.Mode == ModeWakeWord }
+
+// Activation modes.
+const (
+	// ModePushToTalk is the keyboard-only default.
+	ModePushToTalk = "push_to_talk"
+	// ModeWakeWord adds always-on background listening for the wake word.
+	ModeWakeWord = "wake_word"
+)
+
+// MaxWakeRingMs is the hard ceiling on pre-wake retention, in milliseconds.
+// It is a privacy limit rather than a performance one, and it is stated here
+// as well as in internal/wake so a user reading the configuration reference
+// sees the same number the code enforces.
+const MaxWakeRingMs = 3000
 
 // AI selects and configures the assistant provider.
 type AI struct {
@@ -367,8 +413,20 @@ func Default() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		Activation: Activation{
-			Mode:     "push_to_talk",
+			// Push-to-talk stays the default. Background listening is a
+			// microphone that is open when nobody asked it to be, and that is
+			// a decision for the user to make deliberately, not one to
+			// inherit from a default (ADR 0024).
+			Mode:     ModePushToTalk,
 			PTTChord: []string{"leftmeta", "leftalt", "v"},
+			// The wake settings carry working values regardless, so switching
+			// the mode on is one edit rather than six.
+			WakeWord:          "jarvix",
+			WakeCommand:       []string{"jarvix-wake"},
+			WakeSensitivity:   0.5,
+			EndpointSilenceMs: 800,
+			WakeRingMs:        1200,
+			MaxUtteranceSec:   15,
 		},
 		AI: AI{
 			Provider:     "ollama",
@@ -545,15 +603,17 @@ func parse(data []byte, cfg Config) (Config, error) {
 func (c Config) Validate() error {
 	var problems []string
 
-	if c.Activation.Mode != "push_to_talk" {
+	if c.Activation.Mode != ModePushToTalk && c.Activation.Mode != ModeWakeWord {
 		problems = append(problems, fmt.Sprintf(
-			"activation.mode %q is not supported; use \"push_to_talk\"", c.Activation.Mode))
+			"activation.mode %q is not supported; use %q or %q",
+			c.Activation.Mode, ModePushToTalk, ModeWakeWord))
 	}
 	if len(c.Activation.PTTChord) > 0 {
 		if _, err := hotkey.ResolveChord(c.Activation.PTTChord); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
+	problems = append(problems, c.wakeProblems()...)
 	if c.AI.Provider == "" {
 		problems = append(problems, "ai.provider is empty; set it to a provider such as \"ollama\" or \"openai\"")
 	} else if _, ok := c.AI.Endpoints[c.AI.Provider]; !ok {

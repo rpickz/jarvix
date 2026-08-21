@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test ci coverage vet gofmt-check lint generate install install-kokoro install-plugin install-systemd install-hyprland uninstall clean release-snapshot
+.PHONY: all build test ci coverage vet gofmt-check lint generate install install-kokoro install-wake install-plugin install-systemd install-hyprland uninstall clean release-snapshot
 
 all: build
 
@@ -65,6 +65,9 @@ install: build
 
 install-kokoro:
 	scripts/setup-kokoro.sh
+
+install-wake:
+	scripts/setup-wake.sh
 
 install-plugin:
 	scripts/install-plugin.sh

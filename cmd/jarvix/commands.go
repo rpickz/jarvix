@@ -43,6 +43,7 @@ func cmdStatus(paths config.Paths, last bool) error {
 	}
 	fmt.Printf("version:  %v (protocol %v)\n", status["version"], status["protocol"])
 	fmt.Printf("socket:   %s\n", paths.Socket)
+	printWake(status["wake"])
 	printWarmWorkers(status["warm"])
 	if last {
 		printTimings(status["last_timings"])
@@ -134,6 +135,89 @@ func printLastTyping(v any) {
 		fmt.Printf("          %s\n", reason)
 	}
 	fmt.Println("          (the text itself is never recorded)")
+}
+
+// printWake reports background listening: the activation mode, and — the
+// part worth printing at all — whether a capture process is running and which
+// one. "Is my microphone open?" should be answerable by reading a line, and
+// then checkable by grepping the pid out of `ps`.
+func printWake(v any) {
+	report, ok := v.(map[string]any)
+	if !ok || len(report) == 0 {
+		return
+	}
+	mode, _ := report["mode"].(string)
+	if enabled, _ := report["enabled"].(bool); !enabled {
+		fmt.Printf("wake:     off (activation.mode = %s)\n", mode)
+		return
+	}
+	word, _ := report["word"].(string)
+	reason, _ := report["last_reason"].(string)
+	running, _ := report["running"].(bool)
+	muted, _ := report["muted"].(bool)
+	capturing, _ := report["capturing"].(bool)
+	switch {
+	case !running:
+		line := fmt.Sprintf("wake:     enabled for %q but not running — push-to-talk only", word)
+		if reason != "" {
+			line += " (" + reason + ")"
+		}
+		fmt.Println(line)
+	case muted:
+		fmt.Printf("wake:     muted — no capture process is running (jarvix unmute to resume)\n")
+	case capturing:
+		fmt.Printf("wake:     listening for %q — pw-record pid %.0f, %.0fms kept before the wake word\n",
+			word, toFloat(report["pid"]), toFloat(report["ring_ms"]))
+		if detector, _ := report["detector"].(string); detector != "" {
+			fmt.Printf("          detector %s (pid %.0f, %.0f MB), %.0f activations since start\n",
+				detector, toFloat(report["detector_pid"]), toFloat(report["detector_rss_mb"]),
+				toFloat(report["activations"]))
+		}
+	default:
+		line := fmt.Sprintf("wake:     enabled for %q, capture not up", word)
+		if reason != "" {
+			line += " (" + reason + ")"
+		}
+		fmt.Println(line)
+	}
+}
+
+// cmdMute is the live privacy control: `jarvix mute` closes the microphone,
+// `jarvix unmute` opens it again. The daemon only answers once the capture
+// process has actually been killed, so what this prints is a fact rather than
+// a request that has been filed.
+func cmdMute(paths config.Paths, muted bool) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	var report map[string]any
+	if err := client.Call("wake.mute", map[string]bool{"muted": muted}, &report); err != nil {
+		return err
+	}
+	if enabled, _ := report["enabled"].(bool); !enabled {
+		mode, _ := report["mode"].(string)
+		fmt.Printf("background listening is off (activation.mode = %s) — nothing is capturing\n", mode)
+		return nil
+	}
+	if running, _ := report["running"].(bool); !running {
+		fmt.Println("background listening is enabled but not running — nothing is capturing")
+		if reason, _ := report["last_reason"].(string); reason != "" {
+			fmt.Println("  reason:", reason)
+		}
+		return nil
+	}
+	if muted {
+		fmt.Println("muted — the capture process has been killed; nothing is listening")
+		return nil
+	}
+	// Unmuting is the asymmetric half: killing a process is instant, starting
+	// one is not, so this deliberately does not claim a pid it would have to
+	// invent. `jarvix status` reports the real one a moment later.
+	word, _ := report["word"].(string)
+	fmt.Printf("listening for %q again — the microphone reopens in a moment (jarvix status to confirm)\n", word)
+	return nil
 }
 
 // printWarmWorkers summarises the supervised engine processes, one line each,
