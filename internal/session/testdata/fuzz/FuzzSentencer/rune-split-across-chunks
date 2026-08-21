@@ -1,0 +1,3 @@
+go test fuzz v1
+string("\xc2\n \xa0")
+byte(0)
