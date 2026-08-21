@@ -26,6 +26,7 @@ Usage:
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix window                 Open/close the conversation window
   jarvix artifacts [--json]     List recent artifacts (diagrams, documents, sheets, sketches)
+  jarvix voices [--json]        List installed voices by language, accent, and gender
   jarvix doctor                 Check every dependency and explain failures
   jarvix setup                  First-run wizard: voice, activation, AI, advisors
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
@@ -56,6 +57,11 @@ func run(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	// Attach the machine's installed voices so validation can say "that voice
+	// is not installed, try these" instead of leaving it to fail at synthesis
+	// time. The catalog reads nothing until something asks it to, so commands
+	// that never validate pay nothing for it.
+	cfg.Voices = cfg.InstalledVoices(paths)
 
 	cmd, rest := args[0], args[1:]
 	switch cmd {
@@ -97,6 +103,11 @@ func run(args []string) int {
 			return fail(fmt.Errorf("usage: jarvix artifacts [--json]"))
 		}
 		err = cmdArtifacts(cfg, len(rest) > 0)
+	case "voices":
+		if len(rest) > 0 && rest[0] != "--json" {
+			return fail(fmt.Errorf("usage: jarvix voices [--json]"))
+		}
+		err = cmdVoices(cfg, paths, len(rest) > 0)
 	case "doctor":
 		err = cmdDoctor(cfg, paths)
 	case "setup":

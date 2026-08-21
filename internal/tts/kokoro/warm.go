@@ -410,9 +410,16 @@ func (w *WarmSynthesizer) startHelper(ctx context.Context) (*kokoroChild, error)
 	}
 	proc, err := warm.StartProcess(warm.ProcessSpec{
 		Path: w.Cold.python(),
-		Args: []string{w.Cold.script(), "--serve",
+		// The warm worker is pinned to one voice for its lifetime, so the
+		// phonemiser language is settled at spawn exactly as the voice is —
+		// and a voice change is an idle-class reload, which replaces this
+		// child rather than trying to re-language a running one. langArgs
+		// omits the flag for a helper too old to know it, which keeps an
+		// un-refreshed install speaking rather than failing the handshake.
+		Args: append([]string{w.Cold.script(), "--serve",
 			"--voice", w.Cold.voice(),
 			"--speed", strconv.FormatFloat(w.Cold.speed(), 'f', 2, 64)},
+			w.Cold.langArgs()...),
 		Env: append(os.Environ(),
 			"JARVIX_KOKORO_MODEL="+w.Cold.modelPath(),
 			"JARVIX_KOKORO_VOICES="+w.Cold.voicesPath(),

@@ -35,6 +35,7 @@ const kokoroDualStub = `#!/bin/sh
 case " $* " in
   *" --serve "*)
     echo SERVE >> "$KOKORO_STUB_DIR/spawns"
+    echo "$*" >> "$KOKORO_STUB_DIR/serve.args"
     if [ "$KOKORO_STUB_MODE" = "oldscript" ]; then
       echo "unrecognized arguments: --serve" >&2
       exit 2
@@ -66,6 +67,7 @@ case " $* " in
     ;;
   *)
     echo ONESHOT >> "$KOKORO_STUB_DIR/spawns"
+    echo "$*" >> "$KOKORO_STUB_DIR/oneshot.args"
     cat > /dev/null
     echo "SAMPLE_RATE=24000" >&2
     printf 'COLD'
@@ -84,8 +86,14 @@ func installWarmStub(t *testing.T, mode string) (*WarmSynthesizer, string) {
 	if err := os.WriteFile(helper, []byte(kokoroDualStub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"kokoro_stream.py", "model.onnx", "voices.bin"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+	// The helper fixture declares --lang, as the real script does: the adapter
+	// reads the installed script to decide whether it may pass the flag.
+	for name, body := range map[string]string{
+		"kokoro_stream.py": `parser.add_argument("--lang")`,
+		"model.onnx":       "x",
+		"voices.bin":       "x",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

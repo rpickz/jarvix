@@ -137,6 +137,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | See what Jarvix is doing | The bar icon — hover it for the state in words |
 | Actions without speaking | **Right-click the bar icon**: window, new conversation, settings, recent artifacts |
 | Fresh conversation | `jarvix new` (forget the current thread) |
+| Change the accent | `jarvix voices` lists what is installed, by language and gender |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
 

@@ -61,6 +61,11 @@ func healthyWorld(t *testing.T) (config.Config, config.Paths) {
 	stubDir := installDoctorStubs(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// XDG_DATA_HOME as well as HOME: the Kokoro adapter resolves its install
+	// through the same XDG rules setup-kokoro.sh does, so leaving the real one
+	// set would let these checks find the developer's actual Kokoro install
+	// and pass where CI fails.
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 
 	cfg := config.Default()
 

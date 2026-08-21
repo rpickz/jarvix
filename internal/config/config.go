@@ -16,6 +16,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/voice"
 )
 
 // Config is the root configuration document.
@@ -39,6 +40,20 @@ type Config struct {
 	Performance Performance        `toml:"performance"`
 	UI          UI                 `toml:"ui"`
 	Log         Log                `toml:"log"`
+
+	// Voices enumerates the voices the machine actually has installed, for
+	// the configured TTS engine. It is not configuration — it is the state of
+	// the machine — so it never appears in the TOML document, and it is a
+	// field rather than a package-level lookup for two reasons. Validation
+	// must be able to say "that voice is not installed, try these" (see
+	// voice.go), which needs the real list; and no test may be made to depend
+	// on a 27 MB archive being present, which needs the fake.
+	//
+	// Nil is the safe default and means "do not object to the voice": the
+	// daemon and the CLI attach the real catalog at their entry points, tests
+	// attach voice.Fake, and everything else validates the rest of the
+	// document exactly as before.
+	Voices voice.Catalog `toml:"-"`
 }
 
 // Performance decides how much of the engine stack stays warm between
@@ -555,6 +570,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
 	problems = append(problems, c.contextProblems()...)
+	problems = append(problems, c.voiceProblems()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:

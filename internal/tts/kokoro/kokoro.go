@@ -10,6 +10,7 @@ package kokoro
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -20,10 +21,16 @@ import (
 	"strings"
 
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/voice"
 )
 
-// Default install locations, matching scripts/setup-kokoro.sh.
+// Default install locations, matching scripts/setup-kokoro.sh — including its
+// XDG_DATA_HOME handling, without which the adapter looks for the models in
+// ~/.local/share on a machine where the script put them somewhere else.
 func defaultDir() string {
+	if data := os.Getenv("XDG_DATA_HOME"); data != "" {
+		return filepath.Join(data, "jarvix")
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "jarvix")
 }
@@ -70,14 +77,70 @@ func (s *Synthesizer) voicesPath() string {
 	if s.VoicesPath != "" {
 		return s.VoicesPath
 	}
-	return filepath.Join(defaultDir(), "models", "kokoro", "voices-v1.0.bin")
+	return voice.KokoroVoicesFile(defaultDir())
 }
 
 func (s *Synthesizer) voice() string {
 	if s.Voice != "" {
 		return s.Voice
 	}
-	return "af_heart"
+	return DefaultVoice
+}
+
+// lang is the phonemiser language the helper is driven with, derived from the
+// voice and never configured next to it.
+//
+// This is the fix for the defect that motivated the whole feature: the helper
+// used to be handed lang="en-us" for every voice, so a British voice spoke
+// British-sounding American English — rhotic R's, T's flapped to D's — and no
+// amount of config could change it. Deriving the language from the voice id
+// makes that combination unrepresentable.
+//
+// A voice whose id says nothing about its language (a custom embedding
+// somebody added to the archive) falls back to the default rather than
+// refusing to speak: silence is a worse answer than an accent.
+func (s *Synthesizer) lang() string {
+	if l, ok := voice.LanguageForKokoroVoice(s.voice()); ok {
+		return l.Code
+	}
+	return voice.DefaultLanguage().Code
+}
+
+// DefaultVoice is the voice Kokoro speaks with when none is configured.
+const DefaultVoice = "af_heart"
+
+// langArgs is the --lang flag for the helper, omitted when the installed
+// helper predates it.
+//
+// The helper is copied out of the repo into ~/.local/share/jarvix by
+// setup-kokoro.sh, so upgrading Jarvix does not upgrade it — a packaged
+// upgrade refreshes /usr/share/jarvix, which is not the file the adapter
+// runs. Handing --lang to a helper that has never heard of it makes argparse
+// exit 2, which would take the user's voice away entirely as the price of an
+// upgrade they did not know changed anything. Degrading to the old behaviour
+// costs them the accent until they re-run the script, and `jarvix doctor`
+// says exactly that in the meantime.
+//
+// This mirrors how the serve protocol already handles a stale helper: detect,
+// degrade, and explain — never fail hard on someone else's upgrade timing.
+// Reading a 9 KB file is free next to spawning a Python interpreter, so it is
+// checked per spawn rather than cached behind a lock.
+func (s *Synthesizer) langArgs() []string {
+	if !helperSupportsLang(s.script()) {
+		return nil
+	}
+	return []string{"--lang", s.lang()}
+}
+
+// helperSupportsLang reports whether the installed helper accepts --lang. An
+// unreadable helper is assumed current: a missing file is Ready's problem to
+// report, and guessing "stale" there would deny a working helper its language.
+func helperSupportsLang(script string) bool {
+	data, err := os.ReadFile(script)
+	if err != nil {
+		return true
+	}
+	return bytes.Contains(data, []byte("--lang"))
 }
 
 func (s *Synthesizer) speed() float64 {
@@ -89,6 +152,12 @@ func (s *Synthesizer) speed() float64 {
 
 // Name implements tts.Synthesizer.
 func (s *Synthesizer) Name() string { return "kokoro" }
+
+// ScriptPath reports the helper this synthesizer runs, so doctor can inspect
+// the *installed* helper rather than assuming it matches the repo's copy —
+// setup-kokoro.sh copies it out to the data directory, and upgrading Jarvix
+// does not upgrade the copy.
+func (s *Synthesizer) ScriptPath() string { return s.script() }
 
 // Ready reports whether the interpreter, script, and model files exist, so
 // jarvix doctor can explain a missing setup before a session needs speech.
@@ -115,8 +184,11 @@ func (s *Synthesizer) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 	if text == "" {
 		return tts.Format{}, nil, fmt.Errorf("nothing to speak")
 	}
-	cmd := exec.CommandContext(ctx, s.python(), s.script(),
-		"--voice", s.voice(), "--speed", strconv.FormatFloat(s.speed(), 'f', 2, 64))
+	args := append([]string{s.script(),
+		"--voice", s.voice(),
+		"--speed", strconv.FormatFloat(s.speed(), 'f', 2, 64)},
+		s.langArgs()...)
+	cmd := exec.CommandContext(ctx, s.python(), args...)
 	cmd.Cancel = func() error { return cmd.Process.Kill() }
 	cmd.Env = append(os.Environ(),
 		"JARVIX_KOKORO_MODEL="+s.modelPath(),
@@ -191,7 +263,8 @@ func readSampleRate(r io.Reader) (int, error) {
 	if err := scanner.Err(); err != nil {
 		return 0, err
 	}
-	return 0, fmt.Errorf("helper exited before producing audio (is kokoro-onnx installed in the venv?)")
+	return 0, fmt.Errorf("helper exited before producing audio " +
+		"(is kokoro-onnx installed in the venv, and is the installed helper current? re-run scripts/setup-kokoro.sh)")
 }
 
 func drain(r io.Reader) {

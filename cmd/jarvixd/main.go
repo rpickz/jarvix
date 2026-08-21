@@ -40,6 +40,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The installed-voice catalog is attached before validation so a voice the
+	// machine cannot speak is refused at start-up, with alternatives named,
+	// rather than failing in the middle of the first spoken answer. It is
+	// lazy and cached, so this costs one archive read per daemon at most.
+	cfg.Voices = cfg.InstalledVoices(paths)
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
