@@ -25,7 +25,7 @@ Usage:
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix window                 Open/close the conversation window
-  jarvix artifacts              List recent artifacts (diagrams, documents, sheets, sketches)
+  jarvix artifacts [--json]     List recent artifacts (diagrams, documents, sheets, sketches)
   jarvix doctor                 Check every dependency and explain failures
   jarvix setup                  First-run wizard: voice, activation, AI, advisors
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
@@ -93,7 +93,10 @@ func run(args []string) int {
 	case "window":
 		err = cmdWindow()
 	case "artifacts":
-		err = cmdArtifacts(cfg)
+		if len(rest) > 0 && rest[0] != "--json" {
+			return fail(fmt.Errorf("usage: jarvix artifacts [--json]"))
+		}
+		err = cmdArtifacts(cfg, len(rest) > 0)
 	case "doctor":
 		err = cmdDoctor(cfg, paths)
 	case "setup":

@@ -114,3 +114,23 @@ Ordering guarantees: `state.changed` precedes the stage events it enables;
 Slow consumers may lose events (the daemon never blocks on a client), so the
 overlay treats `state.changed` as the source of truth and resyncs with
 `status.get` on reconnect.
+
+## The shell plugin's own IPC surface
+
+Separate from the daemon socket above: the Omarchy shell exposes each
+plugin's `IpcHandler` through `omarchy-shell <target> <function>`. Jarvix
+registers two targets, and this is how the CLI, notifications, and the bar
+widget reach the plugin's windows without the daemon being involved — which
+matters, because the window and the widget must work with jarvixd stopped.
+
+| Target | Function | Effect |
+|---|---|---|
+| `jarvix` | `openWindow` / `closeWindow` / `toggleWindow` | Show, hide, or toggle the conversation window. `jarvix window`, a clicked notification, and the bar widget all go through here — there is only ever one window |
+| `jarvix` | `openSettings` | Open the window already showing the settings screen (the bar widget's Settings action) |
+| `jarvix` | `state` / `ping` | The overlay's view of the session state; liveness |
+| `jarvix.bar` | `open` / `close` / `toggle` / `show` / `hide` | The bar widget's panel |
+| `jarvix.bar` | `state` | The state key the bar icon is showing — one of the daemon states above, or `not-running`, `error`, or `working` (an unrecognised state). `scripts/verify-bar-widget.sh` reads this to check the icon against the daemon |
+
+The widget's own vocabulary — the glyph, words, and urgency for each state —
+is defined in `internal/desktop/barstatus.go` and generated into
+`plugin/omarchy/BarState.js`; see [ADR 0020](adr/0020-bar-widget-not-tray-icon.md).

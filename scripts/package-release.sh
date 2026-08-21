@@ -61,10 +61,17 @@ disappear from the wizard:
     mkdir -p ~/.local/share/jarvix/scripts
     install -m755 scripts/*.sh ~/.local/share/jarvix/scripts/
 
-Copy the Omarchy overlay plugin (don't symlink from a temporary directory):
+Copy the Omarchy plugin — the bar widget, the overlay, and the conversation
+window (don't symlink from a temporary directory), then put the widget in the
+bar's right-hand section:
 
     mkdir -p ~/.config/omarchy/plugins
     cp -r plugin/omarchy ~/.config/omarchy/plugins/jarvix
+    omarchy plugin enable jarvix right
+
+If Jarvix was already enabled from an earlier release it will be listed as a
+plain plugin rather than a bar widget; \`omarchy plugin disable jarvix\` first,
+then enable it as above.
 
 Then let the first-run wizard walk you through the rest — voice engine,
 push-to-talk access, AI provider, advisor CLIs — verifying each step:

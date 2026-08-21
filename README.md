@@ -84,7 +84,7 @@ The wizard covers the pieces below; they remain available individually:
 
 ```bash
 jarvix setup whisper    # downloads the Whisper model (~148 MB, one-time)
-make install-plugin     # links the Omarchy overlay plugin and enables it
+make install-plugin     # links the Omarchy plugin and puts Jarvix in the bar
 make install-hyprland   # adds the push-to-talk keybindings
 jarvix doctor           # verifies every dependency, explains anything missing
 ```
@@ -132,10 +132,42 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Interrupt mid-speech | Hold the chord again — it stops talking and listens |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
-| Review the conversation | Click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |
+| Review the conversation | **Click the Jarvix icon in the bar**, click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |
+| See what Jarvix is doing | The bar icon — hover it for the state in words |
+| Actions without speaking | **Right-click the bar icon**: window, new conversation, settings, recent artifacts |
 | Fresh conversation | `jarvix new` (forget the current thread) |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
+
+### The bar widget
+
+Jarvix lives in the top-right of the Omarchy bar, next to the tray and the
+network and audio widgets. The icon says what Jarvix is doing at a glance —
+ready, listening, thinking, responding, speaking, waiting for a confirmation,
+or stopped — with a different **shape** for each state, and the same thing in
+words on hover, so it never depends on colour alone. A stopped daemon dims the
+icon and offers the start command; it never disappears, because an icon that
+is not there cannot be told apart from a plugin that was never installed.
+
+- **Left click** toggles the conversation window (the same route `jarvix
+  window` and a clicked notification take — there is only ever one window).
+- **Right click** opens the panel: the conversation window, a new
+  conversation, settings, and the recent artifacts, each one row you can also
+  reach with the arrow keys and Enter.
+- **Middle click** starts a fresh conversation.
+
+`make install-plugin` puts it in the bar's `right` section. To place it
+yourself, or to move it:
+
+```bash
+omarchy plugin enable jarvix right          # or left / center
+omarchy plugin enable jarvix --before omarchy.tray
+```
+
+Everything the widget shows is decided in Go (`internal/desktop/barstatus.go`)
+and compiled into `plugin/omarchy/BarState.js` by `go generate
+./internal/desktop`; the QML only draws it. Change a label or a glyph there,
+regenerate, and the tests keep the two in step.
 
 Jarvix remembers the conversation: ask a follow-up ("what should I change?")
 and it keeps the prior context, until the thread goes idle (configurable) or
@@ -175,10 +207,22 @@ Daemon logs:
 journalctl --user -u jarvixd -f
 ```
 
-The overlay is display-only. If it doesn't appear:
-`omarchy plugin list` should show `jarvix` enabled; `omarchy-shell shell rescanPlugins`
-re-discovers it; saving any file in `~/.config/omarchy/plugins/jarvix/`
-hot-reloads it.
+The overlay, the window, and the bar widget are all display-only. If any of
+them doesn't appear: `omarchy plugin list` should show `jarvix` enabled;
+`omarchy-shell shell rescanPlugins` re-discovers it; saving any file in
+`~/.config/omarchy/plugins/jarvix/` hot-reloads it.
+
+No icon in the bar, but `omarchy plugin list` says jarvix is enabled? An
+installation that predates the widget is recorded as a plain plugin rather
+than as a bar widget, and enabling it again will not move it. Re-run
+`scripts/install-plugin.sh`, which migrates it, or do it by hand:
+
+```bash
+omarchy plugin disable jarvix && omarchy plugin enable jarvix right
+```
+
+`scripts/verify-bar-widget.sh` checks the whole thing on a live session —
+manifest, placement, IPC, and whether the icon actually follows a session.
 
 ## Development
 

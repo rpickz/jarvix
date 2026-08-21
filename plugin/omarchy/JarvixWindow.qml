@@ -44,6 +44,16 @@ FloatingWindow {
   function closeWindow() { visible = false }
   function toggleWindow() { visible = !visible }
 
+  // Open straight onto the settings screen. Settings live inside this window
+  // rather than in a window of their own (issue #9), so "open settings" is
+  // "open the window, already showing settings" — what the bar widget's
+  // Settings action asks for. Escape still steps back to the conversation
+  // before closing, so the shortcut cannot strand anyone.
+  function openSettings() {
+    settingsOpen = true
+    visible = true
+  }
+
   onVisibleChanged: {
     if (visible) {
       if (daemon.connected) requestConversation()

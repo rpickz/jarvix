@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -456,26 +457,51 @@ func splitLines(s string) []string {
 // artifactsListLimit keeps the listing to what "recent" means at a glance.
 const artifactsListLimit = 20
 
-// cmdArtifacts lists recent artifacts straight off the filesystem: the
-// artifact directory is the source of truth, so this works with the daemon
-// stopped — same spirit as `jarvix config` and `jarvix doctor`.
-func cmdArtifacts(cfg config.Config) error {
-	dir := cfg.Artifacts.Dir
+// artifactEntry is one file in the artifact directory, already described the
+// way a reader wants it: no timestamps to do arithmetic on, no extensions to
+// interpret. The JSON tags are the contract the Omarchy bar widget's panel
+// reads (`jarvix artifacts --json`) — QML gets a list to draw, and none of
+// the deciding.
+type artifactEntry struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Path string `json:"path"`
+	Age  string `json:"age"`
+	// Modified is RFC 3339 so a client that wants to re-sort or re-phrase can,
+	// without this command having to guess which it wanted.
+	Modified string `json:"modified"`
+}
+
+// artifactListing is the whole answer, directory included: the directory is
+// configurable (artifacts.dir), so a caller that only got the files would
+// have to parse config.toml to say where they live, or to offer "open the
+// folder". Reporting it here keeps that knowledge in Go.
+type artifactListing struct {
+	Dir       string          `json:"dir"`
+	Artifacts []artifactEntry `json:"artifacts"`
+}
+
+// recentArtifacts reads the artifact directory and returns the newest
+// `limit` files. `now` is a parameter rather than a call to time.Now so the
+// age strings are testable without sleeping.
+//
+// A missing directory is not an error: it is the ordinary state of a fresh
+// install that has not made anything yet, and both renderings say so.
+func recentArtifacts(dir string, limit int, now time.Time) (artifactListing, error) {
+	listing := artifactListing{Dir: dir, Artifacts: []artifactEntry{}}
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
-		fmt.Printf("no artifacts yet (they will land in %s)\n", dir)
-		return nil
+		return listing, nil
 	}
 	if err != nil {
-		return err
+		return listing, err
 	}
 
-	type artifact struct {
-		name    string
-		kind    string
+	type found struct {
+		entry   artifactEntry
 		modTime time.Time
 	}
-	var list []artifact
+	var list []found
 	for _, entry := range entries {
 		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
@@ -484,24 +510,57 @@ func cmdArtifacts(cfg config.Config) error {
 		if err != nil {
 			continue // deleted between ReadDir and Info; not worth failing over
 		}
-		list = append(list, artifact{
-			name:    entry.Name(),
-			kind:    artifactKind(entry.Name()),
+		list = append(list, found{
+			entry: artifactEntry{
+				Name:     entry.Name(),
+				Kind:     artifactKind(entry.Name()),
+				Path:     filepath.Join(dir, entry.Name()),
+				Age:      humanAge(now.Sub(info.ModTime())),
+				Modified: info.ModTime().Format(time.RFC3339),
+			},
 			modTime: info.ModTime(),
 		})
 	}
-	if len(list) == 0 {
-		fmt.Printf("no artifacts yet (they will land in %s)\n", dir)
-		return nil
-	}
 	sort.Slice(list, func(i, j int) bool { return list[i].modTime.After(list[j].modTime) })
-	if len(list) > artifactsListLimit {
-		list = list[:artifactsListLimit]
+	if len(list) > limit {
+		list = list[:limit]
+	}
+	for _, f := range list {
+		listing.Artifacts = append(listing.Artifacts, f.entry)
+	}
+	return listing, nil
+}
+
+// cmdArtifacts lists recent artifacts straight off the filesystem: the
+// artifact directory is the source of truth, so this works with the daemon
+// stopped — same spirit as `jarvix config` and `jarvix doctor`.
+//
+// `--json` prints the same listing as one JSON object. That is what the
+// Omarchy bar widget's panel runs to fill its "recent artifacts" section:
+// the shell plugin gets the names, kinds, ages, and paths already decided
+// here rather than reimplementing any of it in QML (ADR 0013).
+func cmdArtifacts(cfg config.Config, asJSON bool) error {
+	listing, err := recentArtifacts(cfg.Artifacts.Dir, artifactsListLimit, time.Now())
+	if err != nil {
+		return err
 	}
 
-	fmt.Printf("recent artifacts in %s:\n", dir)
-	for _, a := range list {
-		fmt.Printf("  %-10s %-9s %s\n", humanAge(time.Since(a.modTime)), a.kind, filepath.Join(dir, a.name))
+	if asJSON {
+		out, err := json.Marshal(listing)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+
+	if len(listing.Artifacts) == 0 {
+		fmt.Printf("no artifacts yet (they will land in %s)\n", listing.Dir)
+		return nil
+	}
+	fmt.Printf("recent artifacts in %s:\n", listing.Dir)
+	for _, a := range listing.Artifacts {
+		fmt.Printf("  %-10s %-9s %s\n", a.Age, a.Kind, a.Path)
 	}
 	return nil
 }

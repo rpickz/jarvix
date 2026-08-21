@@ -2,10 +2,36 @@
   "schemaVersion": 1,
   "id": "jarvix",
   "name": "Jarvix",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Rich Pickering",
-  "description": "Voice-native computer interaction: listening, transcript, and streaming response overlay for the Jarvix daemon, plus a conversation window opened by clicking a Jarvix notification.",
-  "kinds": ["panel"],
+  "description": "Voice-native computer interaction: a bar icon showing what Jarvix is doing, the conversation window a click away, and the listening/transcript/response overlay for the Jarvix daemon.",
+  "kinds": ["panel", "bar-widget"],
   "keepLoaded": true,
-  "entryPoints": { "panel": "JarvixOverlay.qml" }
+  "entryPoints": {
+    "panel": "JarvixOverlay.qml",
+    "barWidget": "JarvixBar.qml"
+  },
+  "barWidget": {
+    "displayName": "Jarvix",
+    "description": "One bar icon and one panel: what Jarvix is doing right now, a click to open the conversation, and the actions worth reaching for without speaking.",
+    "category": "AI",
+    "aliases": ["jarvix", "voice", "assistant"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "artifactCount": 5
+    },
+    "schema": [
+      {
+        "key": "artifactCount",
+        "type": "integer",
+        "label": "Recent artifacts to list",
+        "min": 0,
+        "max": 20,
+        "step": 1,
+        "defaultValue": 5,
+        "description": "How many recent diagrams, documents, spreadsheets, and sketches the panel lists. Zero hides the section."
+      }
+    ]
+  }
 }
