@@ -49,6 +49,12 @@ type PolicyConfig struct {
 	// ShellDeny adds word-prefix patterns that never run, regardless of any
 	// confirmation. Deny beats everything.
 	ShellDeny []string
+	// Advisors maps a configured advisor name to the tier its configuration
+	// earns (ADR 0016): allow for one running a shipped read-only preset
+	// unchanged — it only reads and answers — and ask for everything else,
+	// which is any advisor given a hand-written argv or one whose CLI can act
+	// on the machine. An advisor absent from this map is unknown and asks.
+	Advisors map[string]PolicyDecision
 }
 
 // Verdict is one gate decision, made daemon-side from the parsed command —
@@ -77,6 +83,7 @@ type Policy struct {
 	tools           map[string]PolicyDecision
 	extraAllow      [][]string // word-prefix patterns from configuration
 	extraDeny       [][]string
+	advisors        map[string]PolicyDecision // per-advisor tier (ADR 0016)
 }
 
 // NewPolicy validates and compiles a policy. Errors are actionable: they name
@@ -103,6 +110,19 @@ func NewPolicy(cfg PolicyConfig) (*Policy, error) {
 			return nil, fmt.Errorf("tools.policy.tool.%q is %q; use \"allow\", \"ask\", or \"deny\"", name, d)
 		}
 		p.tools[name] = d
+	}
+	p.advisors = make(map[string]PolicyDecision, len(cfg.Advisors))
+	advisorNames := make([]string, 0, len(cfg.Advisors))
+	for name := range cfg.Advisors {
+		advisorNames = append(advisorNames, name)
+	}
+	sort.Strings(advisorNames) // deterministic error order
+	for _, name := range advisorNames {
+		d := cfg.Advisors[name]
+		if !ValidDecision(string(d)) {
+			return nil, fmt.Errorf("advisor %q has decision %q; use \"allow\", \"ask\", or \"deny\"", name, d)
+		}
+		p.advisors[name] = d
 	}
 	var err error
 	if p.extraAllow, err = compileWordPatterns("tools.policy.shell_allow", cfg.ShellAllow); err != nil {
@@ -136,14 +156,14 @@ var builtinToolDefaults = map[string]PolicyDecision{
 }
 
 // ToolDecision returns the configured tier for a tool: its per-tool entry,
-// a built-in default (shell.run classifies with an ask fallback,
-// artifact.create is allow), or the policy default. Used by status
+// a built-in default (shell.run and advisor.ask classify per call with an ask
+// fallback, artifact.create is allow), or the policy default. Used by status
 // reporting; Decide applies the same resolution.
 func (p *Policy) ToolDecision(name string) PolicyDecision {
 	if d, ok := p.tools[name]; ok {
 		return d
 	}
-	if name == shellToolName {
+	if name == shellToolName || name == advisorToolName {
 		return PolicyAsk
 	}
 	if d, ok := builtinToolDefaults[name]; ok {
@@ -154,6 +174,10 @@ func (p *Policy) ToolDecision(name string) PolicyDecision {
 
 const shellToolName = "shell.run"
 
+// AdvisorToolName is the registry name of the delegation tool, exported so
+// configuration and status reporting can name it without guessing.
+const AdvisorToolName = advisorToolName
+
 // Decide classifies one tool call. For shell.run the command is parsed and
 // classified daemon-side: a compound command (`;`, `&&`, pipes, command
 // substitution) is judged by its riskiest part, and deny beats ask beats
@@ -161,6 +185,9 @@ const shellToolName = "shell.run"
 // never consulted.
 func (p *Policy) Decide(call ai.ToolCall) Verdict {
 	mode := p.ToolDecision(call.Name)
+	if call.Name == advisorToolName {
+		return p.decideAdvisor(call, mode)
+	}
 	if call.Name != shellToolName {
 		v := Verdict{Decision: mode, Tool: call.Name}
 		switch mode {
@@ -183,6 +210,64 @@ func (p *Policy) Decide(call ai.ToolCall) Verdict {
 		return v
 	}
 	return p.decideShell(call, mode)
+}
+
+// decideAdvisor classifies one advisor.ask call (ADR 0016). Delegation sends
+// the user's question to another program on their machine, so *which*
+// advisor decides the tier — and the answer comes from configuration, never
+// from the call: the model names an advisor, and the tier that name earned in
+// config is applied to it.
+//
+// The shape mirrors shell.run: an explicit [tools.policy.tool] entry of
+// "allow" trusts every advisor and "deny" disables delegation outright, while
+// the default (ask) means "classify" — advisors on an unmodified read-only
+// preset run silently, and anything else asks first.
+func (p *Policy) decideAdvisor(call ai.ToolCall, mode PolicyDecision) Verdict {
+	v := Verdict{Tool: call.Name}
+	if mode == PolicyDeny {
+		v.Decision = PolicyDeny
+		v.Rule = `tool "advisor.ask" is set to deny`
+		return v
+	}
+
+	var args struct {
+		Advisor string `json:"advisor"`
+	}
+	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil || strings.TrimSpace(args.Advisor) == "" {
+		// Unparseable arguments name no advisor, so no per-advisor tier
+		// applies. Execute will reject the call anyway; asking is the safe
+		// failure mode.
+		v.Decision = PolicyAsk
+		v.Rule = "arguments could not be parsed"
+		v.Summary = "I was asked to consult an assistant I could not identify. Should I go ahead?"
+		return v
+	}
+	// Command is what the user is confirming and what a remembered approval
+	// is keyed on: the advisor, not the question. Approving "ask Claude" once
+	// approves asking Claude, never asking something else.
+	advisor := strings.TrimSpace(args.Advisor)
+	v.Command = advisor
+
+	if mode == PolicyAllow {
+		v.Decision = PolicyAllow
+		v.Rule = `tool "advisor.ask" is set to allow`
+		return v
+	}
+	if _, explicit := p.tools[call.Name]; !explicit {
+		if p.advisors[advisor] == PolicyAllow {
+			v.Decision = PolicyAllow
+			v.Rule = fmt.Sprintf("advisor %q answers questions only", advisor)
+			return v
+		}
+	}
+	v.Decision = PolicyAsk
+	if _, known := p.advisors[advisor]; known {
+		v.Rule = fmt.Sprintf("advisor %q can act on this computer or runs a custom command", advisor)
+	} else {
+		v.Rule = fmt.Sprintf("advisor %q is not configured", advisor)
+	}
+	v.Summary = fmt.Sprintf("I'd like to ask %s about this. Should I go ahead?", advisor)
+	return v
 }
 
 func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision) Verdict {
