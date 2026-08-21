@@ -168,3 +168,62 @@ func TestProbe(t *testing.T) {
 		t.Error("Probe against dead endpoint should fail")
 	}
 }
+
+// The engine layers system-role content through a turn (prompt, remembered
+// facts, desktop context); Qwen3-family chat templates hard-error unless a
+// request carries exactly one leading system message. These pin the fold.
+func TestCoalesceSystemFoldsLayeredSystemMessages(t *testing.T) {
+	in := []ai.Message{
+		{Role: ai.RoleSystem, Content: "prompt"},
+		{Role: ai.RoleSystem, Content: "remembered facts"},
+		{Role: ai.RoleUser, Content: "earlier question"},
+		{Role: ai.RoleAssistant, Content: "earlier answer"},
+		{Role: ai.RoleSystem, Content: "desktop context"},
+		{Role: ai.RoleUser, Content: "the question"},
+	}
+	out := coalesceSystem(in)
+	if len(out) != 4 {
+		t.Fatalf("len = %d, want 4: %+v", len(out), out)
+	}
+	if out[0].Role != ai.RoleSystem || out[0].Content != "prompt\n\nremembered facts\n\ndesktop context" {
+		t.Errorf("system = %+v", out[0])
+	}
+	rest := []string{string(out[1].Role), out[1].Content, string(out[2].Role), out[2].Content, string(out[3].Role), out[3].Content}
+	want := []string{"user", "earlier question", "assistant", "earlier answer", "user", "the question"}
+	for i := range want {
+		if rest[i] != want[i] {
+			t.Errorf("non-system order broken at %d: got %q want %q", i, rest[i], want[i])
+		}
+	}
+}
+
+func TestCoalesceSystemPassesThroughTheCommonShape(t *testing.T) {
+	in := []ai.Message{
+		{Role: ai.RoleSystem, Content: "prompt"},
+		{Role: ai.RoleUser, Content: "hi"},
+	}
+	out := coalesceSystem(in)
+	if len(out) != 2 || &in[0] == nil || out[0].Content != "prompt" || out[1].Content != "hi" {
+		t.Errorf("passthrough changed the request: %+v", out)
+	}
+	if none := coalesceSystem([]ai.Message{{Role: ai.RoleUser, Content: "hi"}}); len(none) != 1 {
+		t.Errorf("no-system request changed: %+v", none)
+	}
+	if empty := coalesceSystem(nil); len(empty) != 0 {
+		t.Errorf("nil request changed: %+v", empty)
+	}
+}
+
+// A lone system message that is not first (context injected with no system
+// prompt configured) still moves to the front — the template rule is about
+// position, not count.
+func TestCoalesceSystemHoistsAStraySystemMessage(t *testing.T) {
+	in := []ai.Message{
+		{Role: ai.RoleUser, Content: "hi"},
+		{Role: ai.RoleSystem, Content: "desktop context"},
+	}
+	out := coalesceSystem(in)
+	if len(out) != 2 || out[0].Role != ai.RoleSystem || out[0].Content != "desktop context" || out[1].Content != "hi" {
+		t.Errorf("stray system not hoisted: %+v", out)
+	}
+}
