@@ -25,7 +25,7 @@ import (
 // acknowledgement says so plainly rather than apologising for a bug.
 var errIntentDeclined = errors.New("declined")
 
-// RoutineRunner executes one named routine (ADR 0025). It is the engine's
+// RoutineRunner executes one named routine (ADR 0026). It is the engine's
 // view of internal/routine's Runner, declared as an interface here so session
 // tests substitute a fake and never place a window. The contract mirrors the
 // runner's: the returned string is the one spoken summary, partial failure is
@@ -219,7 +219,7 @@ func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive boo
 	return e.intentRunner().RunShell(s.ctx, m.Command), true
 }
 
-// runRoutine carries out a matched routine phrase (ADR 0025) through the
+// runRoutine carries out a matched routine phrase (ADR 0026) through the
 // routine runner, behind its own gate identity. The routine's summary is the
 // acknowledgement — the whole run speaks exactly once, at the end — which is
 // why this returns ack where the other intent paths return only an error.

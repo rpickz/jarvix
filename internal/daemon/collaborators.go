@@ -10,6 +10,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
@@ -172,10 +173,13 @@ func assistantSystemPrompt(cfg config.Config) string {
 	if len(cfg.Advisors) > 0 {
 		prompt += config.AdvisorSystemPrompt
 	}
+	if cfg.Memory.Enabled {
+		prompt += config.MemorySystemPrompt
+	}
 	return prompt
 }
 
-// routineRunner builds the routine runner (ADR 0025), or nil when nothing is
+// routineRunner builds the routine runner (ADR 0026), or nil when nothing is
 // configured. The explicit nil matters for the same reason contextCollector's
 // does: a typed-nil *routine.Runner in the interface field would read as
 // "routines exist" to the engine. Rebuilt on config reload alongside the
@@ -203,9 +207,13 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 
 // engineOptions maps configuration onto engine options, shared by New and by
 // config reloads so both always agree on the translation. The bus is here for
-// the routine runner, which publishes its progress events through it.
+// the routine runner, which publishes its progress events through it. book is
+// the daemon's knowledge base (ADR 0025), nil when memory is disabled — it is
+// a parameter rather than rebuilt from cfg because the store is
+// construction-wired (restart-class) and must stay the same instance the
+// memory tools write through.
 func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
-	logger *slog.Logger) session.Options {
+	book *memory.Book, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -221,6 +229,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Routines:          routineRunner(cfg, compositor, bus, logger),
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
+		Memory:            memoryInjector(book),
 		WakeWord:          cfg.Activation.WakeWord,
 		Lexicon:           cfg.TTS.Lexicon,
 	}
@@ -245,6 +254,18 @@ func contextCollector(cfg config.Config, logger *slog.Logger) session.ContextCol
 		return nil
 	}
 	return c
+}
+
+// memoryInjector adapts the knowledge base for the engine, or leaves the
+// option nil when memory is disabled. Same typed-nil trap as
+// contextCollector: assigning a nil *memory.Book into the interface field
+// would leave the engine consulting "nothing" on every turn — disabled must
+// mean absent.
+func memoryInjector(book *memory.Book) session.MemoryInjector {
+	if book == nil {
+		return nil
+	}
+	return book
 }
 
 // intentRouter compiles the deterministic intent table (ADR 0017). Nil means

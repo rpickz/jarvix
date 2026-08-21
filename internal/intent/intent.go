@@ -111,7 +111,7 @@ type Match struct {
 	// the gate decision and for observability.
 	UserDefined bool
 	// Routine is the configured routine this utterance triggers ([[routines]],
-	// ADR 0025), empty for every other intent. Only the name travels: the
+	// ADR 0026), empty for every other intent. Only the name travels: the
 	// router decides *whether* an utterance is a routine, and the engine hands
 	// the name to the routine runner, which owns what the steps mean.
 	Routine string
@@ -151,7 +151,7 @@ type Options struct {
 	Terminal string
 	// Custom holds the user-defined intents.
 	Custom []Custom
-	// Routines holds the configured routines' trigger phrases (ADR 0025).
+	// Routines holds the configured routines' trigger phrases (ADR 0026).
 	Routines []RoutinePhrases
 }
 

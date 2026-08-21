@@ -1,4 +1,4 @@
-# ADR 0025 — Named routines: one phrase places your apps on your workspaces
+# ADR 0026 — Named routines: one phrase places your apps on your workspaces
 
 **Status:** accepted (implements issue #61)
 

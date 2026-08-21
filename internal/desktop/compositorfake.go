@@ -182,7 +182,7 @@ func (f *FakeCompositor) act(ctx context.Context, verb, address string, workspac
 }
 
 // actOn records one window-addressed dispatch, whatever its payload. The
-// original three verbs and the placement verbs (ADR 0025) share it so all of
+// original three verbs and the placement verbs (ADR 0026) share it so all of
 // them get the same discipline: the BeforeAction hook, and the refusal to
 // "succeed" against an address the inventory never reported.
 func (f *FakeCompositor) actOn(ctx context.Context, action FakeAction) error {

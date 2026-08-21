@@ -11,7 +11,7 @@ import (
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
-// The routine tests cover the engine half of ADR 0025: a routine phrase is
+// The routine tests cover the engine half of ADR 0026: a routine phrase is
 // claimed by the router, gated under its own identity, executed through the
 // injected runner (never the real one — no test here places a window), and
 // acknowledged with the run's single summary. The provider is a fake so the

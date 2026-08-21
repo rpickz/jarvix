@@ -161,9 +161,20 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // state changes, so they take the policy default (ask), and
 // `[tools.policy.tool]."desktop.move_window" = "allow"` is how a user who
 // disagrees says so.
-// routine.run is allow for a third reason: authorship. Every step of a
+//
+// The two memory verbs here are remember and recall (ADR 0025). Recall is a
+// read. Remember mutates state, but its blast radius is bounded by
+// construction the way artifact.create's is: it writes only into the user's
+// own 0600 memory file, the engine speaks a one-sentence confirmation of
+// what was stored, and a wrong fact is undone with "forget that". Asking
+// would turn every "remember X" — an instruction the user just gave out
+// loud — into a question about itself. memory.forget is absent on purpose:
+// deletion is the one memory operation that cannot be undone, so it takes
+// the policy default (ask) and confirms the exact fact about to go.
+//
+// routine.run is allow for yet another reason: authorship. Every step of a
 // routine was written by the user in their own configuration — a fixed
-// program name and a fixed placement, no shell anywhere (ADR 0025) — and the
+// program name and a fixed placement, no shell anywhere (ADR 0026) — and the
 // spoken phrase is itself the instruction to run exactly those steps. Asking
 // "should I run your morning setup?" after "morning setup" would be asking
 // the user to confirm their own sentence. A user who wants the question
@@ -171,10 +182,12 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // `[tools.policy.tool]."routine.run" = "ask"`, and deny disables routines
 // outright.
 var builtinToolDefaults = map[string]PolicyDecision{
-	"artifact.create":   PolicyAllow,
-	ListWindowsToolName: PolicyAllow,
-	FocusWindowToolName: PolicyAllow,
-	RoutineToolName:     PolicyAllow,
+	"artifact.create":      PolicyAllow,
+	ListWindowsToolName:    PolicyAllow,
+	FocusWindowToolName:    PolicyAllow,
+	MemoryRememberToolName: PolicyAllow,
+	MemoryRecallToolName:   PolicyAllow,
+	RoutineToolName:        PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
@@ -249,7 +262,7 @@ const AdvisorToolName = advisorToolName
 const IntentToolName = "intent.run"
 
 // RoutineToolName is the identity a configured routine ([[routines]], ADR
-// 0025) runs under. Its own name, not intent.run's, for the same reason
+// 0026) runs under. Its own name, not intent.run's, for the same reason
 // intent.run is not shell.run's: the risk profiles differ — a custom intent
 // is an arbitrary shell command, a routine is a sequence of validated program
 // launches and window placements — so each must be tightenable without

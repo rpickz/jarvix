@@ -255,6 +255,15 @@ timeout_ms = 300                 # gathering budget, per source and in total
                                  # (sources run in parallel). May be lowered,
                                  # never raised above 300
 
+[memory]                         # facts you ask Jarvix to remember (see below)
+enabled = true                   # off: tools not registered, nothing injected —
+                                 # the store file is left alone (restart-class)
+max_facts = 200                  # store cap; warns from nine-tenths full
+max_injected_tokens = 500        # per-turn budget for the remembered-facts
+                                 # block (~4 chars/token); facts that do not
+                                 # fit are left out of the turn, never deleted.
+                                 # Minimum 100
+
 [conversation]
 speak_responses = true           # false = text-only sessions
 history_turns = 16               # remember this many prior exchanges as context
@@ -817,6 +826,62 @@ What the design guarantees:
 are installed (`sudo pacman -S wl-clipboard`). A missing binary is a warning,
 never a failure: the assistant simply answers without eyes.
 
+## Memory (`[memory]`)
+
+Say "remember that the staging server is called atlas", and from then on any
+question that needs that fact gets it — across conversations and daemon
+restarts — without you repeating yourself
+([ADR 0025](adr/0025-curated-knowledge-base.md)). This is not conversation
+history: it is a small, curated set of facts Jarvix stores **only when you
+explicitly ask**, offered to the model on every turn as a clearly-delimited
+block ("things the user asked you to remember").
+
+```text
+you:    remember that the staging server is called atlas
+jarvix: I'll remember that the staging server is called atlas.
+        …weeks later…
+you:    how do I ssh to staging?
+jarvix: Connect to atlas — ssh atlas — and …
+```
+
+Hearing, correcting, and forgetting all work by voice and from the CLI:
+
+```bash
+jarvix memory list                  # everything Jarvix knows
+jarvix memory list staging          # ...matching a query
+jarvix memory forget m3             # by id, or by words:
+jarvix memory forget "partner's birthday"
+```
+
+What the design guarantees:
+
+- **You own the store.** It is one hand-editable TOML file,
+  `~/.local/state/jarvix/memory.toml` (0600), with its format documented in
+  its own header. Edit it and the change is live on the next question — no
+  restart. A file Jarvix cannot parse degrades to a warning and an empty
+  memory, and is moved aside (`memory.toml.corrupt`), never overwritten, so
+  a typo cannot cost you your facts.
+- **Corrections update; they do not accumulate.** "Actually the staging
+  server is helios" supersedes the stored fact rather than sitting beside
+  it, and the old value stays on the fact's trail with both timestamps —
+  `jarvix memory list` answers "when did that change".
+- **Memory cannot crowd out the conversation.** The injected block has a
+  token budget (`max_injected_tokens`); facts that do not fit are left out
+  of the turn — least recently confirmed first, never deleted — and the
+  model is told the list is incomplete so it can search with its recall
+  tool instead of concluding a fact does not exist.
+- **Forgetting is deletion, and deletion is confirmed.** The forget tool is
+  the one memory verb behind an "ask" confirmation by default, and the
+  question names the exact fact about to go. Remember and recall run
+  silently: storing is disclosed by the spoken confirmation and undoable by
+  forgetting.
+- **Every turn is auditable.** `jarvix status --last` prints which facts the
+  model was just given, beside the desktop context and the latency budget of
+  the same interaction. Fact content never appears in logs or bus events.
+- **Off means off — but never deletes.** `enabled = false` unregisters the
+  tools and injects nothing, and leaves the store file untouched: only an
+  explicit forget (or deleting the file) removes facts.
+
 ## Tools (assistant actions)
 
 With `[tools] shell = true`, the assistant can run shell commands itself to
@@ -1204,6 +1269,7 @@ jarvix config set 'tts.lexicon=Kubernetes=koo ber net eez,k9s=kay nine ess'
 | Config | `~/.config/jarvix/config.toml` |
 | Models | `~/.local/share/jarvix/models/` |
 | State | `~/.local/state/jarvix/` |
+| Memory (remembered facts, hand-editable) | `~/.local/state/jarvix/memory.toml` |
 | Socket | `$XDG_RUNTIME_DIR/jarvix.sock` |
 | Recordings (transient) | `$XDG_RUNTIME_DIR/jarvix/` (tmpfs, deleted after use) |
 | Artifacts (diagrams, documents, spreadsheets, sketches) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |

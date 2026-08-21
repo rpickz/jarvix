@@ -409,7 +409,7 @@ func TestInventoryIsNotTruncatedByTheDiagnosticCap(t *testing.T) {
 }
 
 // TestPlacementArgvPerDialect pins the placement dispatches routines make
-// (ADR 0025) in both dialects. Every one is a *set* rather than a toggle —
+// (ADR 0026) in both dialects. Every one is a *set* rather than a toggle —
 // `setfloating`, never `togglefloating`; `exact`, never a delta — because a
 // routine re-run must converge on the same layout, not oscillate around it.
 func TestPlacementArgvPerDialect(t *testing.T) {

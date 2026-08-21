@@ -388,7 +388,7 @@ func TestRegistryCheckCommandWithoutPolicy(t *testing.T) {
 }
 
 // TestRoutinePolicyDefaultsToAllowAndIsOverridable pins the routine.run
-// identity (ADR 0025): allow with nothing configured — the user authored
+// identity (ADR 0026): allow with nothing configured — the user authored
 // every step — while a [tools.policy.tool] entry can demand a confirmation
 // or disable routines outright, without touching intent.run or shell.run.
 func TestRoutinePolicyDefaultsToAllowAndIsOverridable(t *testing.T) {

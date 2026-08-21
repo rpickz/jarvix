@@ -1,4 +1,4 @@
-// Package routine turns one spoken sentence into a placed desktop (ADR 0025).
+// Package routine turns one spoken sentence into a placed desktop (ADR 0026).
 //
 // A routine is a named, user-authored sequence of steps — launch this
 // application, put its window on that workspace, optionally floated with a

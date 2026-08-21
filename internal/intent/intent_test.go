@@ -420,7 +420,7 @@ func BenchmarkMatchHit(b *testing.B) {
 	}
 }
 
-// TestRoutinePhraseRoutesToTheRoutine covers the routing half of ADR 0025:
+// TestRoutinePhraseRoutesToTheRoutine covers the routing half of ADR 0026:
 // a routine phrase is claimed deterministically and carries nothing but the
 // routine's name — no argv, no command, nothing a runner could mistake for
 // an instruction.

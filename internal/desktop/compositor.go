@@ -155,7 +155,7 @@ type Compositor interface {
 	Spawn(ctx context.Context, program string) error
 	// SetFloating puts the window at address into (true) or back out of
 	// (false) the floating layer. It is a set, not a toggle, on purpose:
-	// routines re-run (ADR 0025), and a toggle applied twice undoes itself
+	// routines re-run (ADR 0026), and a toggle applied twice undoes itself
 	// while a set applied twice converges.
 	SetFloating(ctx context.Context, address string, floating bool) error
 	// ResizeWindow sets a floating window's size in pixels. On a tiled window
@@ -481,7 +481,7 @@ func spawnArgs(d dispatchDialect, program string) []string {
 // as separate dispatchers (`setfloating` / `settiled`) — deliberately not
 // `togglefloating`, whose second application undoes the first; Lua takes the
 // state as a value. Both are sets, which is what makes a re-run routine
-// converge instead of oscillate (ADR 0025).
+// converge instead of oscillate (ADR 0026).
 func floatArgs(d dispatchDialect, address string, floating bool) []string {
 	if d == dialectLegacy {
 		verb := "settiled"

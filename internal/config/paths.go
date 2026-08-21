@@ -49,3 +49,8 @@ func (p Paths) WhisperModelDir() string { return filepath.Join(p.Data, "models",
 // restarts. State, not data: it is machine-local operational memory the user
 // may delete at will (jarvix new).
 func (p Paths) HistoryFile() string { return filepath.Join(p.State, "history.json") }
+
+// MemoryFile returns where the knowledge base lives (ADR 0025). State, like
+// history, because it is machine-local and the user may delete it at will —
+// but unlike history it is a file the user is invited to open and edit.
+func (p Paths) MemoryFile() string { return filepath.Join(p.State, "memory.toml") }

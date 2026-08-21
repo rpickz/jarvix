@@ -6,7 +6,7 @@ import (
 	"github.com/rpickz/jarvix/internal/routine"
 )
 
-// Routine is one [[routines]] table (ADR 0025): a named, phrase-triggered
+// Routine is one [[routines]] table (ADR 0026): a named, phrase-triggered
 // sequence of app placements. The schema is deliberately flat — strings,
 // integers, and two-element integer arrays — because the capture feature
 // (#62) will write these tables programmatically, and a schema a program can

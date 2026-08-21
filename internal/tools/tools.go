@@ -178,7 +178,7 @@ func (r *Registry) CheckCommand(tool, command string) Verdict {
 }
 
 // CheckRoutine classifies running one named routine under the routine.run
-// identity (ADR 0025). Like Check, no policy means everything is allowed —
+// identity (ADR 0026). Like Check, no policy means everything is allowed —
 // which for routines is also what the shipped default policy says.
 func (r *Registry) CheckRoutine(name string) Verdict {
 	if r.policy == nil {

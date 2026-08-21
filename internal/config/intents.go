@@ -49,7 +49,7 @@ func (c Config) intentProblems() []string {
 }
 
 // IntentOptions builds the router options from configuration: the terminal,
-// the custom intents, and the routines' trigger phrases (ADR 0025).
+// the custom intents, and the routines' trigger phrases (ADR 0026).
 func (c Config) IntentOptions() intent.Options {
 	custom := make([]intent.Custom, 0, len(c.Intents.Custom))
 	for _, e := range c.Intents.Custom {

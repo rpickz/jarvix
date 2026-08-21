@@ -136,7 +136,7 @@ func TestSummariseWindowsGroupsAndNeverLeaksIdentifiers(t *testing.T) {
 	}
 }
 
-// TestFindWindowDedupeSemantics pins the two ways routine dedupe (ADR 0025)
+// TestFindWindowDedupeSemantics pins the two ways routine dedupe (ADR 0026)
 // deliberately differs from the model-facing resolver: ties fall to the most
 // recently focused window, and the category-alias tier never claims one.
 func TestFindWindowDedupeSemantics(t *testing.T) {

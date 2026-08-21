@@ -19,6 +19,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -67,7 +68,7 @@ type Options struct {
 	// package can accidentally move the developer's workspace.
 	Compositor desktop.Compositor
 	// Routines executes the named routines the intent router matches
-	// (ADR 0025). Nil — a daemon with no [[routines]] configured — makes a
+	// (ADR 0026). Nil — a daemon with no [[routines]] configured — makes a
 	// matched routine phrase an honest spoken refusal, though validated
 	// configuration cannot produce that combination: the router only knows
 	// phrases the same config that builds the runner declared.
@@ -76,6 +77,10 @@ type Options struct {
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.
 	Context ContextCollector
+	// Memory supplies the remembered-facts block — the user-curated knowledge
+	// base (ADR 0025) — for turns that reach the model. Nil disables it
+	// entirely: no consultation, no message, no cost.
+	Memory MemoryInjector
 	// WakeWord is the word background listening triggers on (ADR 0024). It
 	// is here because the wake word is *in* the transcript: the pre-roll
 	// deliberately includes it, so whisper returns "Jarvix, volume thirty".
@@ -168,6 +173,13 @@ type Engine struct {
 	lastContext        desktop.Snapshot
 	lastContextSession string
 	lastContextTaken   bool
+
+	// The most recent knowledge-base injection, kept for the same audit
+	// promise memory.last / `jarvix status --last` make for desktop context
+	// (ADR 0025). Guarded by mu.
+	lastMemory        memory.Injection
+	lastMemorySession string
+	lastMemoryTaken   bool
 }
 
 // sess is one interaction from start to finish.
@@ -824,7 +836,10 @@ func (e *Engine) think(s *sess) {
 	// the one path that opens a provider request, so a transcript the intent
 	// router already claimed never waits on hyprctl or wl-paste (ADR 0019).
 	snapshot := e.gatherContext(s)
-	messages := e.conversationMessages(s.transcript, snapshot)
+	// The knowledge base is consulted on the same terms (ADR 0025): only a
+	// turn that reaches the provider pays, and what it pays is one stat(2).
+	remembered := e.gatherMemory(s)
+	messages := e.conversationMessages(s.transcript, snapshot, remembered.Message)
 
 	var toolDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
@@ -1004,8 +1019,9 @@ func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
 }
 
 // conversationMessages builds the provider message list for a new turn:
-// system prompt, carried-over history (reset if the follow-up window lapsed),
-// the desktop context capture, then the new user message.
+// system prompt, remembered facts, carried-over history (reset if the
+// follow-up window lapsed), the desktop context capture, then the new user
+// message.
 //
 // Context sits last-but-one on purpose. It is a system message, so the model
 // reads it as ground truth about the machine rather than as something the
@@ -1014,7 +1030,15 @@ func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
 // it before older turns would invite the model to read it as their context
 // too. It is never committed to history (commitTurn stores the question and
 // the answer), so a capture lives exactly one turn.
-func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot) []ai.Message {
+//
+// Remembered facts sit directly after the system prompt, *before* the
+// history, for the mirror-image reason (ADR 0025): they are standing
+// knowledge, true across every turn of the thread, so they read as part of
+// who the assistant is — while the capture, which describes one moment,
+// stays adjacent to the question that moment belongs to. Like the capture,
+// the block is never committed to history: it is rebuilt fresh each turn, so
+// a hand-edit or a forget is reflected on the very next question.
+func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot, remembered string) []ai.Message {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.opts.FollowUpWindow > 0 && !e.lastTurn.IsZero() &&
@@ -1027,9 +1051,12 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 		// must ask again.
 		e.approvals = make(map[string]bool)
 	}
-	msgs := make([]ai.Message, 0, len(e.history)+3)
+	msgs := make([]ai.Message, 0, len(e.history)+4)
 	if e.opts.SystemPrompt != "" {
 		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: e.opts.SystemPrompt})
+	}
+	if remembered != "" {
+		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: remembered})
 	}
 	msgs = append(msgs, e.history...)
 	if captured := snapshot.Message(); captured != "" {

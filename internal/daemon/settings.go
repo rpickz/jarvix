@@ -280,6 +280,9 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	merged.Activation = running.Activation
 	merged.Tools = running.Tools
 	merged.Artifacts = running.Artifacts
+	// Memory is restart-class with the rest of the tool registry: the store
+	// and the memory tools are wired at construction (ADR 0025).
+	merged.Memory = running.Memory
 	merged.Log = running.Log
 
 	if !idleClassChanged(running, merged) {
@@ -295,7 +298,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		return false, err.Error()
 	}
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, engineOptions(merged, d.compositor, d.bus, d.log)); err != nil {
+		deps.Recorder, deps.Player, engineOptions(merged, d.compositor, d.bus, d.memory, d.log)); err != nil {
 		// The engine kept its old collaborators, so the workers just built are
 		// unreachable — close them before they are dropped. Nothing has been
 		// spawned yet (supervisors start lazily), which is what makes this

@@ -93,7 +93,7 @@ FloatingWindow {
   }
 
   // --- routines -----------------------------------------------------------
-  // The configured routines (ADR 0025), listed so one click places the
+  // The configured routines (ADR 0026), listed so one click places the
   // desktop. Display and trigger only: routines.run replays the routine's
   // phrase through the daemon's ordinary session path, so the router, the
   // permission gate, and the spoken summary all behave exactly as if the

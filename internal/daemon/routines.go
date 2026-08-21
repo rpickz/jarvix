@@ -7,7 +7,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
-// registerRoutineMethods adds the routine surface (ADR 0025): `routines.list`
+// registerRoutineMethods adds the routine surface (ADR 0026): `routines.list`
 // for the CLI and the conversation window's panel, and `routines.run` to
 // trigger one by name from either.
 //
