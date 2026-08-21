@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/config"
@@ -266,6 +270,86 @@ func splitLines(s string) []string {
 		}
 	}
 	return append(out, s[start:])
+}
+
+// artifactsListLimit keeps the listing to what "recent" means at a glance.
+const artifactsListLimit = 20
+
+// cmdArtifacts lists recent artifacts straight off the filesystem: the
+// artifact directory is the source of truth, so this works with the daemon
+// stopped — same spirit as `jarvix config` and `jarvix doctor`.
+func cmdArtifacts(cfg config.Config) error {
+	dir := cfg.Artifacts.Dir
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		fmt.Printf("no artifacts yet (they will land in %s)\n", dir)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	type artifact struct {
+		name    string
+		kind    string
+		modTime time.Time
+	}
+	var list []artifact
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue // deleted between ReadDir and Info; not worth failing over
+		}
+		list = append(list, artifact{
+			name:    entry.Name(),
+			kind:    artifactKind(entry.Name()),
+			modTime: info.ModTime(),
+		})
+	}
+	if len(list) == 0 {
+		fmt.Printf("no artifacts yet (they will land in %s)\n", dir)
+		return nil
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].modTime.After(list[j].modTime) })
+	if len(list) > artifactsListLimit {
+		list = list[:artifactsListLimit]
+	}
+
+	fmt.Printf("recent artifacts in %s:\n", dir)
+	for _, a := range list {
+		fmt.Printf("  %-10s %-9s %s\n", humanAge(time.Since(a.modTime)), a.kind, filepath.Join(dir, a.name))
+	}
+	return nil
+}
+
+// artifactKind labels a file for the listing by its extension.
+func artifactKind(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mmd":
+		return "source"
+	case ".svg", ".png":
+		return "diagram"
+	default:
+		return strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
+	}
+}
+
+// humanAge renders a duration the way a person scanning a list thinks about
+// it — coarse buckets, most recent first is already the sort order.
+func humanAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 func cmdConfig(cfg config.Config, paths config.Paths) error {

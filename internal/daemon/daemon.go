@@ -91,6 +91,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
 	}
 
+	bus := session.NewBus(logger)
 	registry := tools.NewRegistry(logger)
 	systemPrompt := cfg.AI.SystemPrompt
 	if cfg.Tools.Shell {
@@ -102,8 +103,24 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		systemPrompt += config.ToolSystemPrompt
 		logger.Info("tool enabled", "component", "tools", "tool", "shell.run")
 	}
+	if cfg.Tools.Artifacts {
+		registry.Register(&tools.Artifact{
+			Dir:         cfg.Artifacts.Dir,
+			OpenCommand: cfg.Artifacts.OpenCommand,
+			Timeout:     time.Duration(cfg.Artifacts.RenderTimeoutSec) * time.Second,
+			Renderers:   []tools.Renderer{&tools.MermaidRenderer{}},
+			// The event carries the path so the window/notification can link
+			// to the file; spoken summaries deliberately never do.
+			OnCreated: func(format, path string) {
+				bus.Publish(session.Event{Type: "artifact.created",
+					Data: map[string]any{"type": format, "path": path}})
+			},
+			Log: logger,
+		})
+		systemPrompt += config.ArtifactSystemPrompt
+		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
+	}
 
-	bus := session.NewBus(logger)
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
 	store := &history.File{Path: paths.HistoryFile()}

@@ -106,6 +106,59 @@ level = "loud"
 	}
 }
 
+func TestArtifactDefaults(t *testing.T) {
+	cfg := Default()
+	if !strings.HasSuffix(cfg.Artifacts.Dir, filepath.Join("Documents", "Jarvix")) {
+		t.Errorf("artifacts.dir default = %q", cfg.Artifacts.Dir)
+	}
+	if cfg.Artifacts.OpenCommand != "xdg-open" || cfg.Artifacts.RenderTimeoutSec != 10 {
+		t.Errorf("artifacts defaults = %+v", cfg.Artifacts)
+	}
+	if !cfg.Tools.Artifacts {
+		t.Error("tools.artifacts should default on: the tool degrades safely without its renderer")
+	}
+}
+
+func TestArtifactOverridesAndValidation(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tools]
+artifacts = false
+
+[artifacts]
+dir = "/tmp/my-artifacts"
+open_command = "imv"
+render_timeout_sec = 30
+`)
+	if cfg.Tools.Artifacts {
+		t.Error("tools.artifacts should be off")
+	}
+	if cfg.Artifacts.Dir != "/tmp/my-artifacts" || cfg.Artifacts.OpenCommand != "imv" ||
+		cfg.Artifacts.RenderTimeoutSec != 30 {
+		t.Errorf("artifacts = %+v", cfg.Artifacts)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestArtifactValidationRejectsBadValues(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[artifacts]
+dir = "~/Documents/Jarvix"
+open_command = " "
+render_timeout_sec = 0
+`)
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	for _, want := range []string{"artifacts.dir", "artifacts.open_command", "artifacts.render_timeout_sec"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing mention of %q: %v", want, err)
+		}
+	}
+}
+
 func TestEndpointKeyPrefersEnvironment(t *testing.T) {
 	t.Setenv("JARVIX_TEST_KEY", "from-env")
 	ep := Endpoint{APIKeyEnv: "JARVIX_TEST_KEY", APIKey: "inline"}
