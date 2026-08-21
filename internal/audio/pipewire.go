@@ -52,7 +52,7 @@ func (r *PipeWireRecorder) Start(ctx context.Context) (Recording, error) {
 		return nil, fmt.Errorf("start pw-record (is PipeWire running?): %w", err)
 	}
 
-	rec := &pipewireRecording{cmd: cmd, path: path}
+	rec := &pipewireRecording{cmd: cmd, path: path, done: make(chan struct{})}
 	// Enforce the safety cap and honour context cancellation without keeping
 	// a goroutine alive past the recording's end.
 	maxDur := r.MaxDuration
@@ -74,21 +74,18 @@ func (r *PipeWireRecorder) Start(ctx context.Context) (Recording, error) {
 type pipewireRecording struct {
 	cmd  *exec.Cmd
 	path string
+	// done is created with the recording: the watchdog goroutine reads it
+	// concurrently with Stop/Cancel, so it must never be assigned lazily
+	// (that was a data race, caught by `go test -race` on this package).
+	done chan struct{}
 
 	mu       sync.Mutex
 	finished bool
-	done     chan struct{}
-	initOnce sync.Once
-}
-
-func (r *pipewireRecording) ensureDone() {
-	r.initOnce.Do(func() { r.done = make(chan struct{}) })
 }
 
 // interrupt sends SIGINT so pw-record finalises the WAV header cleanly, then
 // waits for exit (with a kill fallback).
 func (r *pipewireRecording) interrupt() {
-	r.ensureDone()
 	r.mu.Lock()
 	if r.finished {
 		r.mu.Unlock()
@@ -114,7 +111,6 @@ func (r *pipewireRecording) interrupt() {
 
 // Stop implements Recording.
 func (r *pipewireRecording) Stop() (Clip, error) {
-	r.ensureDone()
 	r.interrupt()
 	info, err := os.Stat(r.path)
 	if err != nil {
@@ -130,7 +126,6 @@ func (r *pipewireRecording) Stop() (Clip, error) {
 
 // Cancel implements Recording.
 func (r *pipewireRecording) Cancel() {
-	r.ensureDone()
 	r.interrupt()
 	_ = os.Remove(r.path)
 }
