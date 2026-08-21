@@ -75,7 +75,7 @@ func cmdSetupWhisper(paths config.Paths, model string) error {
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
@@ -88,7 +88,7 @@ func cmdSetupWhisper(paths config.Paths, model string) error {
 	written, err := io.Copy(f, &progressReader{r: resp.Body, total: resp.ContentLength})
 	closeErr := f.Close()
 	if err != nil || closeErr != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		if err == nil {
 			err = closeErr
 		}

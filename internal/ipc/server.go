@@ -60,7 +60,7 @@ func (s *Server) Listen() error {
 	if _, err := os.Stat(s.socketPath); err == nil {
 		conn, err := net.DialTimeout("unix", s.socketPath, time.Second)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return fmt.Errorf("another jarvixd is already listening on %s", s.socketPath)
 		}
 		if err := os.Remove(s.socketPath); err != nil {
@@ -73,7 +73,7 @@ func (s *Server) Listen() error {
 		return fmt.Errorf("listen on %s: %w", s.socketPath, err)
 	}
 	if err := os.Chmod(s.socketPath, 0o600); err != nil {
-		ln.Close()
+		_ = ln.Close()
 		return fmt.Errorf("restrict socket permissions: %w", err)
 	}
 	s.mu.Lock()
@@ -114,20 +114,20 @@ func (s *Server) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.listener != nil {
-		s.listener.Close()
+		_ = s.listener.Close()
 		s.listener = nil
 	}
 	for conn := range s.conns {
-		conn.Close()
+		_ = conn.Close()
 	}
-	os.Remove(s.socketPath)
+	_ = os.Remove(s.socketPath)
 }
 
 func (s *Server) dropConn(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.conns, conn)
 	s.mu.Unlock()
-	conn.Close()
+	_ = conn.Close()
 }
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {

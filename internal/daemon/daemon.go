@@ -14,6 +14,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
@@ -119,8 +120,12 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		systemPrompt += config.ArtifactSystemPrompt
 		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
 	}
+
+	// Conversation memory persists under the XDG state dir so a follow-up
+	// still has its context after a daemon restart (ADR 0011).
+	store := &history.File{Path: paths.HistoryFile()}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, registry, bus, logger, session.Options{
+		deps.Recorder, deps.Player, registry, store, bus, logger, session.Options{
 			Model:          cfg.AI.Model,
 			SystemPrompt:   systemPrompt,
 			MaxTokens:      cfg.AI.MaxTokens,

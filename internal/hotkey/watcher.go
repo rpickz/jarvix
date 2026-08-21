@@ -23,7 +23,7 @@ func Accessible() bool {
 	for _, dev := range listKeyboards() {
 		f, err := os.Open(dev)
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 			return true
 		}
 	}
@@ -118,10 +118,10 @@ func (w *Watcher) readDevice(ctx context.Context, dev string, events chan<- keyE
 		w.log.Debug("cannot open input device", "component", "hotkey", "device", dev, "error", err.Error())
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	go func() { // unblock the Read below on shutdown
 		<-ctx.Done()
-		f.Close()
+		_ = f.Close()
 	}()
 	w.log.Info("watching keyboard", "component", "hotkey", "device", dev)
 

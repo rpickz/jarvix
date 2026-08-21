@@ -1,5 +1,6 @@
 # Jarvix
 
+[![ci](https://github.com/rpickz/jarvix/actions/workflows/ci.yml/badge.svg)](https://github.com/rpickz/jarvix/actions/workflows/ci.yml)
 **Voice → Computer.** A voice-native interaction layer for
 [Omarchy](https://omarchy.org) (Arch Linux / Hyprland / Wayland).
 

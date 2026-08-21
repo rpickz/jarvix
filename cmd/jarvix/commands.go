@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/doctor"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
@@ -22,7 +23,7 @@ func cmdStatus(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	var status map[string]any
 	if err := client.Call("status.get", nil, &status); err != nil {
 		return err
@@ -41,16 +42,23 @@ func cmdCancel(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	return client.Call("session.cancel", nil, nil)
 }
 
 func cmdNewConversation(paths config.Paths) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
-		return err
+		// No daemon means no in-memory thread to reset — but a persisted
+		// conversation may still sit on disk, and it would resurrect when the
+		// daemon next starts. Clear it directly so "new" always means new.
+		if clearErr := (&history.File{Path: paths.HistoryFile()}).Clear(); clearErr != nil {
+			return clearErr
+		}
+		fmt.Println("started a fresh conversation (daemon not running; cleared saved history)")
+		return nil
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("conversation.reset", nil, nil); err != nil {
 		return err
 	}
@@ -70,7 +78,7 @@ func cmdPTT(paths config.Paths, phase string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	beginListening := func() error {
 		if err := client.Call("session.start", nil, nil); err != nil {
@@ -121,7 +129,7 @@ func cmdAsk(paths config.Paths, question string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("session.start", nil, nil); err != nil {
 		return err
 	}
@@ -136,7 +144,7 @@ func cmdListen(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("session.start", nil, nil); err != nil {
 		return err
 	}
@@ -151,7 +159,7 @@ func cmdListen(paths config.Paths) error {
 	defer signal.Stop(interrupt)
 	enter := make(chan struct{})
 	go func() {
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		close(enter)
 	}()
 	select {
