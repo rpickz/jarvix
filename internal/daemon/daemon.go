@@ -147,6 +147,14 @@ type Daemon struct {
 	// is asked afterwards. It never holds the typed text; the event it comes
 	// from does not carry it. Guarded by errMu.
 	lastTyping map[string]any
+
+	// captureReload is set when a layout capture (#62) has written new
+	// [[routines]] tables that the engine's router does not know yet. The
+	// engine cannot be reconfigured under the very session that spoke the
+	// capture, so the session watcher consumes this on session.finished and
+	// reloads then — which is what makes a captured routine runnable by the
+	// time its phrase can next be spoken. Guarded by cfgMu.
+	captureReload bool
 }
 
 // Deps are the engine's collaborators, injectable for tests. Zero-value
@@ -429,9 +437,16 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("conversation retention on", "component", "session",
 			"dir", paths.ConversationsDir())
 	}
+	// The capture service (#62) is built before the daemon exists and bound
+	// to it after: it needs only paths and the shared compositor to plan and
+	// write, and its post-commit hook needs the daemon — which needs the
+	// engine first. Nothing can capture before Run serves, so the late bind
+	// is single-threaded construction, not a race.
+	capture := newLayoutCapturer(paths, compositor, logger)
+	engOpts := engineOptions(cfg, compositor, bus, book, convs, logger)
+	engOpts.Capture = capture
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, registry, store, bus, logger,
-		engineOptions(cfg, compositor, bus, book, convs, logger))
+		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
 
 	// The memory tools are registered after the engine exists because a
 	// stored fact carries its source turn, and only the engine knows which
@@ -471,6 +486,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		paths:      paths, injected: injected, cfg: cfg, warm: workers,
 		shutdownGrace: DefaultShutdownGrace,
 	}
+	capture.committed = d.captureCommitted
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
 		if err != nil {

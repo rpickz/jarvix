@@ -74,6 +74,12 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 					// (notify-send --wait) that a bare exit would orphan.
 					d.post.Go(func() { d.deliver(ctx, n) })
 				}
+				// A layout capture (#62) may have written routines the
+				// engine's router does not know; now that the session is
+				// finished, the reload it could not do mid-session can run.
+				if d.consumeCaptureReload() {
+					d.post.Go(d.applyCapturedRoutines)
+				}
 				answer, errStage, errMessage = "", "", ""
 			case "session.cancelled":
 				answer, errStage, errMessage = "", "", ""

@@ -181,6 +181,7 @@ func TestParseClientsReadsTheFieldsMatchingNeeds(t *testing.T) {
 		 "mapped":true,"hidden":false,"focusHistoryID":3,"stableId":"180007e8","pid":42},
 		{"address":"0xbbb","class":"firefox","title":"GitHub",
 		 "workspace":{"id":1,"name":"1"},"floating":true,"acceptsInput":true,
+		 "at":[100,200],"size":[1280,720],
 		 "mapped":true,"focusHistoryID":0,"stableId":12345,"pid":7},
 		{"address":"0xccc","class":"ghost","title":"not mapped",
 		 "workspace":{"id":1,"name":"1"},"mapped":false,"focusHistoryID":1}
@@ -199,10 +200,17 @@ func TestParseClientsReadsTheFieldsMatchingNeeds(t *testing.T) {
 	if first.StableID != "12345" {
 		t.Errorf("numeric stableId = %q, want it decoded as text", first.StableID)
 	}
+	if first.X != 100 || first.Y != 200 || first.Width != 1280 || first.Height != 720 {
+		t.Errorf("geometry = %d,%d %dx%d, want 100,200 1280x720 — layout capture needs it",
+			first.X, first.Y, first.Width, first.Height)
+	}
 	second := windows[1]
 	if second.Workspace != 2 || second.WorkspaceName != "2" || second.PID != 42 ||
 		!second.AcceptsInput || second.StableID != "180007e8" || second.Focused {
 		t.Errorf("second window = %+v", second)
+	}
+	if second.X != 0 || second.Width != 0 {
+		t.Errorf("absent at/size decoded as %d,%d %dx%d, want zeroes", second.X, second.Y, second.Width, second.Height)
 	}
 }
 

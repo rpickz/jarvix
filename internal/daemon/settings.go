@@ -297,9 +297,12 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	if err != nil {
 		return false, err.Error()
 	}
+	capture := newLayoutCapturer(d.paths, d.compositor, d.log)
+	capture.committed = d.captureCommitted
+	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.conversations, d.log)
+	opts.Capture = capture
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player,
-		engineOptions(merged, d.compositor, d.bus, d.memory, d.conversations, d.log)); err != nil {
+		deps.Recorder, deps.Player, opts); err != nil {
 		// The engine kept its old collaborators, so the workers just built are
 		// unreachable — close them before they are dropped. Nothing has been
 		// spawned yet (supervisors start lazily), which is what makes this
@@ -342,7 +345,11 @@ func (d *Daemon) restartPending(next config.Config) []string {
 }
 
 // idleClassChanged reports whether any idle-class setting differs between the
-// running and candidate configurations.
+// running and candidate configurations. The structured tables the engine
+// compiles — [[routines]] and [[intents.custom]] — have no entry in the
+// settings registry, so they are compared directly: without this, a reload
+// after a hand edit or a layout capture (#62) would update the stored config
+// but never rebuild the router that makes the phrases work.
 func idleClassChanged(running, next config.Config) bool {
 	for _, s := range config.Settings() {
 		if s.Reload != config.ReloadIdle {
@@ -352,7 +359,8 @@ func idleClassChanged(running, next config.Config) bool {
 			return true
 		}
 	}
-	return false
+	return !reflect.DeepEqual(running.Routines, next.Routines) ||
+		!reflect.DeepEqual(running.Intents.Custom, next.Intents.Custom)
 }
 
 // publishConfigChanged tells every connected client (overlay, windows, CLIs)

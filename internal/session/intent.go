@@ -100,6 +100,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		if !alive {
 			return // cancelled or superseded; that path owns the events
 		}
+	case m.CaptureName != "":
+		var alive bool
+		ack, runErr, alive = e.runCapture(s, m)
+		if !alive {
+			return // cancelled or superseded; that path owns the events
+		}
 	case m.Desktop != intent.DesktopNone:
 		runErr = e.runDesktopIntent(s, m)
 	case len(m.Argv) > 0:
@@ -360,6 +366,10 @@ func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error
 	if m.Routine != "" {
 		data["routine"] = m.Routine
 		attrs = append(attrs, "routine", m.Routine)
+	}
+	if m.CaptureName != "" {
+		data["routine"] = m.CaptureName
+		attrs = append(attrs, "routine", m.CaptureName)
 	}
 	if runErr != nil {
 		data["status"] = "failed"

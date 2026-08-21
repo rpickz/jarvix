@@ -28,6 +28,10 @@ func (d *Daemon) registerRoutineMethods() {
 				"name":    r.Name,
 				"phrases": r.Phrases,
 				"steps":   len(r.Steps),
+				// A capture that could not derive every launch command (#62)
+				// leaves a placeholder; the listing carries the mark so every
+				// surface can say "this one still needs a hand".
+				"incomplete": r.Incomplete(),
 			})
 		}
 		return map[string]any{"routines": out}, nil

@@ -82,6 +82,43 @@ func (c Config) RoutineDefinitions() []routine.Definition {
 	return defs
 }
 
+// RoutineFromDefinition converts a derived definition into its TOML shape —
+// the capture writer's direction (#62), inverse of RoutineDefinitions, kept
+// beside it so the two conversions cannot drift apart.
+func RoutineFromDefinition(d routine.Definition) Routine {
+	r := Routine{
+		Name:    d.Name,
+		Phrases: append([]string(nil), d.Phrases...),
+		Steps:   make([]RoutineStep, 0, len(d.Steps)),
+	}
+	for _, s := range d.Steps {
+		step := RoutineStep{
+			App: s.App, Match: s.Match, Workspace: s.Workspace,
+			Float: s.Float, Tile: s.Tile,
+		}
+		if s.Width != 0 || s.Height != 0 {
+			step.Size = []int{s.Width, s.Height}
+		}
+		if s.HasPosition {
+			step.Position = []int{s.X, s.Y}
+		}
+		r.Steps = append(r.Steps, step)
+	}
+	return r
+}
+
+// Incomplete reports whether any step still carries the capture placeholder
+// (#62) — the marker `jarvix routines` and routines.list surface until a
+// human resolves the launch command.
+func (r Routine) Incomplete() bool {
+	for _, s := range r.Steps {
+		if s.App == routine.PlaceholderApp {
+			return true
+		}
+	}
+	return false
+}
+
 // routineProblems validates the [[routines]] tables: the TOML shapes here,
 // the structural rules in routine.Problems, and — through intentProblems,
 // which compiles the real router — the phrase grammar and collisions. There

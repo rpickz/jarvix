@@ -74,6 +74,10 @@ type Options struct {
 	// configuration cannot produce that combination: the router only knows
 	// phrases the same config that builds the runner declared.
 	Routines RoutineRunner
+	// Capture plans and writes "save this as <name>" layout captures (#62).
+	// Nil — a daemon built without the capture service — makes a matched
+	// capture phrase an honest spoken refusal rather than a silent drop.
+	Capture RoutineCapturer
 	// Context gathers opt-in desktop context — active window, selection,
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.
