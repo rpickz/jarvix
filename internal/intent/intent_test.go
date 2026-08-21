@@ -419,3 +419,104 @@ func BenchmarkMatchHit(b *testing.B) {
 		}
 	}
 }
+
+// TestRoutinePhraseRoutesToTheRoutine covers the routing half of ADR 0025:
+// a routine phrase is claimed deterministically and carries nothing but the
+// routine's name — no argv, no command, nothing a runner could mistake for
+// an instruction.
+func TestRoutinePhraseRoutesToTheRoutine(t *testing.T) {
+	r, err := New(Options{Routines: []RoutinePhrases{
+		{Name: "morning setup", Phrases: []string{"morning setup", "start my usual apps"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, utterance := range []string{"morning setup", "Start my usual apps.", "MORNING SETUP"} {
+		m, ok := r.Match(utterance)
+		if !ok {
+			t.Fatalf("%q did not match", utterance)
+		}
+		if m.Routine != "morning setup" {
+			t.Errorf("%q → routine %q", utterance, m.Routine)
+		}
+		if m.Name != "routine.run" {
+			t.Errorf("%q → name %q", utterance, m.Name)
+		}
+		if len(m.Argv) != 0 || m.Command != "" || m.Program != "" || m.UserDefined {
+			t.Errorf("%q carries an executable payload: %+v", utterance, m)
+		}
+		if m.Ack != "" {
+			t.Errorf("%q carries an immediate ack %q; the run's summary is the acknowledgement", utterance, m.Ack)
+		}
+	}
+	if _, ok := r.Match("morning setup please"); ok {
+		t.Error("a longer sentence matched; routine phrases are whole-utterance like every other intent")
+	}
+}
+
+// TestRoutinePhraseCollisionsFailCompilation: a phrase that already belongs to
+// a built-in, a custom intent, or another routine is a load-time error naming
+// both owners — never a silent coin toss at match time.
+func TestRoutinePhraseCollisionsFailCompilation(t *testing.T) {
+	tests := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"builtin", Options{Routines: []RoutinePhrases{
+			{Name: "quiet", Phrases: []string{"mute"}},
+		}}, `the built-in intent "volume.mute"`},
+		{"custom", Options{
+			Custom: []Custom{{Match: "lock it down", Run: "loginctl lock-session"}},
+			Routines: []RoutinePhrases{
+				{Name: "lockdown", Phrases: []string{"lock it down"}},
+			}}, `intents.custom[0]`},
+		{"another routine", Options{Routines: []RoutinePhrases{
+			{Name: "morning", Phrases: []string{"set up my desk"}},
+			{Name: "evening", Phrases: []string{"set up my desk"}},
+		}}, `the trigger for routine "morning"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.opts)
+			if err == nil {
+				t.Fatal("compiled despite the collision")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %s", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestRoutinePhraseValidation: the malformed shapes fail with messages that
+// name the offending routine.
+func TestRoutinePhraseValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"empty name", Options{Routines: []RoutinePhrases{{Phrases: []string{"go"}}}},
+			"routines[0]: name is empty"},
+		{"no phrases", Options{Routines: []RoutinePhrases{{Name: "morning setup"}}},
+			`routines[0] ("morning setup"): it has no phrases`},
+		{"placeholder", Options{Routines: []RoutinePhrases{
+			{Name: "morning setup", Phrases: []string{"setup workspace {workspace}"}}}},
+			"contains a placeholder"},
+		{"empty phrase", Options{Routines: []RoutinePhrases{
+			{Name: "morning setup", Phrases: []string{"  "}}}},
+			"pattern is empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.opts)
+			if err == nil {
+				t.Fatal("compiled despite the problem")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not contain %q", err, tt.want)
+			}
+		})
+	}
+}
