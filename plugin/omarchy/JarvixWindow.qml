@@ -10,6 +10,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "ActivityState.js" as ActivityState
 
 // Jarvix conversation window: the persistent, reviewable surface for the
 // current conversation. Like the overlay it is a thin view over jarvixd —
@@ -41,6 +42,13 @@ FloatingWindow {
   property bool historyOpen: false
   property string historyDetailId: "" // "" shows the listing; an id shows that record
 
+  // The Activity screen (issue #70) shows what Jarvix is doing and has done:
+  // the daemon's activity feed, live. Every row arrives already worded —
+  // assembled daemon-side from bus events and served by activity.get plus
+  // activity.row pushes — so this screen renders text and looks up glyphs
+  // (ActivityState.js, generated from Go) and decides nothing (ADR 0013).
+  property bool activityOpen: false
+
   // --- daemon state -------------------------------------------------------
   property bool socketReady: false
   property string sessionState: "idle"
@@ -50,6 +58,8 @@ FloatingWindow {
   property bool assistantStreaming: false
 
   ListModel { id: turns } // { role: "user"|"assistant", text: string }
+  // Activity rows, oldest first, exactly as the daemon rendered them.
+  ListModel { id: activityRows } // { seq, time, kind, label, detail, failed }
   // Archived conversations, newest first. "cid" rather than "id" because id
   // is the QML object-id keyword. Unreadable records list too, greyed: one
   // bad file never hides itself, let alone the library.
@@ -70,6 +80,7 @@ FloatingWindow {
   // Settings action asks for. Escape still steps back to the conversation
   // before closing, so the shortcut cannot strand anyone.
   function openSettings() {
+    activityOpen = false
     settingsOpen = true
     visible = true
   }
@@ -107,6 +118,56 @@ FloatingWindow {
     snapshotPending = true
     queuedEvents = []
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "conversation.get" }) + "\n")
+  }
+
+  // --- activity feed ------------------------------------------------------
+  // The snapshot is requested on every connect and the pushes keep it
+  // current, so opening the pane costs nothing and survives window
+  // close/reopen — the ring lives in the daemon, this model only mirrors it.
+  // Reconciliation is by seq: activity.get replaces the model, and any push
+  // that raced the snapshot is deduplicated because seq never repeats.
+  property int activityLimit: 400
+  property int activityRequestId: 0
+
+  function openActivity() {
+    settingsOpen = false
+    historyOpen = false
+    historyDetailId = ""
+    activityOpen = true
+  }
+
+  function requestActivity() {
+    if (!daemon.connected) return
+    activityRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: activityRequestId,
+      method: "activity.get" }) + "\n")
+  }
+
+  function loadActivity(result) {
+    activityRows.clear()
+    if (result.limit) activityLimit = Number(result.limit)
+    var list = result.rows || []
+    for (var i = 0; i < list.length; i++) {
+      appendActivityRow(list[i])
+    }
+  }
+
+  function appendActivityRow(row) {
+    var seq = Number(row.seq || 0)
+    // A push that also made it into the snapshot (or a duplicate replay)
+    // would land here with a seq the model already holds; skip it.
+    if (activityRows.count > 0 && seq <= activityRows.get(activityRows.count - 1).seq) return
+    activityRows.append({
+      seq: seq,
+      time: String(row.ts || "").substring(11, 19),
+      kind: String(row.kind || ""),
+      label: String(row.label || ""),
+      detail: String(row.detail || ""),
+      failed: Boolean(row.failed)
+    })
+    // Mirror the daemon's own bound so a long-lived window cannot outgrow it.
+    while (activityRows.count > activityLimit) activityRows.remove(0)
   }
 
   // --- routines -----------------------------------------------------------
@@ -197,6 +258,7 @@ FloatingWindow {
 
   function openHistory() {
     settingsOpen = false
+    activityOpen = false
     historyOpen = true
     historyDetailId = ""
     searchActive = false
@@ -394,6 +456,12 @@ FloatingWindow {
     case "session.cancelled":
       assistantStreaming = false
       break
+    case "activity.row":
+      // One rendered feed row, pushed as it happened. Appending is all the
+      // logic this window is allowed (ADR 0013) — the wording was decided
+      // and tested daemon-side.
+      appendActivityRow(params)
+      break
     case "conversation.changed":
       // `jarvix new`, a CLI reopen, or a delete changed the thread under us;
       // re-request the authoritative snapshot rather than guessing what the
@@ -426,6 +494,8 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.submitRequestId) {
           win.handleSubmitReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.activityRequestId) {
+          if (frame.result) win.loadActivity(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
                    frame.id === win.historyReadRequestId ||
                    frame.id === win.historyOpenRequestId ||
@@ -452,6 +522,10 @@ FloatingWindow {
       if (connected) {
         win.requestConversation()
         win.requestRoutines()
+        // The snapshot replaces the model wholesale (seq keeps replays
+        // honest), so a reconnect — possibly to a restarted daemon — always
+        // converges on what the daemon actually holds.
+        win.requestActivity()
       } else {
         win.sessionState = "idle"
         win.assistantStreaming = false
@@ -524,6 +598,39 @@ FloatingWindow {
         color: Util.alpha(Color.popups.text, 0.7)
       }
 
+      // Activity toggle: the live feed of what Jarvix is doing (issue #70).
+      // Same shape as the other header toggles — keyboard-reachable, state
+      // as text.
+      Rectangle {
+        id: activityButton
+        visible: win.socketReady
+        width: activityButtonText.width + Style.space(20)
+        height: activityButtonText.height + Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, activityButton.activeFocus ? 0.18 : 0.08)
+        border.color: Util.alpha(Color.popups.text, 0.5)
+        border.width: activityButton.activeFocus ? 2 : 1
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        Accessible.name: win.activityOpen ? "Back to conversation" : "Open the activity feed"
+        function toggle() {
+          if (win.activityOpen) win.activityOpen = false
+          else win.openActivity()
+        }
+        Keys.onReturnPressed: activityButton.toggle()
+        Keys.onSpacePressed: activityButton.toggle()
+        Text {
+          id: activityButtonText
+          anchors.centerIn: parent
+          text: win.activityOpen ? "Conversation" : "Activity"
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+        MouseArea { anchors.fill: parent; onClicked: activityButton.toggle() }
+      }
+
       // History toggle: the archived-conversation library (ADR 0027). Same
       // shape as the settings toggle — keyboard-reachable, state as text.
       Rectangle {
@@ -574,6 +681,7 @@ FloatingWindow {
         function toggle() {
           win.historyOpen = false
           win.historyDetailId = ""
+          win.activityOpen = false
           win.settingsOpen = !win.settingsOpen
         }
         Keys.onReturnPressed: settingsButton.toggle()
@@ -615,7 +723,7 @@ FloatingWindow {
     }
 
     Text {
-      visible: win.socketReady && !win.settingsOpen && !win.historyOpen && turns.count === 0
+      visible: win.socketReady && !win.settingsOpen && !win.historyOpen && !win.activityOpen && turns.count === 0
       anchors.centerIn: parent
       text: "No conversation yet — hold Super+Alt+V and speak, or type below."
       font.family: Style.font.family
@@ -936,9 +1044,107 @@ FloatingWindow {
       }
     }
 
+    // The activity screen: what Jarvix is doing right now and has done
+    // recently, one rendered row per daemon decision (issue #70). A turn
+    // that acted shows its tool rows; a turn that only talked shows the
+    // explicit text-only marker; every refusal carries the daemon's reason.
+    // With the daemon down, the window's standard not-running panel stands
+    // in — this screen, like the others, only exists while connected.
+    Item {
+      id: activityScreen
+      visible: win.socketReady && win.activityOpen && !win.settingsOpen && !win.historyOpen
+      anchors.top: header.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      Text {
+        visible: activityRows.count === 0
+        anchors.centerIn: parent
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        text: "Nothing yet — everything Jarvix does will appear here as it happens."
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+
+      ListView {
+        id: activityList
+        anchors.fill: parent
+        clip: true
+        spacing: Style.space(8)
+        model: activityRows
+        // Keyboard scrollable: the list itself takes focus and the arrow and
+        // page keys move it, so the feed is reviewable without a mouse.
+        activeFocusOnTab: true
+        Keys.onUpPressed: activityList.contentY =
+          Math.max(0, activityList.contentY - Style.space(48))
+        Keys.onDownPressed: activityList.contentY =
+          Math.min(Math.max(0, activityList.contentHeight - activityList.height),
+                   activityList.contentY + Style.space(48))
+
+        // Follow the newest row while it streams; stop the moment the user
+        // scrolls back — the same rule the conversation list applies.
+        property bool followTail: true
+        onMovementEnded: followTail = atYEnd
+        onContentHeightChanged: { if (followTail) positionViewAtEnd() }
+        onCountChanged: { if (followTail) positionViewAtEnd() }
+
+        delegate: Row {
+          width: activityList.width
+          spacing: Style.space(8)
+
+          Text {
+            id: activityGlyph
+            text: ActivityState.glyphFor(model.kind)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            // The urgent colour flags a failure but never carries it alone:
+            // the label says "refused", "failed", "denied" in words.
+            color: model.failed ? Color.urgent : Util.alpha(Color.popups.text, 0.7)
+          }
+
+          Column {
+            width: parent.width - activityGlyph.width - Style.space(8)
+            spacing: Style.space(2)
+
+            Row {
+              spacing: Style.space(8)
+              Text {
+                text: model.time
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Util.alpha(Color.popups.text, 0.5)
+              }
+              Text {
+                text: model.label
+                font.family: Style.font.family
+                font.bold: true
+                font.pixelSize: Style.font.subtitle
+                color: model.failed ? Color.urgent : Color.popups.text
+              }
+            }
+            Text {
+              visible: model.detail !== ""
+              text: model.detail
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.8)
+            }
+          }
+        }
+      }
+    }
+
     ListView {
       id: list
-      visible: win.socketReady && !win.settingsOpen && !win.historyOpen
+      visible: win.socketReady && !win.settingsOpen && !win.historyOpen && !win.activityOpen
       anchors.top: header.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
@@ -991,7 +1197,7 @@ FloatingWindow {
     // answer to a pending tool confirmation.
     Column {
       id: composer
-      visible: !win.settingsOpen && !win.historyOpen
+      visible: !win.settingsOpen && !win.historyOpen && !win.activityOpen
       // A daemon that is down disables the field rather than swallowing the
       // keystrokes; the panel above says why, and the label says it again
       // here, where the caret is.
@@ -1178,6 +1384,7 @@ FloatingWindow {
       // steps search → library → conversation → closed, one layer at a time.
       else if (win.searchActive) historySearchInput.text = ""
       else if (win.historyOpen) win.historyOpen = false
+      else if (win.activityOpen) win.activityOpen = false
       else win.closeWindow()
     }
   }

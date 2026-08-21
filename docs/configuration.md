@@ -49,7 +49,7 @@ to each field in the settings screen:
 
 | Class | Options | When it takes effect |
 |---|---|---|
-| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
+| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new) | Immediately on save, even mid-session |
 | **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
 
@@ -304,6 +304,14 @@ notifications = true             # desktop notification when a session finishes;
 notification_preview = true      # show the start of the answer in the
                                  # notification body; false = a generic
                                  # "Jarvix answered" with no content
+activity_rows = 400              # rows of recent activity the daemon keeps in
+                                 # memory for the window's Activity pane and
+                                 # `activity.get` (issue #70). In-memory only —
+                                 # never written to disk; max 10000
+activity_clear_on_new = false    # true = `jarvix new` also empties the
+                                 # activity feed. Off by default: "what did it
+                                 # just do?" is usually asked after starting
+                                 # fresh
 
 [log]
 level = "info"                   # debug | info | warn | error

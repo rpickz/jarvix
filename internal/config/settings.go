@@ -300,6 +300,12 @@ func Settings() []Setting {
 		{Key: "ui.show_response", Label: "Show response in overlay", Type: TypeBool, Reload: ReloadLive,
 			Get: func(c Config) any { return c.UI.ShowResponse },
 			set: func(c *Config, v any) { c.UI.ShowResponse = v.(bool) }},
+		{Key: "ui.activity_rows", Label: "Activity rows kept in memory", Type: TypeInt, Reload: ReloadLive,
+			Get: func(c Config) any { return c.UI.ActivityRows },
+			set: func(c *Config, v any) { c.UI.ActivityRows = v.(int) }},
+		{Key: "ui.activity_clear_on_new", Label: "Clear activity on a new conversation", Type: TypeBool, Reload: ReloadLive,
+			Get: func(c Config) any { return c.UI.ActivityClearOnNew },
+			set: func(c *Config, v any) { c.UI.ActivityClearOnNew = v.(bool) }},
 
 		{Key: "tools.shell", Label: "Assistant may run shell commands", Type: TypeBool, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Tools.Shell },
