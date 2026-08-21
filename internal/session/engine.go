@@ -78,6 +78,10 @@ type Engine struct {
 	// (or withhold) the timeout deterministically. The returned stop func
 	// releases the underlying timer.
 	timer func(d time.Duration) (<-chan time.Time, func())
+	// progressAfter is how long a slow tool call may run before Jarvix says
+	// it is still working (ADR 0016). Immutable after construction; tests
+	// shorten it.
+	progressAfter time.Duration
 
 	// active tracks the session goroutines (transcribe, think) that read the
 	// swappable collaborators and options without holding mu. Reconfigure
@@ -153,8 +157,9 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 			t := time.NewTimer(d)
 			return t.C, func() { t.Stop() }
 		},
-		approvals: make(map[string]bool),
-		state:     StateIdle,
+		progressAfter: DefaultToolProgressAfter,
+		approvals:     make(map[string]bool),
+		state:         StateIdle,
 	}
 	e.loadHistory()
 	return e

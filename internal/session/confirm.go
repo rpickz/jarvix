@@ -121,11 +121,25 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall) (result string, ok bo
 
 // executeTool runs an approved call through the registry, bracketed by the
 // tool.started/tool.finished events — which therefore mark real executions
-// only, never denied or declined attempts.
+// only, never denied or declined attempts. A tool that describes itself as
+// slow (tools.Progressive) also carries a label on tool.started for the
+// overlay to show for the duration, and gets a spoken "still working" if it
+// outlives the progress threshold.
 func (e *Engine) executeTool(s *sess, call ai.ToolCall) string {
-	e.publish(Event{Type: "tool.started", Data: map[string]any{
-		"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}})
+	started := map[string]any{"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}
+	label, waiting, slow := e.tools.Activity(call)
+	if slow {
+		started["detail"] = label
+	}
+	e.publish(Event{Type: "tool.started", Data: started})
+
+	stopProgress := func() {}
+	if slow {
+		stopProgress = e.startToolProgress(s, call, waiting)
+	}
 	result := e.tools.Execute(s.ctx, call)
+	stopProgress()
+
 	e.publish(Event{Type: "tool.finished", Data: map[string]any{
 		"session_id": s.id, "tool": call.Name}})
 	return result
