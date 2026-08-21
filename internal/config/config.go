@@ -32,6 +32,9 @@ type Config struct {
 	// Context is what Jarvix may look at on the desktop before answering
 	// (see context.go). Every source is opt-in; the clipboard defaults off.
 	Context Context `toml:"context"`
+	// Memory is the knowledge base — facts the user explicitly asks Jarvix
+	// to remember, consulted on every model turn (see memory.go, ADR 0025).
+	Memory Memory `toml:"memory"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
 	// delegation entirely — the tool is not registered.
@@ -486,7 +489,11 @@ func Default() Config {
 			Window: true, Selection: true, Clipboard: false,
 			MaxChars: 2000, TimeoutMs: MaxContextTimeoutMs,
 		},
-		Audio: Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
+		// On by default: nothing enters the store without the user saying
+		// "remember ..." explicitly, so the trust decision is made per fact,
+		// not per install (ADR 0025).
+		Memory: Memory{Enabled: true, MaxFacts: 200, MaxInjectedTokens: 500},
+		Audio:  Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		// Warm by default: presence is the product, and the memory is
 		// reclaimed after ten idle minutes. The cap is a leak detector, not a
 		// working budget — whisper base.en plus Kokoro sit well under it.
@@ -539,6 +546,19 @@ const DesktopSystemPrompt = " You can act on the user's desktop: list their open
 	"the way they did and let the tool find it; if it reports several matches, ask which one they " +
 	"meant rather than choosing. Never read window identifiers, workspace internals, or raw tool " +
 	"output aloud — say what happened in one short sentence."
+
+// MemorySystemPrompt is appended to the system prompt when the knowledge
+// base is enabled (ADR 0025). The trust boundary is stated here, once, as
+// model behaviour: memory is written only on the user's explicit word.
+// Everything mechanical — supersede candidates, ids, cap warnings — is
+// carried by the tool descriptions and results instead.
+const MemorySystemPrompt = " You have a long-term memory of facts, injected above as remembered " +
+	"facts when any exist. Store a fact with memory.remember only when the user explicitly asks " +
+	"you to remember something — never decide on your own that something is worth keeping. When " +
+	"the user corrects a remembered fact, update the existing fact rather than adding a new one. " +
+	"When they ask what you know or remember, answer from the remembered facts or memory.recall, " +
+	"in plain words. When they ask you to forget something, use memory.forget. After remembering " +
+	"or forgetting, confirm what changed in one short sentence."
 
 // minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
 // warm (whisper base.en alone is ~165 MB resident). A cap below it would
@@ -736,6 +756,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
 	problems = append(problems, c.contextProblems()...)
+	problems = append(problems, c.memoryProblems()...)
 	problems = append(problems, c.voiceProblems()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
