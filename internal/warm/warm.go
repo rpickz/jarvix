@@ -257,19 +257,26 @@ func (s *Supervisor[C]) Discard(reason string) {
 // the daemon, on a clean exit or a reload that rebuilt the adapters.
 func (s *Supervisor[C]) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
 	s.disarmIdleLocked()
 	if !s.live {
+		s.mu.Unlock()
 		return
 	}
 	child := s.child
 	s.live = false
 	var zero C
 	s.child = zero
-	// Kill off the lock: terminating a child waits on it, and Status() must
-	// not block behind a shutdown.
-	go child.Close()
+	// Terminate off the lock — killing a child waits on it, and Status() must
+	// not block behind a shutdown — but *do* wait for it here rather than
+	// leaving it to a goroutine nobody joins. Close has to mean closed: the
+	// child owns a scratch directory it removes on the way out, and a caller
+	// that returned early would leave it behind. That is the daemon's
+	// shutdown path (which now drains under a deadline, ADR 0018 + #29) and a
+	// config reload that rebuilds the adapters, so an unwaited teardown
+	// litters the runtime directory a little more on every restart.
+	s.mu.Unlock()
+	child.Close()
 }
 
 // Status reports the worker for doctor and status.get.
