@@ -33,6 +33,14 @@ FloatingWindow {
   // Escape closes it before closing the window.
   property bool settingsOpen: false
 
+  // The history screen lists archived conversations and shows one read-only
+  // (ADR 0027); like settings it replaces the conversation while open. It
+  // holds no decisions of its own (ADR 0013): it renders conversation.list /
+  // conversation.read, and Resume is one conversation.open call — the daemon
+  // owns what reopening means.
+  property bool historyOpen: false
+  property string historyDetailId: "" // "" shows the listing; an id shows that record
+
   // --- daemon state -------------------------------------------------------
   property bool socketReady: false
   property string sessionState: "idle"
@@ -42,6 +50,11 @@ FloatingWindow {
   property bool assistantStreaming: false
 
   ListModel { id: turns } // { role: "user"|"assistant", text: string }
+  // Archived conversations, newest first. "cid" rather than "id" because id
+  // is the QML object-id keyword. Unreadable records list too, greyed: one
+  // bad file never hides itself, let alone the library.
+  ListModel { id: pastConversations } // { cid, preview, turnCount, lastActive, unreadable }
+  ListModel { id: pastTurns }         // { role, text } — the record being viewed
 
   function openWindow() { visible = true }
   function closeWindow() { visible = false }
@@ -143,6 +156,99 @@ FloatingWindow {
     submitInFlight = ""
   }
 
+  // --- history requests ---------------------------------------------------
+  // Each history request takes an id from the same counter as typed turns,
+  // so a reply is matched to exactly the request that asked for it.
+  property int historyListRequestId: 0
+  property int historyReadRequestId: 0
+  property int historyOpenRequestId: 0
+
+  function openHistory() {
+    settingsOpen = false
+    historyOpen = true
+    historyDetailId = ""
+    requestHistory()
+  }
+
+  function requestHistory() {
+    if (!daemon.connected) return
+    historyListRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: historyListRequestId,
+      method: "conversation.list" }) + "\n")
+  }
+
+  function requestHistoryDetail(cid) {
+    if (!daemon.connected) return
+    historyDetailId = cid
+    pastTurns.clear()
+    historyReadRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: historyReadRequestId,
+      method: "conversation.read", params: { id: cid } }) + "\n")
+  }
+
+  function resumeConversation(cid) {
+    if (!daemon.connected) return
+    historyOpenRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: historyOpenRequestId,
+      method: "conversation.open", params: { id: cid } }) + "\n")
+  }
+
+  function loadHistoryList(result) {
+    pastConversations.clear()
+    var list = result.conversations || []
+    for (var i = 0; i < list.length; i++) {
+      pastConversations.append({
+        cid: String(list[i].id),
+        preview: String(list[i].preview || ""),
+        turnCount: Number(list[i].turns || 0),
+        lastActive: String(list[i].last_active || "").substring(0, 10),
+        unreadable: false
+      })
+    }
+    var bad = result.unreadable || []
+    for (var j = 0; j < bad.length; j++) {
+      pastConversations.append({
+        cid: String(bad[j].id), preview: "This conversation could not be read.",
+        turnCount: 0, lastActive: "", unreadable: true
+      })
+    }
+  }
+
+  function loadHistoryDetail(result) {
+    pastTurns.clear()
+    var list = result.turns || []
+    for (var i = 0; i < list.length; i++) {
+      pastTurns.append({ role: String(list[i].role), text: String(list[i].text) })
+    }
+  }
+
+  function handleHistoryReply(frame) {
+    if (frame.id === historyListRequestId) {
+      if (frame.result) loadHistoryList(frame.result)
+      return
+    }
+    if (frame.id === historyReadRequestId) {
+      if (frame.result) loadHistoryDetail(frame.result)
+      else historyDetailId = "" // unreadable after all; back to the listing
+      return
+    }
+    if (frame.id === historyOpenRequestId) {
+      if (frame.error) {
+        errorStage = "history"
+        errorMessage = String(frame.error.message || "the conversation could not be reopened")
+        return
+      }
+      // Reopened: back to the conversation view, whose snapshot is the
+      // authoritative account of what the thread now is.
+      historyOpen = false
+      historyDetailId = ""
+      requestConversation()
+    }
+  }
+
   // loadSnapshot replaces the model with the daemon's authoritative view;
   // events append incrementally from here on.
   function loadSnapshot(result) {
@@ -219,6 +325,13 @@ FloatingWindow {
     case "session.cancelled":
       assistantStreaming = false
       break
+    case "conversation.changed":
+      // `jarvix new`, a CLI reopen, or a delete changed the thread under us;
+      // re-request the authoritative snapshot rather than guessing what the
+      // change meant, and refresh the library if it is on screen.
+      requestConversation()
+      if (historyOpen) requestHistory()
+      break
     }
   }
 
@@ -240,6 +353,10 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.submitRequestId) {
           win.handleSubmitReply(frame)
+        } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
+                   frame.id === win.historyReadRequestId ||
+                   frame.id === win.historyOpenRequestId)) {
+          win.handleHistoryReply(frame)
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
         } else if (frame.id === 1 && frame.error) {
@@ -327,6 +444,38 @@ FloatingWindow {
         color: Util.alpha(Color.popups.text, 0.7)
       }
 
+      // History toggle: the archived-conversation library (ADR 0027). Same
+      // shape as the settings toggle — keyboard-reachable, state as text.
+      Rectangle {
+        id: historyButton
+        visible: win.socketReady
+        width: historyButtonText.width + Style.space(20)
+        height: historyButtonText.height + Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, historyButton.activeFocus ? 0.18 : 0.08)
+        border.color: Util.alpha(Color.popups.text, 0.5)
+        border.width: historyButton.activeFocus ? 2 : 1
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        Accessible.name: win.historyOpen ? "Back to conversation" : "Open past conversations"
+        function toggle() {
+          if (win.historyOpen) { win.historyOpen = false; win.historyDetailId = "" }
+          else win.openHistory()
+        }
+        Keys.onReturnPressed: historyButton.toggle()
+        Keys.onSpacePressed: historyButton.toggle()
+        Text {
+          id: historyButtonText
+          anchors.centerIn: parent
+          text: win.historyOpen ? "Conversation" : "History"
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+        MouseArea { anchors.fill: parent; onClicked: historyButton.toggle() }
+      }
+
       // Settings toggle: keyboard-reachable, state as text. The screen is a
       // thin client of the daemon, so it is only offered while connected.
       Rectangle {
@@ -342,8 +491,13 @@ FloatingWindow {
         activeFocusOnTab: true
         Accessible.role: Accessible.Button
         Accessible.name: win.settingsOpen ? "Back to conversation" : "Open settings"
-        Keys.onReturnPressed: win.settingsOpen = !win.settingsOpen
-        Keys.onSpacePressed: win.settingsOpen = !win.settingsOpen
+        function toggle() {
+          win.historyOpen = false
+          win.historyDetailId = ""
+          win.settingsOpen = !win.settingsOpen
+        }
+        Keys.onReturnPressed: settingsButton.toggle()
+        Keys.onSpacePressed: settingsButton.toggle()
         Text {
           id: settingsButtonText
           anchors.centerIn: parent
@@ -352,7 +506,7 @@ FloatingWindow {
           font.pixelSize: Style.font.subtitle
           color: Color.popups.text
         }
-        MouseArea { anchors.fill: parent; onClicked: win.settingsOpen = !win.settingsOpen }
+        MouseArea { anchors.fill: parent; onClicked: settingsButton.toggle() }
       }
     }
 
@@ -381,7 +535,7 @@ FloatingWindow {
     }
 
     Text {
-      visible: win.socketReady && !win.settingsOpen && turns.count === 0
+      visible: win.socketReady && !win.settingsOpen && !win.historyOpen && turns.count === 0
       anchors.centerIn: parent
       text: "No conversation yet — hold Super+Alt+V and speak, or type below."
       font.family: Style.font.family
@@ -402,9 +556,186 @@ FloatingWindow {
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
     }
 
+    // The history screen shares the conversation's content area, exactly as
+    // settings does: the listing, or one record read-only with a Resume
+    // button.
+    Item {
+      id: historyScreen
+      visible: win.socketReady && win.historyOpen && !win.settingsOpen
+      anchors.top: header.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      Text {
+        visible: win.historyDetailId === "" && pastConversations.count === 0
+        anchors.centerIn: parent
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        text: "No archived conversations yet — they appear here after jarvix new."
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+
+      // The library: id, when, how much, and the first line.
+      ListView {
+        id: pastList
+        visible: win.historyDetailId === ""
+        anchors.fill: parent
+        clip: true
+        spacing: Style.space(10)
+        model: pastConversations
+
+        delegate: Rectangle {
+          width: pastList.width
+          height: pastEntry.height + Style.space(16)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text, 0.06)
+          opacity: model.unreadable ? 0.6 : 1.0
+
+          Column {
+            id: pastEntry
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Style.space(10)
+            spacing: Style.space(2)
+
+            Text {
+              text: model.preview !== "" ? model.preview : "(no preview)"
+              width: parent.width
+              elide: Text.ElideRight
+              font.family: Style.font.family
+              font.bold: true
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Text {
+              text: model.unreadable
+                ? model.cid + " — unreadable"
+                : model.cid + " · " + model.turnCount + " turns · " + model.lastActive
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+          }
+          MouseArea {
+            anchors.fill: parent
+            enabled: !model.unreadable
+            onClicked: win.requestHistoryDetail(model.cid)
+          }
+        }
+      }
+
+      // One record, read-only. Resume is the explicit action that makes it
+      // the active thread again (conversation.open); everything else here
+      // only displays.
+      Column {
+        visible: win.historyDetailId !== ""
+        anchors.fill: parent
+        spacing: Style.space(8)
+
+        Row {
+          spacing: Style.space(8)
+
+          Rectangle {
+            id: backButton
+            width: backButtonText.width + Style.space(20)
+            height: backButtonText.height + Style.space(8)
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.popups.text, backButton.activeFocus ? 0.18 : 0.08)
+            border.color: Util.alpha(Color.popups.text, 0.5)
+            border.width: backButton.activeFocus ? 2 : 1
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Back to the conversation list"
+            Keys.onReturnPressed: win.historyDetailId = ""
+            Keys.onSpacePressed: win.historyDetailId = ""
+            Text {
+              id: backButtonText
+              anchors.centerIn: parent
+              text: "Back"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            MouseArea { anchors.fill: parent; onClicked: win.historyDetailId = "" }
+          }
+
+          Rectangle {
+            id: resumeButton
+            width: resumeButtonText.width + Style.space(20)
+            height: resumeButtonText.height + Style.space(8)
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.accent, resumeButton.activeFocus ? 0.3 : 0.15)
+            border.color: Color.accent
+            border.width: resumeButton.activeFocus ? 2 : 1
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Continue this conversation"
+            Keys.onReturnPressed: win.resumeConversation(win.historyDetailId)
+            Keys.onSpacePressed: win.resumeConversation(win.historyDetailId)
+            Text {
+              id: resumeButtonText
+              anchors.centerIn: parent
+              text: "Continue this conversation"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            MouseArea { anchors.fill: parent; onClicked: win.resumeConversation(win.historyDetailId) }
+          }
+
+          Text {
+            text: "Read-only"
+            anchors.verticalCenter: parent.verticalCenter
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.6)
+          }
+        }
+
+        ListView {
+          id: pastTurnList
+          width: parent.width
+          height: parent.height - parent.spacing - backButton.height
+          clip: true
+          spacing: Style.space(14)
+          model: pastTurns
+
+          delegate: Column {
+            width: pastTurnList.width
+            spacing: Style.space(4)
+
+            Text {
+              text: model.role === "user" ? "You" : "Jarvix"
+              font.family: Style.font.family
+              font.bold: true
+              font.pixelSize: Style.font.subtitle
+              color: model.role === "user"
+                ? Util.alpha(Color.popups.text, 0.7)
+                : Color.accent
+            }
+            Text {
+              text: model.text
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+          }
+        }
+      }
+    }
+
     ListView {
       id: list
-      visible: win.socketReady && !win.settingsOpen
+      visible: win.socketReady && !win.settingsOpen && !win.historyOpen
       anchors.top: header.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
@@ -457,7 +788,7 @@ FloatingWindow {
     // answer to a pending tool confirmation.
     Column {
       id: composer
-      visible: !win.settingsOpen
+      visible: !win.settingsOpen && !win.historyOpen
       // A daemon that is down disables the field rather than swallowing the
       // keystrokes; the panel above says why, and the label says it again
       // here, where the caret is.
@@ -575,6 +906,8 @@ FloatingWindow {
     sequences: ["Escape"]
     onActivated: {
       if (win.settingsOpen) win.settingsOpen = false
+      else if (win.historyDetailId !== "") win.historyDetailId = ""
+      else if (win.historyOpen) win.historyOpen = false
       else win.closeWindow()
     }
   }
