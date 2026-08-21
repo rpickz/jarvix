@@ -115,7 +115,11 @@ func (e *Engine) confirmationData(p *pendingConfirmation, source string) map[str
 // only if the policy — and, for the ask tier, the user — allows. The returned
 // text always goes back to the model; ok is false only when the session ended
 // (cancelled, superseded, failed) and the tool loop must stop.
-func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall) (result string, ok bool) {
+//
+// turn carries what Jarvix has already said aloud this turn, so a call that
+// does not run can be reported to the model together with the promise it has
+// to take back — see refused.
+func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall, turn spokenTurn) (result string, ok bool) {
 	verdict := e.tools.Check(call)
 	switch verdict.Decision {
 	case tools.PolicyDeny:
@@ -123,15 +127,16 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall) (result string, ok bo
 			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
 		e.publish(Event{Type: "tool.denied", Data: map[string]any{
 			"session_id": s.id, "tool": call.Name, "command": verdict.Command, "rule": verdict.Rule}})
-		return fmt.Sprintf("This tool call is not permitted (%s) and will never run, "+
-			"with or without confirmation. Do not retry it; tell the user what you "+
-			"wanted to do and that policy forbids it.", verdict.Rule), true
+		return e.refused(s, call.Name, verdict.Command, "policy", turn,
+			fmt.Sprintf("This tool call is not permitted (%s) and will never run, "+
+				"with or without confirmation. Do not retry it; tell the user what you "+
+				"wanted to do and that policy forbids it.", verdict.Rule)), true
 	case tools.PolicyAsk:
-		return e.confirmAndExecute(s, call, verdict)
+		return e.confirmAndExecute(s, call, verdict, turn)
 	default:
 		e.log.Debug("tool call allowed", "component", "tools", "tool", call.Name,
 			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
-		return e.executeTool(s, call), true
+		return e.executeTool(s, call, turn.speaker), true
 	}
 }
 
@@ -141,7 +146,11 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall) (result string, ok bo
 // slow (tools.Progressive) also carries a label on tool.started for the
 // overlay to show for the duration, and gets a spoken "still working" if it
 // outlives the progress threshold.
-func (e *Engine) executeTool(s *sess, call ai.ToolCall) string {
+//
+// speaker is the turn's voice, passed through so that reassurance queues
+// behind whatever is playing rather than over it — a slow tool can perfectly
+// well be running while the sentence that introduced it is still being said.
+func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeaker) string {
 	started := map[string]any{"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}
 	label, waiting, slow := e.tools.Activity(call)
 	if slow {
@@ -151,7 +160,7 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall) string {
 
 	stopProgress := func() {}
 	if slow {
-		stopProgress = e.startToolProgress(s, call, waiting)
+		stopProgress = e.startToolProgress(s, call, waiting, speaker)
 	}
 	result := e.tools.Execute(s.ctx, call)
 	stopProgress()
@@ -164,7 +173,8 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall) string {
 // confirmAndExecute runs the ask tier for a model tool call: ask, then
 // execute if and only if the answer was yes. It runs on the think goroutine,
 // which is exactly the point — the model's turn pauses on the user's word.
-func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verdict) (string, bool) {
+func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verdict,
+	turn spokenTurn) (string, bool) {
 	outcome, alive := e.awaitConfirmation(s, confirmRequest{
 		tool:         call.Name,
 		command:      verdict.Command,
@@ -173,19 +183,27 @@ func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verd
 		key:          approvalKey(call, verdict),
 		rememberable: tools.RememberableApproval(call.Name),
 		resume:       StateThinking,
+		speaker:      turn.speaker,
 	})
 	if !alive {
 		return "", false
 	}
 	switch outcome {
 	case confirmDeclined:
-		return "The user declined to run this command. It was not executed. " +
-			"Do not retry it; acknowledge the decline and continue helping.", true
+		return e.refused(s, call.Name, verdict.Command, "declined", turn,
+			"The user declined to run this command. It was not executed. "+
+				"Do not retry it; acknowledge the decline and continue helping."), true
 	case confirmTimedOut:
-		return "The user did not confirm in time, so the command was not executed. " +
-			"Do not retry it unless asked again.", true
+		return e.refused(s, call.Name, verdict.Command, "timeout", turn,
+			"The user did not confirm in time, so the command was not executed. "+
+				"Do not retry it unless asked again."), true
+	case confirmUnavailable:
+		return e.refused(s, call.Name, verdict.Command, "unavailable", turn,
+			"The user could not be asked to confirm this command, so it was not "+
+				"executed. Do not retry it; tell the user it did not run and ask "+
+				"them again if they still want it."), true
 	}
-	return e.executeTool(s, call), true
+	return e.executeTool(s, call, turn.speaker), true
 }
 
 // confirmRequest is one thing that needs the user's go-ahead. Model tool
@@ -209,16 +227,29 @@ type confirmRequest struct {
 	rememberable bool
 	// resume is the state to return to once answered.
 	resume State
+	// speaker is the turn's streaming speaker when it has one. The question is
+	// queued on it rather than played on a stream of its own, so it cannot talk
+	// over a sentence still playing (issue #52). Nil for a user-defined intent,
+	// which asks before it has said anything and so has no stream to queue
+	// behind.
+	speaker *streamingSpeaker
 }
 
-// confirmOutcome is how a confirmation ended. Declined and timed out are
-// distinct because the model is told different things about them.
+// confirmOutcome is how a confirmation ended. Each is distinct because the
+// model is told something different about each: "the user said no", "the user
+// did not answer", and "the user was never asked" are three different things
+// to have to explain, and collapsing them would put words in the user's mouth.
 type confirmOutcome int
 
 const (
 	confirmApproved confirmOutcome = iota
 	confirmDeclined
 	confirmTimedOut
+	// confirmUnavailable means the gate could not be entered at all — the
+	// session was in a state with no legal path to AwaitingConfirmation. It is
+	// the safe reading of a bug: nothing runs, the model is told the truth, and
+	// the conversation continues.
+	confirmUnavailable
 )
 
 // awaitConfirmation runs the ask tier: enter AwaitingConfirmation, speak the
@@ -244,9 +275,24 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		return confirmApproved, true
 	}
 	if err := e.setStateLocked(StateAwaitingConfirmation); err != nil {
+		// Never fatal. This used to be e.fail, which killed the conversation
+		// mid-turn the first time a legal-but-unenumerated state reached the
+		// gate — Speaking, in issue #52 — and the user was left with a promise
+		// Jarvix had already made out loud and a session that had silently
+		// stopped existing. A transition the table does not allow is a defect
+		// in this package, and the user should never pay for it with their
+		// turn: the safe reading is that the command was not confirmed, so it
+		// does not run, the model is told so, and the answer continues.
+		//
+		// It is logged at error level, with the transition, because it means
+		// exactly one thing: a state reached the tool path that toolRequestStates
+		// does not know about.
 		e.mu.Unlock()
-		e.fail(s, "session", err)
-		return confirmDeclined, false
+		e.log.Error("tool confirmation could not be requested", "component", "session",
+			"session_id", s.id, "tool", req.tool, "command", req.command, "error", err.Error())
+		e.publish(Event{Type: "tool.declined", Data: map[string]any{
+			"session_id": s.id, "tool": req.tool, "command": req.command, "source": "unavailable"}})
+		return confirmUnavailable, true
 	}
 	p := &pendingConfirmation{
 		tool:    req.tool,
@@ -269,7 +315,7 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 
 	// Speak first, then start the clock: the user's 30 seconds begin when
 	// the question has been asked, not while it is still being said.
-	e.speakPrompt(s, req.summary)
+	e.speakPrompt(s, req.summary, req.speaker)
 
 	timerC, stopTimer := e.timer(timeout)
 	defer stopTimer()
@@ -309,16 +355,31 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 	}
 }
 
-// speakPrompt speaks one sentence outside the streaming speaker. The speaker
-// owns the Responding→Speaking transition, and a confirmation question must
-// be audible while the session sits in AwaitingConfirmation — so this path
-// synthesizes and plays directly, with no state change and no tts.* events
-// (the confirmation_required event, which carries the summary, is the
-// overlay's cue). Failures degrade to silence: the overlay still shows the
-// question and the timeout still declines, so a broken voice never blocks
-// the safety decision.
-func (e *Engine) speakPrompt(s *sess, text string) {
+// speakPrompt asks the confirmation question out loud.
+//
+// When the turn has a streaming speaker it goes on that speaker's queue, and
+// that is the whole answer to "do not talk over the audio already playing": one
+// queue, one audio.Player.Play, one voice at a time. Playing the question on a
+// stream of its own — which is what this function used to do unconditionally —
+// meant that the instant streaming speech and an ask-tier tool call overlapped,
+// the user heard the question mixed into the sentence before it (issue #52).
+// The speaker knows not to claim the Speaking state or emit tts.* events for a
+// question, so the session still sits visibly in AwaitingConfirmation while it
+// plays and the overlay's cue remains the confirmation_required event.
+//
+// Without a speaker — a user-defined intent, which asks before it has said
+// anything — there is nothing to overlap with, and the question synthesizes and
+// plays directly here, with no state change and no tts.* events.
+//
+// Failures degrade to silence either way: the overlay still shows the question
+// and the timeout still declines, so a broken voice never blocks the safety
+// decision.
+func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 	if !e.opts.SpeakResponses || e.tts == nil || e.player == nil {
+		return
+	}
+	if speaker != nil {
+		speaker.interject(text)
 		return
 	}
 	spoken := e.spokenForm(text)

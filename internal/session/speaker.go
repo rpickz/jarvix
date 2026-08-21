@@ -142,32 +142,87 @@ func (sc *sentencer) drain(final bool) []string {
 	return out
 }
 
+// utterance is one thing to say on the speaker's single playback stream.
+type utterance struct {
+	text string
+	// aside marks something Jarvix says that is not part of the answer: a tool
+	// confirmation question (ADR 0014), a "still working" reassurance while a
+	// slow tool runs (ADR 0016). It travels the same queue — that is the whole
+	// point, so it cannot talk over audio already playing (issue #52) — but it
+	// must not claim the Speaking state or emit tts.* events, because it is not
+	// the answer starting: the session is in AwaitingConfirmation or Thinking
+	// while it plays, and the overlay already has its own event for each.
+	aside bool
+	// done, when non-nil, is closed once this utterance has been handed to the
+	// player (or abandoned). It is how awaitConfirmation waits for the question
+	// to have been asked before it starts the user's clock.
+	done chan struct{}
+}
+
 // streamingSpeaker synthesizes and plays sentences as they arrive, over a
 // single continuous playback stream, so Jarvix begins speaking while the rest
 // of the answer is still being generated. One speaker serves a whole think()
 // call (all tool rounds), keeping audio gapless and ordered.
+//
+// "One stream" is a correctness property, not an optimisation: everything the
+// turn says goes through this one queue and this one audio.Player.Play, so two
+// voices can never be heard at once. A confirmation question raised mid-answer
+// is therefore queued here rather than played on a stream of its own.
 type streamingSpeaker struct {
 	e   *Engine
 	s   *sess
-	in  chan string
+	in  chan utterance
 	res chan error
 }
 
 func newStreamingSpeaker(e *Engine, s *sess) *streamingSpeaker {
-	sp := &streamingSpeaker{e: e, s: s, in: make(chan string, 64), res: make(chan error, 1)}
+	sp := &streamingSpeaker{e: e, s: s, in: make(chan utterance, 64), res: make(chan error, 1)}
 	go sp.run()
 	return sp
 }
 
-// speak queues one sentence. Sentences are normalized for speech and empty
-// ones are dropped.
+// speak queues one sentence of the answer. Sentences are normalized for speech
+// and empty ones are dropped.
 func (sp *streamingSpeaker) speak(sentence string) {
-	if strings.TrimSpace(sentence) == "" {
+	sp.enqueue(utterance{text: sentence})
+}
+
+// interject queues something that is not part of the answer — a confirmation
+// question, a "still working" reassurance — behind everything already waiting
+// to be said, and returns once it has been handed to the player (or at once if
+// the session ended). Blocking is the point for a question: the model's turn
+// pauses until it has actually been asked, and only then does the user's
+// confirmation clock start.
+//
+// "Handed to the player" is the strongest ordering this design can offer and
+// the one that matters: it cannot begin until every earlier sentence has been
+// synthesized and pushed into the same stream, so the user never hears two
+// things at once. It is deliberately not "finished playing" — the stream is
+// shared and stays open for the rest of the answer, so there is no
+// per-utterance moment at which the device has fallen silent, and inventing
+// one would mean tearing the stream down and starting a second (which is the
+// overlap this exists to prevent).
+func (sp *streamingSpeaker) interject(text string) {
+	done := make(chan struct{})
+	if !sp.enqueue(utterance{text: text, aside: true, done: done}) {
 		return
 	}
 	select {
-	case sp.in <- sentence:
+	case <-done:
 	case <-sp.s.ctx.Done():
+	}
+}
+
+// enqueue puts one utterance on the queue, reporting whether it got there.
+func (sp *streamingSpeaker) enqueue(u utterance) bool {
+	if strings.TrimSpace(u.text) == "" {
+		return false
+	}
+	select {
+	case sp.in <- u:
+		return true
+	case <-sp.s.ctx.Done():
+		return false
 	}
 }
 
@@ -184,12 +239,19 @@ func (sp *streamingSpeaker) run() {
 		playDone chan error
 		format   tts.Format
 		synthErr error
+		// announced is set once the answer has claimed the Speaking state and
+		// published tts.started. It is tracked separately from pcm because a
+		// confirmation question can open the stream before the answer does
+		// (the model asked for a tool before saying anything), and the answer
+		// that follows must still announce itself — the overlay's tts.started
+		// belongs to the answer, not to the question.
+		announced bool
 	)
 
-	// synth renders one sentence and forwards its PCM into the shared stream,
-	// starting playback (and the Speaking state) lazily on the first audio.
-	synth := func(sentence string) error {
-		spoken := sp.e.spokenForm(sentence)
+	// synth renders one utterance and forwards its PCM into the shared stream,
+	// starting playback lazily on the first audio.
+	synth := func(u utterance) error {
+		spoken := sp.e.spokenForm(u.text)
 		if spoken == "" {
 			return nil
 		}
@@ -197,16 +259,19 @@ func (sp *streamingSpeaker) run() {
 		if err != nil {
 			return err
 		}
-		if pcm == nil {
+		if !u.aside && !announced {
 			if !sp.e.advance(sp.s, StateSpeaking) {
 				for range chunks { // superseded/cancelled: let the synth exit
 				}
 				return sp.s.ctx.Err()
 			}
+			announced = true
+			sp.e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": sp.s.id}})
+		}
+		if pcm == nil {
 			format = f
 			pcm = make(chan []byte, 8)
 			playDone = make(chan error, 1)
-			sp.e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": sp.s.id}})
 			// Only the player can say when audio actually left for the device;
 			// nothing on this side of the channel can observe it (audio.Trace).
 			playCtx := audio.WithTrace(sp.s.ctx, &audio.Trace{FirstAudio: sp.s.timings.markAudioOut})
@@ -223,7 +288,14 @@ func (sp *streamingSpeaker) run() {
 			// immediately while a cold one hands it back once the model has
 			// loaded, so marking the call would time process start-up instead
 			// of synthesis and report a warm worker as infinitely fast.
-			sp.s.timings.markFirstPCM()
+			//
+			// An aside is not the answer and must not set the mark: a turn
+			// that paused to ask the user something, or to say it was still
+			// working, would otherwise report that audio as the answer's
+			// latency and flatter the number (ADR 0018).
+			if !u.aside {
+				sp.s.timings.markFirstPCM()
+			}
 			select {
 			case pcm <- c.PCM:
 			case <-sp.s.ctx.Done():
@@ -233,13 +305,18 @@ func (sp *streamingSpeaker) run() {
 		return nil
 	}
 
-	for sentence := range sp.in {
+	for u := range sp.in {
 		if synthErr != nil || sp.s.ctx.Err() != nil {
-			continue // drain input without speaking once we've stopped
+			// Drain input without speaking once we've stopped — but still
+			// release anyone waiting, or a caller blocked on a question that
+			// will never be said would wait out the session context.
+			sp.release(u)
+			continue
 		}
-		if err := synth(sentence); err != nil {
+		if err := synth(u); err != nil {
 			synthErr = err
 		}
+		sp.release(u)
 	}
 
 	if pcm == nil {
@@ -260,8 +337,20 @@ func (sp *streamingSpeaker) run() {
 	if synthErr == nil {
 		synthErr = playErr
 	}
-	if synthErr == nil {
+	// tts.finished is the answer's bookend, so it is published only when
+	// tts.started was: a turn whose only audio was an aside emits neither,
+	// exactly as the direct prompt path always did.
+	if synthErr == nil && announced {
 		sp.e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": sp.s.id}})
 	}
 	sp.res <- synthErr
+}
+
+// release wakes whoever is waiting on this utterance, whether it was spoken or
+// abandoned. Closing is safe exactly once: only run() ever closes done, and it
+// sees each utterance once.
+func (sp *streamingSpeaker) release(u utterance) {
+	if u.done != nil {
+		close(u.done)
+	}
 }

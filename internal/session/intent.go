@@ -184,6 +184,12 @@ func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive boo
 		if !ok {
 			return nil, false
 		}
+		if outcome == confirmUnavailable {
+			// The gate could not be entered — a defect in the state machine,
+			// never the user's answer. "Cancelled." would put a decision in
+			// their mouth they never made, so this says what happened instead.
+			return errors.New("I could not ask you to confirm that, so I have not run it"), true
+		}
 		if outcome != confirmApproved {
 			return errIntentDeclined, true
 		}
