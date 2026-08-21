@@ -22,6 +22,7 @@ Usage:
   jarvix window                 Open/close the conversation window
   jarvix artifacts              List recent artifacts (diagrams) with paths
   jarvix doctor                 Check every dependency and explain failures
+  jarvix setup                  First-run wizard: voice, activation, AI, advisors
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
   jarvix setup input            Grant keyboard access for real hold-to-talk
   jarvix config                 Show effective configuration
@@ -77,8 +78,10 @@ func main() {
 			err = cmdSetupWhisper(paths, model)
 		case len(args) >= 1 && args[0] == "input":
 			err = cmdSetupInput()
+		case len(args) == 0:
+			err = cmdSetupWizard(cfg, paths)
 		default:
-			fatal(fmt.Errorf("usage: jarvix setup whisper [model] | jarvix setup input"))
+			fatal(fmt.Errorf("usage: jarvix setup | jarvix setup whisper [model] | jarvix setup input"))
 		}
 	case "config":
 		err = cmdConfig(cfg, paths)
