@@ -181,13 +181,20 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // anyway (a shared machine, say) writes
 // `[tools.policy.tool]."routine.run" = "ask"`, and deny disables routines
 // outright.
+//
+// conversations.search is allow for the same reason the other reads are: it
+// looks at the user's own archive and changes nothing. Asking "may I search
+// what you said?" before answering "what did we say about X?" would turn the
+// question into a toll booth — and the search's contents never leave the
+// daemon except as the spoken answer the user asked for.
 var builtinToolDefaults = map[string]PolicyDecision{
-	"artifact.create":      PolicyAllow,
-	ListWindowsToolName:    PolicyAllow,
-	FocusWindowToolName:    PolicyAllow,
-	MemoryRememberToolName: PolicyAllow,
-	MemoryRecallToolName:   PolicyAllow,
-	RoutineToolName:        PolicyAllow,
+	"artifact.create":           PolicyAllow,
+	ListWindowsToolName:         PolicyAllow,
+	FocusWindowToolName:         PolicyAllow,
+	MemoryRememberToolName:      PolicyAllow,
+	MemoryRecallToolName:        PolicyAllow,
+	RoutineToolName:             PolicyAllow,
+	ConversationsSearchToolName: PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
