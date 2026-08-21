@@ -13,6 +13,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
@@ -93,6 +94,58 @@ func (d *Daemon) registerConversationMethods() {
 		return map[string]any{"id": id, "turns": len(conv.Turns)}, nil
 	})
 
+	// conversation.search is full-text search over the archive (issue #59):
+	// the window's search box and `jarvix conversations search` are thin
+	// clients of it, and the model's conversations.search tool shares the
+	// same Searcher — one implementation, three surfaces. Ranked passages
+	// come back with conversation id and turn references; `current` marks
+	// hits in the live thread so results can distinguish "earlier in this
+	// conversation" from a past one. The query and the passages stay off the
+	// journal: the log records that a search happened and what it counted.
+	d.server.Handle("conversation.search", func(params json.RawMessage) (any, error) {
+		p := struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}{}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "conversation.search params: %v", err)
+			}
+		}
+		if strings.TrimSpace(p.Query) == "" {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "conversation.search needs a query")
+		}
+		matches, stats, err := d.searcher.Search(conversations.Query{Text: p.Query, Limit: p.Limit})
+		if err != nil {
+			return nil, ipc.Errorf(ipc.CodeInternalError, "%v", err)
+		}
+		activeID := d.engine.ActiveConversationID()
+		results := make([]map[string]any, 0, len(matches))
+		for _, m := range matches {
+			results = append(results, map[string]any{
+				"id":      m.ConversationID,
+				"turn":    m.Turn,
+				"role":    m.Role,
+				"ts":      m.Time.Format(time.RFC3339),
+				"passage": m.Passage,
+				"current": activeID != "" && m.ConversationID == activeID,
+			})
+		}
+		skipped := make([]map[string]any, 0, len(stats.Skipped))
+		for _, u := range stats.Skipped {
+			skipped = append(skipped, map[string]any{"id": u.ID, "error": u.Err})
+		}
+		d.log.Info("conversation search", "component", "daemon",
+			"results", len(matches), "searched", stats.Conversations, "skipped", len(stats.Skipped))
+		return map[string]any{
+			"retention": d.retentionOn(),
+			"active_id": activeID,
+			"results":   results,
+			"searched":  stats.Conversations,
+			"skipped":   skipped,
+		}, nil
+	})
+
 	// conversation.delete removes one conversation (id) or every one (all).
 	// Deleting the conversation the live thread belongs to also resets the
 	// thread — head, approvals, and history.json included — because a record
@@ -123,6 +176,24 @@ func (d *Daemon) registerConversationMethods() {
 		d.log.Info("conversation deleted", "component", "daemon", "conversation_id", id)
 		return map[string]any{"deleted": 1}, nil
 	})
+}
+
+// conversationsReport summarises the archive for status.get: the retention
+// switch, how many conversations are stored, and whether search has anything
+// to work with. "inactive" is a state, not a failure — retention off with an
+// empty archive means search *correctly* has nothing to do, and status must
+// say that rather than look broken (issue #59).
+func (d *Daemon) conversationsReport() map[string]any {
+	retention := d.retentionOn()
+	archived := 0
+	if metas, _, err := d.conversations.List(); err == nil {
+		archived = len(metas)
+	}
+	search := "active"
+	if !retention && archived == 0 {
+		search = "inactive"
+	}
+	return map[string]any{"retention": retention, "archived": archived, "search": search}
 }
 
 // retentionOn reads the live retention switch.

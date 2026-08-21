@@ -45,6 +45,7 @@ func cmdStatus(paths config.Paths, last bool) error {
 	fmt.Printf("socket:   %s\n", paths.Socket)
 	printWake(status["wake"])
 	printWarmWorkers(status["warm"])
+	printConversationSearch(status["conversations"])
 	if last {
 		printTimings(status["last_timings"])
 		// "What did that cost?" and "what did it see?" are the same question
@@ -75,6 +76,21 @@ func cmdStatus(paths config.Paths, last bool) error {
 		}
 	}
 	return nil
+}
+
+// printConversationSearch renders the archive-search state (issue #59):
+// active with a count, or inactive with the reason — never an error, because
+// an empty archive with retention off is a choice working as configured.
+func printConversationSearch(v any) {
+	report, ok := v.(map[string]any)
+	if !ok || len(report) == 0 {
+		return // an older daemon that predates the search surface
+	}
+	if search, _ := report["search"].(string); search == "inactive" {
+		fmt.Println("search:   conversation search inactive (retention off, nothing archived)")
+		return
+	}
+	fmt.Printf("search:   conversation search active (%.0f archived)\n", toFloat(report["archived"]))
 }
 
 // timingLabels turn the wire keys of session.timings into the pipeline stages

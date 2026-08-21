@@ -374,3 +374,139 @@ func TestConversationMethodsRejectBadParams(t *testing.T) {
 		t.Error("conversation.open accepted an unknown id")
 	}
 }
+
+// searchReply is the conversation.search wire shape these tests read.
+type searchReply struct {
+	Retention bool   `json:"retention"`
+	ActiveID  string `json:"active_id"`
+	Results   []struct {
+		ID      string `json:"id"`
+		Turn    int    `json:"turn"`
+		Role    string `json:"role"`
+		TS      string `json:"ts"`
+		Passage string `json:"passage"`
+		Current bool   `json:"current"`
+	} `json:"results"`
+	Searched int `json:"searched"`
+	Skipped  []struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	} `json:"skipped"`
+}
+
+func (f *convFixture) search(t *testing.T, query string) searchReply {
+	t.Helper()
+	var r searchReply
+	if err := f.client.Call("conversation.search", map[string]string{"query": query}, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestConversationSearchOverSocket(t *testing.T) {
+	f := startConvDaemon(t, config.RetentionOn)
+	f.ask(t, "what did we decide about the deployment approach?")
+	archived := f.list(t).Conversations[0].ID
+	if err := f.client.Call("conversation.reset", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.ask(t, "an unrelated thread about kittens")
+
+	// A past conversation is found with the references a client needs to
+	// open it and land on the turn — and it is not marked current.
+	r := f.search(t, "deployment approach")
+	if !r.Retention || r.Searched != 2 {
+		t.Fatalf("search reply = %+v, want retention on over 2 conversations", r)
+	}
+	if len(r.Results) != 1 {
+		t.Fatalf("results = %+v, want the one archived hit", r.Results)
+	}
+	hit := r.Results[0]
+	if hit.ID != archived || hit.Turn != 1 || hit.Role != "user" || hit.TS == "" {
+		t.Errorf("hit = %+v, want conversation %s turn 1 by user with a timestamp", hit, archived)
+	}
+	if !strings.Contains(hit.Passage, "deployment approach") {
+		t.Errorf("passage lost the match: %q", hit.Passage)
+	}
+	if hit.Current {
+		t.Error("an archived conversation is marked as the current one")
+	}
+
+	// The live head is part of the corpus, and its hits say so.
+	r = f.search(t, "kittens")
+	if len(r.Results) != 1 || !r.Results[0].Current {
+		t.Fatalf("live-head search = %+v, want one current hit", r.Results)
+	}
+	if r.Results[0].ID != r.ActiveID {
+		t.Errorf("current hit in %q but active is %q", r.Results[0].ID, r.ActiveID)
+	}
+
+	// No matches is an empty result, not an error.
+	r = f.search(t, "completely absent words")
+	if len(r.Results) != 0 || r.Searched != 2 {
+		t.Errorf("no-match reply = %+v", r)
+	}
+
+	// A query is required.
+	if err := f.client.Call("conversation.search", nil, nil); err == nil {
+		t.Error("conversation.search accepted empty params")
+	}
+	if err := f.client.Call("conversation.search", map[string]string{"query": "  "}, nil); err == nil {
+		t.Error("conversation.search accepted a blank query")
+	}
+}
+
+func TestConversationSearchWithRetentionOff(t *testing.T) {
+	f := startConvDaemon(t, config.RetentionOff)
+	r := f.search(t, "anything at all")
+	if r.Retention {
+		t.Error("search claims retention is on")
+	}
+	if r.Searched != 0 || len(r.Results) != 0 || len(r.Skipped) != 0 {
+		t.Errorf("empty archive search = %+v, want nothing searched and nothing broken", r)
+	}
+}
+
+func TestConversationSearchToolRegisteredAsAllow(t *testing.T) {
+	f := startConvDaemon(t, config.RetentionOn)
+	var status struct {
+		Policy struct {
+			Tools map[string]string `json:"tools"`
+		} `json:"policy"`
+		Conversations struct {
+			Retention bool   `json:"retention"`
+			Archived  int    `json:"archived"`
+			Search    string `json:"search"`
+		} `json:"conversations"`
+	}
+	if err := f.client.Call("status.get", nil, &status); err != nil {
+		t.Fatal(err)
+	}
+	// The tool is offered to the model and gated as a read: allow, like
+	// desktop.list_windows.
+	if got := status.Policy.Tools["conversations.search"]; got != "allow" {
+		t.Errorf("conversations.search tier = %q, want allow", got)
+	}
+	// Status reports search as a state: active here, since retention is on.
+	if status.Conversations.Search != "active" || !status.Conversations.Retention {
+		t.Errorf("status conversations = %+v, want active with retention on", status.Conversations)
+	}
+}
+
+func TestStatusReportsSearchInactiveNotBroken(t *testing.T) {
+	f := startConvDaemon(t, config.RetentionOff)
+	var status struct {
+		Conversations struct {
+			Retention bool   `json:"retention"`
+			Archived  int    `json:"archived"`
+			Search    string `json:"search"`
+		} `json:"conversations"`
+	}
+	if err := f.client.Call("status.get", nil, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Conversations.Search != "inactive" || status.Conversations.Retention ||
+		status.Conversations.Archived != 0 {
+		t.Errorf("status conversations = %+v, want inactive with retention off", status.Conversations)
+	}
+}

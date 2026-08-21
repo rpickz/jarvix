@@ -119,6 +119,108 @@ func printConversations(views []conversationView, unreadable []string, activeID 
 	}
 }
 
+// searchResultView is the wire shape of one conversation.search result.
+type searchResultView struct {
+	ID      string `json:"id"`
+	Turn    int    `json:"turn"`
+	Role    string `json:"role"`
+	TS      string `json:"ts"`
+	Passage string `json:"passage"`
+	Current bool   `json:"current"`
+}
+
+// cmdConversationsSearch searches the archive, ranked best first. The daemon
+// answers when it is up (its searcher is the same implementation the window
+// and the model's tool use); with jarvixd stopped the files are searched
+// directly, because finding what you said must not require the daemon any
+// more than reading it does.
+func cmdConversationsSearch(paths config.Paths, query string) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		if !daemonIsDown(err) {
+			return err
+		}
+		store := fileStore(paths)
+		matches, stats, err := store.Search(conversations.Query{Text: query})
+		if err != nil {
+			return err
+		}
+		views := make([]searchResultView, 0, len(matches))
+		activeID := store.Active()
+		for _, m := range matches {
+			views = append(views, searchResultView{
+				ID: m.ConversationID, Turn: m.Turn, Role: m.Role,
+				TS: m.Time.Format(time.RFC3339), Passage: m.Passage,
+				Current: activeID != "" && m.ConversationID == activeID,
+			})
+		}
+		skipped := make([]string, 0, len(stats.Skipped))
+		for _, u := range stats.Skipped {
+			skipped = append(skipped, fmt.Sprintf("%s (%s)", u.ID, u.Err))
+		}
+		printSearchResults(query, views, skipped, stats.Conversations, true)
+		return nil
+	}
+	defer func() { _ = client.Close() }()
+	var result struct {
+		Retention bool               `json:"retention"`
+		Results   []searchResultView `json:"results"`
+		Searched  int                `json:"searched"`
+		Skipped   []struct {
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		} `json:"skipped"`
+	}
+	if err := client.Call("conversation.search", map[string]string{"query": query}, &result); err != nil {
+		return err
+	}
+	skipped := make([]string, 0, len(result.Skipped))
+	for _, u := range result.Skipped {
+		skipped = append(skipped, fmt.Sprintf("%s (%s)", u.ID, u.Error))
+	}
+	printSearchResults(query, result.Results, skipped, result.Searched, result.Retention)
+	return nil
+}
+
+// printSearchResults renders ranked passages: where, when, who, and the
+// clipped text — with the hint that opening a result is one command away.
+func printSearchResults(query string, views []searchResultView, skipped []string, searched int, retention bool) {
+	if !retention {
+		fmt.Println("retention is off (conversation.retention = \"off\") — recent conversations were not archived")
+	}
+	if searched == 0 && len(skipped) == 0 {
+		fmt.Println("no archived conversations to search yet")
+		return
+	}
+	if len(views) == 0 {
+		fmt.Printf("no conversation mentions %q\n", query)
+	}
+	current := false
+	for _, v := range views {
+		marker := " "
+		if v.Current {
+			marker = "*"
+			current = true
+		}
+		speaker := "jarvix"
+		if v.Role == "user" {
+			speaker = "you"
+		}
+		fmt.Printf("%s %s  turn %3d  %s  %s: %s\n", marker, v.ID, v.Turn, day(v.TS), speaker, v.Passage)
+	}
+	// Skipped records are stated, never hidden: a search that could not read
+	// part of the library must say so (the listing's unreadable rule).
+	for _, s := range skipped {
+		fmt.Printf("! %s — could not be searched\n", s)
+	}
+	if current {
+		fmt.Println("* = earlier in the active conversation")
+	}
+	if len(views) > 0 {
+		fmt.Println("open one with: jarvix conversations show <id>")
+	}
+}
+
 // cmdConversationsShow prints one conversation read-only.
 func cmdConversationsShow(paths config.Paths, id string) error {
 	client, err := ipc.Dial(paths.Socket)
@@ -241,6 +343,11 @@ func cmdConversations(paths config.Paths, args []string) error {
 	switch args[0] {
 	case "list":
 		return cmdConversationsList(paths)
+	case "search":
+		if len(args) < 2 {
+			return errors.New("usage: jarvix conversations search <query>")
+		}
+		return cmdConversationsSearch(paths, strings.Join(args[1:], " "))
 	case "show":
 		if len(args) != 2 {
 			return errors.New("usage: jarvix conversations show <id>")
@@ -261,6 +368,6 @@ func cmdConversations(paths config.Paths, args []string) error {
 			return errors.New("usage: jarvix conversations delete <id> | jarvix conversations delete --all")
 		}
 	default:
-		return fmt.Errorf("usage: jarvix conversations [list | show <id> | open <id> | delete <id>|--all]")
+		return fmt.Errorf("usage: jarvix conversations [list | search <query> | show <id> | open <id> | delete <id>|--all]")
 	}
 }

@@ -302,6 +302,17 @@ under your XDG state dir, private (0600), and never leaves the machine. Set
 `conversation.retention = "off"` to stop archiving entirely; it removes
 nothing already kept.
 
+The archive is searchable ([ADR 0028](docs/adr/0028-conversation-search.md)):
+ask Jarvix "what did we decide about the deployment approach?" and it
+searches past conversations with the `conversations.search` tool, quotes
+what it finds, and says when it was said in words ("last Tuesday") — and if
+nothing matches, it says it found nothing rather than inventing a
+recollection. The same search is yours directly: type in the History view's
+search box, or run `jarvix conversations search <query>` (which works with
+the daemon stopped, straight off the files). Results are ranked — exact
+phrase first, then recency — and distinguish "earlier in this conversation"
+from past ones.
+
 Hold-to-talk is watched by the daemon itself (evdev — the same mechanism
 Mumble and Discord use), because compositor release-binds are unreliable for
 modifier chords. It needs one-time read access to keyboard devices:

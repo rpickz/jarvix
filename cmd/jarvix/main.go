@@ -24,6 +24,7 @@ Usage:
   jarvix deny                   Decline the pending tool confirmation
   jarvix new                    Start a fresh conversation (the old one is archived)
   jarvix conversations          List archived conversations, newest first
+  jarvix conversations search <query>  Find what was said, ranked best first
   jarvix conversations show <id>   Print one conversation (read-only)
   jarvix conversations open <id>   Continue one as the active conversation
   jarvix conversations delete <id> Delete one from disk (--all deletes every one)

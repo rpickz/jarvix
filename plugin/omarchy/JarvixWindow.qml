@@ -55,6 +55,10 @@ FloatingWindow {
   // bad file never hides itself, let alone the library.
   ListModel { id: pastConversations } // { cid, preview, turnCount, lastActive, unreadable }
   ListModel { id: pastTurns }         // { role, text } — the record being viewed
+  // Search hits over the archive (issue #59), ranked by the daemon. The
+  // window renders them and opens the conversation a hit names — every
+  // matching, ranking and bounding decision is made daemon-side (ADR 0013).
+  ListModel { id: searchResults }     // { cid, turn, passage, lastActive, current }
 
   function openWindow() { visible = true }
   function closeWindow() { visible = false }
@@ -186,11 +190,17 @@ FloatingWindow {
   property int historyListRequestId: 0
   property int historyReadRequestId: 0
   property int historyOpenRequestId: 0
+  property int historySearchRequestId: 0
+  // True while search results (rather than the library) fill the history
+  // screen; cleared by emptying the search box or reopening history.
+  property bool searchActive: false
 
   function openHistory() {
     settingsOpen = false
     historyOpen = true
     historyDetailId = ""
+    searchActive = false
+    historySearchInput.text = ""
     requestHistory()
   }
 
@@ -210,6 +220,37 @@ FloatingWindow {
     nextRequestId++
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: historyReadRequestId,
       method: "conversation.read", params: { id: cid } }) + "\n")
+  }
+
+  // requestHistorySearch asks the daemon to search the archive. The daemon
+  // owns matching, ranking and passage bounds; an emptied box steps back to
+  // the library without a round trip, because there is nothing to ask.
+  function requestHistorySearch(query) {
+    if (query.trim() === "") {
+      searchActive = false
+      searchResults.clear()
+      return
+    }
+    if (!daemon.connected) return
+    historySearchRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: historySearchRequestId,
+      method: "conversation.search", params: { query: query, limit: 20 } }) + "\n")
+  }
+
+  function loadSearchResults(result) {
+    searchResults.clear()
+    var list = result.results || []
+    for (var i = 0; i < list.length; i++) {
+      searchResults.append({
+        cid: String(list[i].id),
+        turn: Number(list[i].turn || 0),
+        passage: String(list[i].passage || ""),
+        lastActive: String(list[i].ts || "").substring(0, 10),
+        current: Boolean(list[i].current)
+      })
+    }
+    searchActive = true
   }
 
   function resumeConversation(cid) {
@@ -252,6 +293,10 @@ FloatingWindow {
   function handleHistoryReply(frame) {
     if (frame.id === historyListRequestId) {
       if (frame.result) loadHistoryList(frame.result)
+      return
+    }
+    if (frame.id === historySearchRequestId) {
+      if (frame.result) loadSearchResults(frame.result)
       return
     }
     if (frame.id === historyReadRequestId) {
@@ -383,7 +428,8 @@ FloatingWindow {
           win.handleSubmitReply(frame)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
                    frame.id === win.historyReadRequestId ||
-                   frame.id === win.historyOpenRequestId)) {
+                   frame.id === win.historyOpenRequestId ||
+                   frame.id === win.historySearchRequestId)) {
           win.handleHistoryReply(frame)
         } else if (frame.id === 15 && frame.result) {
           win.routines = frame.result.routines || []
@@ -604,7 +650,7 @@ FloatingWindow {
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
       Text {
-        visible: win.historyDetailId === "" && pastConversations.count === 0
+        visible: win.historyDetailId === "" && !win.searchActive && pastConversations.count === 0
         anchors.centerIn: parent
         width: parent.width
         horizontalAlignment: Text.AlignHCenter
@@ -615,11 +661,134 @@ FloatingWindow {
         color: Util.alpha(Color.popups.text, 0.7)
       }
 
+      // The search box (issue #59): type what you are looking for, press
+      // Enter, and the daemon searches the archive — this box only displays
+      // what comes back. Emptying it returns to the library.
+      Rectangle {
+        id: historySearchBox
+        visible: win.historyDetailId === ""
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: historySearchInput.height + Style.space(14)
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, 0.06)
+        // The focus ring: a colour *and* a thicker border, like the composer.
+        border.color: historySearchInput.activeFocus ? Color.accent : Util.alpha(Color.popups.text, 0.4)
+        border.width: historySearchInput.activeFocus ? 2 : 1
+
+        TextInput {
+          id: historySearchInput
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.margins: Style.space(10)
+          activeFocusOnTab: true
+          clip: true
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+          selectByMouse: true
+          Accessible.role: Accessible.EditableText
+          Accessible.name: "Search past conversations"
+          Accessible.description: "Type what you are looking for and press Enter"
+
+          Keys.onPressed: function(event) {
+            if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
+            event.accepted = true
+            win.requestHistorySearch(historySearchInput.text)
+          }
+          // Clearing the box is itself the way back to the library — no
+          // round trip, nothing to cancel.
+          onTextChanged: { if (text.trim() === "") win.requestHistorySearch("") }
+
+          Text {
+            visible: historySearchInput.text === ""
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Search past conversations, press Enter"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.45)
+          }
+        }
+      }
+
+      Text {
+        visible: win.historyDetailId === "" && win.searchActive && searchResults.count === 0
+        anchors.centerIn: parent
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        text: "Nothing in your past conversations mentions that."
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+
+      // Search results, ranked best first by the daemon. Clicking one opens
+      // the conversation it came from.
+      ListView {
+        id: searchList
+        visible: win.historyDetailId === "" && win.searchActive
+        anchors.top: historySearchBox.bottom
+        anchors.topMargin: Style.space(10)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        clip: true
+        spacing: Style.space(10)
+        model: searchResults
+
+        delegate: Rectangle {
+          width: searchList.width
+          height: searchEntry.height + Style.space(16)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text, 0.06)
+
+          Column {
+            id: searchEntry
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Style.space(10)
+            spacing: Style.space(2)
+
+            Text {
+              text: model.passage
+              width: parent.width
+              elide: Text.ElideRight
+              font.family: Style.font.family
+              font.bold: true
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Text {
+              // "This conversation" versus a past one is stated in words —
+              // the same distinction the spoken answer draws.
+              text: (model.current ? "this conversation" : model.cid)
+                + " · turn " + model.turn + " · " + model.lastActive
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: model.current ? Color.accent : Util.alpha(Color.popups.text, 0.7)
+            }
+          }
+          MouseArea {
+            anchors.fill: parent
+            onClicked: win.requestHistoryDetail(model.cid)
+          }
+        }
+      }
+
       // The library: id, when, how much, and the first line.
       ListView {
         id: pastList
-        visible: win.historyDetailId === ""
-        anchors.fill: parent
+        visible: win.historyDetailId === "" && !win.searchActive
+        anchors.top: historySearchBox.bottom
+        anchors.topMargin: Style.space(10)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         clip: true
         spacing: Style.space(10)
         model: pastConversations
@@ -1005,6 +1174,9 @@ FloatingWindow {
     onActivated: {
       if (win.settingsOpen) win.settingsOpen = false
       else if (win.historyDetailId !== "") win.historyDetailId = ""
+      // Clearing the box also clears the results (onTextChanged), so Escape
+      // steps search → library → conversation → closed, one layer at a time.
+      else if (win.searchActive) historySearchInput.text = ""
       else if (win.historyOpen) win.historyOpen = false
       else win.closeWindow()
     }

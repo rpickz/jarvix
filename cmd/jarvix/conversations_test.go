@@ -227,3 +227,88 @@ func TestOfflineCommandsKeepFilesPrivate(t *testing.T) {
 		t.Errorf("transcript mode = %v after a read, want 0600", info.Mode().Perm())
 	}
 }
+
+func TestRunConversationsSearch(t *testing.T) {
+	hermeticEnv(t)
+	startDaemon(t, nil, map[string]ipc.Handler{
+		"conversation.search": func(params json.RawMessage) (any, error) {
+			var p struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(params, &p); err != nil {
+				t.Errorf("bad params: %v", err)
+			}
+			if p.Query != "deployment approach" {
+				t.Errorf("query = %q, want the joined arguments", p.Query)
+			}
+			return map[string]any{
+				"retention": true,
+				"active_id": "20260821-104500-ab12",
+				"searched":  2,
+				"results": []map[string]any{
+					{"id": "20260821-104500-ab12", "turn": 3, "role": "user",
+						"ts": "2026-08-21T10:45:00Z", "current": true,
+						"passage": "more on the deployment approach please"},
+					{"id": "20260814-090000-cd34", "turn": 1, "role": "assistant",
+						"ts": "2026-08-14T09:00:00Z", "current": false,
+						"passage": "we settled the deployment approach: blue-green"},
+				},
+				"skipped": []map[string]any{
+					{"id": "20260810-080000-ef56", "error": "bad header"},
+				},
+			}, nil
+		},
+	})
+	var code int
+	stdout, stderr := capture(t, func() {
+		code = run([]string{"conversations", "search", "deployment", "approach"})
+	})
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{
+		// Ranked results with the references that open them.
+		"20260821-104500-ab12", "turn   3", "more on the deployment approach please",
+		"20260814-090000-cd34", "we settled the deployment approach: blue-green", "2026-08-14",
+		// The live thread is distinguished from past ones.
+		"* = earlier in the active conversation",
+		// A record that could not be searched is stated, never hidden.
+		"20260810-080000-ef56", "could not be searched",
+		"open one with: jarvix conversations show <id>",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestRunConversationsSearchFallsBackToFilesWhenDaemonIsDown(t *testing.T) {
+	hermeticEnv(t)
+	_, id := seedArchive(t, "where did we land on the rollout?", "Canary first.")
+
+	var code int
+	stdout, stderr := capture(t, func() { code = run([]string{"conversations", "search", "rollout"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, id) || !strings.Contains(stdout, "where did we land on the rollout?") {
+		t.Errorf("offline search missing the archived hit:\n%s", stdout)
+	}
+
+	stdout, _ = capture(t, func() { code = run([]string{"conversations", "search", "unheard", "words"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, `no conversation mentions "unheard words"`) {
+		t.Errorf("no-match output = %q", stdout)
+	}
+}
+
+func TestRunConversationsSearchNeedsAQuery(t *testing.T) {
+	hermeticEnv(t)
+	var code int
+	_, stderr := capture(t, func() { code = run([]string{"conversations", "search"}) })
+	if code != 1 || !strings.Contains(stderr, "usage: jarvix conversations search") {
+		t.Errorf("exit = %d, stderr = %q", code, stderr)
+	}
+}
