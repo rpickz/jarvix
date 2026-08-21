@@ -34,18 +34,22 @@ func installKokoroStub(t *testing.T) (*Synthesizer, string) {
 		t.Fatal(err)
 	}
 	t.Setenv("KOKORO_STUB_DIR", dir)
-	mkfile := func(name string) string {
+	mkfile := func(name, content string) string {
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return path
 	}
 	return &Synthesizer{
-		Python:     python,
-		Script:     mkfile("kokoro_stream.py"),
-		ModelPath:  mkfile("model.onnx"),
-		VoicesPath: mkfile("voices.bin"),
+		Python: python,
+		// The stub helper declares --lang the way the real one does: the
+		// adapter reads the installed script to decide whether it may pass
+		// the flag, so a fixture that did not mention it would be testing
+		// the stale-helper path by accident.
+		Script:     mkfile("kokoro_stream.py", `parser.add_argument("--lang")`),
+		ModelPath:  mkfile("model.onnx", "x"),
+		VoicesPath: mkfile("voices.bin", "x"),
 	}, dir
 }
 

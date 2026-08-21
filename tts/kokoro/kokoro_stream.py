@@ -42,7 +42,17 @@ Environment:
 Arguments:
   --voice NAME          voice id (default: af_heart)
   --speed FLOAT         speech rate (default: 1.0)
+  --lang CODE           phonemiser language (default: en-us)
   --serve               run the persistent protocol described above
+
+--lang is separate from --voice because Kokoro treats them separately: the
+voice supplies the timbre, the language supplies the letter-to-sound rules.
+They used to be allowed to disagree — this script hardcoded lang="en-us" — so
+a British voice spoke British-sounding American English, with rhotic R's and
+T's flapped to D's. The caller derives the code from the voice id's family
+letter (a=en-us, b=en-gb, e=es, f=fr-fr, h=hi, i=it, j=ja, p=pt-br, z=zh) and
+passes it here, so the two halves of a voice can no longer come apart. The
+default keeps a hand-run invocation working as it always did.
 
 In one-shot mode the sample rate (24000) is printed to stderr as
 "SAMPLE_RATE=24000" before any audio, so the adapter can configure playback
@@ -91,7 +101,7 @@ def one_shot(args) -> int:
     stdout = sys.stdout.buffer
     # create_stream yields (samples, sample_rate) per sentence-ish chunk, so
     # playback can begin before the whole utterance is synthesized.
-    stream = kokoro.create_stream(text, voice=args.voice, speed=args.speed, lang="en-us")
+    stream = kokoro.create_stream(text, voice=args.voice, speed=args.speed, lang=args.lang)
 
     async def run() -> None:
         async for samples, _ in stream:
@@ -159,7 +169,7 @@ def serve(args) -> int:
     commands.start()
 
     async def speak(utterance_id: str, text: str) -> None:
-        stream = kokoro.create_stream(text, voice=args.voice, speed=args.speed, lang="en-us")
+        stream = kokoro.create_stream(text, voice=args.voice, speed=args.speed, lang=args.lang)
         async for samples, _ in stream:
             if commands.aborted(utterance_id):
                 emit(f"ABORTED {utterance_id}\n")
@@ -204,6 +214,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--voice", default="af_heart")
     parser.add_argument("--speed", type=float, default=1.0)
+    parser.add_argument("--lang", default="en-us",
+                        help="phonemiser language code, derived from the voice")
     parser.add_argument("--serve", action="store_true",
                         help="run the persistent line-wise protocol")
     args = parser.parse_args()
