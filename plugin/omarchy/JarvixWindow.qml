@@ -22,6 +22,10 @@ FloatingWindow {
   implicitHeight: 640
   color: Color.background
 
+  // The settings screen replaces the conversation while open (issue #9);
+  // Escape closes it before closing the window.
+  property bool settingsOpen: false
+
   // --- daemon state -------------------------------------------------------
   property bool socketReady: false
   property string sessionState: "idle"
@@ -192,6 +196,34 @@ FloatingWindow {
         font.pixelSize: Style.font.subtitle
         color: Util.alpha(Color.popups.text, 0.7)
       }
+
+      // Settings toggle: keyboard-reachable, state as text. The screen is a
+      // thin client of the daemon, so it is only offered while connected.
+      Rectangle {
+        id: settingsButton
+        visible: win.socketReady
+        width: settingsButtonText.width + Style.space(20)
+        height: settingsButtonText.height + Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, settingsButton.activeFocus ? 0.18 : 0.08)
+        border.color: Util.alpha(Color.popups.text, 0.5)
+        border.width: settingsButton.activeFocus ? 2 : 1
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        Accessible.name: win.settingsOpen ? "Back to conversation" : "Open settings"
+        Keys.onReturnPressed: win.settingsOpen = !win.settingsOpen
+        Keys.onSpacePressed: win.settingsOpen = !win.settingsOpen
+        Text {
+          id: settingsButtonText
+          anchors.centerIn: parent
+          text: win.settingsOpen ? "Conversation" : "Settings"
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+        MouseArea { anchors.fill: parent; onClicked: win.settingsOpen = !win.settingsOpen }
+      }
     }
 
     // Daemon unreachable: say so instead of hanging on an empty view.
@@ -219,7 +251,7 @@ FloatingWindow {
     }
 
     Text {
-      visible: win.socketReady && turns.count === 0
+      visible: win.socketReady && !win.settingsOpen && turns.count === 0
       anchors.centerIn: parent
       text: "No conversation yet — hold Super+Alt+V and speak."
       font.family: Style.font.family
@@ -227,9 +259,22 @@ FloatingWindow {
       color: Util.alpha(Color.popups.text, 0.7)
     }
 
+    // The settings screen shares the conversation's content area.
+    JarvixSettings {
+      id: settingsScreen
+      visible: win.settingsOpen
+      active: win.visible && win.settingsOpen && win.socketReady
+      anchors.top: header.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+    }
+
     ListView {
       id: list
-      visible: win.socketReady
+      visible: win.socketReady && !win.settingsOpen
       anchors.top: header.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
@@ -313,6 +358,9 @@ FloatingWindow {
 
   Shortcut {
     sequences: ["Escape"]
-    onActivated: win.closeWindow()
+    onActivated: {
+      if (win.settingsOpen) win.settingsOpen = false
+      else win.closeWindow()
+    }
   }
 }
