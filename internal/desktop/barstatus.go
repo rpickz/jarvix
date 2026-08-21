@@ -65,8 +65,18 @@ func (s BarState) Tooltip() string {
 // an unrenderable box in most diff viewers. Codepoints verified present in
 // the shell's resolved monospace family (JetBrainsMono Nerd Font).
 const (
-	glyphRobot      = "\U000F06A9" // md-robot
-	glyphRobotOff   = "\U000F16A7" // md-robot_off
+	// Jarvix's resting identity. Deliberately not md-robot: a robot is the
+	// generic "an AI lives here" glyph, so it collides with every other
+	// assistant in the bar — the Agents widget next door is Claude Code —
+	// and says nothing about what Jarvix is. An orbiting mark reads as a
+	// presence rather than a machine, and nothing else in a default Omarchy
+	// bar looks like it. The activity glyphs below carry the meaning; this
+	// one only has to be unmistakably Jarvix.
+	glyphOrbit = "\U000F0018" // md-orbit
+	// Stopped. md-orbit has no struck-through variant, and reusing the
+	// robot here would put the glyph we just removed back in the bar, so
+	// the dormant state gets its own unambiguous mark.
+	glyphSleep      = "\U000F04B2" // md-sleep
 	glyphMicrophone = "\U000F036C" // md-microphone
 	glyphWaveform   = "\U000F147D" // md-waveform
 	glyphBrain      = "\U000F09D1" // md-brain
@@ -113,7 +123,7 @@ const (
 // JavaScript stable across Go's map iteration order.
 var barStates = map[string]BarState{
 	"idle": {
-		Key: "idle", Glyph: glyphRobot,
+		Key: "idle", Glyph: glyphOrbit,
 		Label:  "Jarvix is ready",
 		Detail: "Click to open the conversation",
 	},
@@ -167,7 +177,7 @@ var barStates = map[string]BarState{
 		Urgent: true,
 	},
 	BarKeyNotRunning: {
-		Key: BarKeyNotRunning, Glyph: glyphRobotOff,
+		Key: BarKeyNotRunning, Glyph: glyphSleep,
 		Label:  "Jarvix is not running",
 		Detail: StartHint,
 		Dim:    true,
