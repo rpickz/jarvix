@@ -12,8 +12,9 @@
 // shape so the widget never depends on colour alone.
 
 // One record per state. Keys match the `state` field of a state.changed
-// event (docs/ipc.md), plus the three the widget synthesises: not-running,
-// error, and working.
+// event (docs/ipc.md), plus the three the widget synthesises — not-running,
+// error, and working — and the two background-listening rows the wake state
+// selects.
 var states = {
   "acting": { key: "acting", glyph: "󰉁", label: "Running a command", detail: "A matched intent is executing", urgent: false, pulse: false, dim: false },
   "awaiting_confirmation": { key: "awaiting_confirmation", glyph: "󰋗", label: "Waiting for your answer", detail: "A tool call needs confirming", urgent: true, pulse: true, dim: false },
@@ -26,15 +27,19 @@ var states = {
   "speaking": { key: "speaking", glyph: "󰕾", label: "Speaking", detail: "Reading the answer aloud", urgent: false, pulse: false, dim: false },
   "thinking": { key: "thinking", glyph: "󰧑", label: "Thinking", detail: "Working out an answer", urgent: false, pulse: true, dim: false },
   "transcribing": { key: "transcribing", glyph: "󱑽", label: "Transcribing", detail: "Turning what you said into text", urgent: false, pulse: false, dim: false },
+  "wake-armed": { key: "wake-armed", glyph: "󰍮", label: "Listening for the wake word", detail: "The microphone is open; audio stays on this machine until you say the wake word", urgent: false, pulse: false, dim: false },
+  "wake-muted": { key: "wake-muted", glyph: "󰍭", label: "Microphone muted", detail: "Background listening is off; run jarvix unmute to resume", urgent: false, pulse: false, dim: false },
   "working": { key: "working", glyph: "󰇘", label: "Working", detail: "Jarvix is busy", urgent: false, pulse: false, dim: false }
 }
 
 // statusFor mirrors desktop.BarStatusFor. Precedence: a dead socket beats any
 // state (a state read from a dead connection is stale); a held error beats the
 // state (the daemon returns to idle after a failed turn, so the state alone
-// would erase the failure); an unrecognised state reads as "Working" rather
-// than "ready".
-function statusFor(connected, state, errorMessage) {
+// would erase the failure); an active session beats the wake state (the
+// session states already say the microphone is open); between sessions the
+// wake state decides, so "idle with a capture process running" never draws as
+// plain "ready"; an unrecognised state reads as "Working" rather than "ready".
+function statusFor(connected, state, errorMessage, wake) {
   if (!connected) return states["not-running"]
   var message = String(errorMessage || "").trim()
   if (message !== "") {
@@ -45,7 +50,12 @@ function statusFor(connected, state, errorMessage) {
     }
   }
   var name = String(state || "")
-  if (name === "") return states["idle"]
+  if (name === "" || name === "idle") {
+    var listening = String(wake || "")
+    if (listening === "armed") return states["wake-armed"]
+    if (listening === "muted") return states["wake-muted"]
+    return states["idle"]
+  }
   return states[name] || states["working"]
 }
 
@@ -61,14 +71,21 @@ function tooltip(status) {
 // own IPC surface — the same handler "jarvix window" and a clicked
 // notification go through — or the CLI. Mirrors desktop.BarActionsFor.
 var allActions = [
-  { key: "start", glyph: "󰐥", label: "Start Jarvix", detail: "systemctl --user start jarvixd", command: "systemctl --user start jarvixd", onlyWhenDown: true },
-  { key: "window", glyph: "󰖲", label: "Conversation window", detail: "Show or hide the full conversation", command: "omarchy-shell jarvix toggleWindow", onlyWhenDown: false },
-  { key: "new", glyph: "󰐙", label: "New conversation", detail: "Forget the current thread and start fresh", command: "jarvix new", onlyWhenDown: false },
-  { key: "settings", glyph: "󰒓", label: "Settings", detail: "Voice, activation, AI, and advisors", command: "omarchy-shell jarvix openSettings", onlyWhenDown: false }
+  { key: "start", glyph: "󰐥", label: "Start Jarvix", detail: "systemctl --user start jarvixd", command: "systemctl --user start jarvixd", onlyWhenDown: true, onlyWhenWake: "" },
+  { key: "mute", glyph: "󰍭", label: "Mute the microphone", detail: "Stop listening for the wake word", command: "jarvix mute", onlyWhenDown: false, onlyWhenWake: "armed" },
+  { key: "unmute", glyph: "󰍮", label: "Resume background listening", detail: "Listen for the wake word again", command: "jarvix unmute", onlyWhenDown: false, onlyWhenWake: "muted" },
+  { key: "window", glyph: "󰖲", label: "Conversation window", detail: "Show or hide the full conversation", command: "omarchy-shell jarvix toggleWindow", onlyWhenDown: false, onlyWhenWake: "" },
+  { key: "new", glyph: "󰐙", label: "New conversation", detail: "Forget the current thread and start fresh", command: "jarvix new", onlyWhenDown: false, onlyWhenWake: "" },
+  { key: "settings", glyph: "󰒓", label: "Settings", detail: "Voice, activation, AI, and advisors", command: "omarchy-shell jarvix openSettings", onlyWhenDown: false, onlyWhenWake: "" }
 ]
 
-function actions(connected) {
-  return allActions.filter(function (a) { return !(a.onlyWhenDown && connected) })
+function actions(connected, wake) {
+  var listening = String(wake || "")
+  return allActions.filter(function (a) {
+    if (a.onlyWhenDown && connected) return false
+    if (a.onlyWhenWake !== "" && (!connected || a.onlyWhenWake !== listening)) return false
+    return true
+  })
 }
 
 // Icons for the kinds `jarvix artifacts --json` reports. Anything else —

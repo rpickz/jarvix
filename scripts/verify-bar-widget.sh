@@ -30,8 +30,19 @@ info() { printf '       %s\n' "$1"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # widget_state asks the bar widget what it is showing. The answer is the key
-# from the Go table (idle, listening, not-running, error, …).
+# from the Go table (idle, listening, not-running, error, wake-armed, …).
 widget_state() { omarchy-shell jarvix.bar state 2>/dev/null | tr -d '\r\n'; }
+
+# resting_state is what the widget should show between sessions. With
+# background listening on that is a microphone rather than the idle mark, and
+# both are correct — the point of the check is that the widget reconnected,
+# not which resting state it landed in.
+is_resting() {
+  case "$1" in
+    idle | wake-armed | wake-muted) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # daemon_state asks jarvixd directly, so the two can be compared.
 daemon_state() {
@@ -96,10 +107,10 @@ if [[ $RESTART_DAEMON == 1 ]]; then
   fi
   systemctl --user start jarvixd >/dev/null 2>&1
   for _ in 1 2 3 4 5; do
-    [[ $(widget_state) == "idle" ]] && break
+    is_resting "$(widget_state)" && break
     sleep 1
   done
-  if [[ $(widget_state) == "idle" ]]; then
+  if is_resting "$(widget_state)"; then
     pass "the widget reconnects on its own once jarvixd is back"
   else
     fail "after restarting jarvixd the widget shows '$(widget_state)'"

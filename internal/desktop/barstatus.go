@@ -78,15 +78,23 @@ const (
 	// the dormant state gets its own unambiguous mark.
 	glyphSleep      = "\U000F04B2" // md-sleep
 	glyphMicrophone = "\U000F036C" // md-microphone
-	glyphWaveform   = "\U000F147D" // md-waveform
-	glyphBrain      = "\U000F09D1" // md-brain
-	glyphMessage    = "\U000F0369" // md-message_text
-	glyphFlash      = "\U000F0241" // md-flash
-	glyphHelp       = "\U000F02D7" // md-help_circle
-	glyphVolume     = "\U000F057E" // md-volume_high
-	glyphCancel     = "\U000F073A" // md-cancel
-	glyphAlert      = "\U000F0026" // md-alert
-	glyphDots       = "\U000F01D8" // md-dots_horizontal
+	// The two background-listening marks (#4). Deliberately the same family
+	// as the session's filled microphone and deliberately not the same shape:
+	// hollow means the microphone is open but nobody is being listened *to*
+	// yet, struck through means it is shut. A user must be able to tell the
+	// three apart across a room, without reading the tooltip and without
+	// being able to pick the theme's urgent colour out of its foreground.
+	glyphMicrophoneOutline = "\U000F036E" // md-microphone_outline
+	glyphMicrophoneOff     = "\U000F036D" // md-microphone_off
+	glyphWaveform          = "\U000F147D" // md-waveform
+	glyphBrain             = "\U000F09D1" // md-brain
+	glyphMessage           = "\U000F0369" // md-message_text
+	glyphFlash             = "\U000F0241" // md-flash
+	glyphHelp              = "\U000F02D7" // md-help_circle
+	glyphVolume            = "\U000F057E" // md-volume_high
+	glyphCancel            = "\U000F073A" // md-cancel
+	glyphAlert             = "\U000F0026" // md-alert
+	glyphDots              = "\U000F01D8" // md-dots_horizontal
 
 	glyphWindow = "\U000F05B2" // md-window_restore
 	glyphPlus   = "\U000F0419" // md-plus_circle_outline
@@ -116,6 +124,30 @@ const (
 	// is the honest thing to say about one — far better than reporting the
 	// last state we understood, or claiming Jarvix is ready when it is busy.
 	BarKeyUnknown = "working"
+	// BarKeyWakeArmed is the privacy indicator (#4, ADR 0024): background
+	// wake-word listening is running and a capture process is open on the
+	// microphone. It is shown between sessions, which is exactly when nothing
+	// else on screen would say so — the whole reason this widget exists.
+	BarKeyWakeArmed = "wake-armed"
+	// BarKeyWakeMuted is the same feature with `jarvix mute` in force: the
+	// capture process has been killed. It is a state of its own rather than a
+	// silent fall back to "ready" because a user who muted must be able to
+	// confirm that they did.
+	BarKeyWakeMuted = "wake-muted"
+)
+
+// Wake states, as the daemon publishes them in `wake.changed` and in
+// `status.get`'s `wake_state`. They are a second dimension alongside the
+// session state: a session state describes a turn in progress, and these
+// describe the microphone between turns.
+const (
+	// WakeOff — background listening is not running. The bar shows the
+	// session state alone, exactly as it did before the feature existed.
+	WakeOff = "off"
+	// WakeArmed — a capture process is running.
+	WakeArmed = "armed"
+	// WakeMuted — the user muted; nothing is capturing.
+	WakeMuted = "muted"
 )
 
 // barStates is the vocabulary, keyed by the `state` field of a `state.changed`
@@ -187,6 +219,22 @@ var barStates = map[string]BarState{
 		Label:  "Working",
 		Detail: "Jarvix is busy",
 	},
+	BarKeyWakeArmed: {
+		Key: BarKeyWakeArmed, Glyph: glyphMicrophoneOutline,
+		Label: "Listening for the wake word",
+		// Says what is true rather than what is reassuring: the microphone is
+		// open. The second half is what makes that acceptable, and it is the
+		// claim the rest of the feature has to keep.
+		Detail: "The microphone is open; audio stays on this machine until you say the wake word",
+		// No pulse. A permanent state that animates permanently is not an
+		// indicator, it is a distraction, and one the user would learn to
+		// stop seeing — which is the opposite of the point.
+	},
+	BarKeyWakeMuted: {
+		Key: BarKeyWakeMuted, Glyph: glyphMicrophoneOff,
+		Label:  "Microphone muted",
+		Detail: "Background listening is off; run jarvix unmute to resume",
+	},
 }
 
 // StartHint is the one thing worth saying when the daemon is down, and the
@@ -198,10 +246,10 @@ const StartHint = "Start it: systemctl --user start jarvixd"
 // generic sentence.
 const defaultErrorDetail = "The last turn failed"
 
-// BarStatusFor resolves what the bar should show. The three inputs are
-// exactly what the widget knows: whether its socket is up, the last
-// `state.changed` it saw, and the error message it is holding (empty once a
-// new session clears it).
+// BarStatusFor resolves what the bar should show. The four inputs are exactly
+// what the widget knows: whether its socket is up, the last `state.changed`
+// it saw, the error message it is holding (empty once a new session clears
+// it), and the last `wake.changed` — off, armed, or muted.
 //
 // Precedence is deliberate and is the part worth testing:
 //  1. No socket wins over everything. A state read from a dead connection is
@@ -210,9 +258,15 @@ const defaultErrorDetail = "The last turn failed"
 //     failed turn, so trusting the state alone would erase the failure the
 //     instant it happened — the widget would go quiet about the one thing
 //     the user needs to know.
-//  3. Otherwise the state's own row, with an unknown state falling back to
+//  3. An active session wins over the wake state. During a turn the session
+//     states already say the microphone is open, and in more detail.
+//  4. Between sessions, the wake state. This is the privacy indicator: idle
+//     with a capture process running is *not* the same thing as idle, and a
+//     bar that showed "Jarvix is ready" for both would be telling a user
+//     their microphone is closed when it is not.
+//  5. Otherwise the state's own row, with an unknown state falling back to
 //     "Working" rather than to "ready".
-func BarStatusFor(connected bool, state string, errMessage string) BarState {
+func BarStatusFor(connected bool, state string, errMessage string, wake string) BarState {
 	if !connected {
 		return barStates[BarKeyNotRunning]
 	}
@@ -221,7 +275,13 @@ func BarStatusFor(connected bool, state string, errMessage string) BarState {
 		s.Detail = strings.TrimSpace(errMessage)
 		return s
 	}
-	if state == "" {
+	if state == "" || state == "idle" {
+		switch wake {
+		case WakeArmed:
+			return barStates[BarKeyWakeArmed]
+		case WakeMuted:
+			return barStates[BarKeyWakeMuted]
+		}
 		return barStates["idle"]
 	}
 	if s, ok := barStates[state]; ok {
@@ -246,6 +306,13 @@ type BarAction struct {
 	// Jarvix" beside a running one is noise; offering it beside a stopped one
 	// is the entire point of the "not running" state.
 	OnlyWhenDown bool
+	// OnlyWhenWake limits the action to one wake state ("armed", "muted").
+	// Empty means always. It is how the microphone control appears in the
+	// panel only for users who have background listening on: muting is the
+	// action a privacy indicator has to be one click away from, and offering
+	// it to someone with no microphone open would be noise of the same kind
+	// as offering "start Jarvix" to a running daemon.
+	OnlyWhenWake string
 }
 
 // barActions is the panel's menu, in the order it is drawn.
@@ -261,6 +328,20 @@ var barActions = []BarAction{
 		Detail:       "systemctl --user start jarvixd",
 		Command:      "systemctl --user start jarvixd",
 		OnlyWhenDown: true,
+	},
+	{
+		Key: "mute", Glyph: glyphMicrophoneOff,
+		Label:        "Mute the microphone",
+		Detail:       "Stop listening for the wake word",
+		Command:      "jarvix mute",
+		OnlyWhenWake: WakeArmed,
+	},
+	{
+		Key: "unmute", Glyph: glyphMicrophoneOutline,
+		Label:        "Resume background listening",
+		Detail:       "Listen for the wake word again",
+		Command:      "jarvix unmute",
+		OnlyWhenWake: WakeMuted,
 	},
 	{
 		Key: "window", Glyph: glyphWindow,
@@ -282,13 +363,17 @@ var barActions = []BarAction{
 	},
 }
 
-// BarActionsFor returns the panel's actions for the current connection state.
-// The daemon-down action leads, because when Jarvix is not running that is
-// the only thing the user wants from this panel.
-func BarActionsFor(connected bool) []BarAction {
+// BarActionsFor returns the panel's actions for the current connection and
+// wake states. The daemon-down action leads, because when Jarvix is not
+// running that is the only thing the user wants from this panel; the
+// microphone control comes next when there is a microphone to control.
+func BarActionsFor(connected bool, wake string) []BarAction {
 	out := make([]BarAction, 0, len(barActions))
 	for _, a := range barActions {
 		if a.OnlyWhenDown && connected {
+			continue
+		}
+		if a.OnlyWhenWake != "" && (!connected || a.OnlyWhenWake != wake) {
 			continue
 		}
 		out = append(out, a)
@@ -361,8 +446,9 @@ func RenderBarStateJS() string {
 // shape so the widget never depends on colour alone.
 
 // One record per state. Keys match the ` + "`state`" + ` field of a state.changed
-// event (docs/ipc.md), plus the three the widget synthesises: not-running,
-// error, and working.
+// event (docs/ipc.md), plus the three the widget synthesises — not-running,
+// error, and working — and the two background-listening rows the wake state
+// selects.
 var states = {
 `)
 	keys := BarStateKeys()
@@ -377,9 +463,11 @@ var states = {
 // statusFor mirrors desktop.BarStatusFor. Precedence: a dead socket beats any
 // state (a state read from a dead connection is stale); a held error beats the
 // state (the daemon returns to idle after a failed turn, so the state alone
-// would erase the failure); an unrecognised state reads as "Working" rather
-// than "ready".
-function statusFor(connected, state, errorMessage) {
+// would erase the failure); an active session beats the wake state (the
+// session states already say the microphone is open); between sessions the
+// wake state decides, so "idle with a capture process running" never draws as
+// plain "ready"; an unrecognised state reads as "Working" rather than "ready".
+function statusFor(connected, state, errorMessage, wake) {
   if (!connected) return states["not-running"]
   var message = String(errorMessage || "").trim()
   if (message !== "") {
@@ -390,7 +478,12 @@ function statusFor(connected, state, errorMessage) {
     }
   }
   var name = String(state || "")
-  if (name === "") return states["idle"]
+  if (name === "" || name === "idle") {
+    var listening = String(wake || "")
+    if (listening === ` + jsString(WakeArmed) + `) return states[` + jsString(BarKeyWakeArmed) + `]
+    if (listening === ` + jsString(WakeMuted) + `) return states[` + jsString(BarKeyWakeMuted) + `]
+    return states["idle"]
+  }
   return states[name] || states["working"]
 }
 
@@ -408,14 +501,20 @@ function tooltip(status) {
 var allActions = [
 `)
 	for i, a := range barActions {
-		fmt.Fprintf(&b, "  { key: %s, glyph: %s, label: %s, detail: %s, command: %s, onlyWhenDown: %t }%s\n",
+		fmt.Fprintf(&b, "  { key: %s, glyph: %s, label: %s, detail: %s, command: %s, onlyWhenDown: %t, onlyWhenWake: %s }%s\n",
 			jsString(a.Key), jsString(a.Glyph), jsString(a.Label),
-			jsString(a.Detail), jsString(a.Command), a.OnlyWhenDown, jsSeparator(i, len(barActions)))
+			jsString(a.Detail), jsString(a.Command), a.OnlyWhenDown,
+			jsString(a.OnlyWhenWake), jsSeparator(i, len(barActions)))
 	}
 	b.WriteString(`]
 
-function actions(connected) {
-  return allActions.filter(function (a) { return !(a.onlyWhenDown && connected) })
+function actions(connected, wake) {
+  var listening = String(wake || "")
+  return allActions.filter(function (a) {
+    if (a.onlyWhenDown && connected) return false
+    if (a.onlyWhenWake !== "" && (!connected || a.onlyWhenWake !== listening)) return false
+    return true
+  })
 }
 
 // Icons for the kinds ` + "`jarvix artifacts --json`" + ` reports. Anything else —
