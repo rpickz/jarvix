@@ -39,6 +39,14 @@ type Options struct {
 	// the last exchange, so an old thread does not bleed into a new one. Zero
 	// keeps history until an explicit reset.
 	FollowUpWindow time.Duration
+	// ConfirmTimeout is how long a pending tool confirmation waits for the
+	// user before declining. Zero means DefaultConfirmTimeout.
+	ConfirmTimeout time.Duration
+	// RememberApprovals re-runs a user-approved command without asking again
+	// for the rest of the conversation. Approvals live in memory only and
+	// are cleared with the conversation — they never survive `jarvix new`,
+	// the follow-up window, or a daemon restart.
+	RememberApprovals bool
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -66,11 +74,22 @@ type Engine struct {
 	// now is the follow-up-window clock, injectable so tests can lapse the
 	// window deterministically — including across a simulated restart.
 	now func() time.Time
+	// timer is the confirmation-timeout clock, injectable so tests can fire
+	// (or withhold) the timeout deterministically. The returned stop func
+	// releases the underlying timer.
+	timer func(d time.Duration) (<-chan time.Time, func())
 
 	mu      sync.Mutex
 	state   State
 	current *sess
 	counter int
+	// pending is the tool confirmation the session is waiting on, if any
+	// (ADR 0014). Guarded by mu.
+	pending *pendingConfirmation
+	// approvals are commands the user already confirmed this conversation
+	// (remember_for_conversation). Cleared with the conversation; guarded
+	// by mu.
+	approvals map[string]bool
 
 	// Conversation memory: prior exchanges carried across sessions so
 	// follow-up questions have context. Guarded by mu.
@@ -92,6 +111,12 @@ type sess struct {
 	transcript      string
 	transcriptReady bool
 	submitted       bool
+
+	// replyCapture marks a voice capture that answers a pending tool
+	// confirmation rather than asking a new question: its transcript is
+	// interpreted as yes/no and resolves the confirmation instead of
+	// starting a think round.
+	replyCapture bool
 }
 
 // NewEngine wires the engine. logger, registry, and store may be nil (no
@@ -115,7 +140,12 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 		opts:     opts,
 		store:    store,
 		now:      time.Now,
-		state:    StateIdle,
+		timer: func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTimer(d)
+			return t.C, func() { t.Stop() }
+		},
+		approvals: make(map[string]bool),
+		state:     StateIdle,
 	}
 	e.loadHistory()
 	return e
@@ -187,7 +217,10 @@ func (e *Engine) StartSession() (string, error) {
 	return e.current.id, nil
 }
 
-// StartVoice begins microphone capture for the active session.
+// StartVoice begins microphone capture for the active session. While a tool
+// confirmation is pending it captures the user's answer instead: the same
+// Listening → Transcribing path runs, but the transcript resolves the
+// confirmation (yes/no) rather than starting a new question.
 func (e *Engine) StartVoice() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -195,8 +228,19 @@ func (e *Engine) StartVoice() error {
 	if s == nil {
 		return fmt.Errorf("no active session; call session.start first")
 	}
+	replyCapture := e.state == StateAwaitingConfirmation && e.pending != nil
 	if err := e.setStateLocked(StateListening); err != nil {
 		return err
+	}
+	if replyCapture {
+		// The user is engaging: the confirmation timeout no longer applies,
+		// and the transcript gates below must wait for the reply, not reuse
+		// the original question's.
+		e.pending.engaged = true
+		s.replyCapture = true
+		s.transcript = ""
+		s.transcriptReady = false
+		s.submitted = false
 	}
 	rec, err := e.recorder.Start(s.ctx)
 	if err != nil {
@@ -240,13 +284,20 @@ func (e *Engine) StopVoice() (discarded bool, err error) {
 
 // Submit marks the session ready to proceed to the assistant. With text, the
 // transcript step is skipped entirely (the `jarvix ask` path); without text
-// the session proceeds once transcription finishes.
+// the session proceeds once transcription finishes. While a tool
+// confirmation is pending, submitted text is the user's answer to it —
+// affirmative approves, anything else declines.
 func (e *Engine) Submit(text string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := e.current
 	if s == nil {
 		return fmt.Errorf("no active session; call session.start first")
+	}
+	if text != "" && e.state == StateAwaitingConfirmation && e.pending != nil {
+		e.publish(Event{Type: "transcript.final", Data: map[string]any{"session_id": s.id, "text": text}})
+		e.resolveConfirmationLocked(isAffirmative(text), "text")
+		return nil
 	}
 	if text != "" {
 		s.transcript = text
@@ -326,6 +377,7 @@ func (e *Engine) cancelLocked(reason string) {
 		return
 	}
 	s.cancel()
+	e.clearPendingLocked("interrupted")
 	if s.recording != nil {
 		rec := s.recording
 		s.recording = nil
@@ -370,6 +422,7 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 	if e.current != s || s.ctx.Err() != nil {
 		return
 	}
+	e.clearPendingLocked("error")
 	e.log.Error("session failed", "component", stage, "session_id", s.id, "error", err.Error())
 	if CanTransition(e.state, StateError) {
 		_ = e.setStateLocked(StateError)
@@ -387,6 +440,20 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 // both arrived, whichever order they came in.
 func (e *Engine) maybeThinkLocked(s *sess) {
 	if !s.transcriptReady || !s.submitted || e.current != s {
+		return
+	}
+	if s.replyCapture {
+		// The transcript answers a pending tool confirmation, not a new
+		// question. An empty or unrecognised reply declines: the safe
+		// reading of anything that is not a clear yes.
+		s.replyCapture = false
+		e.resolveConfirmationLocked(isAffirmative(s.transcript), "voice")
+		return
+	}
+	if e.state != StateIdle && e.state != StateTranscribing {
+		// A duplicate submission (e.g. a stray session.submit while the
+		// session is already thinking or awaiting confirmation) must not
+		// start a second think round.
 		return
 	}
 	if strings.TrimSpace(s.transcript) == "" {
@@ -491,19 +558,22 @@ func (e *Engine) think(s *sess) {
 			return
 		}
 
-		// The model wants tools. Record its request, run each call, append
-		// results, and loop.
+		// The model wants tools. Record its request, gate and run each call,
+		// append results, and loop. The permission gate (ADR 0014) sits in
+		// front of every execution: denied and declined calls still produce
+		// a result message, so the model can answer gracefully instead of
+		// the session dying.
 		messages = append(messages, ai.Message{Role: ai.RoleAssistant, Content: text, ToolCalls: calls})
 		for _, call := range calls {
 			if s.ctx.Err() != nil {
 				e.abortSpeaker(speaker)
 				return
 			}
-			e.publish(Event{Type: "tool.started", Data: map[string]any{
-				"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}})
-			result := e.tools.Execute(s.ctx, call)
-			e.publish(Event{Type: "tool.finished", Data: map[string]any{
-				"session_id": s.id, "tool": call.Name}})
+			result, ok := e.gateAndExecute(s, call)
+			if !ok {
+				e.abortSpeaker(speaker)
+				return
+			}
 			messages = append(messages, ai.Message{Role: ai.RoleTool, ToolCallID: call.ID, Content: result})
 		}
 	}
@@ -607,6 +677,9 @@ func (e *Engine) conversationMessages(userText string) []ai.Message {
 			"turns", len(e.history)/2)
 		e.history = nil
 		e.lastTurn = time.Time{}
+		// Remembered tool approvals are conversation-scoped: a new thread
+		// must ask again.
+		e.approvals = make(map[string]bool)
 	}
 	msgs := make([]ai.Message, 0, len(e.history)+2)
 	if e.opts.SystemPrompt != "" {
@@ -689,11 +762,13 @@ func (e *Engine) Conversation() []Turn {
 
 // ResetConversation clears the carried-over context — in memory and on disk —
 // so the next turn starts a fresh thread and a later restart resurrects
-// nothing.
+// nothing. Remembered tool approvals die with the conversation too: they are
+// scoped to it by design and never persist.
 func (e *Engine) ResetConversation() {
 	e.mu.Lock()
 	e.history = nil
 	e.lastTurn = time.Time{}
+	e.approvals = make(map[string]bool)
 	e.mu.Unlock()
 	if e.store == nil {
 		return

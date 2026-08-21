@@ -36,6 +36,39 @@ func cmdStatus(paths config.Paths) error {
 	}
 	fmt.Printf("version:  %v (protocol %v)\n", status["version"], status["protocol"])
 	fmt.Printf("socket:   %s\n", paths.Socket)
+	if pol, ok := status["policy"].(map[string]any); ok {
+		fmt.Printf("policy:   default=%v confirm_timeout=%vs remember_for_conversation=%v\n",
+			pol["default"], pol["confirm_timeout_sec"], pol["remember_for_conversation"])
+		if tools, ok := pol["tools"].(map[string]any); ok {
+			names := make([]string, 0, len(tools))
+			for name := range tools {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				fmt.Printf("          %s: %v\n", name, tools[name])
+			}
+		}
+	}
+	return nil
+}
+
+// cmdConfirm answers a pending tool confirmation: the keyed counterpart to
+// saying "yes" or "no" out loud.
+func cmdConfirm(paths config.Paths, approved bool) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	if err := client.Call("session.confirm", map[string]bool{"approved": approved}, nil); err != nil {
+		return err
+	}
+	if approved {
+		fmt.Println("confirmed — running the command")
+	} else {
+		fmt.Println("declined — the command will not run")
+	}
 	return nil
 }
 
@@ -83,6 +116,14 @@ func cmdPTT(paths config.Paths, phase string) error {
 	defer func() { _ = client.Close() }()
 
 	beginListening := func() error {
+		// While a tool confirmation is pending, this press answers it: the
+		// pending session must keep waiting, so no session.start (which
+		// would interrupt it) — the capture flows into the confirmation.
+		var status map[string]any
+		if err := client.Call("status.get", nil, &status); err == nil &&
+			status["state"] == "awaiting_confirmation" {
+			return client.Call("voice.start", nil, nil)
+		}
 		if err := client.Call("session.start", nil, nil); err != nil {
 			return err
 		}
@@ -233,6 +274,15 @@ func followSession(client *ipc.Client, showTranscript bool) error {
 				fmt.Println()
 			case "tts.started":
 				fmt.Println("🔊 speaking (jarvix cancel to stop)")
+			case "tool.confirmation_required":
+				fmt.Printf("? %v\n  command: %v\n  answer with: jarvix confirm | jarvix deny (auto-declines in %vs)\n",
+					ev.Data["summary"], ev.Data["command"], ev.Data["timeout_sec"])
+			case "tool.confirmed":
+				fmt.Println("✓ confirmed")
+			case "tool.declined":
+				fmt.Printf("✗ declined (%v) — nothing was run\n", ev.Data["source"])
+			case "tool.denied":
+				fmt.Printf("✗ denied by policy (%v): %v\n", ev.Data["rule"], ev.Data["command"])
 			case "session.finished":
 				return nil
 			case "session.cancelled":

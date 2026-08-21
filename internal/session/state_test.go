@@ -14,8 +14,54 @@ func TestHappyPathTransitions(t *testing.T) {
 	}
 }
 
+func TestConfirmationTransitions(t *testing.T) {
+	legal := [][2]State{
+		// A tool call that needs confirmation pauses the model's turn…
+		{StateThinking, StateAwaitingConfirmation},
+		// …including when the model streamed text before calling the tool.
+		{StateResponding, StateAwaitingConfirmation},
+		// Approved, declined, and timed out all resume the tool loop: a
+		// decline is a result for the model, not an error.
+		{StateAwaitingConfirmation, StateThinking},
+		// A spoken reply reuses the normal capture path…
+		{StateAwaitingConfirmation, StateListening},
+		{StateListening, StateTranscribing},
+		// …and resolves from Transcribing back into the tool loop.
+		{StateTranscribing, StateThinking},
+		// Interruption and failure work like every other active state.
+		{StateAwaitingConfirmation, StateCancelling},
+		{StateAwaitingConfirmation, StateError},
+	}
+	for _, pair := range legal {
+		if !CanTransition(pair[0], pair[1]) {
+			t.Errorf("expected %s → %s to be legal", pair[0], pair[1])
+		}
+	}
+	illegal := [][2]State{
+		{StateIdle, StateAwaitingConfirmation},      // only a tool round can ask
+		{StateListening, StateAwaitingConfirmation}, // capture resolves via Transcribing
+		{StateSpeaking, StateAwaitingConfirmation},
+		{StateAwaitingConfirmation, StateSpeaking},   // the prompt is spoken without a state change
+		{StateAwaitingConfirmation, StateResponding}, // resolution passes through Thinking
+		{StateAwaitingConfirmation, StateIdle},       // teardown goes via Cancelling/Error
+		{StateError, StateAwaitingConfirmation},
+	}
+	for _, pair := range illegal {
+		if CanTransition(pair[0], pair[1]) {
+			t.Errorf("expected %s → %s to be illegal", pair[0], pair[1])
+		}
+	}
+	if !StateAwaitingConfirmation.Active() {
+		t.Error("awaiting_confirmation is an active state")
+	}
+	if !StateAwaitingConfirmation.Valid() {
+		t.Error("awaiting_confirmation must validate")
+	}
+}
+
 func TestCancellationFromEveryActiveState(t *testing.T) {
-	active := []State{StateListening, StateTranscribing, StateThinking, StateResponding, StateSpeaking}
+	active := []State{StateListening, StateTranscribing, StateThinking,
+		StateResponding, StateAwaitingConfirmation, StateSpeaking}
 	for _, s := range active {
 		if !CanTransition(s, StateCancelling) {
 			t.Errorf("%s must allow cancellation", s)

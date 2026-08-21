@@ -33,8 +33,10 @@ type Daemon struct {
 	server   *ipc.Server
 	bus      *session.Bus
 	log      *slog.Logger
-	pttChord []uint16 // daemon-side hold-to-talk chord; empty = disabled
-	pttLive  bool     // watcher running (chord set + input devices readable)
+	registry *tools.Registry
+	policy   config.ToolsPolicy // effective gate config, reported by status.get
+	pttChord []uint16           // daemon-side hold-to-talk chord; empty = disabled
+	pttLive  bool               // watcher running (chord set + input devices readable)
 
 	// Desktop notification dispatch (ui.notifications); see notifications.go.
 	notifier   desktop.Notifier
@@ -141,20 +143,38 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		systemPrompt += config.ArtifactSystemPrompt
 		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
 	}
+	// The permission gate is always installed — even with no tools enabled,
+	// so a tool added later can never ship ungated (ADR 0014).
+	perTool := make(map[string]tools.PolicyDecision, len(cfg.Tools.Policy.Tool))
+	for name, d := range cfg.Tools.Policy.Tool {
+		perTool[name] = tools.PolicyDecision(d)
+	}
+	policy, err := tools.NewPolicy(tools.PolicyConfig{
+		Default:    tools.PolicyDecision(cfg.Tools.Policy.Default),
+		Tools:      perTool,
+		ShellAllow: cfg.Tools.Policy.ShellAllow,
+		ShellDeny:  cfg.Tools.Policy.ShellDeny,
+	})
+	if err != nil {
+		return nil, err // Validate catches this first; belt and braces
+	}
+	registry.SetPolicy(policy)
 
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
 	store := &history.File{Path: paths.HistoryFile()}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, session.Options{
-			Model:          cfg.AI.Model,
-			SystemPrompt:   systemPrompt,
-			MaxTokens:      cfg.AI.MaxTokens,
-			Temperature:    cfg.AI.Temperature,
-			SpeakResponses: cfg.Conversation.SpeakResponses,
-			MinRecording:   time.Duration(cfg.Audio.MinRecordingMs) * time.Millisecond,
-			HistoryTurns:   cfg.Conversation.HistoryTurns,
-			FollowUpWindow: time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
+			Model:             cfg.AI.Model,
+			SystemPrompt:      systemPrompt,
+			MaxTokens:         cfg.AI.MaxTokens,
+			Temperature:       cfg.AI.Temperature,
+			SpeakResponses:    cfg.Conversation.SpeakResponses,
+			MinRecording:      time.Duration(cfg.Audio.MinRecordingMs) * time.Millisecond,
+			HistoryTurns:      cfg.Conversation.HistoryTurns,
+			FollowUpWindow:    time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
+			ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
+			RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		})
 
 	if deps.Notifier == nil {
@@ -168,6 +188,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	server := ipc.NewServer(paths.Socket, bus, logger)
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
+		registry: registry, policy: cfg.Tools.Policy,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		notify: cfg.UI.Notifications, preview: cfg.UI.NotificationPreview,
 	}
@@ -214,6 +235,15 @@ func (d *Daemon) startPTT(ctx context.Context) {
 	}
 	watcher := hotkey.NewWatcher(d.pttChord,
 		func() { // chord held down → listen
+			if state, _ := d.engine.State(); state == session.StateAwaitingConfirmation {
+				// A tool confirmation is pending: this hold answers it. The
+				// session must keep waiting, so no new session is started —
+				// the capture flows into the pending confirmation instead.
+				if err := d.engine.StartVoice(); err != nil {
+					d.log.Error("ptt press", "component", "hotkey", "error", err.Error())
+				}
+				return
+			}
 			if _, err := d.engine.StartSession(); err != nil {
 				d.log.Error("ptt press", "component", "hotkey", "error", err.Error())
 				return
@@ -310,6 +340,23 @@ func (d *Daemon) registerMethods() {
 			"session_id": id,
 		}, nil
 	})
+	d.server.Handle("session.confirm", func(params json.RawMessage) (any, error) {
+		// Approved defaults to true: `jarvix confirm` is the affirmative;
+		// declining is the explicit case.
+		p := struct {
+			Approved *bool `json:"approved"`
+		}{}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "session.confirm params: %v", err)
+			}
+		}
+		approved := p.Approved == nil || *p.Approved
+		if err := d.engine.Confirm(approved); err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return map[string]bool{"approved": approved}, nil
+	})
 	d.server.Handle("status.get", func(json.RawMessage) (any, error) {
 		state, id := d.engine.State()
 		ptt := "external" // activation comes from keybindings (toggle/hold CLI)
@@ -322,6 +369,23 @@ func (d *Daemon) registerMethods() {
 			"version":    build.Version,
 			"protocol":   ipc.ProtocolVersion,
 			"ptt":        ptt,
+			"policy":     d.effectivePolicy(),
 		}, nil
 	})
+}
+
+// effectivePolicy reports the permission gate as it actually applies: the
+// gate-wide settings plus the resolved decision for every registered tool,
+// so `jarvix status` shows what would happen, not just what the file says.
+func (d *Daemon) effectivePolicy() map[string]any {
+	perTool := map[string]string{}
+	for _, name := range d.registry.Names() {
+		perTool[name] = string(d.registry.Policy().ToolDecision(name))
+	}
+	return map[string]any{
+		"default":                   d.policy.Default,
+		"confirm_timeout_sec":       d.policy.ConfirmTimeoutSec,
+		"remember_for_conversation": d.policy.RememberForConversation,
+		"tools":                     perTool,
+	}
 }

@@ -45,10 +45,11 @@ capability that makes Jarvix useful and the one to be careful with:
 - The system prompt instructs the model to prefer read-only commands and to
   confirm before destructive actions, but this is model behaviour, not
   enforcement.
-- **Not yet built:** a real permission gate (allow / ask / deny per command
+- ~~**Not yet built:** a real permission gate (allow / ask / deny per command
   pattern, with spoken confirmation for the "ask" tier). That is the next
   tools milestone; until then `shell` is a single switch and should be
-  enabled only with a model and setup you trust.
+  enabled only with a model and setup you trust.~~ **Now built** — see
+  [ADR 0014](0014-tool-permission-gate.md).
 
 ## Consequences
 
