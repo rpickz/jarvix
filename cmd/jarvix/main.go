@@ -29,25 +29,31 @@ The daemon must be running for session commands:
   systemctl --user enable --now jarvixd`
 
 func main() {
-	if len(os.Args) < 2 {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run dispatches one CLI invocation and returns the process exit code. It is
+// the testable seam: main only binds it to os.Args/os.Exit.
+func run(args []string) int {
+	if len(args) < 1 {
 		fmt.Println(usage)
-		os.Exit(2)
+		return 2
 	}
 	paths := config.DefaultPaths()
 	cfg, err := config.Load(paths.ConfigFile())
 	if err != nil {
-		fatal(err)
+		return fail(err)
 	}
 
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "status":
 		err = cmdStatus(paths)
 	case "ask":
-		if len(args) < 1 {
-			fatal(fmt.Errorf("usage: jarvix ask \"question\""))
+		if len(rest) < 1 {
+			return fail(fmt.Errorf("usage: jarvix ask \"question\""))
 		}
-		err = cmdAsk(paths, args[0])
+		err = cmdAsk(paths, rest[0])
 	case "listen":
 		err = cmdListen(paths)
 	case "cancel":
@@ -55,24 +61,24 @@ func main() {
 	case "new":
 		err = cmdNewConversation(paths)
 	case "ptt":
-		if len(args) < 1 || (args[0] != "start" && args[0] != "stop" && args[0] != "toggle") {
-			fatal(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
+		if len(rest) < 1 || (rest[0] != "start" && rest[0] != "stop" && rest[0] != "toggle") {
+			return fail(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
 		}
-		err = cmdPTT(paths, args[0])
+		err = cmdPTT(paths, rest[0])
 	case "doctor":
 		err = cmdDoctor(cfg, paths)
 	case "setup":
 		switch {
-		case len(args) >= 1 && args[0] == "whisper":
+		case len(rest) >= 1 && rest[0] == "whisper":
 			model := cfg.STT.Whisper.Model
-			if len(args) > 1 {
-				model = args[1]
+			if len(rest) > 1 {
+				model = rest[1]
 			}
 			err = cmdSetupWhisper(paths, model)
-		case len(args) >= 1 && args[0] == "input":
+		case len(rest) >= 1 && rest[0] == "input":
 			err = cmdSetupInput()
 		default:
-			fatal(fmt.Errorf("usage: jarvix setup whisper [model] | jarvix setup input"))
+			return fail(fmt.Errorf("usage: jarvix setup whisper [model] | jarvix setup input"))
 		}
 	case "config":
 		err = cmdConfig(cfg, paths)
@@ -82,14 +88,15 @@ func main() {
 		fmt.Println(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "jarvix: unknown command %q\n\n%s\n", cmd, usage)
-		os.Exit(2)
+		return 2
 	}
 	if err != nil {
-		fatal(err)
+		return fail(err)
 	}
+	return 0
 }
 
-func fatal(err error) {
+func fail(err error) int {
 	fmt.Fprintln(os.Stderr, "jarvix:", err)
-	os.Exit(1)
+	return 1
 }
