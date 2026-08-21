@@ -196,9 +196,10 @@ func captureStep(w desktop.Window, opts CaptureOptions) (Step, string) {
 // logic with the dedupe matcher rather than keeping a second table: the
 // candidate is desktop.AppName's spoken form of the class (which collapses
 // reverse-DNS classes to their app segment), and each candidate must both be
-// a valid program token and resolve to an installed binary. The "-desktop"
-// suffix covers the one widespread packaging convention where the binary is
-// not the class ("signal" → "signal-desktop").
+// a valid program token and resolve to an installed binary. The candidate
+// spellings come from tools.LaunchCandidates — the one copy of the "-desktop"
+// packaging convention ("signal" → "signal-desktop"), shared with the
+// launcher's near-match suggestions (issue #71).
 //
 // A candidate that resolves but differs from the class is handled by the
 // caller writing a match override — derivation never loosens what dedupe
@@ -208,7 +209,7 @@ func deriveCommand(class string, lookPath func(string) (string, error)) (string,
 		return "", false
 	}
 	base := strings.ToLower(strings.TrimSpace(desktop.AppName(class)))
-	for _, candidate := range []string{base, base + "-desktop"} {
+	for _, candidate := range tools.LaunchCandidates(base) {
 		if candidate == "" || candidate == "-desktop" || !programToken.MatchString(candidate) {
 			continue
 		}

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -491,6 +492,121 @@ func TestLaunchNeedsAnApplication(t *testing.T) {
 	h := newHarness(t)
 	if _, err := h.tool(t, LaunchAppToolName).Execute(context.Background(), json.RawMessage(`{"app":"  "}`)); err == nil {
 		t.Error("an empty application name must be an error")
+	}
+}
+
+// nearMatchHarness builds the window tools over a canned PATH, through the
+// injectable lookPath — the same seam routine capture uses — so what is
+// installed on the machine running the tests decides nothing.
+func nearMatchHarness(installed []string, apps ...string) *harness {
+	onPath := make(map[string]bool, len(installed))
+	for _, name := range installed {
+		onPath[name] = true
+	}
+	h := &harness{comp: desktop.NewFakeCompositor(testWindows()...), launcher: &fakeLauncher{}}
+	h.d = NewDesktop(DesktopOptions{
+		Compositor: h.comp, launcher: h.launcher, Apps: apps,
+		lookPath: func(name string) (string, error) {
+			if onPath[name] {
+				return "/usr/bin/" + name, nil
+			}
+			return "", errors.New(name + ": executable file not found in $PATH")
+		},
+	})
+	return h
+}
+
+// TestLaunchRefusalNamesAnInstalledNearMatch pins issue #71's recovery: a
+// refusal for a program that is not installed names an installed near-match
+// when one exists — the alias table, the shared "-desktop" convention, or a
+// category sibling — and stays quiet when nothing near is installed, so the
+// suggestion is always something that would actually launch.
+func TestLaunchRefusalNamesAnInstalledNearMatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		app       string
+		installed []string
+		apps      []string // launch allow list; empty allows anything
+		want      []string // fragments the refusal must carry
+		quiet     bool     // plain refusal: no suggestion offered
+	}{
+		{name: "alias: chrome finds chromium (the live incident's hint)",
+			app: "chrome", installed: []string{"chromium"},
+			want: []string{`"chrome" is not installed, but chromium is`, "call this tool again"}},
+		{name: "alias: google-chrome finds the -stable packaging",
+			app: "google-chrome", installed: []string{"google-chrome-stable"},
+			want: []string{"google-chrome-stable is"}},
+		{name: "alias: code finds code-oss (which the editor category does not list)",
+			app: "code", installed: []string{"code-oss"},
+			want: []string{"code-oss is"}},
+		{name: "packaging convention: signal finds signal-desktop",
+			app: "signal", installed: []string{"signal-desktop"},
+			want: []string{"signal-desktop is"}},
+		{name: "packaging convention alone: a name in no table still finds its -desktop binary",
+			app: "vesktop", installed: []string{"vesktop-desktop"},
+			want: []string{"vesktop-desktop is"}},
+		{name: "category sibling: firefox finds chromium (the live refusal)",
+			app: "firefox", installed: []string{"chromium"},
+			want: []string{`"firefox" is not installed, but chromium is`}},
+		{name: "several near-matches are named together",
+			app: "chrome", installed: []string{"chromium", "google-chrome-stable"},
+			want: []string{"chromium", "google-chrome-stable", "are", "one of them"}},
+		{name: "allow list: the suggestion is permitted",
+			app: "chrome", installed: []string{"chromium"}, apps: []string{"chrome", "chromium"},
+			want: []string{"chromium is"}},
+		{name: "quiet: nothing near is installed",
+			app: "chrome", installed: []string{"gimp"}, quiet: true},
+		{name: "quiet: an unknown name has no near-match to offer",
+			app: "hopfenschnitzel", installed: []string{"chromium"}, quiet: true},
+		{name: "quiet: a suggestion outside the allow list is never offered",
+			app: "chrome", installed: []string{"chromium"}, apps: []string{"chrome", "firefox"},
+			quiet: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := nearMatchHarness(tt.installed, tt.apps...)
+			out := h.run(t, LaunchAppToolName, map[string]any{"app": tt.app})
+			if tt.quiet {
+				if !strings.Contains(out, "cannot be started") || strings.Contains(out, "instead") {
+					t.Errorf("launch(%q) = %q, want a plain refusal with no suggestion", tt.app, out)
+				}
+			} else {
+				for _, want := range tt.want {
+					if !strings.Contains(out, want) {
+						t.Errorf("launch(%q) = %q, missing %q", tt.app, out, want)
+					}
+				}
+				if !strings.Contains(out, "only if they say yes") {
+					t.Errorf("launch(%q) = %q; the suggestion must route through the user", tt.app, out)
+				}
+			}
+			if got := h.launcher.calls(); len(got) != 0 {
+				t.Errorf("launched %v; a refusal must start nothing", got)
+			}
+		})
+	}
+}
+
+// TestInstalledNearMatchesAreBoundedAndDeduplicated: the refusal is one
+// spoken sentence, so the suggestions are capped and never repeat.
+func TestInstalledNearMatchesAreBoundedAndDeduplicated(t *testing.T) {
+	h := nearMatchHarness([]string{"chromium", "google-chrome-stable", "google-chrome",
+		"firefox", "brave", "vivaldi"})
+	got := h.d.installedNearMatches("chrome")
+	// Pinned at three, not at the constant: the bound is the spoken-sentence
+	// budget, and a test that compares the cap to itself checks nothing.
+	if len(got) > 3 {
+		t.Errorf("near matches = %v, want at most 3", got)
+	}
+	seen := map[string]bool{}
+	for _, name := range got {
+		if seen[name] {
+			t.Errorf("near matches repeat %q: %v", name, got)
+		}
+		seen[name] = true
+		if name == "chrome" {
+			t.Errorf("near matches suggest the very name that failed: %v", got)
+		}
 	}
 }
 
