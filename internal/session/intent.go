@@ -176,7 +176,10 @@ func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive boo
 			summary: verdict.Summary,
 			rule:    verdict.Rule,
 			key:     tools.IntentToolName + "\x00" + verdict.Command,
-			resume:  StateActing,
+			// A user-defined intent is a command the user wrote themselves, so
+			// remembering its approval is exactly what the setting is for.
+			rememberable: tools.RememberableApproval(tools.IntentToolName),
+			resume:       StateActing,
 		})
 		if !ok {
 			return nil, false

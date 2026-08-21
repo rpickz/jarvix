@@ -167,10 +167,30 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	FocusWindowToolName: PolicyAllow,
 }
 
+// neverSilent are the tools that must not inherit an "allow" policy default.
+//
+// Everything else in the registry is judged by the gate-wide default, on the
+// argument that a user who wrote `default = "allow"` meant it. Synthetic
+// keystrokes are the exception, and the reason is that they are the one
+// capability whose target the model does not choose and cannot see: the keys
+// land wherever focus is at that instant, and a mistake is neither visible
+// before it happens nor undoable after. So a global "allow" does not reach
+// them — only naming the tool explicitly
+// (`[tools.policy.tool]."typing.type_text" = "allow"`) does, which is a
+// sentence a user has to mean.
+//
+// The exception runs one way. A stricter default still wins: `default =
+// "deny"` denies these too, because tightening is never the thing to override.
+var neverSilent = map[string]bool{
+	TypeTextToolName: true,
+	PressKeyToolName: true,
+}
+
 // ToolDecision returns the configured tier for a tool: its per-tool entry,
 // a built-in default (shell.run and advisor.ask classify per call with an ask
-// fallback, artifact.create is allow), or the policy default. Used by status
-// reporting; Decide applies the same resolution.
+// fallback, artifact.create is allow, the typing tools always ask), or the
+// policy default. Used by status reporting; Decide applies the same
+// resolution.
 func (p *Policy) ToolDecision(name string) PolicyDecision {
 	if d, ok := p.tools[name]; ok {
 		return d
@@ -178,11 +198,29 @@ func (p *Policy) ToolDecision(name string) PolicyDecision {
 	if name == shellToolName || name == advisorToolName {
 		return PolicyAsk
 	}
+	if neverSilent[name] {
+		if p.defaultDecision == PolicyDeny {
+			return PolicyDeny
+		}
+		return PolicyAsk
+	}
 	if d, ok := builtinToolDefaults[name]; ok {
 		return d
 	}
 	return p.defaultDecision
 }
+
+// RememberableApproval reports whether an approval of this tool may be reused
+// for the rest of the conversation when `remember_for_conversation` is on.
+//
+// It is false for the typing tools, and the reason is that the setting's
+// premise does not hold for them. Remembering an approval is safe when the
+// thing approved is fully described by what was asked — the same command, the
+// same advisor. A typing approval is about a payload *and* a window that had
+// focus at that moment, and the second half cannot be carried forward: the
+// user is at their keyboard, and by the next call they may be somewhere else
+// entirely. Asking again costs a sentence; not asking costs whatever has focus.
+func RememberableApproval(tool string) bool { return !neverSilent[tool] }
 
 const shellToolName = "shell.run"
 
@@ -256,9 +294,13 @@ func (p *Policy) Decide(call ai.ToolCall) Verdict {
 				v.Rule = fmt.Sprintf("tool %q defaults to allow", call.Name)
 			}
 		default:
-			if _, ok := p.tools[call.Name]; ok {
+			_, explicit := p.tools[call.Name]
+			switch {
+			case explicit:
 				v.Rule = fmt.Sprintf("tool %q is set to ask", call.Name)
-			} else {
+			case neverSilent[call.Name]:
+				v.Rule = fmt.Sprintf("tool %q always asks unless the configuration names it", call.Name)
+			default:
 				v.Rule = "unknown tool defaults to ask"
 			}
 			v.Summary = fmt.Sprintf("I want to use the %s tool. Should I go ahead?", call.Name)

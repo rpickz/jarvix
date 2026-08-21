@@ -58,6 +58,26 @@ type Confirmable interface {
 	Confirmation(input json.RawMessage) (command, summary string, ok bool)
 }
 
+// Escalating is optionally implemented by a tool that can tell, from live
+// state, that *this* call is more dangerous than its configured tier assumes.
+//
+// It exists because some risk is not a property of the tool or its arguments.
+// "May Jarvix type?" is a question configuration can answer; "may Jarvix type
+// into a shell?" is not, because whether the focused window is a terminal
+// depends on where focus happens to be at this instant, and only the tool can
+// see that (#37).
+//
+// The direction is one-way and enforced by the caller: an implementation may
+// turn allow into ask, never ask or deny into allow. A tool can therefore only
+// ever make the gate stricter than the user configured it, which is the only
+// direction in which trusting a tool's own judgement is safe.
+type Escalating interface {
+	// Escalate reports that this call must be confirmed despite an allow tier,
+	// and names the rule for the logs and the audit trail. ok is false for the
+	// ordinary case: nothing about this call raises it.
+	Escalate(input json.RawMessage) (rule string, ok bool)
+}
+
 // Registry holds the enabled tools.
 type Registry struct {
 	tools map[string]Tool
@@ -100,15 +120,32 @@ func (r *Registry) Check(call ai.ToolCall) Verdict {
 		return Verdict{Decision: PolicyAllow, Tool: call.Name, Rule: "no policy installed"}
 	}
 	verdict := r.policy.Decide(call)
+	tool, registered := r.tools[call.Name]
+	// A tool that can see something the configuration could not may tighten
+	// the tier — allow becomes ask, and only in that direction (Escalating).
+	// Checked before the question is built, so an escalated call gets the same
+	// generated sentence a configured ask would.
+	if registered && verdict.Decision == PolicyAllow {
+		if e, escalating := tool.(Escalating); escalating {
+			if rule, ok := e.Escalate(json.RawMessage(call.Arguments)); ok {
+				verdict.Decision, verdict.Rule = PolicyAsk, rule
+				// A fallback question, so an escalation is never silent even if
+				// the tool then declines to word it. Confirmable overwrites it
+				// below in every case that has something better to say.
+				verdict.Summary = fmt.Sprintf("I want to use the %s tool, and %s. Should I go ahead?",
+					call.Name, rule)
+				r.log.Info("tool call escalated to ask", "component", "tools",
+					"tool", call.Name, "rule", rule)
+			}
+		}
+	}
 	// The gate settled the tier; a Confirmable tool now supplies the sentence
 	// the user actually hears, from what it can see (Confirmable). Only for
 	// the ask tier: nothing else asks a question.
-	if verdict.Decision == PolicyAsk {
-		if tool, registered := r.tools[call.Name]; registered {
-			if c, confirmable := tool.(Confirmable); confirmable {
-				if command, summary, ok := c.Confirmation(json.RawMessage(call.Arguments)); ok {
-					verdict.Command, verdict.Summary = command, summary
-				}
+	if registered && verdict.Decision == PolicyAsk {
+		if c, confirmable := tool.(Confirmable); confirmable {
+			if command, summary, ok := c.Confirmation(json.RawMessage(call.Arguments)); ok {
+				verdict.Command, verdict.Summary = command, summary
 			}
 		}
 	}
