@@ -56,6 +56,112 @@ func TestDispatchArgvIsFixedAndAddressIsOneElement(t *testing.T) {
 	}
 }
 
+// TestWorkspaceAndSpawnArgvPerDialect pins the two dispatches the
+// deterministic intents make (#47). The legacy row is the form every script
+// on the internet uses and a Lua parse error on a Lua-configured compositor;
+// the Lua row is what actually reaches a current Omarchy desktop.
+func TestWorkspaceAndSpawnArgvPerDialect(t *testing.T) {
+	tests := []struct {
+		name    string
+		got     []string
+		want    []string
+		mustNot string
+	}{
+		{"workspace lua", workspaceArgs(dialectLua, 4),
+			[]string{"dispatch", `hl.dsp.focus({ workspace = 4 })`}, ""},
+		{"workspace legacy", workspaceArgs(dialectLegacy, 4),
+			[]string{"dispatch", "workspace", "4"}, ""},
+		{"spawn lua", spawnArgs(dialectLua, "alacritty"),
+			[]string{"dispatch", `hl.dsp.exec_cmd("alacritty")`}, ""},
+		{"spawn legacy", spawnArgs(dialectLegacy, "alacritty"),
+			[]string{"dispatch", "exec", "alacritty"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.Join(tt.got, "\x00") != strings.Join(tt.want, "\x00") {
+				t.Fatalf("argv = %q, want %q", tt.got, tt.want)
+			}
+			// Whatever the dialect, the whole dispatch is one argv element
+			// after the verb: the compositor parses it, a shell never sees it.
+			if len(tt.got) > 3 {
+				t.Errorf("argv = %q, want at most a verb and its argument", tt.got)
+			}
+		})
+	}
+}
+
+func TestSwitchWorkspaceAndSpawnRefuseNonsenseBeforeDispatching(t *testing.T) {
+	bin := writeStub(t, "hyprctl", "#!/bin/sh\nprintf 'ok\\n'\n")
+	h := &Hyprland{Binary: bin}
+	for _, ws := range []int{0, -1, 100, 1000} {
+		if err := h.SwitchWorkspace(context.Background(), ws); err == nil {
+			t.Errorf("SwitchWorkspace(%d) was dispatched", ws)
+		}
+	}
+	// A quote or a space would be Lua syntax inside hl.dsp.exec_cmd("…"), and
+	// the compositor runs that string through a shell — so neither may ever
+	// reach argv.
+	for _, program := range []string{
+		"", "alacritty --title x", `alacritty") os.execute("id`, "foot; id", "$(id)", "a`b`",
+	} {
+		if err := h.Spawn(context.Background(), program); err == nil {
+			t.Errorf("Spawn(%q) was dispatched", program)
+		}
+	}
+}
+
+func TestSwitchWorkspaceUsesTheProbedDialect(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		luaOK bool
+		want  string
+	}{
+		{"lua", true, `dispatch hl.dsp.focus({ workspace = 4 })`},
+		{"legacy", false, "dispatch workspace 4"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bin, dir := hyprStub(t, tt.luaOK, "[]")
+			h := &Hyprland{Binary: bin}
+			if err := h.SwitchWorkspace(context.Background(), 4); err != nil {
+				t.Fatalf("SwitchWorkspace: %v", err)
+			}
+			got := calls(t, dir)
+			if len(got) == 0 || got[len(got)-1] != tt.want {
+				t.Fatalf("calls = %q, want a %s dispatch %q", got, tt.name, tt.want)
+			}
+			// The probe is the seam's, made once: "open a terminal" straight
+			// after must not pay for a second one.
+			before := len(got)
+			if err := h.Spawn(context.Background(), "alacritty"); err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if got = calls(t, dir); len(got) != before+1 {
+				t.Fatalf("calls = %q, want one more dispatch and no re-probe", got)
+			}
+		})
+	}
+}
+
+// TestRefusedWorkspaceDispatchIsAFailure is the deeper half of #47: hyprctl
+// exits 0 for a dispatch the compositor refused, so a workspace switch that
+// did not happen used to be indistinguishable from one that did.
+func TestRefusedWorkspaceDispatchIsAFailure(t *testing.T) {
+	bin := writeStub(t, "hyprctl", `#!/bin/sh
+case "$2" in
+  hl.dsp.no_op*) printf 'ok\n' ;;
+  *) printf 'warning: =[C]:-1: hl.focus: workspace not found\n' ;;
+esac
+`)
+	h := &Hyprland{Binary: bin}
+	err := h.SwitchWorkspace(context.Background(), 4)
+	if err == nil || !strings.Contains(err.Error(), "workspace not found") {
+		t.Errorf("err = %v, want the compositor's refusal rather than its exit code", err)
+	}
+	if err := h.Spawn(context.Background(), "alacritty"); err == nil {
+		t.Error("a refused spawn reported success")
+	}
+}
+
 func TestDispatchRefusesMalformedAddress(t *testing.T) {
 	bin := writeStub(t, "hyprctl", "#!/bin/sh\nprintf 'ok\\n'\n")
 	h := &Hyprland{Binary: bin}

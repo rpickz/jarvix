@@ -46,6 +46,9 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 		// notify-send, no window opening on the machine running the suite.
 		Notifier:   &desktop.FakeNotifier{},
 		OpenWindow: func(context.Context) error { return nil },
+		// The window tools and the desktop intents share this seam, so a
+		// daemon test can never dispatch to the desktop running the suite.
+		Compositor: desktop.NewFakeCompositor(),
 	})
 	if err != nil {
 		t.Fatal(err)

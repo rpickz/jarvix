@@ -173,7 +173,7 @@ func assistantSystemPrompt(cfg config.Config) string {
 
 // engineOptions maps configuration onto engine options, shared by New and by
 // config reloads so both always agree on the translation.
-func engineOptions(cfg config.Config, logger *slog.Logger) session.Options {
+func engineOptions(cfg config.Config, compositor desktop.Compositor, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -186,6 +186,7 @@ func engineOptions(cfg config.Config, logger *slog.Logger) session.Options {
 		ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		Intents:           intentRouter(cfg),
+		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Lexicon:           cfg.TTS.Lexicon,
 	}

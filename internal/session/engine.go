@@ -56,6 +56,15 @@ type Options struct {
 	// IntentRunner executes matched intents. Nil alongside a router installs
 	// the real one; tests substitute a fake so no test touches wpctl.
 	IntentRunner intent.Runner
+	// Compositor carries out the intents that act on the desktop — "workspace
+	// four", "open a terminal" — through the same seam the window tools use
+	// (ADR 0022), so the dispatch dialect is probed once for both.
+	//
+	// Deliberately not defaulted the way IntentRunner is: a nil here means
+	// those intents say they cannot reach the window manager, which is both
+	// the honest answer off a Wayland session and the reason no test in this
+	// package can accidentally move the developer's workspace.
+	Compositor desktop.Compositor
 	// Context gathers opt-in desktop context — active window, selection,
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.

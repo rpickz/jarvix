@@ -40,6 +40,12 @@ type Daemon struct {
 	// Desktop notification dispatch (ui.notifications); see notifications.go.
 	notifier   desktop.Notifier
 	openWindow func(context.Context) error
+	// compositor is the one window-manager seam this daemon owns, shared by
+	// the window tools and the desktop intents. Held here so a settings
+	// reload rebuilds the engine's options around the *same* instance and its
+	// probed dispatch dialect, rather than making the next "workspace four"
+	// pay for a fresh probe.
+	compositor desktop.Compositor
 
 	// The most recent session failure, retained past session.finished so the
 	// conversation window can render it. A window opened from an error
@@ -84,6 +90,10 @@ type Deps struct {
 	Player      audio.Player
 	// Notifier delivers desktop notifications; nil uses notify-send.
 	Notifier desktop.Notifier
+	// Compositor is the window-manager seam (ADR 0022); nil drives Hyprland
+	// through hyprctl. Injected by tests so nothing here ever touches a real
+	// desktop.
+	Compositor desktop.Compositor
 	// OpenWindow opens the conversation window after a notification click;
 	// nil asks the Omarchy shell plugin.
 	OpenWindow func(context.Context) error
@@ -101,6 +111,16 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	deps, workers, err := fillDeps(cfg, paths, deps, logger)
 	if err != nil {
 		return nil, err
+	}
+
+	// One compositor for the whole daemon. The window tools (ADR 0022) and the
+	// deterministic desktop intents (ADR 0017) both act through it, so the
+	// dispatch dialect is probed once and remembered for both — a second
+	// instance would mean a second probe and, worse, a second place for the
+	// dialect decision to live.
+	compositor := deps.Compositor
+	if compositor == nil {
+		compositor = &desktop.Hyprland{}
 	}
 
 	bus := session.NewBus(logger)
@@ -143,7 +163,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// ask about the changes without either being a special case.
 	if cfg.Tools.Desktop {
 		windows := tools.NewDesktop(tools.DesktopOptions{
-			Compositor: &desktop.Hyprland{},
+			Compositor: compositor,
 			Apps:       cfg.Tools.DesktopApps,
 			ScrubEnv:   providerKeyEnvNames(cfg),
 			// The event carries what was done to which window so the overlay
@@ -219,7 +239,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// still has its context after a daemon restart (ADR 0011).
 	store := &history.File{Path: paths.HistoryFile()}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, registry, store, bus, logger, engineOptions(cfg, logger))
+		deps.Recorder, deps.Player, registry, store, bus, logger,
+		engineOptions(cfg, compositor, logger))
 
 	if deps.Notifier == nil {
 		deps.Notifier = &desktop.NotifySend{}
@@ -234,7 +255,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
-		paths: paths, injected: injected, cfg: cfg, warm: workers,
+		compositor: compositor,
+		paths:      paths, injected: injected, cfg: cfg, warm: workers,
 	}
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
