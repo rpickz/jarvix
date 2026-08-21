@@ -186,9 +186,15 @@ type streamingSpeaker struct {
 	// mu guards the three flags below and nothing else; it is only ever taken
 	// as a leaf, so it can never deadlock against Engine.mu.
 	mu sync.Mutex
-	// accepted is set once the first utterance is queued: from that moment
-	// there is audio in flight or committed to be, even while synthesis is
-	// still working — killing playback must not wait on synthesis.
+	// accepted is set once the first utterance is committed to the queue:
+	// from that moment there is audio in flight or committed to be, even
+	// while synthesis is still working — killing playback must not wait on
+	// synthesis. It is set *before* the utterance is visible to run(), which
+	// makes an invariant hold by construction: any subscriber that observes
+	// tts.started (published downstream of the handoff) finds speaking()
+	// live until playback drains, because accepted happened-before the event
+	// and drained cannot be set while the answer's chunks are still gated
+	// (issue #80).
 	accepted bool
 	// announced is set once the answer has claimed Speaking and published
 	// tts.started. Tracked here (not only in run's locals) so a cancel knows
@@ -281,11 +287,24 @@ func (sp *streamingSpeaker) enqueue(u utterance) bool {
 	if strings.TrimSpace(u.text) == "" {
 		return false
 	}
+	// accepted is recorded before the utterance is handed over, never after.
+	// The moment run() can see it, everything downstream — synthesis,
+	// claiming Speaking, publishing tts.started — can happen before this
+	// goroutine is scheduled again, and a stop arriving on that event must
+	// find speaking() live (issue #80: a CI runner parked exactly here and
+	// CancelSpeech read accepted == false while held audio sat in the
+	// synthesizer). If the handoff then loses to session teardown, the stale
+	// mark is unobservable: every path that cancels the session context also
+	// clears Engine.current under the lock, so CancelSpeech bails before it
+	// would ask this speaker.
+	sp.mu.Lock()
+	sp.accepted = true
+	sp.mu.Unlock()
 	select {
 	case sp.in <- u:
-		sp.mu.Lock()
-		sp.accepted = true
-		sp.mu.Unlock()
+		if queued := sp.e.speakerQueued; queued != nil {
+			queued()
+		}
 		return true
 	case <-sp.s.ctx.Done():
 		return false

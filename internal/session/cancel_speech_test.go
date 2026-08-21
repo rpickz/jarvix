@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -262,6 +263,61 @@ func TestCancelSpeechSilencesADirectConfirmationPrompt(t *testing.T) {
 	}
 	if h.runner.Shell() != nil {
 		t.Errorf("the cancelled command ran: %v", h.runner.Shell())
+	}
+}
+
+// TestCancelSpeechIsLiveTheInstantTtsStartedArrives pins issue #80's window
+// with the interleaving CI actually hit, made deterministic. The goroutine
+// that queues the answer's sentence is parked (via the engine's speakerQueued
+// seam) the instant the utterance is handed to the speaker's run loop — the
+// exact spot a slow runner descheduled it — while the run loop races ahead:
+// synthesizes, claims Speaking, publishes tts.started. A stop arriving on
+// that event must find speaking() live even though the enqueuer has not run
+// again, because tts.started is the bus telling every client "the answer is
+// playing", and a client that acts on it is entitled to a stop that works.
+//
+// Before the fix this failed every run with the CI's exact message: accepted
+// was recorded by the parked goroutine *after* the handoff, so the cancel
+// read accepted == false while held audio sat in the synthesizer.
+func TestCancelSpeechIsLiveTheInstantTtsStartedArrives(t *testing.T) {
+	h := newHarness(t, Options{SpeakResponses: true})
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unpark := func() { releaseOnce.Do(func() { close(release) }) }
+	// A failure returns before the happy path unparks; without this cleanup
+	// the frozen goroutine would wedge the harness's Shutdown drain too and
+	// bury the real failure under a quiesce timeout.
+	t.Cleanup(unpark)
+	var parkOnce sync.Once
+	h.engine.speakerQueued = func() {
+		// Only the first utterance matters — it is the one that races the
+		// announcement — and parking any later one would deadlock the drain.
+		parkOnce.Do(func() {
+			close(parked)
+			<-release
+		})
+	}
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("hi")
+	<-parked                    // the utterance is visible to run(); its queuer is frozen
+	h.waitFor(t, "tts.started") // the answer announced itself regardless
+
+	if !h.engine.CancelSpeech() {
+		t.Fatal("CancelSpeech reported nothing playing on the very event that announced the speech")
+	}
+	unpark()
+	ev := h.waitFor(t, "tts.finished")
+	if ev.Data["interrupted"] != true {
+		t.Errorf("tts.finished = %v, want interrupted: true", ev.Data)
+	}
+	h.waitFor(t, "session.finished")
+	h.waitIdle(t)
+	if state, id := h.engine.State(); state != StateIdle || id != "" {
+		t.Errorf("state = %s session = %q; want a cleanly finished engine", state, id)
 	}
 }
 
