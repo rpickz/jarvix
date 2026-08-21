@@ -50,6 +50,14 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 				// Retained past the session so `jarvix status --last` can
 				// print the budget of the interaction that just happened.
 				d.setLastTimings(ev.Data)
+			case "typing.audit":
+				// The typing audit trail (ADR 0023). Retained for the same
+				// reason and answered by the same flag: "what did it just do
+				// with my keyboard?" is asked after it happened, by which time
+				// the event has already gone out on the bus. What is kept is
+				// the window, the length and the outcome — the payload is not
+				// in the event, so it cannot be in the trail.
+				d.setLastTyping(ev.Data)
 			case "session.finished":
 				// Retain the failure past the session so a window opened by
 				// clicking the error notification can still render it.
@@ -108,6 +116,26 @@ func (d *Daemon) lastTimingsReport() map[string]any {
 	d.errMu.Lock()
 	defer d.errMu.Unlock()
 	return d.lastTimings
+}
+
+// setLastTyping records the most recent typing decision. The map is copied
+// because the event's own map is shared with every other bus subscriber.
+func (d *Daemon) setLastTyping(data map[string]any) {
+	copied := make(map[string]any, len(data))
+	for k, v := range data {
+		copied[k] = v
+	}
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	d.lastTyping = copied
+}
+
+// lastTypingReport returns the retained typing audit for status.get, or nil
+// when nothing has been typed since the daemon started.
+func (d *Daemon) lastTypingReport() map[string]any {
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	return d.lastTyping
 }
 
 // buildNotification decides what a finished session's notification says,

@@ -113,3 +113,93 @@ func TestRunStatusRejectsUnknownFlags(t *testing.T) {
 		t.Errorf("exit = %d, stderr = %q", code, stderr)
 	}
 }
+
+// TestRunStatusLastShowsTheTypingAudit: after Jarvix has typed, the user can
+// ask what it did with their keyboard — which window, how much, and whether
+// they were asked first (ADR 0023).
+//
+// The assertion that matters most is the negative one at the end: the trail
+// says everything except what was typed, because the daemon never had it.
+func TestRunStatusLastShowsTheTypingAudit(t *testing.T) {
+	hermeticEnv(t)
+	startDaemon(t, nil, map[string]ipc.Handler{
+		"status.get": func(json.RawMessage) (any, error) {
+			return map[string]any{
+				"state": "idle", "version": "test", "protocol": 1,
+				"last_typing": map[string]any{
+					"tool": "typing.type_text", "window": "Alacritty — zsh",
+					"chars": 24, "approved": true, "terminal": true, "outcome": "typed",
+				},
+			}, nil
+		},
+		"context.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"captured": false}, nil
+		},
+	})
+	var code int
+	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{
+		"typing:   typed — Alacritty — zsh",
+		"24 characters", "confirmed by you", "into a terminal",
+		"the text itself is never recorded",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestRunStatusLastReportsAFocusChange: the refusal is as much a part of the
+// audit trail as the action, because "it typed nothing because you moved" is
+// what a user is trying to find out.
+func TestRunStatusLastReportsAFocusChange(t *testing.T) {
+	hermeticEnv(t)
+	startDaemon(t, nil, map[string]ipc.Handler{
+		"status.get": func(json.RawMessage) (any, error) {
+			return map[string]any{
+				"state": "idle", "version": "test", "protocol": 1,
+				"last_typing": map[string]any{
+					"tool": "typing.type_text", "window": "code — engine.go",
+					"chars": 11, "approved": true, "outcome": "focus-changed",
+					"reason": "focus moved to firefox — GitHub before it could be typed",
+				},
+			}, nil
+		},
+		"context.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"captured": false}, nil
+		},
+	})
+	var code int
+	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{"typing:   focus-changed", "focus moved to firefox — GitHub"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestRunStatusLastWithNoTypingSaysNothing: typing is off by default, and a
+// status report should not grow a line about a capability nobody enabled.
+func TestRunStatusLastWithNoTypingSaysNothing(t *testing.T) {
+	hermeticEnv(t)
+	startDaemon(t, nil, map[string]ipc.Handler{
+		"status.get": idleStatus,
+		"context.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"captured": false}, nil
+		},
+	})
+	var code int
+	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if strings.Contains(stdout, "typing:") {
+		t.Errorf("output should say nothing about typing:\n%s", stdout)
+	}
+}

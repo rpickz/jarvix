@@ -54,6 +54,9 @@ func SettingsChecks(cfg config.Config, paths config.Paths) []ReadinessResult {
 		// fast enough for a settings screen, and the one place the answer to
 		// "why does nothing happen when I ask it to focus something?" lives.
 		{checkWindowControl, "tools.desktop"},
+		// Typing is off by default, so this check is usually one string compare;
+		// with it on it is a local probe that presses nothing (ADR 0023).
+		{checkTyping, "tools.typing.enable"},
 		{checkPushToTalk, "activation.ptt_chord"},
 	}
 	results := make([]ReadinessResult, 0, len(checks))

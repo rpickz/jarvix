@@ -58,6 +58,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkIntentBinaries,
 		checkContextSources,
 		checkWindowControl,
+		checkTyping,
 		checkDaemon,
 		checkWarmEngines,
 		checkProviderConfigured,

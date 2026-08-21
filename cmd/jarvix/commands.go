@@ -51,6 +51,8 @@ func cmdStatus(paths config.Paths, last bool) error {
 		if err := printLastContext(client); err != nil {
 			return err
 		}
+		// ...and "what did it do with my keyboard?" is the third (ADR 0023).
+		printLastTyping(status["last_typing"])
 	}
 	if pol, ok := status["policy"].(map[string]any); ok {
 		fmt.Printf("policy:   default=%v confirm_timeout=%vs remember_for_conversation=%v\n",
@@ -96,6 +98,42 @@ func printTimings(v any) {
 		}
 		fmt.Printf("          %-33s %5.0f ms\n", stage.label, toFloat(ms))
 	}
+}
+
+// printLastTyping renders the typing audit trail: the most recent thing Jarvix
+// did with the user's keyboard (ADR 0023).
+//
+// It reports the target, the length, whether a human approved it, and the
+// outcome — and it deliberately cannot report the text, because the daemon
+// does not keep it. That is the whole design: a user must be able to audit
+// what was typed *where*, without the audit itself becoming somewhere their
+// dictated password is written down.
+func printLastTyping(v any) {
+	report, ok := v.(map[string]any)
+	if !ok || len(report) == 0 {
+		return // typing is off, or nothing has been typed since jarvixd started
+	}
+	approval := "not confirmed (the policy allowed it)"
+	if approved, _ := report["approved"].(bool); approved {
+		approval = "confirmed by you"
+	}
+	where, _ := report["window"].(string)
+	if where == "" {
+		where = "no window"
+	}
+	fmt.Printf("typing:   %v — %s\n", report["outcome"], where)
+	detail := fmt.Sprintf("%.0f characters, %s", toFloat(report["chars"]), approval)
+	if key, _ := report["key"].(string); key != "" {
+		detail = fmt.Sprintf("key %s, %s", key, approval)
+	}
+	if terminal, _ := report["terminal"].(bool); terminal {
+		detail += ", into a terminal"
+	}
+	fmt.Printf("          %s\n", detail)
+	if reason, _ := report["reason"].(string); reason != "" {
+		fmt.Printf("          %s\n", reason)
+	}
+	fmt.Println("          (the text itself is never recorded)")
 }
 
 // printWarmWorkers summarises the supervised engine processes, one line each,
