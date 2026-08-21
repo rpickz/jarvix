@@ -110,6 +110,11 @@ type Match struct {
 	// UserDefined distinguishes a configured intent from a built-in one, for
 	// the gate decision and for observability.
 	UserDefined bool
+	// Routine is the configured routine this utterance triggers ([[routines]],
+	// ADR 0026), empty for every other intent. Only the name travels: the
+	// router decides *whether* an utterance is a routine, and the engine hands
+	// the name to the routine runner, which owns what the steps mean.
+	Routine string
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -124,6 +129,21 @@ type Custom struct {
 	Say string
 }
 
+// RoutinePhrases is the router's view of one configured routine ([[routines]]):
+// the name the engine will run and the phrases that trigger it. The steps are
+// deliberately absent — routing decides *whether* an utterance is a routine,
+// never what a routine does, so nothing about launching or placing windows can
+// leak into the grammar table.
+type RoutinePhrases struct {
+	// Name is the routine's configured name, spoken in summaries and handed
+	// to the runner on a match.
+	Name string
+	// Phrases are the literal trigger phrases. Placeholders are not accepted:
+	// a routine's steps are fixed by configuration, so there is nothing a slot
+	// value could parameterise.
+	Phrases []string
+}
+
 // Options configures a router.
 type Options struct {
 	// Terminal is the binary "open terminal" launches. It is validated as a
@@ -131,6 +151,8 @@ type Options struct {
 	Terminal string
 	// Custom holds the user-defined intents.
 	Custom []Custom
+	// Routines holds the configured routines' trigger phrases (ADR 0026).
+	Routines []RoutinePhrases
 }
 
 // DefaultTerminal is the terminal "open terminal" launches when configuration
@@ -182,6 +204,7 @@ type rule struct {
 	ack         func(slot int) string
 	command     string
 	userDefined bool
+	routine     string
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -339,15 +362,24 @@ func New(opts Options) (*Router, error) {
 		}
 	}
 
+	// taken maps a compiled phrase to a human description of what owns it, so
+	// a routine phrase collision is reported against whichever of the three
+	// families — built-in, custom intent, another routine — got there first.
+	taken := make(map[string]string, len(builtinNames))
+	for key, owner := range builtinNames {
+		taken[key] = fmt.Sprintf("the built-in intent %q", owner)
+	}
+
 	for i, c := range opts.Custom {
 		p, err := compileCustom(i, c)
 		if err != nil {
 			return nil, err
 		}
-		if owner, taken := builtinNames[p.key()]; taken {
+		if owner, clash := builtinNames[p.key()]; clash {
 			return nil, fmt.Errorf("%s: match %q is already the built-in intent %q; "+
 				"choose a different phrase", customLabel(i), c.Match, owner)
 		}
+		taken[p.key()] = fmt.Sprintf("%s (%q)", customLabel(i), c.Match)
 		ack := strings.TrimSpace(c.Say)
 		if ack == "" {
 			ack = "Done."
@@ -359,7 +391,50 @@ func New(opts Options) (*Router, error) {
 		})
 		r.names = append(r.names, "custom."+p.key())
 	}
+
+	// Routines last, and checked against everything: a phrase that already
+	// belongs to a built-in, a custom intent, or an earlier routine is a
+	// config error at load, never a silent coin toss at match time. The rules
+	// they compile to carry only the routine's name — no ack (the engine
+	// speaks the run's summary instead) and no argv or command of any kind.
+	for i, rt := range opts.Routines {
+		name := strings.TrimSpace(rt.Name)
+		label := routineLabel(i, name)
+		if name == "" {
+			return nil, fmt.Errorf("%s: name is empty; give the routine a name to trigger and log under", label)
+		}
+		if len(rt.Phrases) == 0 {
+			return nil, fmt.Errorf("%s: it has no phrases; add at least one trigger phrase", label)
+		}
+		for _, phrase := range rt.Phrases {
+			if strings.ContainsAny(phrase, "{}") {
+				// A routine's steps are fixed by configuration, so a slot
+				// would have nothing to parameterise — refusing it here keeps
+				// the schema honest for the capture tooling too (#62).
+				return nil, fmt.Errorf("%s: phrase %q contains a placeholder; routine phrases are "+
+					"literal, because the steps are fixed by the configuration", label, phrase)
+			}
+			p, err := compile(phrase)
+			if err != nil {
+				return nil, fmt.Errorf("%s: phrase %q: %w", label, phrase, err)
+			}
+			if owner, clash := taken[p.key()]; clash {
+				return nil, fmt.Errorf("%s: phrase %q is already %s; choose a different phrase",
+					label, phrase, owner)
+			}
+			taken[p.key()] = fmt.Sprintf("the trigger for routine %q", name)
+			r.add(&rule{name: "routine.run", pattern: p, routine: name})
+		}
+		r.names = append(r.names, "routine:"+name)
+	}
 	return r, nil
+}
+
+func routineLabel(i int, name string) string {
+	if name == "" {
+		return fmt.Sprintf("routines[%d]", i)
+	}
+	return fmt.Sprintf("routines[%d] (%q)", i, name)
 }
 
 // ValidateCustom reports the first problem with the user-defined intents,
@@ -426,6 +501,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Name: ru.name, Slot: slot, HasSlot: hasSlot, Control: ru.control,
 		Desktop: ru.desktop, Program: ru.program,
 		Command: ru.command, UserDefined: ru.userDefined,
+		Routine: ru.routine,
 	}
 	if ru.argv != nil {
 		m.Argv = ru.argv(slot)

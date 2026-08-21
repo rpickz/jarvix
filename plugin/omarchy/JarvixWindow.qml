@@ -105,10 +105,34 @@ FloatingWindow {
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "conversation.get" }) + "\n")
   }
 
+  // --- routines -----------------------------------------------------------
+  // The configured routines (ADR 0026), listed so one click places the
+  // desktop. Display and trigger only: routines.run replays the routine's
+  // phrase through the daemon's ordinary session path, so the router, the
+  // permission gate, and the spoken summary all behave exactly as if the
+  // phrase had been spoken — this window decides nothing (ADR 0013).
+  property var routines: []
+
+  function requestRoutines() {
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 15, method: "routines.list" }) + "\n")
+  }
+
+  function runRoutine(name) {
+    if (!daemon.connected) return
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: 16, method: "routines.run", params: { name: name }
+    }) + "\n")
+  }
+
   // --- typed turns --------------------------------------------------------
   // Request id 1 is the conversation snapshot; typed submissions take ids
   // from 2 upwards so a reply can be matched to the text that produced it.
-  property int nextRequestId: 2
+  // Dynamic request ids start above the fixed ones this connection also
+  // carries (1 = conversation.get, 15/16 = routines list/run; settings has
+  // 11–14 on its own socket). Two features merged with each scheme unaware
+  // of the other, and a dynamic counter walking into the fixed range would
+  // misroute a history reply as a routines one — hence the gap.
+  property int nextRequestId: 100
   property int submitRequestId: 0
   // The text of the submission in flight, kept only so a failed submit can
   // give it back. A question typed and then lost to a daemon that died
@@ -332,6 +356,10 @@ FloatingWindow {
       requestConversation()
       if (historyOpen) requestHistory()
       break
+    case "config.changed":
+      // A saved config may have added or renamed routines.
+      requestRoutines()
+      break
     }
   }
 
@@ -357,6 +385,11 @@ FloatingWindow {
                    frame.id === win.historyReadRequestId ||
                    frame.id === win.historyOpenRequestId)) {
           win.handleHistoryReply(frame)
+        } else if (frame.id === 15 && frame.result) {
+          win.routines = frame.result.routines || []
+        } else if (frame.id === 16 && frame.error) {
+          win.errorStage = "routine"
+          win.errorMessage = String(frame.error.message || "the routine could not be started")
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
         } else if (frame.id === 1 && frame.error) {
@@ -372,6 +405,7 @@ FloatingWindow {
       win.socketReady = connected
       if (connected) {
         win.requestConversation()
+        win.requestRoutines()
       } else {
         win.sessionState = "idle"
         win.assistantStreaming = false
@@ -798,6 +832,70 @@ FloatingWindow {
       anchors.left: parent.left
       anchors.right: parent.right
       spacing: Style.space(4)
+
+      // Routines panel: each configured routine, its phrases, and a Run
+      // button. Sits with the composer because both are ways to start a turn.
+      Column {
+        id: routinesPanel
+        visible: win.socketReady && win.routines.length > 0
+        width: parent.width
+        spacing: Style.space(4)
+        bottomPadding: Style.space(8)
+
+        Text {
+          text: "Routines"
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.subtitle
+          color: Util.alpha(Color.popups.text, 0.7)
+        }
+
+        Repeater {
+          model: win.routines
+          delegate: Row {
+            id: routineRow
+            required property var modelData
+            width: routinesPanel.width
+            spacing: Style.space(8)
+
+            Rectangle {
+              id: runButton
+              width: runLabel.width + Style.space(20)
+              height: runLabel.height + Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.accent, runButton.activeFocus ? 0.35 : 0.18)
+              border.color: Color.accent
+              border.width: runButton.activeFocus ? 2 : 1
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Run routine " + routineRow.modelData.name
+              Keys.onReturnPressed: win.runRoutine(routineRow.modelData.name)
+              Keys.onSpacePressed: win.runRoutine(routineRow.modelData.name)
+              Text {
+                id: runLabel
+                anchors.centerIn: parent
+                text: "Run"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea { anchors.fill: parent; onClicked: win.runRoutine(routineRow.modelData.name) }
+            }
+
+            Text {
+              width: routineRow.width - runButton.width - Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+              text: routineRow.modelData.name
+                + "  —  say “" + (routineRow.modelData.phrases || []).join("” or “") + "”"
+            }
+          }
+        }
+      }
 
       Text {
         id: composerLabel

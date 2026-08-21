@@ -12,6 +12,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/memory"
+	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
@@ -179,17 +180,45 @@ func assistantSystemPrompt(cfg config.Config) string {
 	return prompt
 }
 
+// routineRunner builds the routine runner (ADR 0026), or nil when nothing is
+// configured. The explicit nil matters for the same reason contextCollector's
+// does: a typed-nil *routine.Runner in the interface field would read as
+// "routines exist" to the engine. Rebuilt on config reload alongside the
+// intent router, and around the same shared compositor, so the probed
+// dispatch dialect is discovered once for intents, window tools, and
+// routines alike.
+func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
+	logger *slog.Logger) session.RoutineRunner {
+	defs := cfg.RoutineDefinitions()
+	if len(defs) == 0 {
+		return nil
+	}
+	return routine.New(routine.Options{
+		Compositor:  compositor,
+		Definitions: defs,
+		Log:         logger,
+		// routine.started / routine.step / routine.finished go out on the bus
+		// so the bar and the window can show progress; the user only ever
+		// *hears* the final summary.
+		Publish: func(event string, data map[string]any) {
+			bus.Publish(session.Event{Type: event, Data: data})
+		},
+	})
+}
+
 // engineOptions maps configuration onto engine options, shared by New and by
-// config reloads so both always agree on the translation. book is the
-// daemon's knowledge base (ADR 0025), nil when memory is disabled — it is a
-// parameter rather than rebuilt from cfg because the store is
+// config reloads so both always agree on the translation. The bus is here for
+// the routine runner, which publishes its progress events through it. book is
+// the daemon's knowledge base (ADR 0025), nil when memory is disabled — it is
+// a parameter rather than rebuilt from cfg because the store is
 // construction-wired (restart-class) and must stay the same instance the
-// memory tools write through. archive is the durable conversation store
-// (ADR 0027), a parameter for the same reason: one instance serves the
-// engine's appends and the conversation.* IPC methods, and only the
-// retention switch here decides whether the engine writes to it.
-func engineOptions(cfg config.Config, compositor desktop.Compositor, book *memory.Book,
-	archive conversations.Store, logger *slog.Logger) session.Options {
+// memory tools write through. bus carries the routine progress events
+// (ADR 0026). archive is the durable conversation store (ADR 0027), a
+// parameter for the same reason as book: one instance serves the engine's
+// appends and the conversation.* IPC methods, and only the retention switch
+// here decides whether the engine writes to it.
+func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
+	book *memory.Book, archive conversations.Store, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -202,6 +231,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, book *memor
 		ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		Intents:           intentRouter(cfg),
+		Routines:          routineRunner(cfg, compositor, bus, logger),
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Memory:            memoryInjector(book),

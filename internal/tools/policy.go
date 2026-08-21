@@ -161,6 +161,7 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // state changes, so they take the policy default (ask), and
 // `[tools.policy.tool]."desktop.move_window" = "allow"` is how a user who
 // disagrees says so.
+//
 // The two memory verbs here are remember and recall (ADR 0025). Recall is a
 // read. Remember mutates state, but its blast radius is bounded by
 // construction the way artifact.create's is: it writes only into the user's
@@ -170,12 +171,23 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // loud — into a question about itself. memory.forget is absent on purpose:
 // deletion is the one memory operation that cannot be undone, so it takes
 // the policy default (ask) and confirms the exact fact about to go.
+//
+// routine.run is allow for yet another reason: authorship. Every step of a
+// routine was written by the user in their own configuration — a fixed
+// program name and a fixed placement, no shell anywhere (ADR 0026) — and the
+// spoken phrase is itself the instruction to run exactly those steps. Asking
+// "should I run your morning setup?" after "morning setup" would be asking
+// the user to confirm their own sentence. A user who wants the question
+// anyway (a shared machine, say) writes
+// `[tools.policy.tool]."routine.run" = "ask"`, and deny disables routines
+// outright.
 var builtinToolDefaults = map[string]PolicyDecision{
 	"artifact.create":      PolicyAllow,
 	ListWindowsToolName:    PolicyAllow,
 	FocusWindowToolName:    PolicyAllow,
 	MemoryRememberToolName: PolicyAllow,
 	MemoryRecallToolName:   PolicyAllow,
+	RoutineToolName:        PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
@@ -248,6 +260,46 @@ const AdvisorToolName = advisorToolName
 // unleashing the model, and disabling shell.run does not silently break
 // phrases they configured by hand. Deny rules still win either way.
 const IntentToolName = "intent.run"
+
+// RoutineToolName is the identity a configured routine ([[routines]], ADR
+// 0026) runs under. Its own name, not intent.run's, for the same reason
+// intent.run is not shell.run's: the risk profiles differ — a custom intent
+// is an arbitrary shell command, a routine is a sequence of validated program
+// launches and window placements — so each must be tightenable without
+// touching the other. Unlike every other identity it defaults to allow (see
+// builtinToolDefaults for the argument).
+const RoutineToolName = "routine.run"
+
+// DecideRoutine classifies running one named routine. There is no command to
+// parse and no shell classifier to consult — a routine's steps were validated
+// at config load and contain nothing but program names and placements — so
+// the verdict is the tool identity's configured tier, with the routine's name
+// as the Command the audit trail and any confirmation are about.
+func (p *Policy) DecideRoutine(name string) Verdict {
+	v := Verdict{Tool: RoutineToolName, Command: name}
+	_, explicit := p.tools[RoutineToolName]
+	switch p.ToolDecision(RoutineToolName) {
+	case PolicyDeny:
+		v.Decision = PolicyDeny
+		v.Rule = fmt.Sprintf("tool %q is set to deny", RoutineToolName)
+	case PolicyAsk:
+		v.Decision = PolicyAsk
+		if explicit {
+			v.Rule = fmt.Sprintf("tool %q is set to ask", RoutineToolName)
+		} else {
+			v.Rule = fmt.Sprintf("tool %q asks under this policy", RoutineToolName)
+		}
+		v.Summary = fmt.Sprintf("I'm about to run your %s routine. Should I go ahead?", name)
+	default:
+		v.Decision = PolicyAllow
+		if explicit {
+			v.Rule = fmt.Sprintf("tool %q is set to allow", RoutineToolName)
+		} else {
+			v.Rule = fmt.Sprintf("tool %q defaults to allow; the user authored every step", RoutineToolName)
+		}
+	}
+	return v
+}
 
 // DecideCommand classifies a bare command string that no model asked for —
 // a user-defined intent — through the very same shell classifier a model's

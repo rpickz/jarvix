@@ -34,6 +34,8 @@ Usage:
   jarvix mute                   Close the microphone: kill background capture
   jarvix unmute                 Listen for the wake word again
   jarvix window                 Open/close the conversation window
+  jarvix routines [--json]      List the configured routines and their phrases
+  jarvix routines run "name"    Run one routine (same as speaking its phrase)
   jarvix artifacts [--json]     List recent artifacts (diagrams, documents, sheets, sketches)
   jarvix voices [--json]        List installed voices by language, accent, and gender
   jarvix doctor                 Check every dependency and explain failures
@@ -128,6 +130,17 @@ func run(args []string) int {
 		err = cmdMute(paths, false)
 	case "window":
 		err = cmdWindow()
+	case "routines":
+		switch {
+		case len(rest) == 0:
+			err = cmdRoutines(cfg, false)
+		case rest[0] == "--json" && len(rest) == 1:
+			err = cmdRoutines(cfg, true)
+		case rest[0] == "run" && len(rest) == 2:
+			err = cmdRoutineRun(paths, rest[1])
+		default:
+			return fail(fmt.Errorf("usage: jarvix routines [--json] | jarvix routines run \"name\""))
+		}
 	case "artifacts":
 		if len(rest) > 0 && rest[0] != "--json" {
 			return fail(fmt.Errorf("usage: jarvix artifacts [--json]"))

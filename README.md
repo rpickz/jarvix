@@ -144,6 +144,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Review the conversation | **Click the Jarvix icon in the bar**, click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |
 | See what Jarvix is doing | The bar icon — hover it for the state in words |
 | Actions without speaking | **Right-click the bar icon**: window, new conversation, settings, recent artifacts |
+| Set up your desktop in one sentence | **Say a routine's phrase** ("Jarvix, morning setup") — your apps launch onto your workspaces, arranged; `jarvix routines` lists them, `jarvix routines run "morning setup"` triggers one, and the conversation window has a Run button. Defined as `[[routines]]` in config.toml — see [docs/configuration.md](docs/configuration.md#routines-routines) |
 | Fresh conversation | `jarvix new` — the current thread is archived, not destroyed |
 | Past conversations | `jarvix conversations` lists them; `show`, `open`, `delete <id>`/`--all` — or the window's **History** button |
 | Change the accent | `jarvix voices` lists what is installed, by language and gender |

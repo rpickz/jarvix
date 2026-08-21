@@ -461,3 +461,69 @@ func TestSplitLines(t *testing.T) {
 		t.Errorf("splitLines = %q", got)
 	}
 }
+
+// TestRunRoutinesListsOffline: `jarvix routines` reads config.toml directly,
+// so "what have I set up?" is answerable with the daemon down.
+func TestRunRoutinesListsOffline(t *testing.T) {
+	hermeticEnv(t)
+	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "jarvix")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := `
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup", "start my usual apps"]
+[[routines.steps]]
+app = "alacritty"
+workspace = 1
+[[routines.steps]]
+app = "signal-desktop"
+workspace = 9
+float = true
+size = [1200, 800]
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	stdout, _ := capture(t, func() { code = run([]string{"routines"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, output %q", code, stdout)
+	}
+	for _, want := range []string{
+		"morning setup", `"morning setup" or "start my usual apps"`,
+		"alacritty → workspace 1", "signal-desktop → workspace 9 (floating 1200x800)",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output %q missing %q", stdout, want)
+		}
+	}
+
+	stdout, _ = capture(t, func() { code = run([]string{"routines", "--json"}) })
+	if code != 0 || !strings.Contains(stdout, `"name":"morning setup"`) {
+		t.Errorf("json output = %q (exit %d)", stdout, code)
+	}
+
+	// Usage errors for the malformed shapes.
+	for _, args := range [][]string{{"routines", "run"}, {"routines", "bogus"}} {
+		_, stderr := capture(t, func() { code = run(args) })
+		if code != 1 || !strings.Contains(stderr, "usage:") {
+			t.Errorf("%v: exit %d, stderr %q", args, code, stderr)
+		}
+	}
+}
+
+// TestRunRoutinesEmptyPointsAtTheDocs: no routines is a hint, not an error.
+func TestRunRoutinesEmptyPointsAtTheDocs(t *testing.T) {
+	hermeticEnv(t)
+	var code int
+	stdout, _ := capture(t, func() { code = run([]string{"routines"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "no routines configured") {
+		t.Errorf("output = %q", stdout)
+	}
+}
