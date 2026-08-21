@@ -144,7 +144,8 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Review the conversation | **Click the Jarvix icon in the bar**, click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |
 | See what Jarvix is doing | The bar icon — hover it for the state in words |
 | Actions without speaking | **Right-click the bar icon**: window, new conversation, settings, recent artifacts |
-| Fresh conversation | `jarvix new` (forget the current thread) |
+| Fresh conversation | `jarvix new` — the current thread is archived, not destroyed |
+| Past conversations | `jarvix conversations` lists them; `show`, `open`, `delete <id>`/`--all` — or the window's **History** button |
 | Change the accent | `jarvix voices` lists what is installed, by language and gender |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
@@ -288,6 +289,17 @@ and it keeps the prior context, until the thread goes idle (configurable) or
 you run `jarvix new`. Answers are spoken **as they stream** — Jarvix starts
 talking on the first complete sentence rather than waiting for the whole
 reply.
+
+Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
+`jarvix new` archives the thread instead of destroying it, whole — the
+`history_turns` cap only limits what the model is sent, never what is kept.
+`jarvix conversations` lists the archive newest-first (the window's
+**History** button shows the same library), `show` prints one read-only,
+`open` continues one as the active thread with its context, and
+`delete <id>` / `delete --all` actually remove the files — the archive lives
+under your XDG state dir, private (0600), and never leaves the machine. Set
+`conversation.retention = "off"` to stop archiving entirely; it removes
+nothing already kept.
 
 Hold-to-talk is watched by the daemon itself (evdev — the same mechanism
 Mumble and Discord use), because compositor release-binds are unreliable for
