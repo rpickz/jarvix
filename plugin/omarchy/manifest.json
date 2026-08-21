@@ -4,7 +4,7 @@
   "name": "Jarvix",
   "version": "0.2.0",
   "author": "Rich Pickering",
-  "description": "Voice-native computer interaction: listening, transcript, and streaming response overlay for the Jarvix daemon, plus the conversation window notifications open.",
+  "description": "Voice-native computer interaction: listening, transcript, and streaming response overlay for the Jarvix daemon, plus a conversation window opened by clicking a Jarvix notification.",
   "kinds": ["panel"],
   "keepLoaded": true,
   "entryPoints": { "panel": "JarvixOverlay.qml" }

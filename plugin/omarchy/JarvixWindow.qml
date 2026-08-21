@@ -1,5 +1,9 @@
 import QtQuick
 import Quickshell
+// FloatingWindow lives in Quickshell.Wayland, not Quickshell: without this
+// import the type does not resolve, JarvixOverlay.qml fails to instantiate
+// the window, and the whole plugin fails to load.
+import Quickshell.Wayland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
