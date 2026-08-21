@@ -130,6 +130,10 @@ Item {
     function openWindow(): string { convWindow.openWindow(); return "open" }
     function closeWindow(): string { convWindow.closeWindow(); return "closed" }
     function toggleWindow(): string { convWindow.toggleWindow(); return convWindow.visible ? "open" : "closed" }
+    // The bar widget's Settings action. Settings are a screen inside the
+    // window, so this opens the window already showing them rather than
+    // inventing a second surface.
+    function openSettings(): string { convWindow.openSettings(); return "open" }
   }
 
   // --- presentation -------------------------------------------------------

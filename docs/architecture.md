@@ -5,7 +5,7 @@ Jarvix is two processes and a protocol:
 ```mermaid
 flowchart LR
     subgraph Omarchy shell
-        overlay[Jarvix overlay plugin<br/>QML, display-only]
+        overlay[Jarvix plugin<br/>QML, display-only<br/>bar widget · overlay · window]
     end
     subgraph jarvixd [jarvixd — Go daemon]
         ipc[IPC server<br/>JSON-RPC 2.0]
@@ -213,8 +213,9 @@ The full event vocabulary is in [ipc.md](ipc.md).
 
 ## The Omarchy plugin
 
-`plugin/omarchy/` is a third-party Omarchy shell plugin (kind `panel`,
-`keepLoaded`) installed by symlink into `~/.config/omarchy/plugins/jarvix/`.
+`plugin/omarchy/` is a third-party Omarchy shell plugin (kinds `panel` and
+`bar-widget`, `keepLoaded`) installed by symlink into
+`~/.config/omarchy/plugins/jarvix/`.
 It connects to `$XDG_RUNTIME_DIR/jarvix.sock` with Quickshell's `Socket`,
 follows `state.changed` / `transcript.*` / `assistant.*` events, and shows a
 top-centre card on the Wayland overlay layer. It is input-transparent (empty
@@ -231,6 +232,17 @@ connected only while it is open. Notifications go out via `notify-send`
 `ui.notifications` / `ui.notification_preview` control them (see
 [configuration.md](configuration.md)). Window technology choice:
 [ADR 0013](adr/0013-conversation-window-in-shell-plugin.md).
+
+And the **bar widget** (`JarvixBar.qml`, manifest kind `bar-widget`): the
+permanent icon in the bar's `right` section, showing what Jarvix is doing
+between sessions, toggling the conversation window on click, and offering the
+actions worth reaching for without speaking. It is a third client of the same
+event stream, holding its socket open so the icon is right whether or not a
+session is running. Which glyph, which words, which actions, and which icon
+an artifact kind gets are all decided in Go (`internal/desktop/barstatus.go`)
+and compiled into `plugin/omarchy/BarState.js` by `go generate
+./internal/desktop` — QML stays display-only, and the rules stay testable.
+Widget technology choice: [ADR 0020](adr/0020-bar-widget-not-tray-icon.md).
 
 Assumptions about the installed Omarchy version are recorded in
 [ADR 0005](adr/0005-omarchy-plugin-integration.md).

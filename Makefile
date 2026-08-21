@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test ci coverage vet gofmt-check lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean release-snapshot
+.PHONY: all build test ci coverage vet gofmt-check lint generate install install-kokoro install-plugin install-systemd install-hyprland uninstall clean release-snapshot
 
 all: build
 
@@ -52,6 +52,12 @@ lint: vet
 	else \
 		echo "golangci-lint/staticcheck not installed; ran go vet only"; \
 	fi
+
+# Rebuild the checked-in artifacts generated from Go — currently the bar
+# widget's state vocabulary (plugin/omarchy/BarState.js). `go test` fails if
+# they have drifted, so this is the fix for that failure, not an extra step.
+generate:
+	$(GO) generate ./...
 
 install: build
 	install -Dm755 bin/jarvix  $(BINDIR)/jarvix
