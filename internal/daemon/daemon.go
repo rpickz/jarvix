@@ -105,6 +105,13 @@ type Daemon struct {
 	// after an interaction felt slow, which is exactly when the event has
 	// already gone out on the bus. Guarded by errMu.
 	lastTimings map[string]any
+
+	// The most recent typing decision (ADR 0023) — which window, how many
+	// characters, whether a human approved it, what happened. Retained for
+	// `jarvix status --last` for the same reason as the timings: the question
+	// is asked afterwards. It never holds the typed text; the event it comes
+	// from does not carry it. Guarded by errMu.
+	lastTyping map[string]any
 }
 
 // Deps are the engine's collaborators, injectable for tests. Zero-value
@@ -121,6 +128,10 @@ type Deps struct {
 	// through hyprctl. Injected by tests so nothing here ever touches a real
 	// desktop.
 	Compositor desktop.Compositor
+	// Keyboard is the keystroke seam (ADR 0023); nil drives wtype. Injected by
+	// tests for a stronger reason than the compositor's: a test that reached
+	// the real one would type into the session running it.
+	Keyboard desktop.Keyboard
 	// OpenWindow opens the conversation window after a notification click;
 	// nil asks the Omarchy shell plugin.
 	OpenWindow func(context.Context) error
@@ -192,8 +203,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// The window tools (ADR 0022). Registered as five verbs sharing one
 	// compositor and one inventory cache, so the gate can allow the reads and
 	// ask about the changes without either being a special case.
-	if cfg.Tools.Desktop {
-		windows := tools.NewDesktop(tools.DesktopOptions{
+	//
+	// The shared state is built whenever *either* family is on, because typing
+	// borrows every window decision from it (ADR 0023): one inventory, one
+	// matcher, one definition of which window is being acted on. Only the
+	// desktop flag decides whether the five verbs are offered to the model.
+	var windows *tools.Desktop
+	if cfg.Tools.Desktop || cfg.Tools.Typing.Enable {
+		windows = tools.NewDesktop(tools.DesktopOptions{
 			Compositor: compositor,
 			Apps:       cfg.Tools.DesktopApps,
 			ScrubEnv:   providerKeyEnvNames(cfg),
@@ -206,11 +223,56 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			},
 			Log: logger,
 		})
+	}
+	if cfg.Tools.Desktop {
 		for _, t := range windows.Tools() {
 			registry.Register(t)
 		}
 		logger.Info("tool enabled", "component", "tools",
 			"tools", strings.Join(windows.Names(), ","), "apps", cfg.Tools.DesktopApps)
+	}
+	// The typing tools (ADR 0023). Opt-in, like shell.run: the user turned
+	// this on deliberately, and the startup log says so in the journal, once,
+	// because a machine that types on its owner's behalf should never be
+	// something they discover by watching it happen.
+	if cfg.Tools.Typing.Enable {
+		keyboard := deps.Keyboard
+		if keyboard == nil {
+			keyboard = &desktop.Wtype{Binary: cfg.Tools.Typing.Binary}
+		}
+		typing := tools.NewTyping(tools.TypingOptions{
+			Windows:         windows,
+			Keyboard:        keyboard,
+			MaxChars:        cfg.Tools.Typing.MaxChars,
+			RateLimit:       cfg.Tools.Typing.RateLimit,
+			RateWindow:      cfg.Tools.Typing.RateWindow(),
+			TerminalClasses: cfg.Tools.Typing.TerminalClasses,
+			// The audit event carries the window, the length and the outcome —
+			// never the characters. The user may have dictated a password, and
+			// a bus event reaches every subscriber.
+			OnAudit: func(a tools.TypingAudit) {
+				d := map[string]any{
+					"tool": a.Tool, "window": a.Window, "chars": a.Chars,
+					"approved": a.Approved, "terminal": a.Terminal, "outcome": a.Outcome,
+				}
+				if a.Key != "" {
+					d["key"] = a.Key
+				}
+				if a.Reason != "" {
+					d["reason"] = a.Reason
+				}
+				bus.Publish(session.Event{Type: "typing.audit", Data: d})
+			},
+			Log: logger,
+		})
+		for _, t := range typing.Tools() {
+			registry.Register(t)
+		}
+		logger.Info("tool enabled", "component", "tools",
+			"tools", strings.Join(typing.Names(), ","),
+			"max_chars", cfg.Tools.Typing.MaxChars,
+			"rate_limit", cfg.Tools.Typing.RateLimit,
+			"rate_window_sec", cfg.Tools.Typing.RateWindowSec)
 	}
 	// Advisor delegation is enabled by configuring an advisor and nothing
 	// else: `jarvix setup` writes the tables, and each advisor carries its
@@ -593,6 +655,9 @@ func (d *Daemon) registerMethods() {
 			// The last session's latency budget, so `jarvix status --last`
 			// answers "why did that feel slow" without tailing the journal.
 			"last_timings": d.lastTimingsReport(),
+			// The typing audit trail: what Jarvix last did with the keyboard,
+			// and never what it typed (ADR 0023).
+			"last_typing": d.lastTypingReport(),
 		}, nil
 	})
 	d.registerConfigMethods()

@@ -269,6 +269,27 @@ func Settings() []Setting {
 			Get: func(c Config) any { return append([]string(nil), c.Tools.DesktopApps...) },
 			set: func(c *Config, v any) { c.Tools.DesktopApps = v.([]string) }},
 
+		// Typing (ADR 0023). Editable from the settings screen so the switch is
+		// where a user would look for it — and so turning it *off* is one
+		// click, which is the direction that has to be easy.
+		{Key: "tools.typing.enable", Label: "Assistant may type on your keyboard", Type: TypeBool, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Tools.Typing.Enable },
+			set: func(c *Config, v any) { c.Tools.Typing.Enable = v.(bool) }},
+		{Key: "tools.typing.max_chars", Label: "Longest text the assistant may type", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Tools.Typing.MaxChars },
+			set: func(c *Config, v any) { c.Tools.Typing.MaxChars = v.(int) }},
+		{Key: "tools.typing.rate_limit", Label: "Typing actions allowed per window", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Tools.Typing.RateLimit },
+			set: func(c *Config, v any) { c.Tools.Typing.RateLimit = v.(int) }},
+		{Key: "tools.typing.rate_window_sec", Label: "Typing rate-limit window (seconds)", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Tools.Typing.RateWindowSec },
+			set: func(c *Config, v any) { c.Tools.Typing.RateWindowSec = v.(int) }},
+		// A list, not a string: each entry is one window class. The CLI's comma
+		// form ("alacritty,kitty") is how that is spelled from a shell.
+		{Key: "tools.typing.terminal_classes", Label: "Window classes treated as terminals", Type: TypeStringList, Reload: ReloadRestart,
+			Get: func(c Config) any { return append([]string(nil), c.Tools.Typing.TerminalClasses...) },
+			set: func(c *Config, v any) { c.Tools.Typing.TerminalClasses = v.([]string) }},
+
 		{Key: "artifacts.dir", Label: "Artifact directory", Type: TypeString, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Artifacts.Dir },
 			set: func(c *Config, v any) { c.Artifacts.Dir = v.(string) }},

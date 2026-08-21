@@ -102,8 +102,45 @@ type Tools struct {
 	// PATH: launching an application the user already has is not an
 	// escalation, and the launch verb confirms first. Set it to pin the
 	// assistant to a shortlist.
-	DesktopApps []string    `toml:"desktop_apps"`
-	Policy      ToolsPolicy `toml:"policy"`
+	DesktopApps []string `toml:"desktop_apps"`
+	// Typing enables the typing.* tools. Off by default, the same way
+	// shell.run is — see Typing.
+	Typing Typing      `toml:"typing"`
+	Policy ToolsPolicy `toml:"policy"`
+}
+
+// Typing configures synthetic keystrokes: the typing.type_text and
+// typing.press_key tools (ADR 0023).
+//
+// It is off by default and stays off until the user says otherwise, because it
+// is the most powerful thing Jarvix can be given. Everything else the
+// assistant does either answers a question or performs one bounded, visible
+// action on a named object. Keystrokes are neither bounded nor named: they go
+// wherever focus is at that instant, they can be characters or a command, and
+// a wrong one is not undoable by looking somewhere else.
+//
+// The other fields are the blast-radius controls. They are configuration
+// rather than constants because the right numbers depend on what the machine
+// is used for, and because a user who wants Jarvix to fill in forms all day
+// should be able to say so without editing Go.
+type Typing struct {
+	// Enable turns the typing tools on. Default false.
+	Enable bool `toml:"enable"`
+	// MaxChars caps one payload. A runaway loop must not be able to fill a
+	// document before anyone reaches the keyboard.
+	MaxChars int `toml:"max_chars"`
+	// RateLimit is how many typing actions may happen inside
+	// RateWindowSec before further ones are refused with a reason.
+	RateLimit int `toml:"rate_limit"`
+	// RateWindowSec is the rate limiter's window, in seconds.
+	RateWindowSec int `toml:"rate_window_sec"`
+	// TerminalClasses are the window classes whose contents are a command
+	// line. Typing into one always asks first, however the policy tier is
+	// otherwise set. Empty uses the shipped list (alacritty, kitty, foot,
+	// ghostty, …); set it to add a terminal Jarvix would not recognise.
+	TerminalClasses []string `toml:"terminal_classes"`
+	// Binary overrides the keystroke injector. Empty means "wtype" from PATH.
+	Binary string `toml:"binary"`
 }
 
 // Command is a viewer invocation: argv, not a shell line. Jarvix never runs
@@ -360,6 +397,9 @@ func Default() Config {
 		Tools: Tools{
 			Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true,
 			Desktop: true,
+			// Off, like shell.run: a capability this powerful is opted into,
+			// never inherited from a default (ADR 0023).
+			Typing: Typing{Enable: false, MaxChars: 500, RateLimit: 6, RateWindowSec: 60},
 			Policy: ToolsPolicy{
 				Default:                 "ask",
 				ConfirmTimeoutSec:       30,
@@ -618,6 +658,7 @@ func (c Config) Validate() error {
 				"tools.desktop_apps entry %q must be a program name or an absolute path (\"~\" is not expanded)", app))
 		}
 	}
+	problems = append(problems, c.typingProblems()...)
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
 	problems = append(problems, c.contextProblems()...)

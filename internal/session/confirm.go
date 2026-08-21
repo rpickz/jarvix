@@ -166,12 +166,13 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall) string {
 // which is exactly the point — the model's turn pauses on the user's word.
 func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verdict) (string, bool) {
 	outcome, alive := e.awaitConfirmation(s, confirmRequest{
-		tool:    call.Name,
-		command: verdict.Command,
-		summary: verdict.Summary,
-		rule:    verdict.Rule,
-		key:     approvalKey(call, verdict),
-		resume:  StateThinking,
+		tool:         call.Name,
+		command:      verdict.Command,
+		summary:      verdict.Summary,
+		rule:         verdict.Rule,
+		key:          approvalKey(call, verdict),
+		rememberable: tools.RememberableApproval(call.Name),
+		resume:       StateThinking,
 	})
 	if !alive {
 		return "", false
@@ -203,6 +204,9 @@ type confirmRequest struct {
 	rule string
 	// key identifies the request for remember_for_conversation.
 	key string
+	// rememberable is false for a tool whose approval must never be reused,
+	// however remember_for_conversation is configured (tools.RememberableApproval).
+	rememberable bool
 	// resume is the state to return to once answered.
 	resume State
 }
@@ -233,7 +237,7 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		e.mu.Unlock()
 		return confirmDeclined, false
 	}
-	if e.opts.RememberApprovals && e.approvals[req.key] {
+	if e.opts.RememberApprovals && req.rememberable && e.approvals[req.key] {
 		e.mu.Unlock()
 		e.log.Info("tool call allowed", "component", "tools", "tool", req.tool,
 			"command", req.command, "rule", req.rule, "source", "remembered approval")
@@ -275,7 +279,7 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 			if !approved {
 				return confirmDeclined, true
 			}
-			if e.opts.RememberApprovals {
+			if e.opts.RememberApprovals && req.rememberable {
 				e.mu.Lock()
 				e.approvals[req.key] = true
 				e.mu.Unlock()

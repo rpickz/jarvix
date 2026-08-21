@@ -141,6 +141,20 @@ desktop_apps = []                # what desktop.launch_app may start; empty
                                  # means anything on PATH, e.g.
                                  # ["firefox", "alacritty", "/opt/apps/notes"]
 
+[tools.typing]                   # Jarvix typing on YOUR keyboard — read the
+                                 # Typing section below before enabling this
+enable = false                   # off by default, like shell.run
+max_chars = 500                  # longest text one call may type (max 50000)
+rate_limit = 6                   # typing actions allowed per window below
+rate_window_sec = 60             # the rate-limit window (max 3600)
+terminal_classes = []            # window classes whose contents are a command
+                                 # line; typing into one always asks first.
+                                 # Empty uses the shipped list (alacritty,
+                                 # kitty, foot, ghostty, wezterm, konsole, …);
+                                 # set it to name your own instead
+# binary = "wtype"               # the keystroke injector; one program, no
+                                 # arguments — it is executed directly
+
 [artifacts]                      # where the assistant's files land and open
 dir = "/home/you/Documents/Jarvix"
                                  # must be an absolute path — "~" is NOT
@@ -181,6 +195,10 @@ shell_deny = []                  # extra command prefixes that never run,
 # "desktop.list_windows" = "allow"   # built-in defaults: the two window reads
 # "desktop.focus_window" = "allow"   # run silently; move, close and launch
                                      # take the default above ("ask")
+# "typing.type_text" = "allow"   # the typing tools ALWAYS ask unless you name
+# "typing.press_key" = "allow"   # them here — a global default of "allow"
+                                 # deliberately does not reach them. A global
+                                 # "deny" still does.
 
 [intents]                        # the deterministic intent router (Phase 3)
 enabled = true                   # false = every utterance goes to the AI
@@ -690,6 +708,76 @@ Each entry is one program — a name found on PATH or an absolute path — becau
 applications are executed directly, never through a shell. Empty (the default)
 allows anything installed. A category also works ("open a browser") when
 exactly one such application is installed; when several are, Jarvix asks which.
+
+## Typing (`[tools.typing]`)
+
+Jarvix can type into the window you are working in — dictating into a
+document, filling a form field, composing a message in a web app
+([ADR 0023](adr/0023-synthetic-keystrokes.md)). It is **off by default**, and
+it is the one capability worth reading about before you turn it on.
+
+```bash
+sudo pacman -S wtype
+jarvix config set tools.typing.enable=true    # takes effect on daemon restart
+```
+
+Two tools, and they are separate on purpose:
+
+| Tool | Default | What it does |
+| --- | --- | --- |
+| `typing.type_text` | ask | Types literal characters into the focused window |
+| `typing.press_key` | ask | Presses one key: enter, tab, escape, backspace, delete, or an arrow |
+
+**Both always ask.** Unlike every other tool, they do not inherit
+`[tools.policy] default = "allow"` — allowing them takes naming them under
+`[tools.policy.tool]`, which is a sentence you have to mean. A global `deny`
+still denies them. An approval is never carried forward by
+`remember_for_conversation` either: it was about a payload *and* the window
+that had focus at that moment, and the second half does not survive you moving.
+
+What the safeguards actually do:
+
+- **The confirmation shows the text.** "I want to type "call the bank at
+  three" into Obsidian — Daily note. Should I go ahead?" — built from the live
+  window list and the literal characters, never from the assistant's
+  description of what it is doing.
+- **Focus is re-checked at the last moment.** The window is captured when you
+  are asked and checked again the instant before the keys go out, against a
+  fresh look at the desktop. If a notification, a dialog or your own hand moved
+  focus while you were answering, **nothing is typed** and Jarvix says the
+  window changed.
+- **Literal characters only.** Line breaks, Tab, Escape and every other control
+  key are refused — the whole request, not just the offending character, so
+  what you approved is what happens. Text can therefore never submit itself.
+- **Submitting is separate.** Approving text is never approving Enter. Pressing
+  a key is its own tool, its own confirmation, and a closed list of thirteen
+  keys with no modifiers and no chords.
+- **Terminals always ask**, even with `"typing.type_text" = "allow"`, and the
+  confirmation says so: anything typed into a shell may be run as a command.
+  `terminal_classes` names the windows this applies to.
+- **Caps.** `max_chars` per call and `rate_limit` per `rate_window_sec`, shared
+  between both tools, each refusing with a reason rather than silently dropping
+  the call.
+- **The text is never logged.** Which window, how many characters, whether you
+  approved it and what happened are recorded — `jarvix status --last` prints
+  the last one, and a `typing.audit` event goes out on the bus. *What* was
+  typed is not recorded anywhere, because you may have dictated a password.
+
+If `wtype` is missing, there is no Wayland session, or the compositor refuses
+the virtual-keyboard protocol, the tools say they have no way to send
+keystrokes and everything else Jarvix does is unaffected. `jarvix doctor` names
+which of the three it is and how to fix it — the check probes with an empty
+payload, so it never types anything either.
+
+`ydotool` is deliberately not supported: it needs a root daemon and write
+access to `/dev/uinput`, which is a permanently elevated privilege on your
+machine in exchange for the same keystrokes.
+
+Turning it off again:
+
+```bash
+jarvix config set tools.typing.enable=false
+```
 
 ## Advisors (asking a stronger assistant)
 

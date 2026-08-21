@@ -52,6 +52,9 @@ with an Omarchy overlay and full cancellation. See
   natural voice via `scripts/setup-kokoro.sh`
 - An AI backend: [Ollama](https://ollama.com) locally (default), or any
   OpenAI-compatible endpoint (OpenAI, OpenRouter, LM Studio, …)
+- Optional, and only if you turn it on: [wtype](https://github.com/atx/wtype)
+  (`sudo pacman -S wtype`) for **Jarvix typing on your behalf** — see
+  [Letting Jarvix type for you](#letting-jarvix-type-for-you) before you do
 
 ## Installation
 
@@ -188,6 +191,56 @@ like speaking over it. If Jarvix is waiting on a tool confirmation, typing
 "yes" or "no" answers *that* rather than asking something new. Shift+Enter is
 reserved for multi-line composition and deliberately does not send.
 `scripts/verify-typed-input.sh` walks the whole thing on a live session.
+
+### Letting Jarvix type for you
+
+The section above is you typing *to* Jarvix. This one is the opposite, and it
+is **off by default**: Jarvix can type *for* you — into the document, form
+field or chat box you are working in — but only if you switch it on.
+
+```bash
+sudo pacman -S wtype                          # the Wayland virtual keyboard
+jarvix config set tools.typing.enable=true    # then restart jarvixd
+```
+
+**What enabling it grants, in plain English.** Jarvix gains the ability to
+enter characters into whatever window has focus, as if you had typed them
+yourself. That is genuinely the most powerful thing you can give it — more
+than `shell.run`, because a shell command at least names what it is going to
+do, and typing goes wherever your attention happens to be. So:
+
+- **Nothing is typed without you saying yes.** Jarvix speaks a confirmation
+  naming the window *and* reading back the exact text, every time. The
+  sentence is built from the live window list and the literal characters, not
+  from the assistant's description of what it is doing.
+- **It cannot press Enter as part of typing.** Line breaks, Tab, Escape and
+  the rest are refused outright — the text goes in and stops. Submitting is a
+  separate tool with its own confirmation, so approving "type this" is never
+  approving "and send it".
+- **It re-checks where you are.** The window is captured when you are asked
+  and checked again the instant before the keys go out. If a notification, a
+  dialog or your own hand moved focus while you were answering, nothing is
+  typed at all and Jarvix tells you why.
+- **Typing into a terminal always asks**, even if you configured typing to
+  run silently, and the confirmation says that is what it is.
+- **There are caps.** A maximum length per request and a rate limit, both
+  refusing with a reason, so a confused assistant in a loop cannot type
+  indefinitely.
+- **The text is never written down.** Which window, how many characters and
+  whether you approved it are recorded (`jarvix status --last`, and an event
+  on the bus); *what* was typed is not, anywhere, because you may have
+  dictated a password.
+
+Turning it off is one command and takes effect on the next daemon start:
+
+```bash
+jarvix config set tools.typing.enable=false
+```
+
+The threat model — what a confused or adversarial assistant could do with a
+keyboard and which control blocks each path — is written down in
+[ADR 0023](docs/adr/0023-synthetic-keystrokes.md). `jarvix doctor` reports
+whether typing would work here and why not if it would not.
 
 Jarvix remembers the conversation: ask a follow-up ("what should I change?")
 and it keeps the prior context, until the thread goes idle (configurable) or

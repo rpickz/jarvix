@@ -165,6 +165,9 @@ func assistantSystemPrompt(cfg config.Config) string {
 	if cfg.Tools.Desktop {
 		prompt += config.DesktopSystemPrompt
 	}
+	if cfg.Tools.Typing.Enable {
+		prompt += config.TypingSystemPrompt
+	}
 	if len(cfg.Advisors) > 0 {
 		prompt += config.AdvisorSystemPrompt
 	}
