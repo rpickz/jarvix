@@ -340,6 +340,17 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("intent router enabled", "component", "intent",
 			"intents", len(router.Names()))
 	}
+	// Routines (ADR 0025) are stated at startup like the intents they route
+	// through: names only, never the steps — a journal line should say what
+	// the daemon can do, not inventory the user's desktop habits.
+	if len(cfg.Routines) > 0 {
+		names := make([]string, 0, len(cfg.Routines))
+		for _, r := range cfg.Routines {
+			names = append(names, r.Name)
+		}
+		logger.Info("routines enabled", "component", "routine",
+			"routines", strings.Join(names, ","))
+	}
 
 	// What Jarvix may look at is stated at startup, once, in the journal: an
 	// ambient-capture feature should never be something a user discovers by
@@ -360,7 +371,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger,
-		engineOptions(cfg, compositor, logger))
+		engineOptions(cfg, compositor, bus, logger))
 
 	if deps.Notifier == nil {
 		deps.Notifier = &desktop.NotifySend{}
@@ -699,6 +710,7 @@ func (d *Daemon) registerMethods() {
 	d.registerContextMethods()
 	d.registerTextMethods()
 	d.registerWakeMethods()
+	d.registerRoutineMethods()
 }
 
 // effectivePolicy reports the permission gate as it actually applies: the
