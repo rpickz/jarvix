@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -31,14 +32,16 @@ type Config struct {
 }
 
 // Tools configures the assistant's tool access. shell.run is opt-in: it
-// gives the assistant the same authority as the user's shell. artifact.create
+// gives the assistant the same authority as the user's shell — which is why
+// every call also passes the permission gate in Policy. artifact.create
 // only writes into the artifact directory and opens a viewer, so it defaults
 // on — with the renderer missing it degrades to a prose answer.
 type Tools struct {
-	Shell            bool `toml:"shell"`               // enable shell.run
-	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`   // per-command timeout
-	ShellMaxOutputKB int  `toml:"shell_max_output_kb"` // captured output cap
-	Artifacts        bool `toml:"artifacts"`           // enable artifact.create
+	Shell            bool        `toml:"shell"`               // enable shell.run
+	ShellTimeoutSec  int         `toml:"shell_timeout_sec"`   // per-command timeout
+	ShellMaxOutputKB int         `toml:"shell_max_output_kb"` // captured output cap
+	Artifacts        bool        `toml:"artifacts"`           // enable artifact.create
+	Policy           ToolsPolicy `toml:"policy"`
 }
 
 // Artifacts configures where rendered artifacts (diagrams, later documents)
@@ -57,6 +60,37 @@ type Artifacts struct {
 	OpenCommands map[string]string `toml:"open_commands"`
 	// RenderTimeoutSec bounds one render; the renderer is killed past it.
 	RenderTimeoutSec int `toml:"render_timeout_sec"`
+}
+
+// ToolsPolicy is the tool permission gate (ADR 0014). Every tool call is
+// classified allow / ask / deny before it executes: allow runs silently, ask
+// makes Jarvix speak a one-sentence summary and wait for confirmation, deny
+// never runs. Classification happens daemon-side on the parsed command — the
+// model's own description of what it is doing is never trusted.
+type ToolsPolicy struct {
+	// Default is the decision for tools with no [tools.policy.tool] entry.
+	// Unknown tools must never run silently, so the default is "ask".
+	Default string `toml:"default"`
+	// ConfirmTimeoutSec is how long a spoken confirmation waits before
+	// declining the command.
+	ConfirmTimeoutSec int `toml:"confirm_timeout_sec"`
+	// RememberForConversation re-runs an approved command without asking
+	// again for the rest of the conversation. Approvals never persist
+	// across conversations (`jarvix new` and the follow-up window clear
+	// them) or across daemon restarts.
+	RememberForConversation bool `toml:"remember_for_conversation"`
+	// Tool maps a tool name to "allow", "ask", or "deny". For shell.run the
+	// entry is the fallback for commands no pattern classifies: the default
+	// "ask" keeps read-only commands silent (the shipped allow list) and
+	// confirms everything else; "allow" restores the pre-gate trust-all
+	// behaviour (deny patterns still win); "deny" disables the tool.
+	Tool map[string]string `toml:"tool"`
+	// ShellAllow adds command word-prefix patterns (e.g. "docker compose ps")
+	// that run without confirmation.
+	ShellAllow []string `toml:"shell_allow"`
+	// ShellDeny adds command word-prefix patterns that never run, regardless
+	// of any confirmation. Deny beats everything, including ShellAllow.
+	ShellDeny []string `toml:"shell_deny"`
 }
 
 // Activation configures how sessions are initiated.
@@ -212,7 +246,14 @@ func Default() Config {
 			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
 		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900},
-		Tools:        Tools{Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true},
+		Tools: Tools{
+			Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true,
+			Policy: ToolsPolicy{
+				Default:                 "ask",
+				ConfirmTimeoutSec:       30,
+				RememberForConversation: false,
+			},
+		},
 		Artifacts: Artifacts{
 			Dir:              filepath.Join(home, "Documents", "Jarvix"),
 			OpenCommand:      "xdg-open",
@@ -235,8 +276,10 @@ const ToolSystemPrompt = " You can run shell commands yourself with the shell.ru
 	"questions about the computer's live state and to carry out tasks. When the user asks what is " +
 	"happening with something (Docker, git, processes, disk, services), run the appropriate command " +
 	"and summarise the result — do not tell the user which command to run, run it. Prefer read-only " +
-	"commands; before anything destructive or irreversible, ask for confirmation first. Summarise " +
-	"command output for speech: report what matters, not raw tables."
+	"commands. Commands that change the system trigger a built-in spoken confirmation from the user " +
+	"before they run; if a tool result says the command was declined or not permitted, do not retry " +
+	"it — acknowledge and move on. Summarise command output for speech: report what matters, not " +
+	"raw tables."
 
 // ArtifactSystemPrompt is appended to the system prompt when the artifact
 // tool is enabled. The spoken-summary rules live here because they are model
@@ -361,6 +404,42 @@ func (c Config) Validate() error {
 	}
 	if c.Artifacts.RenderTimeoutSec <= 0 {
 		problems = append(problems, "artifacts.render_timeout_sec must be positive")
+	}
+	validDecision := func(s string) bool { return s == "allow" || s == "ask" || s == "deny" }
+	if !validDecision(c.Tools.Policy.Default) {
+		problems = append(problems, fmt.Sprintf(
+			"tools.policy.default %q is invalid; use \"allow\", \"ask\", or \"deny\"", c.Tools.Policy.Default))
+	}
+	if c.Tools.Policy.ConfirmTimeoutSec <= 0 {
+		problems = append(problems,
+			"tools.policy.confirm_timeout_sec must be positive (seconds to wait for a confirmation)")
+	}
+	toolNames := make([]string, 0, len(c.Tools.Policy.Tool))
+	for name := range c.Tools.Policy.Tool {
+		toolNames = append(toolNames, name)
+	}
+	sort.Strings(toolNames) // deterministic error order
+	for _, name := range toolNames {
+		if !validDecision(c.Tools.Policy.Tool[name]) {
+			problems = append(problems, fmt.Sprintf(
+				"tools.policy.tool.%q is %q; use \"allow\", \"ask\", or \"deny\"",
+				name, c.Tools.Policy.Tool[name]))
+		}
+	}
+	for _, entry := range []struct {
+		key      string
+		patterns []string
+	}{
+		{"tools.policy.shell_allow", c.Tools.Policy.ShellAllow},
+		{"tools.policy.shell_deny", c.Tools.Policy.ShellDeny},
+	} {
+		key, patterns := entry.key, entry.patterns
+		for _, p := range patterns {
+			if strings.TrimSpace(p) == "" {
+				problems = append(problems, fmt.Sprintf(
+					"%s contains an empty pattern; each entry must be a command prefix such as \"docker ps\"", key))
+			}
+		}
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

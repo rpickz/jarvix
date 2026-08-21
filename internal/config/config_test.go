@@ -252,3 +252,76 @@ func writeAndLoad(t *testing.T, content string) Config {
 	}
 	return cfg
 }
+
+func TestToolsPolicyDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Tools.Policy.Default != "ask" {
+		t.Errorf("policy default = %q, want ask (unknown tools must never run silently)", cfg.Tools.Policy.Default)
+	}
+	if cfg.Tools.Policy.ConfirmTimeoutSec != 30 {
+		t.Errorf("confirm_timeout_sec = %d, want 30", cfg.Tools.Policy.ConfirmTimeoutSec)
+	}
+	if cfg.Tools.Policy.RememberForConversation {
+		t.Error("remember_for_conversation must default to false")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("defaults must validate: %v", err)
+	}
+}
+
+func TestToolsPolicyParsing(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tools]
+shell = true
+
+[tools.policy]
+default = "deny"
+confirm_timeout_sec = 10
+remember_for_conversation = true
+shell_allow = ["docker compose ps"]
+shell_deny = ["git push"]
+
+[tools.policy.tool]
+"shell.run" = "allow"
+"weather.get" = "deny"
+`)
+	p := cfg.Tools.Policy
+	if p.Default != "deny" || p.ConfirmTimeoutSec != 10 || !p.RememberForConversation {
+		t.Errorf("policy = %+v", p)
+	}
+	if p.Tool["shell.run"] != "allow" || p.Tool["weather.get"] != "deny" {
+		t.Errorf("per-tool = %v", p.Tool)
+	}
+	if len(p.ShellAllow) != 1 || p.ShellAllow[0] != "docker compose ps" {
+		t.Errorf("shell_allow = %v", p.ShellAllow)
+	}
+	if len(p.ShellDeny) != 1 || p.ShellDeny[0] != "git push" {
+		t.Errorf("shell_deny = %v", p.ShellDeny)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("valid policy must validate: %v", err)
+	}
+}
+
+func TestToolsPolicyValidation(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tools.policy]
+default = "yolo"
+confirm_timeout_sec = 0
+shell_allow = ["  "]
+
+[tools.policy.tool]
+"shell.run" = "maybe"
+`)
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	for _, want := range []string{
+		"tools.policy.default", "confirm_timeout_sec", "shell_allow", "shell.run", "maybe",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing mention of %q: %v", want, err)
+		}
+	}
+}

@@ -66,6 +66,10 @@ stateDiagram-v2
     Listening --> Transcribing : voice.stop
     Transcribing --> Thinking : transcript final + submitted
     Thinking --> Responding : first token
+    Thinking --> AwaitingConfirmation : tool call needs the user
+    Responding --> AwaitingConfirmation : tool call needs the user
+    AwaitingConfirmation --> Thinking : approved / declined / timeout
+    AwaitingConfirmation --> Listening : voice reply capture
     Responding --> Speaking : response complete
     Responding --> Idle : speak_responses = false
     Speaking --> Idle : playback done
@@ -73,12 +77,14 @@ stateDiagram-v2
     Transcribing --> Cancelling
     Thinking --> Cancelling
     Responding --> Cancelling
+    AwaitingConfirmation --> Cancelling
     Speaking --> Cancelling
     Cancelling --> Idle
     Listening --> Error
     Transcribing --> Error
     Thinking --> Error
     Responding --> Error
+    AwaitingConfirmation --> Error
     Speaking --> Error
     Error --> Idle
 ```
@@ -88,6 +94,21 @@ final transcript has arrived **and** the client has submitted — whichever
 order those happen in. Push-to-talk release sends `voice.stop` +
 `session.submit` back-to-back; `jarvix ask` sends `session.submit` with text
 and skips audio entirely.
+
+### Tool confirmations
+
+Every tool call passes a permission gate before it executes
+([ADR 0014](adr/0014-tool-permission-gate.md)): allow-listed read-only
+commands run silently, deny-listed patterns never run, and everything else
+pauses the session in `AwaitingConfirmation` — Jarvix speaks a one-sentence
+summary generated from the parsed command, publishes the exact command
+(`tool.confirmation_required`), and waits. The user answers with
+`jarvix confirm`/`jarvix deny`, a typed `session.submit`, or by voice: a
+push-to-talk press while awaiting flows into the pending confirmation
+(`AwaitingConfirmation → Listening → Transcribing`), and the transcript is
+read as yes/no. A decline, a 30-second timeout, or an interruption returns
+"declined by user" to the model — the tool loop continues so the assistant
+can answer gracefully, and nothing has executed.
 
 ### Cancellation and interruption
 

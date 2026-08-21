@@ -30,6 +30,10 @@ type Registry struct {
 	tools map[string]Tool
 	order []string
 	log   *slog.Logger
+	// policy is the permission gate consulted before every Execute (ADR
+	// 0014). Nil means no gate — a construction-time choice for tests, never
+	// the daemon's: the daemon always installs a policy.
+	policy *Policy
 }
 
 // NewRegistry builds a registry. logger may be nil.
@@ -46,6 +50,28 @@ func (r *Registry) Register(t Tool) {
 		r.order = append(r.order, t.Name())
 	}
 	r.tools[t.Name()] = t
+}
+
+// SetPolicy installs the permission gate. Call before the registry serves
+// traffic; the registry does not lock around it.
+func (r *Registry) SetPolicy(p *Policy) { r.policy = p }
+
+// Policy returns the installed permission gate (nil when none).
+func (r *Registry) Policy() *Policy { return r.policy }
+
+// Check classifies one tool call against the permission gate, without
+// executing anything. With no policy installed everything is allowed —
+// the pre-gate behaviour tests rely on.
+func (r *Registry) Check(call ai.ToolCall) Verdict {
+	if r.policy == nil {
+		return Verdict{Decision: PolicyAllow, Tool: call.Name, Rule: "no policy installed"}
+	}
+	return r.policy.Decide(call)
+}
+
+// Names returns registered tool names in registration order.
+func (r *Registry) Names() []string {
+	return append([]string(nil), r.order...)
 }
 
 // Empty reports whether no tools are enabled.

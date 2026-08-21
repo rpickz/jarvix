@@ -28,10 +28,11 @@ clients must ignore unknown events and fields.
 | `voice.stop` | — | `{discarded}` | Listening → Transcribing; transcription runs async. `discarded: true` means the capture was shorter than `audio.min_recording_ms` and the session ended quietly (`session.cancelled`) — skip the follow-up `session.submit` |
 | `session.submit` | `{text?}` | `{}` | With `text`: skip audio, go think. Without: proceed when the transcript lands |
 | `session.cancel` | — | `{}` | Stops everything; no-op when idle |
+| `session.confirm` | `{approved?}` | `{approved}` | Answers a pending tool confirmation (`approved` defaults to `true`); errors when nothing is pending or a voice reply is already being captured |
 | `speech.cancel` | — | `{}` | Stops spoken output only; no-op unless speaking |
-| `conversation.reset` | — | `{}` | Forget carried-over context; the next turn starts a fresh thread |
+| `conversation.reset` | — | `{}` | Forget carried-over context (and any remembered tool approvals); the next turn starts a fresh thread |
 | `conversation.get` | — | `{turns, state, session_id}` | Snapshot of the current conversation for display: `turns` is an array of `{role, text}` (`user`/`assistant`, oldest first, including the in-flight user question once transcribed). Render it on open, then live-append from `assistant.delta` / `transcript.final` / `state.changed` / `error` events |
-| `status.get` | — | `{state, session_id, version, protocol, ptt}` | `ptt` is `"daemon"` when jarvixd watches the hold-to-talk chord itself (keybinding toggles must then no-op) or `"external"` when keybindings drive activation |
+| `status.get` | — | `{state, session_id, version, protocol, ptt, policy}` | `ptt` is `"daemon"` when jarvixd watches the hold-to-talk chord itself (keybinding toggles must then no-op) or `"external"` when keybindings drive activation. `policy` is the effective tool permission policy: `{default, confirm_timeout_sec, remember_for_conversation, tools: {name: decision}}` |
 
 Errors use JSON-RPC error objects. Application errors (wrong state, no active
 session) use code `-32000`; standard codes cover parse/method/params issues.
@@ -75,6 +76,11 @@ Every event's params include `session_id` where a session is involved.
 | `assistant.started` | `{provider}` | Provider request opened |
 | `assistant.delta` | `{content}` | One streamed response fragment |
 | `assistant.finished` | `{content}` | Full response text |
+| `tool.started` / `tool.finished` | `{tool, arguments}` / `{tool}` | Bounds of one real tool execution — never published for denied or declined calls |
+| `tool.confirmation_required` | `{tool, command, summary, rule, timeout_sec}` | The permission gate paused a tool call (state `awaiting_confirmation`). `command` is the exact command, verbatim; `summary` is the spoken question, generated daemon-side from the command; the overlay should display `command` |
+| `tool.confirmed` | `{tool, command, source}` | The user approved; the call executes. `source`: `cli`, `text`, or `voice` |
+| `tool.declined` | `{tool, command, source}` | The call will not run. `source`: `cli`, `text`, `voice`, `timeout`, `interrupted`, or `error` |
+| `tool.denied` | `{tool, command, rule}` | A deny rule blocked the call outright; no confirmation is possible |
 | `tts.started` / `tts.finished` | `{}`; finished may carry `{interrupted:true}` | Speech bounds |
 | `session.finished` | `{}` | Session completed (also after an error) |
 | `session.cancelled` | `{reason}` | Session cancelled or interrupted |

@@ -16,6 +16,8 @@ Usage:
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
+  jarvix confirm                Approve the pending tool confirmation
+  jarvix deny                   Decline the pending tool confirmation
   jarvix new                    Start a fresh conversation (forget context)
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
@@ -55,6 +57,10 @@ func main() {
 		err = cmdListen(paths)
 	case "cancel":
 		err = cmdCancel(paths)
+	case "confirm":
+		err = cmdConfirm(paths, true)
+	case "deny":
+		err = cmdConfirm(paths, false)
 	case "new":
 		err = cmdNewConversation(paths)
 	case "ptt":
