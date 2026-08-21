@@ -21,6 +21,25 @@ type Fake struct {
 	// completes. Buffered; sends never block.
 	Ops chan string
 
+	// SaveStarted and SaveGate turn a Save into something a test can hold
+	// open, which is what shutdown-drain tests need: the write the daemon must
+	// wait for has to be *in flight* while shutdown runs, and no amount of
+	// event-waiting can arrange that from outside.
+	//
+	// SaveStarted, when non-nil, receives once at the top of every Save,
+	// before the gate. Receiving from it is the guarantee that a write is
+	// under way and cannot finish yet.
+	//
+	// SaveGate, when non-nil, holds every Save there until the channel is
+	// closed (or a value is received from it).
+	//
+	// Both must be set before the Fake is handed to an engine; they are read
+	// without the lock precisely so a held-open Save does not also hold the
+	// Fake's mutex, which would make the block indistinguishable from a
+	// deadlock in the store itself.
+	SaveStarted chan struct{}
+	SaveGate    chan struct{}
+
 	mu       sync.Mutex
 	messages []ai.Message
 	lastTurn time.Time
@@ -52,6 +71,12 @@ func (f *Fake) Load() ([]ai.Message, time.Time, error) {
 
 // Save implements Store.
 func (f *Fake) Save(messages []ai.Message, lastTurn time.Time) error {
+	if f.SaveStarted != nil {
+		f.SaveStarted <- struct{}{}
+	}
+	if f.SaveGate != nil {
+		<-f.SaveGate
+	}
 	f.mu.Lock()
 	f.saves++
 	err := f.SaveErr

@@ -19,12 +19,30 @@ import (
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
 	"github.com/rpickz/jarvix/internal/warm"
 )
+
+// DefaultShutdownGrace bounds the whole shutdown drain: how long Run will
+// wait, in total, for the work a stopping daemon still owes — the pending
+// conversation-history write above all (ADR 0011).
+//
+// Five seconds is chosen from both ends. It is far more than the drain
+// actually needs: the outstanding work is one small atomic file write plus a
+// few goroutines unwinding a cancelled context, which is milliseconds on any
+// working system. And it is comfortably inside systemd's default
+// TimeoutStopSec of 90s, so a daemon that does hit the bound still exits on
+// its own terms — logging which stage was stuck — rather than being SIGKILLed
+// with no explanation in the journal.
+//
+// It is a constant rather than a setting deliberately: a user has no way to
+// know a good value, and the only two outcomes it selects between are "wait a
+// few milliseconds" and "something is broken, say so and go".
+const DefaultShutdownGrace = 5 * time.Second
 
 // Daemon is a fully wired jarvixd instance.
 type Daemon struct {
@@ -40,6 +58,15 @@ type Daemon struct {
 	// Desktop notification dispatch (ui.notifications); see notifications.go.
 	notifier   desktop.Notifier
 	openWindow func(context.Context) error
+
+	// post tracks the daemon's own post-session goroutines: the session
+	// watcher and every notification delivery it dispatches. They outlive the
+	// session that produced them by design, so shutdown has to wait for them
+	// rather than assume a finished session means a finished daemon.
+	post quiesce.Group
+	// shutdownGrace bounds the drain in shutdown; DefaultShutdownGrace unless
+	// a test shortens it to exercise the give-up path.
+	shutdownGrace time.Duration
 
 	// The most recent session failure, retained past session.finished so the
 	// conversation window can render it. A window opened from an error
@@ -87,6 +114,10 @@ type Deps struct {
 	// OpenWindow opens the conversation window after a notification click;
 	// nil asks the Omarchy shell plugin.
 	OpenWindow func(context.Context) error
+	// HistoryStore persists conversation memory; nil uses the JSON file under
+	// the XDG state dir. Injectable so a test can hold a write open across
+	// shutdown — the one thing a real file store cannot be asked to do.
+	HistoryStore history.Store
 }
 
 // New builds a daemon from configuration. cfg must already be validated.
@@ -217,7 +248,10 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
-	store := &history.File{Path: paths.HistoryFile()}
+	var store history.Store = &history.File{Path: paths.HistoryFile()}
+	if deps.HistoryStore != nil {
+		store = deps.HistoryStore
+	}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engineOptions(cfg, logger))
 
@@ -235,6 +269,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		registry: registry, policy: cfg.Tools.Policy,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		paths: paths, injected: injected, cfg: cfg, warm: workers,
+		shutdownGrace: DefaultShutdownGrace,
 	}
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
@@ -262,23 +297,80 @@ func artifactOpenCommands(in map[string]config.Command) map[string][]string {
 	return out
 }
 
-// Run listens on the socket and serves until ctx is cancelled.
+// Run listens on the socket and serves until ctx is cancelled, then drains
+// the work the daemon still owes before returning (see shutdown).
 func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.server.Listen(); err != nil {
 		return err
 	}
-	// Warm workers die with the daemon. Their process groups would survive a
-	// bare exit — that is the whole point of a persistent worker — so the exit
-	// path has to say so explicitly (ADR 0018).
-	defer d.closeWarm()
+	defer d.shutdown()
 	// Subscribe before serving so no session that a client starts can finish
 	// unobserved. The watcher checks the live ui.notifications switch per
 	// session, so toggling notifications needs no restart (settings.go).
 	events, unsubscribe := d.bus.Subscribe()
-	go d.watchSessions(ctx, events, unsubscribe)
+	d.post.Go(func() { d.watchSessions(ctx, events, unsubscribe) })
 	d.startPTT(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
 	return d.server.Serve(ctx)
+}
+
+// shutdown drains everything a stopping daemon still owes, then kills its
+// children. It runs once Serve has stopped accepting, and Run does not return
+// until it is done — so "jarvixd has exited" means the work is finished, not
+// merely abandoned.
+//
+// The reason this exists at all is that jarvixd does work after the part of an
+// interaction the user can see. Conversation history is written *after*
+// session.finished and off the engine's lock, so the disk never delays a
+// spoken answer (ADR 0011). That design is right and stays; what was missing
+// was anyone waiting for it, so a restart landing in the gap silently lost the
+// last exchange.
+//
+// The stages are drained in dependency order, and share one deadline so total
+// shutdown is bounded by the grace period however many stages there are:
+//
+//	sessions       cancel what is in flight and wait for the tails, which is
+//	               where the pending history write lives.
+//	ipc            connections still dispatching a request or pushing events.
+//	notifications  the session watcher and its delivery goroutines; a cancelled
+//	               context kills the notify-send child, so this is quick.
+//	warm workers   killed last, because a draining session may still be
+//	               speaking or transcribing through one (ADR 0018).
+//
+// A stage that does not settle is logged with what it left outstanding, and
+// shutdown moves on: a wedged write must never be able to keep the daemon
+// alive. Deliberately not drained: the push-to-talk watcher (ADR 0008). Its
+// goroutines are parked in a blocking read on an evdev device that only a
+// keystroke returns from, so waiting for them would spend the entire grace
+// period on every shutdown — and they hold nothing a restart could lose.
+func (d *Daemon) shutdown() {
+	// Background, not the cancelled context Run was given: this is the drain
+	// that runs *because* that context is done.
+	ctx, cancel := context.WithTimeout(context.Background(), d.shutdownGrace)
+	defer cancel()
+
+	for _, stage := range []struct {
+		name      string
+		wait      func(context.Context) error
+		remaining func() int
+	}{
+		{"sessions", d.engine.Shutdown, d.engine.InFlight},
+		{"ipc", d.server.Drain, d.server.InFlight},
+		{"notifications", d.post.Wait, d.post.InFlight},
+	} {
+		if err := stage.wait(ctx); err != nil {
+			d.log.Warn("shutdown drain gave up waiting; exiting anyway",
+				"component", "daemon", "stage", stage.name,
+				"grace_ms", d.shutdownGrace.Milliseconds(),
+				"outstanding", stage.remaining(), "error", err.Error())
+		}
+	}
+
+	// Warm workers die with the daemon. Their process groups would survive a
+	// bare exit — that is the whole point of a persistent worker — so the exit
+	// path has to say so explicitly (ADR 0018).
+	d.closeWarm()
+	d.log.Info("jarvixd stopped", "component", "daemon")
 }
 
 // startPTT runs the daemon-side hold-to-talk watcher when a chord is

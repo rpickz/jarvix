@@ -42,7 +42,7 @@ func (w *windowSpy) count() int {
 // config and collaborators.
 func startNotifyDaemon(t *testing.T, cfg config.Config, notifier desktop.Notifier, opener func(context.Context) error, provider *ai.Fake) *ipc.Client {
 	t.Helper()
-	dir := daemonTempDir(t)
+	dir := t.TempDir()
 	paths := config.Paths{
 		Config:  dir,
 		Data:    dir,
@@ -63,24 +63,8 @@ func startNotifyDaemon(t *testing.T, cfg config.Config, notifier desktop.Notifie
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = d.Run(ctx) }()
-
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		client, err = ipc.Dial(paths.Socket)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("daemon socket never came up: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client
+	serveDaemon(t, d)
+	return dialDaemon(t, paths.Socket)
 }
 
 // runSession drives one text session to its terminal event.

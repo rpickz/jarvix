@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/session"
 )
 
@@ -27,6 +28,13 @@ type Server struct {
 	handlers   map[string]Handler
 	bus        *session.Bus
 	log        *slog.Logger
+
+	// serving tracks the per-connection goroutines. Serve returning only means
+	// the listener stopped accepting; the connections it already handed off
+	// are still dispatching requests and pushing events. Drain lets the daemon
+	// wait for them, so "the daemon has stopped" is not something a client can
+	// still be mid-request through.
+	serving quiesce.Group
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -105,9 +113,18 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.mu.Lock()
 		s.conns[conn] = struct{}{}
 		s.mu.Unlock()
-		go s.serveConn(ctx, conn)
+		s.serving.Go(func() { s.serveConn(ctx, conn) })
 	}
 }
+
+// Drain waits for every connection goroutine to exit, or until ctx is done.
+// Close must have been called first — it is closing the sockets that ends the
+// per-connection read loops — which Serve does for a cancelled context.
+func (s *Server) Drain(ctx context.Context) error { return s.serving.Wait(ctx) }
+
+// InFlight reports how many connections are still being served, for the
+// shutdown log when a drain gives up.
+func (s *Server) InFlight() int { return s.serving.InFlight() }
 
 // Close stops listening and disconnects all clients.
 func (s *Server) Close() {
