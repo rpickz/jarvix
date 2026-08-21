@@ -101,11 +101,17 @@ func TestShutdownIsBoundedByItsContext(t *testing.T) {
 		t.Error("a session started after the drain gave up")
 	}
 
-	// Let the wedged write finish, and the engine is quiescent again — which a
-	// second Shutdown reports even with an expired context.
+	// Let the wedged write finish, and the engine drains to quiescence. The
+	// wait here is bounded, not expired: the save lands a beat before the
+	// goroutine carrying it leaves the quiesce group, so an expired context
+	// could still catch the tail mid-exit and flake (#74). What is asserted
+	// is that the drain now completes — the write was the only thing holding
+	// it open.
 	release()
 	awaitOp(t, store, "save")
-	if err := h.engine.Shutdown(expired); err != nil {
+	bounded, cancelBounded := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelBounded()
+	if err := h.engine.Shutdown(bounded); err != nil {
 		t.Errorf("Shutdown after the write completed: %v", err)
 	}
 }

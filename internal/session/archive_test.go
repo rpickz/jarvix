@@ -12,6 +12,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/history"
+	"github.com/rpickz/jarvix/internal/intent"
 )
 
 // awaitAppend waits for the archive Fake to report a completed append. The
@@ -343,6 +344,124 @@ func TestShutdownWaitsForThePendingArchiveWrite(t *testing.T) {
 	id := h.engine.ActiveConversationID()
 	if turns := fake.Turns(id); len(turns) != 2 {
 		t.Errorf("archived %d turns by shutdown, want 2", len(turns))
+	}
+}
+
+// routineArchiveOptions is archiveOptions for an intent turn: a router that
+// knows one routine, the fake runner, and the archive under test — the
+// smallest configuration in which runIntent's tail writes the archive (#74).
+func routineArchiveOptions(t *testing.T, runner RoutineRunner, archive conversations.Store) Options {
+	t.Helper()
+	router, err := intent.New(intent.Options{Routines: []intent.RoutinePhrases{
+		{Name: "morning setup", Phrases: []string{"morning setup"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := archiveOptions(archive, 8)
+	opts.Intents = router
+	opts.IntentRunner = &intent.FakeRunner{}
+	opts.Routines = runner
+	return opts
+}
+
+// runRoutineTurn drives one routine phrase through the engine to
+// session.finished — which finishLocked publishes only after the engine is
+// back in idle, so no polling is needed on top of it.
+func runRoutineTurn(t *testing.T, h *harness) {
+	t.Helper()
+	if _, err := h.engine.StartSession(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.Submit("morning setup"); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "session.finished")
+}
+
+// An intent turn's archive flush lives on runIntent's tail exactly as a model
+// turn's lives on think()'s — and it rides the same shutdown drain. This is
+// #74: the routine/capture path spawned that tail untracked, so a daemon stop
+// could race the archive append it still owed and lose the exchange.
+//
+// The bounded assertion doubles as the mutation check: spawn runIntent
+// outside e.active again and the expired Shutdown returns nil with nothing
+// in flight, failing this test deterministically.
+func TestShutdownWaitsForARoutineTurnsArchiveWrite(t *testing.T) {
+	fake, release := gatedArchive(t)
+	runner := &fakeRoutines{summary: "Morning setup: all five apps placed."}
+	h := newHarness(t, routineArchiveOptions(t, runner, fake))
+	runRoutineTurn(t, h)
+
+	// Finished, idle, published — and the archive write is in flight, held.
+	<-fake.AppendStarted
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := h.engine.Shutdown(expired); err == nil {
+		t.Fatal("Shutdown returned nil with a routine turn's archive write still in flight")
+	}
+	if n := h.engine.InFlight(); n != 1 {
+		t.Errorf("InFlight = %d, want the 1 parked archive flush", n)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.engine.Shutdown(context.Background()) }()
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	// If Shutdown returned before the flush completed, this reads a hole.
+	if n := fake.Appends(); n != 1 {
+		t.Errorf("archive saw %d appends by the time Shutdown returned, want 1", n)
+	}
+	id := h.engine.ActiveConversationID()
+	if turns := fake.Turns(id); len(turns) != 2 {
+		t.Errorf("archived %d turns by shutdown, want the routine exchange's 2", len(turns))
+	}
+}
+
+// The rebuilt-engine case of the same invariant — #74's exact shape: a layout
+// capture's deferred reload rebuilds the engine's collaborators between turns
+// (#62), and the routine then runs on the rebuilt engine. Reconfigure swaps
+// options in place, so the swapped-in archive's write must be tracked by the
+// same drain as the original's — an engine rebuild must never orphan
+// post-session work (#29's invariant, extended).
+func TestRebuiltEngineArchiveWriteStillDrainsOnShutdown(t *testing.T) {
+	fake, release := gatedArchive(t)
+	runner := &fakeRoutines{summary: "Morning setup: all five apps placed."}
+	// Boot with one archive, then rebuild onto the gated one — the swap a
+	// config reload performs after a capture turn.
+	h := newHarness(t, routineArchiveOptions(t, runner, conversations.NewFake()))
+	if err := h.engine.Reconfigure(h.provider, h.stt, h.tts, h.recorder, h.player,
+		routineArchiveOptions(t, runner, fake)); err != nil {
+		t.Fatal(err)
+	}
+	runRoutineTurn(t, h)
+
+	<-fake.AppendStarted // the rebuilt engine's flush is in flight, held
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := h.engine.Shutdown(expired); err == nil {
+		t.Fatal("Shutdown returned nil with the rebuilt engine's archive write still in flight")
+	}
+	if n := h.engine.InFlight(); n != 1 {
+		t.Errorf("InFlight = %d, want the 1 parked archive flush", n)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.engine.Shutdown(context.Background()) }()
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if n := fake.Appends(); n != 1 {
+		t.Errorf("the rebuilt engine's archive saw %d appends by the time Shutdown returned, want 1", n)
+	}
+	id := h.engine.ActiveConversationID()
+	if turns := fake.Turns(id); len(turns) != 2 {
+		t.Errorf("archived %d turns by shutdown, want the routine exchange's 2", len(turns))
 	}
 }
 
