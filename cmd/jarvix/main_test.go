@@ -301,7 +301,10 @@ func TestRunAskSurfacesSessionErrors(t *testing.T) {
 
 func TestRunPTTStartBeginsListening(t *testing.T) {
 	hermeticEnv(t)
+	// beginListening probes state first: a pending tool confirmation must
+	// not be interrupted by session.start.
 	rec := startDaemon(t, nil, map[string]ipc.Handler{
+		"status.get":    func(json.RawMessage) (any, error) { return map[string]any{"state": "idle"}, nil },
 		"session.start": ok,
 		"voice.start":   ok,
 	})
@@ -311,8 +314,30 @@ func TestRunPTTStartBeginsListening(t *testing.T) {
 		t.Fatalf("exit = %d", code)
 	}
 	calls := rec.recorded()
-	if len(calls) != 2 || calls[0] != "session.start" || calls[1] != "voice.start" {
+	if strings.Join(calls, ",") != "status.get,session.start,voice.start" {
 		t.Errorf("calls = %v", calls)
+	}
+}
+
+func TestRunPTTStartDuringConfirmationOnlyCaptures(t *testing.T) {
+	hermeticEnv(t)
+	// While a confirmation is pending, the press answers it by voice: the
+	// session must keep waiting, so no session.start.
+	rec := startDaemon(t, nil, map[string]ipc.Handler{
+		"status.get": func(json.RawMessage) (any, error) {
+			return map[string]any{"state": "awaiting_confirmation"}, nil
+		},
+		"session.start": ok,
+		"voice.start":   ok,
+	})
+	var code int
+	capture(t, func() { code = run([]string{"ptt", "start"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	calls := rec.recorded()
+	if strings.Join(calls, ",") != "status.get,voice.start" {
+		t.Errorf("calls = %v, want the capture to flow into the confirmation", calls)
 	}
 }
 
@@ -355,9 +380,11 @@ func TestRunPTTToggle(t *testing.T) {
 		status    map[string]any
 		wantCalls []string
 	}{
+		// beginListening re-probes state (the confirmation guard), so the
+		// paths that reach it see status.get twice.
 		"idle starts listening": {
 			status:    map[string]any{"state": "idle", "ptt": "cli"},
-			wantCalls: []string{"status.get", "session.start", "voice.start"},
+			wantCalls: []string{"status.get", "status.get", "session.start", "voice.start"},
 		},
 		"listening submits": {
 			status:    map[string]any{"state": "listening", "ptt": "cli"},
@@ -369,7 +396,11 @@ func TestRunPTTToggle(t *testing.T) {
 		},
 		"speaking interrupts into listening": {
 			status:    map[string]any{"state": "speaking", "ptt": "cli"},
-			wantCalls: []string{"status.get", "session.start", "voice.start"},
+			wantCalls: []string{"status.get", "status.get", "session.start", "voice.start"},
+		},
+		"pending confirmation only captures": {
+			status:    map[string]any{"state": "awaiting_confirmation", "ptt": "cli"},
+			wantCalls: []string{"status.get", "status.get", "voice.start"},
 		},
 	}
 	for name, c := range cases {
@@ -392,6 +423,27 @@ func TestRunPTTToggle(t *testing.T) {
 				t.Errorf("calls = %v, want %v", calls, c.wantCalls)
 			}
 		})
+	}
+}
+
+func TestRunDoctorReturnsExitCodeInsteadOfExiting(t *testing.T) {
+	hermeticEnv(t)
+	// A machine with nothing installed: every dependency check fails. The
+	// point of this test is the seam itself — cmdDoctor must report failure
+	// through run()'s exit code, never by calling os.Exit (which would kill
+	// this very test process).
+	t.Setenv("PATH", t.TempDir())
+	var code int
+	stdout, stderr := capture(t, func() { code = run([]string{"doctor"}) })
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stdout, "[FAIL]") || !strings.Contains(stdout, "Fix the failures above") {
+		t.Errorf("stdout = %q, want the doctor report", stdout)
+	}
+	// The report already explains everything; no extra error line is added.
+	if strings.Contains(stderr, "checks failed") {
+		t.Errorf("stderr = %q, want no redundant error output", stderr)
 	}
 }
 

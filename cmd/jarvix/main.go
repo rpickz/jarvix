@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -101,23 +102,23 @@ func run(args []string) int {
 		}
 	case "config":
 		switch {
-		case len(args) == 0:
+		case len(rest) == 0:
 			err = cmdConfig(cfg, paths)
-		case args[0] == "get":
+		case rest[0] == "get":
 			key := ""
-			if len(args) > 1 {
-				key = args[1]
+			if len(rest) > 1 {
+				key = rest[1]
 			}
 			err = cmdConfigGet(paths, key)
-		case args[0] == "set":
-			if len(args) < 2 {
-				fatal(fmt.Errorf("usage: jarvix config set key=value [key=value ...]"))
+		case rest[0] == "set":
+			if len(rest) < 2 {
+				return fail(fmt.Errorf("usage: jarvix config set key=value [key=value ...]"))
 			}
-			err = cmdConfigSet(paths, args[1:])
-		case args[0] == "reload":
+			err = cmdConfigSet(paths, rest[1:])
+		case rest[0] == "reload":
 			err = cmdConfigReload(paths)
 		default:
-			fatal(fmt.Errorf("usage: jarvix config [get [key] | set key=value ... | reload]"))
+			return fail(fmt.Errorf("usage: jarvix config [get [key] | set key=value ... | reload]"))
 		}
 	case "version", "--version", "-v":
 		fmt.Println("jarvix", build.Version)
@@ -128,10 +129,20 @@ func run(args []string) int {
 		return 2
 	}
 	if err != nil {
+		if errors.Is(err, errChecksFailed) {
+			// The command already printed its own report (doctor's check
+			// list); only the exit code is left to deliver.
+			return 1
+		}
 		return fail(err)
 	}
 	return 0
 }
+
+// errChecksFailed signals a non-zero exit whose explanation was already
+// printed. It exists so commands never call os.Exit themselves — run() is
+// the only place an exit code is decided, which is what makes it testable.
+var errChecksFailed = errors.New("checks failed")
 
 func fail(err error) int {
 	fmt.Fprintln(os.Stderr, "jarvix:", err)
