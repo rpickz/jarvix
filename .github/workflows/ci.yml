@@ -13,14 +13,19 @@ on:
 permissions:
   contents: read
 
-# One run per commit, belt to the braces of the same-repo guard on each job
-# below. Keyed on the commit (github.sha for a push, the PR's head sha for a
-# pull_request — the same value) rather than on the branch: distinct commits
-# land in distinct groups, so no push ever loses its verdict to a later one,
-# which is the promise in the first line of this file.
+# One run at a time per commit, keyed on the commit (github.sha for a push,
+# the PR's head sha for a pull_request — the same value) rather than on the
+# branch, so distinct commits never contend and no push loses its verdict to
+# a later one.
+#
+# cancel-in-progress is deliberately FALSE. Cancelling is the usual setting
+# and it is wrong here twice over: a cancelled run is a lost verdict, which
+# is the one thing the first line of this file promises, and it shows up as a
+# red check besides. The same-repo guard below is what removes the duplicate;
+# this group only stops two runs of one commit overlapping.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # Both jobs carry the same guard: skip the pull_request run for a branch in
 # this repo, because the push trigger above already graded that exact commit

@@ -128,4 +128,10 @@ func TestCIWorkflowGradesEveryBranchWithAPinnedLinter(t *testing.T) {
 	if guards := strings.Count(workflow, "github.event.pull_request.head.repo.full_name != github.repository"); guards != 2 {
 		t.Errorf("both jobs must skip the duplicate same-repo pull_request run, found %d guards", guards)
 	}
+	// Cancelling is the usual concurrency setting and the wrong one here: a
+	// cancelled run is a lost verdict. Observed for real — the skipped
+	// pull_request run cancelled the push run that had done the grading.
+	if strings.Contains(workflow, "cancel-in-progress: true") {
+		t.Error("cancel-in-progress must stay false: a cancelled run is a push without a verdict")
+	}
 }
