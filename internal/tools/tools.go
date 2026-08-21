@@ -177,6 +177,16 @@ func (r *Registry) CheckCommand(tool, command string) Verdict {
 	return r.policy.DecideCommand(tool, command)
 }
 
+// CheckRoutine classifies running one named routine under the routine.run
+// identity (ADR 0025). Like Check, no policy means everything is allowed —
+// which for routines is also what the shipped default policy says.
+func (r *Registry) CheckRoutine(name string) Verdict {
+	if r.policy == nil {
+		return Verdict{Decision: PolicyAllow, Tool: RoutineToolName, Command: name, Rule: "no policy installed"}
+	}
+	return r.policy.DecideRoutine(name)
+}
+
 // Names returns registered tool names in registration order.
 func (r *Registry) Names() []string {
 	return append([]string(nil), r.order...)
