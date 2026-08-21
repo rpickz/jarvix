@@ -20,14 +20,14 @@ import (
 // KnownModels maps short model names to their ggml file names as distributed
 // on Hugging Face (ggerganov/whisper.cpp).
 var KnownModels = map[string]string{
-	"tiny":     "ggml-tiny.bin",
-	"tiny.en":  "ggml-tiny.en.bin",
-	"base":     "ggml-base.bin",
-	"base.en":  "ggml-base.en.bin",
-	"small":    "ggml-small.bin",
-	"small.en": "ggml-small.en.bin",
-	"medium":   "ggml-medium.bin",
-	"large-v3": "ggml-large-v3.bin",
+	"tiny":           "ggml-tiny.bin",
+	"tiny.en":        "ggml-tiny.en.bin",
+	"base":           "ggml-base.bin",
+	"base.en":        "ggml-base.en.bin",
+	"small":          "ggml-small.bin",
+	"small.en":       "ggml-small.en.bin",
+	"medium":         "ggml-medium.bin",
+	"large-v3":       "ggml-large-v3.bin",
 	"large-v3-turbo": "ggml-large-v3-turbo.bin",
 }
 

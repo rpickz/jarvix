@@ -525,9 +525,9 @@ type recordingTool struct {
 	calls  int
 }
 
-func (r *recordingTool) Name() string                { return "run" }
-func (r *recordingTool) Description() string          { return "run something" }
-func (r *recordingTool) Schema() json.RawMessage      { return json.RawMessage(`{"type":"object"}`) }
+func (r *recordingTool) Name() string            { return "run" }
+func (r *recordingTool) Description() string     { return "run something" }
+func (r *recordingTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (r *recordingTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
 	r.calls++
 	return r.result, nil
