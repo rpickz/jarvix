@@ -9,7 +9,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 )
 
-// Engine-side desktop context (ADR 0018): where a capture lands in the
+// Engine-side desktop context (ADR 0019): where a capture lands in the
 // message list, which paths pay for it, and how it is disclosed afterwards.
 
 // contextHarness is the standard harness with a scripted collector.
@@ -186,6 +186,73 @@ func TestCaptureIsAuditableAfterwards(t *testing.T) {
 		if _, present := s["text"]; present {
 			t.Errorf("context.captured carried content: %v", s)
 		}
+	}
+}
+
+// TestContextGatheringIsChargedToJarvix pins the seam with the latency budget
+// (ADR 0018): gathering happens between the transcript and the request, so
+// without its own stage it would sit inside transcript_to_first_delta_ms —
+// the one span subtracted from jarvix_ms as "the user's choice of model".
+// A cost hidden inside the number it inflates is worse than no measurement.
+func TestContextGatheringIsChargedToJarvix(t *testing.T) {
+	var s sess
+	base := time.Now()
+	s.timings.captureStop = base
+	s.timings.transcript = base.Add(100 * time.Millisecond)
+	s.timings.contextDone = base.Add(150 * time.Millisecond)
+	s.timings.firstDelta = base.Add(400 * time.Millisecond)
+	s.timings.firstPCM = base.Add(450 * time.Millisecond)
+	s.timings.audioOut = base.Add(500 * time.Millisecond)
+
+	report := s.timings.report()
+	if got := report[StageContext]; got != int64(50) {
+		t.Errorf("%s = %v, want 50", StageContext, got)
+	}
+	// The model's clock starts where gathering stopped, not at the transcript.
+	if got := report[StageTranscriptToDelta]; got != int64(250) {
+		t.Errorf("%s = %v, want 250 (context excluded)", StageTranscriptToDelta, got)
+	}
+	// …so the 50ms lands in Jarvix's own number: 500 total - 250 thinking.
+	if got := report[StageJarvixOverhead]; got != int64(250) {
+		t.Errorf("%s = %v, want 250 (context included)", StageJarvixOverhead, got)
+	}
+
+	// With context disabled there is no stage at all — absent, not zero, so a
+	// reader can tell "off" from "instant".
+	var without sess
+	without.timings.captureStop = base
+	without.timings.transcript = base.Add(100 * time.Millisecond)
+	without.timings.firstDelta = base.Add(400 * time.Millisecond)
+	plain := without.timings.report()
+	if _, present := plain[StageContext]; present {
+		t.Errorf("%s reported with context disabled: %v", StageContext, plain)
+	}
+	if got := plain[StageTranscriptToDelta]; got != int64(300) {
+		t.Errorf("%s = %v, want the full 300 without context", StageTranscriptToDelta, got)
+	}
+}
+
+// TestContextStageReachesTheTimingsEvent proves the mark is actually set on a
+// real turn, not merely computable.
+func TestContextStageReachesTheTimingsEvent(t *testing.T) {
+	h, _ := newContextHarness(t, Options{Model: "m"},
+		desktop.Item{Source: desktop.SourceWindow, Text: "Alacritty"})
+
+	if _, err := h.engine.StartSession(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.Submit("what is this?"); err != nil {
+		t.Fatal(err)
+	}
+	seen := h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	ev, ok := seen["session.timings"]
+	if !ok {
+		t.Fatal("no session.timings event")
+	}
+	if _, present := ev.Data[StageContext]; !present {
+		t.Errorf("timings = %v, want a %s stage", ev.Data, StageContext)
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 )
 
-// This file is the engine half of desktop context (ADR 0018).
+// This file is the engine half of desktop context (ADR 0019).
 // internal/desktop owns the gathering — which sources, which subprocesses,
 // what redaction — while the engine owns three decisions that are only
 // answerable here:
@@ -40,6 +40,9 @@ func (e *Engine) gatherContext(s *sess) desktop.Snapshot {
 		return desktop.Snapshot{}
 	}
 	snap := collector.Collect(s.ctx)
+	// Charged to Jarvix, not to the model: gathering happens inside the window
+	// that would otherwise be reported as thinking time (ADR 0018's timings).
+	s.timings.markContext()
 	if s.ctx.Err() != nil {
 		// Cancelled mid-capture: the session is over, and recording what a
 		// dead turn saw would only confuse the audit.

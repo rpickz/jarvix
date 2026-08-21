@@ -17,7 +17,7 @@ or the more natural Kokoro), provider-independent AI, tool calling
 The conversation gains eyes: active window, selected text, and clipboard are
 gathered by the daemon and offered to the model, so "what does this error
 mean?" with a stack trace selected answers *that* error
-([ADR 0018](adr/0018-desktop-context.md)). Every source is opt-in
+([ADR 0019](adr/0019-desktop-context.md)). Every source is opt-in
 (`[context]`, clipboard off by default), a disabled source is never read at
 all, gathering is parallel inside a 300ms hard budget (measured: ~2ms), and
 anything that looks like a secret is redacted before it leaves the machine.

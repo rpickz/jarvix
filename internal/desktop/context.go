@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 )
 
-// This file implements desktop context gathering (ADR 0018): the daemon looks
+// This file implements desktop context gathering (ADR 0019): the daemon looks
 // at what the user is looking at — the focused window, the primary selection,
 // the clipboard — and offers it to the assistant, so "what does this error
 // mean?" answers the stack trace on screen instead of the question in the

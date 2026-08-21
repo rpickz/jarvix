@@ -62,7 +62,7 @@ func TestRedactLetsOrdinaryContentThrough(t *testing.T) {
 		"stack trace":      "panic: runtime error: index out of range [5] with length 3\n\tmain.go:42 +0x1d",
 		"java stack trace": "at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory2.doCreateBean(AbstractAutowireCapableBeanFactory.java:594)",
 		"absolute path":    "/home/rpickz/Work/DigitalBrainwave2/contentdeck/internal/session/engine.go",
-		"long url":         "https://github.com/rpickz/jarvix/blob/main/docs/adr/0018-desktop-context.md#consequences",
+		"long url":         "https://github.com/rpickz/jarvix/blob/main/docs/adr/0019-desktop-context.md#consequences",
 		"git sha":          "commit 9f2c1ae0b7d34e5a6c8f0192b3d4e5f60718293a",
 		"uuid":             "550e8400-e29b-41d4-a716-446655440000",
 		"sql":              "SELECT id, created_at FROM social_posts WHERE scheduled_for > now() ORDER BY scheduled_for LIMIT 50;",

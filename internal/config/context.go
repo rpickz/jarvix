@@ -3,7 +3,7 @@ package config
 import "fmt"
 
 // Context configures what Jarvix may look at on the desktop before it answers
-// (ADR 0018): the focused window, the text the user has highlighted, and the
+// (ADR 0019): the focused window, the text the user has highlighted, and the
 // clipboard. Every source is opt-in on its own, because they carry very
 // different amounts of the user's life:
 //

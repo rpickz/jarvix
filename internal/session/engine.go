@@ -57,7 +57,7 @@ type Options struct {
 	// the real one; tests substitute a fake so no test touches wpctl.
 	IntentRunner intent.Runner
 	// Context gathers opt-in desktop context — active window, selection,
-	// clipboard — for turns that reach the model (ADR 0018). Nil disables it
+	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.
 	Context ContextCollector
 }
@@ -123,7 +123,7 @@ type Engine struct {
 	lastTurn time.Time
 
 	// The most recent desktop context capture, kept so the user can always
-	// audit what Jarvix saw (ADR 0018). It outlives its session deliberately —
+	// audit what Jarvix saw (ADR 0019). It outlives its session deliberately —
 	// `jarvix status --last` is asked *after* the answer — but never outlives
 	// the daemon: context is not persisted. Guarded by mu.
 	lastContext        desktop.Snapshot
@@ -139,6 +139,9 @@ type sess struct {
 	recording    audio.Recording
 	started      time.Time
 	voiceStarted time.Time
+	// timings carries the per-stage latency marks of this interaction; it is
+	// written from every stage goroutine and published when the session ends.
+	timings timings
 
 	// A session proceeds to Thinking only once both are true: the transcript
 	// is ready (from STT or provided directly) and the client has submitted.
@@ -319,6 +322,10 @@ func (e *Engine) StopVoice() (discarded bool, err error) {
 	}
 	rec := s.recording
 	s.recording = nil
+	// The latency budget starts here: everything a user perceives as "how long
+	// until it answers" is measured from the key release, not from the moment
+	// some later stage happened to begin.
+	s.timings.markCaptureStop()
 	e.publish(Event{Type: "recording.stopped", Data: map[string]any{"session_id": s.id}})
 	e.active.Add(1)
 	go func() { defer e.active.Done(); e.transcribe(s, rec) }()
@@ -345,6 +352,7 @@ func (e *Engine) Submit(text string) error {
 	if text != "" {
 		s.transcript = text
 		s.transcriptReady = true
+		s.timings.markTranscript()
 		e.publish(Event{Type: "transcript.final", Data: map[string]any{"session_id": s.id, "text": text}})
 	}
 	s.submitted = true
@@ -445,11 +453,39 @@ func (e *Engine) finishLocked(s *sess) {
 	if e.state.Active() {
 		_ = e.setStateLocked(StateIdle)
 	}
+	e.publishTimings(s)
 	e.publish(Event{Type: "session.finished", Data: map[string]any{"session_id": s.id}})
 	e.log.Info("session finished", "component", "session", "session_id", s.id,
 		"duration_ms", time.Since(s.started).Milliseconds())
 	s.cancel()
 	e.current = nil
+}
+
+// publishTimings reports the latency budget of a session that got far enough
+// to have one. It goes out before session.finished, which the bus guarantees
+// is a session's last event, so a client can attribute the numbers without
+// racing the end of the session.
+func (e *Engine) publishTimings(s *sess) {
+	report := s.timings.report()
+	if len(report) == 0 {
+		return
+	}
+	// Log the stages in pipeline order so a journal line reads like the
+	// pipeline, and every key matches the event and the CLI exactly.
+	args := []any{"component", "session", "session_id", s.id}
+	for _, stage := range StageOrder {
+		if v, ok := report[stage]; ok {
+			args = append(args, stage, v)
+		}
+	}
+	e.log.Info("session timings", args...)
+
+	data := make(map[string]any, len(report)+1)
+	for k, v := range report {
+		data[k] = v
+	}
+	data["session_id"] = s.id
+	e.publish(Event{Type: "session.timings", Data: data})
 }
 
 // fail reports a stage failure and ends the session. Cancellation is not a
@@ -474,6 +510,9 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 		"session_id": s.id, "stage": stage, "message": err.Error(),
 	}})
 	_ = e.setStateLocked(StateIdle)
+	// A failure has a latency story too — often the interesting one, because
+	// the stage it died in is the stage that ran long.
+	e.publishTimings(s)
 	e.publish(Event{Type: "session.finished", Data: map[string]any{"session_id": s.id}})
 	s.cancel()
 	e.current = nil
@@ -545,6 +584,7 @@ func (e *Engine) transcribe(s *sess, rec audio.Recording) {
 		case stt.EventFinal:
 			e.log.Info("transcription finished", "component", "stt",
 				"session_id", s.id, "duration_ms", time.Since(start).Milliseconds())
+			s.timings.markTranscript()
 			e.mu.Lock()
 			if e.current == s {
 				s.transcript = ev.Text
@@ -574,7 +614,7 @@ const maxToolRounds = 6
 func (e *Engine) think(s *sess) {
 	// Desktop context is gathered here and nowhere earlier: this function is
 	// the one path that opens a provider request, so a transcript the intent
-	// router already claimed never waits on hyprctl or wl-paste (ADR 0018).
+	// router already claimed never waits on hyprctl or wl-paste (ADR 0019).
 	snapshot := e.gatherContext(s)
 	messages := e.conversationMessages(s.transcript, snapshot)
 
@@ -678,6 +718,7 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 		switch ev.Type {
 		case ai.EventDelta:
 			if !responded {
+				s.timings.markFirstDelta()
 				if !e.advance(s, StateResponding) {
 					return "", nil, false
 				}

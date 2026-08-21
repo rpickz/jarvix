@@ -76,6 +76,11 @@ func (p *timedPlayer) Play(ctx context.Context, sampleRate, channels int, chunks
 	return nil
 }
 
+// timedPlayer deliberately ignores audio.Trace: it *is* the measurement, and
+// taking the mark itself keeps the benchmark independent of the plumbing under
+// test.
+var _ audio.Player = (*timedPlayer)(nil)
+
 // BenchmarkFirstDeltaToFirstPCM measures THE latency seam of the product:
 // from the fake provider emitting its first text delta to the first PCM chunk
 // being handed to the audio player — i.e. sentencer + streaming speaker +
@@ -116,6 +121,60 @@ func BenchmarkFirstDeltaToFirstPCM(b *testing.B) {
 		total += t1.Sub(t0)
 	}
 	b.ReportMetric(float64(total.Nanoseconds())/float64(b.N), "first-delta-to-first-pcm-ns/op")
+}
+
+// BenchmarkReleaseToFirstAudio measures the product's headline number over our
+// own pipeline: push-to-talk release to the first PCM chunk reaching the
+// player, with fake engines so what is measured is Jarvix's overhead and
+// nothing else.
+//
+// It is the companion to the per-session `session.timings` report (ADR 0018):
+// the event tells a user what their machine did with real engines, and this
+// tells a reviewer whether a change made our share of that budget worse. The
+// engine numbers themselves belong to whisper and kokoro and are recorded in
+// the ADR, not here — a benchmark that shelled out to them would measure the
+// machine it ran on.
+func BenchmarkReleaseToFirstAudio(b *testing.B) {
+	provider := &timedProvider{text: "The answer is ready. More detail follows in a second sentence."}
+	player := &timedPlayer{}
+	bus := NewBus(discardLogger())
+	events, unsub := bus.Subscribe()
+	defer unsub()
+	engine := NewEngine(provider, &stt.Fake{Text: "what time is it"}, &tts.Fake{},
+		&audio.FakeRecorder{}, player, nil, nil, bus, discardLogger(),
+		Options{Model: "bench", SpeakResponses: true})
+
+	b.ReportAllocs()
+	var total time.Duration
+	for b.Loop() {
+		if _, err := engine.StartSession(); err != nil {
+			b.Fatal(err)
+		}
+		if err := engine.StartVoice(); err != nil {
+			b.Fatal(err)
+		}
+		released := time.Now()
+		if _, err := engine.StopVoice(); err != nil {
+			b.Fatal(err)
+		}
+		if err := engine.Submit(""); err != nil {
+			b.Fatal(err)
+		}
+		for ev := range events {
+			if ev.Type == "session.finished" {
+				break
+			}
+			if ev.Type == "error" {
+				b.Fatalf("session failed: %v", ev.Data)
+			}
+		}
+		player.mu.Lock()
+		firstPCM := player.firstPCM
+		player.firstPCM = time.Time{}
+		player.mu.Unlock()
+		total += firstPCM.Sub(released)
+	}
+	b.ReportMetric(float64(total.Nanoseconds())/float64(b.N), "release-to-first-audio-ns/op")
 }
 
 // BenchmarkSentencer measures sentence-splitter throughput over a streaming

@@ -1,4 +1,4 @@
-# ADR 0018 — Desktop context: opt-in eyes, gathered on the model path only
+# ADR 0019 — Desktop context: opt-in eyes, gathered on the model path only
 
 **Status:** accepted (implements roadmap Phase 2)
 
@@ -86,9 +86,21 @@ mistaken for instruction, with a per-source cap (`context.max_chars`, default
 every surface. Context is never committed to history: a capture lives exactly
 one turn.
 
+**Gathering is charged to Jarvix, not to the model.** ADR 0018 made every
+session report its latency budget, and it subtracts the transcript→first-token
+span from the total as "the user's choice of model" to get `jarvix_ms`.
+Context gathering happens inside exactly that span, so without its own mark it
+would inflate the number that is excused and deflate the number this codebase
+is accountable for. It therefore has its own stage, `context_ms`, and the
+model's clock starts where gathering stops. A cost that hides inside the
+figure it inflates is the one kind of measurement worse than none.
+
 **Disclosure is a feature, not a log line.** `context.last` (IPC) returns the
 exact text that reached the model — already truncated, already redacted — and
-`jarvix status --last` prints it. A `context.captured` event carries sizes and
+`jarvix status --last` prints it — beside that interaction's latency budget,
+because "what did that cost?" and "what did it see?" are the same question
+asked of the same turn, and one flag should answer both. A
+`context.captured` event carries sizes and
 flags only, because events fan out to every connected client. Captured content
 is never logged at any level; the debug line records which sources contributed
 and how many characters each held. `jarvix doctor` lists the enabled sources
@@ -103,7 +115,9 @@ read the config finds out that Jarvix looks at anything at all.
   for the default pair (window + selection) and ~2.0–3.5ms with the clipboard
   as well — under 1.5% of the 300ms budget, and roughly the cost of two
   process spawns. Disabled costs 1.6ns and zero allocations. A matched intent
-  costs nothing at all, by construction.
+  costs nothing at all, by construction. Against ADR 0018's release-to-first-
+  audio budget of 1.5s, eyes cost about 0.1% of it, and `context_ms` says so
+  on every session rather than asking anyone to take that on trust.
 - **The gatherer seam is the template for Phase 2's remaining surface.** A
   screen region (with its own consent UX) and later `desktop.*` tools
   implement `Gatherer` and appear in the enabled list; the budget, the

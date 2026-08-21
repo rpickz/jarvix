@@ -3,6 +3,7 @@ package session
 import (
 	"strings"
 
+	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/tts"
 )
 
@@ -129,14 +130,23 @@ func (sp *streamingSpeaker) run() {
 			pcm = make(chan []byte, 8)
 			playDone = make(chan error, 1)
 			sp.e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": sp.s.id}})
+			// Only the player can say when audio actually left for the device;
+			// nothing on this side of the channel can observe it (audio.Trace).
+			playCtx := audio.WithTrace(sp.s.ctx, &audio.Trace{FirstAudio: sp.s.timings.markAudioOut})
 			go func(rate, ch int, in <-chan []byte) {
-				playDone <- sp.e.player.Play(sp.s.ctx, rate, ch, in)
+				playDone <- sp.e.player.Play(playCtx, rate, ch, in)
 			}(format.SampleRate, format.Channels, pcm)
 		}
 		for c := range chunks {
 			if c.Err != nil {
 				return c.Err
 			}
+			// The first synthesized sample of the answer — marked on the sample,
+			// never on the Speak call. A warm engine hands back its channel
+			// immediately while a cold one hands it back once the model has
+			// loaded, so marking the call would time process start-up instead
+			// of synthesis and report a warm worker as infinitely fast.
+			sp.s.timings.markFirstPCM()
 			select {
 			case pcm <- c.PCM:
 			case <-sp.s.ctx.Done():

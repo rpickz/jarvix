@@ -122,7 +122,7 @@ permission gate the model's tool calls do.
 ### Desktop context
 
 A transcript the router does not claim goes to the model — and only then does
-Jarvix look at the screen ([ADR 0018](adr/0018-desktop-context.md)). Inside
+Jarvix look at the screen ([ADR 0019](adr/0019-desktop-context.md)). Inside
 `think()`, before the request is built, the enabled sources (active window,
 primary selection, clipboard) are gathered in parallel by short-lived
 subprocesses (`hyprctl`, `wl-paste`) inside a 300ms budget, redacted, capped,

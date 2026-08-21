@@ -50,7 +50,7 @@ to each field in the settings screen:
 | Class | Options | When it takes effect |
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
-| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
 
 A reload that fails validation keeps the running configuration and reports
@@ -197,6 +197,15 @@ max_recording_sec = 60           # safety cap on capture length
 min_recording_ms = 300           # discard shorter captures as accidental taps
                                  # (no transcription, no error; session ends quietly)
 
+[performance]                    # how much of the engine stack stays loaded
+warm_engines = true              # keep supervised STT/TTS workers alive between
+                                 # sessions; false restores the pre-ADR-0017
+                                 # behaviour exactly (a cold start per session)
+warm_memory_cap_mb = 2048        # retire a worker whose resident set passes this
+                                 # (a leak detector, not a working budget; 0 = off)
+warm_idle_reap_sec = 600         # free the workers after this long without an
+                                 # interaction; 0 = keep them until jarvixd exits
+
 [ui]                             # desktop surfaces: overlay hints + notifications
 show_transcript = true
 show_response = true
@@ -224,6 +233,72 @@ binary = "/usr/bin/claude"       # absolute path found on PATH at setup time
 # timeout_sec = 120              # the process group is killed past this
 # description = "..."            # what the model is told this advisor is for
 ```
+
+## Latency and warm engines (`[performance]`)
+
+Jarvix's premise is that the computer feels present, so the time between
+letting go of push-to-talk and hearing the first word is a budget, not an
+accident. It is measured on **every** session and published as the
+`session.timings` event; `jarvix status --last` prints the breakdown:
+
+```
+$ jarvix status --last
+state:    idle
+warm:     whisper  warm, 168 MB, up 412s
+warm:     kokoro   warm, 640 MB, up 388s
+last:     session s7
+          release → transcript                 31 ms
+          transcript → first token (model)    240 ms
+          first token → first audio sample    256 ms
+          first sample → audio out              2 ms
+          release → first audio (total)       529 ms
+            of which Jarvix (excl. model)     289 ms
+```
+
+The model's thinking time is reported separately and excluded from the
+Jarvix line: which model you point at is your choice, and mixing it in would
+hide what Jarvix itself costs.
+
+**What warm mode does.** With `warm_engines = true` (the default) the daemon
+keeps one supervised child per engine — `whisper-server` holding the ggml
+model, and the TTS helper holding its voice — instead of starting a fresh
+process and reloading the model for every question. On the development
+machine that is the difference between ~900 ms and ~290 ms to first audio
+with Kokoro, and ~374 ms versus ~81 ms with Piper (ADR 0018 has the full
+table and the method).
+
+**What it costs.** Memory, while the machine is idle: whisper base.en is
+~165 MB resident and Kokoro's helper several hundred more. Three things
+bound it:
+
+- `warm_idle_reap_sec` frees the workers after ten minutes of quiet. The
+  next question pays one cold start — the numbers above, cold column.
+- `warm_memory_cap_mb` retires a worker that grows past the cap, so a leaking
+  engine costs one cold start rather than your session. It is deliberately
+  well above what a healthy engine uses; setting it below 256 MB is rejected,
+  because it would retire the worker the moment it loaded its model.
+- `warm_engines = false` turns the whole thing off and restores the previous
+  behaviour exactly. That is the setting for a low-RAM machine.
+
+**Failure is never yours to handle.** If an engine is not installed, is still
+restarting after a crash, or the helper script predates the protocol, the
+session silently falls back to the per-operation path and answers normally.
+You get one warning in the journal and one slower answer, not an error.
+
+`jarvix doctor` reports each worker, its memory, and whether it has been
+restarting:
+
+```
+[OK]   warm engines — whisper warm (168 MB), kokoro warm (640 MB); 808 MB resident, cap 2048 MB, reaped after 600s idle
+```
+
+Warm workers are children of `jarvixd` in the literal sense: they are killed
+when it exits and when a config reload rebuilds the adapters, so stopping the
+daemon always leaves nothing behind.
+
+> **Kokoro users:** the warm path needs the current helper script. Re-run
+> `scripts/setup-kokoro.sh` after upgrading; an older `kokoro_stream.py` is
+> detected at start-up and degrades to the per-utterance path.
 
 ## Secrets
 
@@ -332,7 +407,7 @@ Ask "what does this error mean?" with a stack trace selected and Jarvix
 answers *that* error. Before each question reaches the model, the daemon
 gathers what you are looking at — the focused window, your selection, your
 clipboard — and offers it as a clearly-delimited system message
-([ADR 0018](adr/0018-desktop-context.md)):
+([ADR 0019](adr/0019-desktop-context.md)):
 
 ```text
 Desktop context: what the user is looking at on this computer right now…
@@ -378,16 +453,28 @@ What the design guarantees:
   source with `[looks like a secret — not shared]`. It is a heuristic, and
   the first line of defence is still that the clipboard is opt-in.
 - **You can always see what it saw.** `jarvix status --last` prints the exact
-  text that reached the model, already truncated and redacted:
+  text that reached the model, already truncated and redacted, beside the
+  latency budget of the same interaction — what it cost and what it saw are
+  the same question:
 
   ```text
-  last context: session s7, captured just now, gathered in 2ms
-    window     (26 chars)
-      Alacritty — nvim internal/session/engine.go
-    selection  (4212 chars, truncated)
-      panic: runtime error: index out of range [5] with length 3
-      …
+  last:     session s7
+            release → transcript                 412 ms
+            desktop context gathered               2 ms
+            transcript → first token (model)     286 ms
+            release → first audio (total)        901 ms
+              of which Jarvix (excl. model)      615 ms
+  context:  session s7, captured just now, gathered in 2ms
+            window     (26 chars)
+              Alacritty — nvim internal/session/engine.go
+            selection  (4212 chars, truncated)
+              panic: runtime error: index out of range [5] with length 3
+              …
   ```
+
+  Gathering is reported as its own stage (`context_ms`) and counted in
+  Jarvix's own number rather than inside the model's thinking time — a cost
+  hidden in the figure it inflates would be worse than not measuring it.
 
 - **Captured content is never logged and never persisted.** The debug log
   records which sources contributed and how many characters each held, never

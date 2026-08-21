@@ -86,7 +86,7 @@ clean:
 # --- Test-depth targets (issue #8) -----------------------------------------
 # Local and CI invocations are identical: CI calls these same targets.
 
-.PHONY: fuzz bench mutate
+.PHONY: fuzz bench bench-engines mutate
 
 # Fuzz every parser that eats external input. Each target runs briefly; the
 # committed seed corpora under testdata/fuzz regression-check known inputs on
@@ -107,6 +107,15 @@ fuzz:
 BENCHCOUNT ?= 1
 bench:
 	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCHCOUNT) ./internal/session ./internal/intent ./internal/desktop
+
+# The same latency question against the REAL local engines (ADR 0018). Not run
+# by CI: it measures the machine, not the code, so it lives behind a build tag
+# and is the tool for answering "is warm mode still worth it on this box?".
+# Needs a 16 kHz mono WAV of a short question:
+#   JARVIX_BENCH_WAV=/tmp/question.wav make bench-engines
+bench-engines:
+	$(GO) test -tags=engines -run='^$$' -bench='Engines' -benchtime=5x \
+		-count=$(BENCHCOUNT) -v ./internal/session
 
 # Mutation testing over the session engine (the core state machine).
 # GOFLAGS=-count=1 keeps gremlins' baseline honest: a cached test run makes

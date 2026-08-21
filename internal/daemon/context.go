@@ -1,6 +1,6 @@
 package daemon
 
-// This file is the disclosure surface for desktop context (ADR 0018).
+// This file is the disclosure surface for desktop context (ADR 0019).
 //
 // Gathering what the user is looking at is only acceptable if they can always
 // find out what was taken, so auditability is wired as a first-class IPC

@@ -5,25 +5,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
-// cmdStatusLast prints the desktop context Jarvix captured for its most
-// recent question (ADR 0018) — the answer to "what did it just see?".
+// printLastContext prints the desktop context Jarvix captured for its most
+// recent question (ADR 0019) — the answer to "what did it just see?". It is
+// the second half of `jarvix status --last`, beside the latency budget: both
+// report on the same interaction, so both belong behind the same flag.
 //
 // It prints the captured text itself, not a summary of it. The whole point of
 // the audit is that the user can compare what was sent with what they thought
 // was on screen, and character counts cannot do that. What is shown is
 // exactly what reached the model: already truncated at the configured cap,
 // already redacted if it looked like a secret.
-func cmdStatusLast(paths config.Paths) error {
-	client, err := ipc.Dial(paths.Socket)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = client.Close() }()
-
+func printLastContext(client *ipc.Client) error {
 	var last struct {
 		Captured   bool   `json:"captured"`
 		SessionID  string `json:"session_id"`
@@ -41,15 +36,15 @@ func cmdStatusLast(paths config.Paths) error {
 		return err
 	}
 	if !last.Captured {
-		fmt.Println("no desktop context has been captured yet.")
-		fmt.Println("(sources are configured under [context]; jarvix doctor shows which are enabled)")
+		fmt.Println("context:  no desktop context has been captured yet")
+		fmt.Println("          (sources are configured under [context]; jarvix doctor lists them)")
 		return nil
 	}
 
-	fmt.Printf("last context: session %s, captured %s, gathered in %dms\n",
+	fmt.Printf("context:  session %s, captured %s, gathered in %dms\n",
 		last.SessionID, humanAge(time.Duration(last.AgeSec)*time.Second), last.DurationMs)
 	if len(last.Sources) == 0 {
-		fmt.Println("  (nothing was captured — no window, selection, or clipboard content was available)")
+		fmt.Println("          nothing was captured — no window, selection, or clipboard content")
 		return nil
 	}
 	for _, s := range last.Sources {
@@ -60,9 +55,9 @@ func cmdStatusLast(paths config.Paths) error {
 		if s.Redacted {
 			note += ", redacted"
 		}
-		fmt.Printf("  %-10s (%s)\n", s.Source, note)
+		fmt.Printf("          %-10s (%s)\n", s.Source, note)
 		for _, line := range strings.Split(s.Text, "\n") {
-			fmt.Println("    " + line)
+			fmt.Println("            " + line)
 		}
 	}
 	return nil
