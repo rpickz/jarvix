@@ -41,11 +41,15 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 				errStage, _ = ev.Data["stage"].(string)
 				errMessage, _ = ev.Data["message"].(string)
 			case "session.finished":
-				n := d.buildNotification(answer, errStage, errMessage)
-				// Send blocks until the notification is clicked, dismissed,
-				// or expires; dispatch from its own goroutine so back-to-back
-				// sessions never queue behind an unclicked notification.
-				go d.deliver(ctx, n)
+				// ui.notifications is a live setting: checked per session so
+				// the switch acts immediately, no restart (settings.go).
+				if d.notificationsEnabled() {
+					n := d.buildNotification(answer, errStage, errMessage)
+					// Send blocks until the notification is clicked, dismissed,
+					// or expires; dispatch from its own goroutine so back-to-back
+					// sessions never queue behind an unclicked notification.
+					go d.deliver(ctx, n)
+				}
 				answer, errStage, errMessage = "", "", ""
 			case "session.cancelled":
 				answer, errStage, errMessage = "", "", ""
@@ -65,9 +69,10 @@ func (d *Daemon) buildNotification(answer, errStage, errMessage string) desktop.
 		// the click target: click anywhere → open the window.
 		Actions: []desktop.Action{{ID: desktop.DefaultActionID, Label: "Open"}},
 	}
+	preview := d.previewEnabled()
 	if errStage != "" || errMessage != "" {
 		n.Summary = "Jarvix hit a problem"
-		if d.preview {
+		if preview {
 			n.Body = fmt.Sprintf("Failed at %s: %s", errStage, errMessage)
 		} else {
 			n.Body = "Failed at " + errStage
@@ -75,7 +80,7 @@ func (d *Daemon) buildNotification(answer, errStage, errMessage string) desktop.
 		return n
 	}
 	n.Summary = "Jarvix answered"
-	if d.preview {
+	if preview {
 		n.Body = previewText(answer, notificationPreviewLimit)
 	}
 	return n
