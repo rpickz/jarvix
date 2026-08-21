@@ -1,3 +1,7 @@
+// Package session owns the conversational core of jarvixd: the authoritative
+// session state machine, the event bus, and the engine that drives one
+// interaction from captured speech through transcription, the assistant
+// (including tool rounds), and streamed spoken output.
 package session
 
 import (
@@ -350,7 +354,7 @@ func (e *Engine) transcribe(s *sess, rec audio.Recording) {
 		e.fail(s, "audio", err)
 		return
 	}
-	defer os.Remove(clip.WAVPath)
+	defer func() { _ = os.Remove(clip.WAVPath) }()
 
 	start := time.Now()
 	events, err := e.stt.Transcribe(s.ctx, stt.AudioInput{

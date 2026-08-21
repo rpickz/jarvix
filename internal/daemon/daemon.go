@@ -20,8 +20,8 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tools"
-	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
 )
 

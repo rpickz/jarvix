@@ -30,7 +30,7 @@ func TestIllegalTransitions(t *testing.T) {
 	illegal := [][2]State{
 		{StateIdle, StateSpeaking},
 		{StateIdle, StateResponding},
-		{StateListening, StateThinking},   // must transcribe first
+		{StateListening, StateThinking},    // must transcribe first
 		{StateTranscribing, StateSpeaking}, // must think first
 		{StateSpeaking, StateListening},
 		{StateIdle, StateCancelling}, // nothing to cancel

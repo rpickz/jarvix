@@ -234,9 +234,11 @@ func TestCancelWhileListening(t *testing.T) {
 
 func TestCancelWhileSpeaking(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	// Speech takes measurable time so there is a window to cancel within it.
-	h.tts.Delay = 100 * time.Millisecond
-	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
+	// Hold speech in progress deterministically: no chunk is delivered until
+	// the gate opens, so the cancel always lands mid-speech.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
@@ -256,9 +258,11 @@ func TestCancelWithNoSessionIsNoop(t *testing.T) {
 
 func TestInterruptionStartsNewSessionImmediately(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	// Keep the first session speaking so the interrupt lands mid-utterance.
-	h.tts.Delay = 100 * time.Millisecond
-	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
+	// Keep the first session speaking so the interrupt lands mid-utterance:
+	// the gate is never opened for it, only cancellation releases it.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 	first, _ := h.engine.StartSession()
 	_ = h.engine.Submit("first question")
 	h.waitFor(t, "tts.started")
@@ -275,6 +279,8 @@ func TestInterruptionStartsNewSessionImmediately(t *testing.T) {
 	if ev.Data["session_id"] != first {
 		t.Errorf("cancelled session = %v, want %s", ev.Data["session_id"], first)
 	}
+	// The second session's speech must run to completion: remove the gate.
+	h.tts.SetHold(nil)
 	if err := h.engine.Submit("second question"); err != nil {
 		t.Fatal(err)
 	}
@@ -360,8 +366,11 @@ func TestEmptyTranscriptIsFriendlyError(t *testing.T) {
 
 func TestCancelSpeechStopsOnlySpeech(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	h.tts.Delay = 100 * time.Millisecond
-	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
+	// Deterministic: speech cannot complete before the cancel — no chunk is
+	// delivered until the gate opens, and only cancellation opens it here.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
@@ -525,9 +534,9 @@ type recordingTool struct {
 	calls  int
 }
 
-func (r *recordingTool) Name() string                { return "run" }
-func (r *recordingTool) Description() string          { return "run something" }
-func (r *recordingTool) Schema() json.RawMessage      { return json.RawMessage(`{"type":"object"}`) }
+func (r *recordingTool) Name() string            { return "run" }
+func (r *recordingTool) Description() string     { return "run something" }
+func (r *recordingTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (r *recordingTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
 	r.calls++
 	return r.result, nil

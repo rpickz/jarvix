@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test vet lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean
+.PHONY: all build test ci coverage vet lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean
 
 all: build
 
@@ -16,11 +16,21 @@ build:
 test:
 	$(GO) test ./...
 
+# What CI runs (.github/workflows/ci.yml) — race detector, twice, plus lint.
+ci: vet
+	$(GO) test -race -count=2 ./...
+	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "golangci-lint not installed; skipped"
+
+coverage:
+	$(GO) test -coverprofile=coverage.out ./...
+	$(GO) tool cover -func=coverage.out | tail -1
+
 vet:
 	$(GO) vet ./...
 
 lint: vet
-	@command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || echo "staticcheck not installed; ran go vet only"
+	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || \
+		{ command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || echo "golangci-lint/staticcheck not installed; ran go vet only"; }
 
 install: build
 	install -Dm755 bin/jarvix  $(BINDIR)/jarvix

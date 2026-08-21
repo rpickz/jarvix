@@ -31,8 +31,8 @@ type Config struct {
 // Tools configures the assistant's tool access. Tools are opt-in: enabling
 // shell.run gives the assistant the same authority as the user's shell.
 type Tools struct {
-	Shell            bool `toml:"shell"`              // enable shell.run
-	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`  // per-command timeout
+	Shell            bool `toml:"shell"`               // enable shell.run
+	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`   // per-command timeout
 	ShellMaxOutputKB int  `toml:"shell_max_output_kb"` // captured output cap
 }
 
@@ -128,8 +128,8 @@ type Conversation struct {
 
 // Audio configures capture and playback.
 type Audio struct {
-	InputDevice     string `toml:"input_device"`     // PipeWire target, empty = default
-	OutputDevice    string `toml:"output_device"`    // PipeWire target, empty = default
+	InputDevice     string `toml:"input_device"`      // PipeWire target, empty = default
+	OutputDevice    string `toml:"output_device"`     // PipeWire target, empty = default
 	MaxRecordingSec int    `toml:"max_recording_sec"` // safety cap on recording length
 	// MinRecordingMs discards recordings shorter than this as accidental
 	// activations (a stray tap) instead of transcribing them.

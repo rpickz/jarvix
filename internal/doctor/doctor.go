@@ -201,7 +201,7 @@ func checkDaemon(_ config.Config, paths config.Paths) Result {
 			Detail: "socket not reachable at " + paths.Socket,
 			Fix:    "Start it: systemctl --user start jarvixd\nor run in the foreground: jarvixd"}
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	var status map[string]any
 	if err := client.Call("status.get", nil, &status); err != nil {
 		return Result{Status: Fail, Name: "jarvixd running",
