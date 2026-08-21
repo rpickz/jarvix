@@ -8,16 +8,16 @@ import (
 // Markdown that would be read aloud literally by TTS. The overlay still shows
 // the original formatted text; only the spoken form is normalized.
 var (
-	reCodeFence   = regexp.MustCompile("(?s)```.*?```")
-	reInlineCode  = regexp.MustCompile("`([^`]*)`")
-	reBold        = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	reItalic      = regexp.MustCompile(`\*([^*]+)\*|_([^_]+)_`)
-	reHeading     = regexp.MustCompile(`(?m)^#{1,6}\s*`)
-	reBullet      = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
-	reNumbered    = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
-	reLink        = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
-	reMultiSpace  = regexp.MustCompile(`[ \t]+`)
-	reBlankLines  = regexp.MustCompile(`\n{2,}`)
+	reCodeFence  = regexp.MustCompile("(?s)```.*?```")
+	reInlineCode = regexp.MustCompile("`([^`]*)`")
+	reBold       = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	reItalic     = regexp.MustCompile(`\*([^*]+)\*|_([^_]+)_`)
+	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s*`)
+	reBullet     = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+	reNumbered   = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
+	reLink       = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+	reMultiSpace = regexp.MustCompile(`[ \t]+`)
+	reBlankLines = regexp.MustCompile(`\n{2,}`)
 )
 
 // speechText turns assistant markdown into plain prose suitable for TTS.
@@ -37,6 +37,11 @@ func speechText(s string) string {
 	// not run together, but without speaking the bullet character.
 	s = reBullet.ReplaceAllString(s, "")
 	s = reNumbered.ReplaceAllString(s, "")
+	// The regexes above only strip paired/anchored markers; an unpaired
+	// backtick or asterisk ("2 * 3", a stray ` in prose) would survive and be
+	// read aloud literally. Found by FuzzSpeechText — strip the stragglers.
+	s = strings.ReplaceAll(s, "`", " ")
+	s = strings.ReplaceAll(s, "*", " ")
 	s = reMultiSpace.ReplaceAllString(s, " ")
 	s = reBlankLines.ReplaceAllString(s, "\n")
 
