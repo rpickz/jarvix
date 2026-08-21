@@ -62,6 +62,10 @@ func TestConversationSurvivesRestart(t *testing.T) {
 	// "Restart": a brand-new engine over the same on-disk state.
 	h2 := newHarnessWithStore(t, opts, store)
 	h2.ask(t, "what should I change?")
+	// The restarted engine persists too, after session.finished. Waiting for
+	// that write is what stops t.TempDir's cleanup racing the store's
+	// temp-file-and-rename ("directory not empty"), as below.
+	store.awaitSave(t)
 
 	got := requestContents(h2.provider.LastRequest)
 	if !strings.Contains(got, "why is my build failing?") {
@@ -88,6 +92,7 @@ func TestFollowUpWindowLapsesAcrossRestart(t *testing.T) {
 	h2 := newHarnessWithStore(t, opts, store)
 	h2.engine.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	h2.ask(t, "a new question")
+	store.awaitSave(t) // as above: do not let cleanup race the write
 
 	got := requestContents(h2.provider.LastRequest)
 	if strings.Contains(got, "an old question") {

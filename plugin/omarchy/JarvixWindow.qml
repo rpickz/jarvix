@@ -61,10 +61,20 @@ FloatingWindow {
     if (visible) {
       if (daemon.connected) requestConversation()
       else daemon.connected = true
+      // The window is a place you talk to, not only a place you read: taking
+      // focus puts the caret in the composer so a summoned window can be
+      // typed into without reaching for the mouse first. Deferred, because
+      // this runs before the toplevel is mapped and focus given to an
+      // unmapped window goes nowhere.
+      Qt.callLater(function() { composerInput.forceActiveFocus() })
     } else {
       daemon.connected = false
     }
   }
+
+  // Leaving the settings screen returns to the conversation — and to the
+  // composer, for the same reason.
+  onSettingsOpenChanged: { if (visible && !settingsOpen) composerInput.forceActiveFocus() }
 
   // Events are delivered on the same connection as the conversation.get
   // response, and the daemon writes notifications and responses
@@ -80,6 +90,57 @@ FloatingWindow {
     snapshotPending = true
     queuedEvents = []
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "conversation.get" }) + "\n")
+  }
+
+  // --- typed turns --------------------------------------------------------
+  // Request id 1 is the conversation snapshot; typed submissions take ids
+  // from 2 upwards so a reply can be matched to the text that produced it.
+  property int nextRequestId: 2
+  property int submitRequestId: 0
+  // The text of the submission in flight, kept only so a failed submit can
+  // give it back. A question typed and then lost to a daemon that died
+  // mid-keystroke is the one thing this input must never do.
+  property string submitInFlight: ""
+
+  // submitTypedTurn sends the composer's contents as one turn. Everything it
+  // could decide is decided in the daemon (ADR 0013): `session.text` starts a
+  // session or answers a pending confirmation, interrupts whatever is running
+  // when it starts one, and rejects an empty string. The window's own empty
+  // check is not that decision — it just avoids a round trip that could only
+  // ever come back as an error.
+  function submitTypedTurn() {
+    var text = composerInput.text
+    if (text.trim() === "") {
+      composerInput.text = ""
+      return
+    }
+    if (!daemon.connected) return
+    submitRequestId = nextRequestId
+    nextRequestId++
+    submitInFlight = text
+    composerInput.text = ""
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: submitRequestId, method: "session.text",
+      params: { text: text }
+    }) + "\n")
+  }
+
+  // returnTypedText puts an unsent question back in the composer, unless the
+  // user has already started typing the next one — their keystrokes win.
+  function returnTypedText() {
+    if (submitInFlight === "") return
+    if (composerInput.text === "") composerInput.text = submitInFlight
+    submitInFlight = ""
+  }
+
+  function handleSubmitReply(frame) {
+    if (frame.error) {
+      errorStage = "input"
+      errorMessage = String(frame.error.message || "the question could not be submitted")
+      returnTypedText()
+      return
+    }
+    submitInFlight = ""
   }
 
   // loadSnapshot replaces the model with the daemon's authoritative view;
@@ -118,8 +179,10 @@ FloatingWindow {
       sessionState = next
       break
     case "transcript.final":
-      // Fires once per session; a snapshot taken after it already contains
-      // the turn and the event will not repeat, so appending cannot double.
+      // One per submitted utterance — normally one a session, but a reply to
+      // a pending tool confirmation ("yes", spoken or typed) is a second, and
+      // showing it is right: the user answered and should see their answer.
+      // Events never repeat, so appending cannot double a turn.
       turns.append({ role: "user", text: String(params.text || "") })
       break
     case "assistant.delta":
@@ -175,6 +238,8 @@ FloatingWindow {
           } else {
             win.handleEvent(frame.method, frame.params || {})
           }
+        } else if (frame.id !== undefined && frame.id === win.submitRequestId) {
+          win.handleSubmitReply(frame)
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
         } else if (frame.id === 1 && frame.error) {
@@ -198,6 +263,11 @@ FloatingWindow {
         // connection unrendered.
         win.snapshotPending = false
         win.queuedEvents = []
+        // A submit in flight when the socket died was never delivered: hand
+        // the text back rather than swallowing it. The "daemon is not
+        // running" panel is the explanation; the error banner is hidden
+        // while disconnected and would be replaced by the next snapshot.
+        win.returnTypedText()
         if (win.visible) retry.start()
       }
     }
@@ -220,6 +290,10 @@ FloatingWindow {
     case "thinking":     return "Thinking"
     case "responding":   return "Responding"
     case "speaking":     return "Speaking"
+    // Typing "yes" here answers the pending tool call rather than asking
+    // something new, so the header has to say that a question is open —
+    // otherwise the composer looks like an ordinary empty prompt.
+    case "awaiting_confirmation": return "Waiting for your yes or no"
     case "cancelling":   return "Cancelling"
     case "error":        return "Error"
     default:             return "Idle"
@@ -309,7 +383,7 @@ FloatingWindow {
     Text {
       visible: win.socketReady && !win.settingsOpen && turns.count === 0
       anchors.centerIn: parent
-      text: "No conversation yet — hold Super+Alt+V and speak."
+      text: "No conversation yet — hold Super+Alt+V and speak, or type below."
       font.family: Style.font.family
       font.pixelSize: Style.font.subtitle
       color: Util.alpha(Color.popups.text, 0.7)
@@ -335,8 +409,9 @@ FloatingWindow {
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
       anchors.right: parent.right
-      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
-      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+      anchors.bottom: errorBanner.visible ? errorBanner.top
+        : (composer.visible ? composer.top : parent.bottom)
+      anchors.bottomMargin: errorBanner.visible || composer.visible ? Style.space(12) : 0
       clip: true
       spacing: Style.space(14)
       model: turns
@@ -372,11 +447,95 @@ FloatingWindow {
       }
     }
 
+    // The composer: type a question instead of saying it (issue #35). Speech
+    // is the wrong input for a URL, a path, a flag, or an unusual name, and
+    // it is no input at all in a quiet room or on a call.
+    //
+    // It holds no session logic. Enter calls win.submitTypedTurn(), which
+    // sends one `session.text` request and lets the daemon decide what the
+    // text means — a new turn (interrupting whatever is running) or the
+    // answer to a pending tool confirmation.
+    Column {
+      id: composer
+      visible: !win.settingsOpen
+      // A daemon that is down disables the field rather than swallowing the
+      // keystrokes; the panel above says why, and the label says it again
+      // here, where the caret is.
+      enabled: win.socketReady
+      opacity: win.socketReady ? 1.0 : 0.55
+      anchors.bottom: parent.bottom
+      anchors.left: parent.left
+      anchors.right: parent.right
+      spacing: Style.space(4)
+
+      Text {
+        id: composerLabel
+        text: win.socketReady ? "Ask Jarvix" : "Ask Jarvix — start jarvixd to type"
+        font.family: Style.font.family
+        font.bold: true
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+
+      Rectangle {
+        id: composerBox
+        width: parent.width
+        height: composerInput.height + Style.space(14)
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, 0.06)
+        // The focus ring: visible as a colour *and* a thicker border, so it
+        // reads for anyone who cannot pick the accent out of the foreground.
+        border.color: composerInput.activeFocus ? Color.accent : Util.alpha(Color.popups.text, 0.4)
+        border.width: composerInput.activeFocus ? 2 : 1
+
+        TextInput {
+          id: composerInput
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.margins: Style.space(10)
+          activeFocusOnTab: composer.enabled
+          readOnly: !win.socketReady
+          clip: true
+          // Every size comes from the shell's Style tokens, so the field
+          // grows with the user's font scale like the rest of the window.
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+          selectByMouse: true
+          Accessible.role: Accessible.EditableText
+          Accessible.name: composerLabel.text
+          Accessible.description: "Type a question and press Enter to send it to Jarvix"
+
+          // Enter sends. Shift+Enter is deliberately swallowed: multi-line
+          // composition is not built yet (issue #35 scopes it out), and the
+          // reflex of reaching for it must not post half a thought.
+          Keys.onPressed: function(event) {
+            if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
+            event.accepted = true
+            if (event.modifiers & Qt.ShiftModifier) return
+            win.submitTypedTurn()
+          }
+
+          Text {
+            visible: composerInput.text === ""
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: win.socketReady ? "Type a question, press Enter" : "Jarvix daemon is not running"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.45)
+          }
+        }
+      }
+    }
+
     // Failures are stated in words — stage and message — not colour alone.
     Rectangle {
       id: errorBanner
       visible: win.socketReady && win.errorMessage !== ""
-      anchors.bottom: parent.bottom
+      anchors.bottom: composer.visible ? composer.top : parent.bottom
+      anchors.bottomMargin: composer.visible ? Style.space(12) : 0
       anchors.left: parent.left
       anchors.right: parent.right
       height: errorText.height + Style.space(20)

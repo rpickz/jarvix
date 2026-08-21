@@ -243,6 +243,15 @@ func (e *Engine) State() (State, string) {
 func (e *Engine) StartSession() (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.startSessionLocked()
+}
+
+// startSessionLocked is StartSession's body, split out so a caller that has
+// already decided something under the lock — SubmitText choosing between a new
+// turn and a pending confirmation (text.go) — can start the session without
+// dropping the lock in between. Releasing it would open a window in which the
+// state it just read no longer holds.
+func (e *Engine) startSessionLocked() (string, error) {
 	if e.reconfiguring {
 		// Milliseconds at most: Reconfigure only drains goroutine tails.
 		return "", fmt.Errorf("new settings are being applied; try again in a moment")
@@ -340,6 +349,15 @@ func (e *Engine) StopVoice() (discarded bool, err error) {
 func (e *Engine) Submit(text string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.submitLocked(text)
+}
+
+// submitLocked is Submit's body; see startSessionLocked for why the split
+// exists. Every text submission — `jarvix ask`, `session.submit`, the
+// conversation window's composer — lands here, so there is exactly one place
+// that decides a typed string is an answer to a pending confirmation rather
+// than a new question.
+func (e *Engine) submitLocked(text string) error {
 	s := e.current
 	if s == nil {
 		return fmt.Errorf("no active session; call session.start first")
