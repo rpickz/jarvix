@@ -65,10 +65,17 @@ in my browser" and "what have I got open?" are things Jarvix does rather than
 explains. The model names a window loosely and the match is made here against
 the compositor's own inventory — several matches is a question, never a guess
 — so nothing it says ever reaches a command line. Reads run silently; moving,
-closing and launching confirm first, naming the actual window. Remaining:
-`clipboard.*`, `system.*`, `files.*`, and typing into a window (#37), each
-behind that gate (unknown tools default to ask). The engine's tool loop already
-generalises to all of them.
+closing and launching confirm first, naming the actual window. Typing ships too
+([ADR 0023](adr/0023-synthetic-keystrokes.md)): `typing.type_text` enters
+literal characters into the window the user is in, and `typing.press_key` is a
+separate capability with its own tier, so approving "type this" is never
+approving "and send it". It is off by default, unlike the window verbs, because
+it is the one capability whose target the model does not choose and cannot see
+— the keys land wherever focus is at that instant — so the focused window is
+captured when the question is asked and re-checked at the moment of typing, and
+the typed text is never written to a log. Remaining: `clipboard.*`, `system.*`
+and `files.*`, each behind that gate (unknown tools default to ask). The
+engine's tool loop already generalises to all of them.
 
 ## Phase 5 — Conversational mode (persistence: done; threads: next)
 

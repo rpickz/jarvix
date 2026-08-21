@@ -186,6 +186,29 @@ firefox, the window titled GitHub") rather than from the model's description.
 The compositor sits behind an interface with a fake, so none of this needs
 Hyprland to test — and a missing one degrades to a spoken sentence.
 
+### Typing on the user's keyboard
+
+Two further tools enter text into the window the user is working in and press
+one key from a closed list ([ADR 0023](adr/0023-synthetic-keystrokes.md)).
+They are off by default, and everything about them is shaped by one fact: this
+is the only capability whose target the model does not choose and cannot see,
+because keystrokes land wherever focus happens to be at that instant.
+
+They therefore borrow the window layer above rather than resolving anything
+themselves — one inventory, one matcher, one definition of which window is
+being acted on. The focused window is captured when the gate builds its
+question and re-checked at the moment of typing against a fresh look, so an
+approval given about one window can never be spent on another; any difference
+types nothing. The payload is literal characters by construction (the injector
+cannot express a control key, and Return is only reachable through the separate
+press tool), and it is capped and rate-limited. The confirmation names the
+window *and* reads back the text, generated daemon-side; the text itself never
+reaches a log, because the user may have dictated a password. A terminal in
+focus escalates the tier to ask through `tools.Escalating`, a seam that can
+only ever make the gate stricter than configuration made it. The injector sits
+behind an interface with a fake, and no test in the tree synthesises a
+keystroke.
+
 ### Delegating to a stronger assistant
 
 A request beyond the local model is handed to an assistant CLI the user has
