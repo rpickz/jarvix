@@ -69,6 +69,10 @@ type Daemon struct {
 	// reading and deleting what is already kept must keep working — the user's
 	// control over their transcripts does not lapse with the recording.
 	conversations conversations.Store
+	// searcher is full-text search over the same archive (issue #59): one
+	// implementation behind the window, the CLI, and the model's tool. Never
+	// nil for the same reason the store never is.
+	searcher conversations.Searcher
 
 	// Background wake-word listening (ADR 0024), nil unless activation.mode
 	// is "wake_word" and its detector is installed. wakeSession is the
@@ -411,6 +415,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	if deps.ConversationStore != nil {
 		convs = deps.ConversationStore
 	}
+	// Search shares the store when it can search (the file store and the test
+	// fake both do). An injected wrapper that cannot still has the real files
+	// underneath, so searching the directory keeps the one-implementation
+	// promise (issue #59) rather than declaring search absent.
+	searcher, ok := convs.(conversations.Searcher)
+	if !ok {
+		searcher = &conversations.FileStore{Dir: paths.ConversationsDir()}
+	}
 	if cfg.Conversation.Retention == config.RetentionOff {
 		logger.Info("conversation retention off", "component", "session")
 	} else {
@@ -453,8 +465,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy, memory: book,
-		conversations: convs,
-		notifier:      deps.Notifier, openWindow: deps.OpenWindow,
+		conversations: convs, searcher: searcher,
+		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor,
 		paths:      paths, injected: injected, cfg: cfg, warm: workers,
 		shutdownGrace: DefaultShutdownGrace,
@@ -466,6 +478,17 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		}
 		d.pttChord = codes
 	}
+	// The archive search tool (issue #59), registered after the daemon exists
+	// because "earlier in this conversation" needs the engine's live thread id
+	// and the wording for an empty archive needs the live retention switch.
+	// Registration still precedes serving, like the memory tools above.
+	registry.Register(tools.NewConversationSearch(tools.ConversationSearchOptions{
+		Searcher:  searcher,
+		ActiveID:  engine.ActiveConversationID,
+		Retention: d.retentionOn,
+		Log:       logger,
+	}))
+	logger.Info("tool enabled", "component", "tools", "tool", tools.ConversationsSearchToolName)
 	d.registerMethods()
 	return d, nil
 }
@@ -773,6 +796,9 @@ func (d *Daemon) registerMethods() {
 			// The typing audit trail: what Jarvix last did with the keyboard,
 			// and never what it typed (ADR 0023).
 			"last_typing": d.lastTypingReport(),
+			// The archive and its search: counts and states only — whether
+			// search is active is status's business, what was searched is not.
+			"conversations": d.conversationsReport(),
 		}, nil
 	})
 	d.registerConfigMethods()
