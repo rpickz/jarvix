@@ -87,11 +87,23 @@ type Performance struct {
 // only writes into the artifact directory and opens a viewer, so it defaults
 // on — with the renderer missing it degrades to a prose answer.
 type Tools struct {
-	Shell            bool        `toml:"shell"`               // enable shell.run
-	ShellTimeoutSec  int         `toml:"shell_timeout_sec"`   // per-command timeout
-	ShellMaxOutputKB int         `toml:"shell_max_output_kb"` // captured output cap
-	Artifacts        bool        `toml:"artifacts"`           // enable artifact.create
-	Policy           ToolsPolicy `toml:"policy"`
+	Shell            bool `toml:"shell"`               // enable shell.run
+	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`   // per-command timeout
+	ShellMaxOutputKB int  `toml:"shell_max_output_kb"` // captured output cap
+	Artifacts        bool `toml:"artifacts"`           // enable artifact.create
+	// Desktop enables the desktop.* window tools: list, focus, move, close,
+	// launch. On by default — unlike shell.run, each verb is one bounded
+	// action on a window the compositor named, every one of them is visible
+	// on screen and undoable by hand, and none can enter data anywhere. The
+	// state-changing verbs still pass the gate, which asks.
+	Desktop bool `toml:"desktop"`
+	// DesktopApps restricts what desktop.launch_app may start, as bare
+	// program names or absolute paths. Empty means anything installed on
+	// PATH: launching an application the user already has is not an
+	// escalation, and the launch verb confirms first. Set it to pin the
+	// assistant to a shortlist.
+	DesktopApps []string    `toml:"desktop_apps"`
+	Policy      ToolsPolicy `toml:"policy"`
 }
 
 // Command is a viewer invocation: argv, not a shell line. Jarvix never runs
@@ -347,6 +359,7 @@ func Default() Config {
 		Intents:      Intents{Enabled: true, Terminal: intent.DefaultTerminal},
 		Tools: Tools{
 			Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true,
+			Desktop: true,
 			Policy: ToolsPolicy{
 				Default:                 "ask",
 				ConfirmTimeoutSec:       30,
@@ -405,6 +418,20 @@ const ArtifactSystemPrompt = " When the user asks for output better seen than he
 	"source, file names, or paths, because your answer is read aloud. If the tool rejects your " +
 	"source, fix exactly what the error names and retry once; if it fails again, or rendering is " +
 	"unavailable, apologise briefly and answer in prose."
+
+// DesktopSystemPrompt is appended to the system prompt when the window tools
+// are enabled. Two behaviours have to be stated here rather than left to the
+// tool descriptions, because both are judgements the model makes before it
+// calls anything: that "put me back in the browser" is a tool call rather than
+// a sentence about keyboard shortcuts, and that an ambiguous reference is a
+// question to the user rather than a guess.
+const DesktopSystemPrompt = " You can act on the user's desktop: list their open windows, focus " +
+	"one, move one to another workspace, close one, and start an application. When they ask you " +
+	"to go somewhere (\"put me back in my browser\", \"switch to the terminal\") or to open, move " +
+	"or close something, do it with those tools instead of telling them how. Describe the window " +
+	"the way they did and let the tool find it; if it reports several matches, ask which one they " +
+	"meant rather than choosing. Never read window identifiers, workspace internals, or raw tool " +
+	"output aloud — say what happened in one short sentence."
 
 // minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
 // warm (whisper base.en alone is ~165 MB resident). A cap below it would
@@ -572,6 +599,23 @@ func (c Config) Validate() error {
 				problems = append(problems, fmt.Sprintf(
 					"%s contains an empty pattern; each entry must be a command prefix such as \"docker ps\"", key))
 			}
+		}
+	}
+	// An unusable launch allow list is worth naming now rather than as a
+	// refusal the user only hears when they ask for an application: an empty
+	// entry allows nothing, and a relative path is neither a program name nor
+	// a location.
+	for _, app := range c.Tools.DesktopApps {
+		switch {
+		case strings.TrimSpace(app) == "":
+			problems = append(problems,
+				"tools.desktop_apps contains an empty entry; each one must be a program name (\"firefox\") or an absolute path")
+		case strings.ContainsAny(app, " \t"):
+			problems = append(problems, fmt.Sprintf(
+				"tools.desktop_apps entry %q contains whitespace; applications are launched directly, not through a shell, so each entry is one program", app))
+		case strings.Contains(app, "/") && !filepath.IsAbs(app):
+			problems = append(problems, fmt.Sprintf(
+				"tools.desktop_apps entry %q must be a program name or an absolute path (\"~\" is not expanded)", app))
 		}
 	}
 	problems = append(problems, c.validateAdvisors()...)

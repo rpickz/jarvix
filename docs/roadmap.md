@@ -28,7 +28,9 @@ Gathering happens on the model path only — after the Phase 3 intent router —
 so a deterministic intent never pays for eyes it does not use.
 
 Remaining: the optional **screen region** (capture + OCR), which needs its own
-consent UX, and the `desktop.*` action tools in Phase 4.
+consent UX. The `desktop.*` action tools landed in Phase 4 and share this
+seam — the window inventory they match against is the same compositor view
+that gathers the active window here.
 
 ## Phase 3 — Deterministic local intents (done)
 
@@ -56,10 +58,17 @@ The model can act, not just answer. `shell.run` ships now
 ([ADR 0009](adr/0009-tool-calling.md)): the assistant runs commands itself
 and summarises the result. The permission gate ships too
 ([ADR 0014](adr/0014-tool-permission-gate.md)): allow / ask / deny per tool,
-with spoken confirmation for the ask tier. Remaining: structured tools —
-`desktop.*`, `clipboard.*`, `apps.*`, `system.*`, `hyprland.*`, `files.*` —
-each behind that gate (unknown tools default to ask). The engine's tool loop
-already generalises to all of them.
+with spoken confirmation for the ask tier. The window tools ship too
+([ADR 0022](adr/0022-desktop-window-control.md)): `desktop.list_windows`,
+`focus_window`, `move_window`, `close_window` and `launch_app`, so "put me back
+in my browser" and "what have I got open?" are things Jarvix does rather than
+explains. The model names a window loosely and the match is made here against
+the compositor's own inventory — several matches is a question, never a guess
+— so nothing it says ever reaches a command line. Reads run silently; moving,
+closing and launching confirm first, naming the actual window. Remaining:
+`clipboard.*`, `system.*`, `files.*`, and typing into a window (#37), each
+behind that gate (unknown tools default to ask). The engine's tool loop already
+generalises to all of them.
 
 ## Phase 5 — Conversational mode (persistence: done; threads: next)
 

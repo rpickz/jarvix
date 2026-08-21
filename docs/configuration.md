@@ -135,6 +135,11 @@ shell_timeout_sec = 30           # per-command timeout
 shell_max_output_kb = 16         # captured output cap fed back to the model
 artifacts = true                 # enable artifact.create (diagrams, documents,
                                  # spreadsheets, sketches on screen)
+desktop = true                   # enable the desktop.* window tools: list,
+                                 # focus, move, close, launch
+desktop_apps = []                # what desktop.launch_app may start; empty
+                                 # means anything on PATH, e.g.
+                                 # ["firefox", "alacritty", "/opt/apps/notes"]
 
 [artifacts]                      # where the assistant's files land and open
 dir = "/home/you/Documents/Jarvix"
@@ -173,6 +178,9 @@ shell_deny = []                  # extra command prefixes that never run,
 # "artifact.create" = "allow"    # built-in default: it only writes into the
                                  # artifact directory. Unknown tools default
                                  # to "ask".
+# "desktop.list_windows" = "allow"   # built-in defaults: the two window reads
+# "desktop.focus_window" = "allow"   # run silently; move, close and launch
+                                     # take the default above ("ask")
 
 [intents]                        # the deterministic intent router (Phase 3)
 enabled = true                   # false = every utterance goes to the AI
@@ -619,6 +627,58 @@ without asking again — scoped strictly to the current conversation:
 approvals.
 
 `jarvix status` prints the effective policy.
+
+## Window control (`[tools] desktop`)
+
+Jarvix can move you around your own desktop: say what is open, switch to a
+window, send one to another workspace, close one, or start an application
+([ADR 0022](adr/0022-desktop-window-control.md)). "Put me back in my browser",
+"what have I got open?", "move this to workspace three", "open Spotify".
+
+It is **on by default**, unlike `shell.run`, because each verb is one bounded
+action on a window the compositor itself named — visible on screen, undoable
+by hand, and unable to enter data anywhere. Sending keystrokes into a window is
+a different thing entirely and is not part of this.
+
+Name a window loosely and it is found on class *and* title, case-insensitively:
+"firefox", "the editor", "my browser", "the one about pull requests". Say
+"this" (or nothing) and it means the window you are in.
+
+- **Several windows match** → Jarvix names them and asks which you meant. It
+  does not pick one. A wrong focus is cheap but it teaches you that it is
+  guessing.
+- **Nothing matches** → it says so in one sentence.
+- **Hyprland is not running, or `hyprctl` is missing** → the tools say they
+  cannot see your windows, and everything else Jarvix does is unaffected.
+  `jarvix doctor` names the missing piece.
+
+How much it asks first:
+
+| Verb | Default | Why |
+| --- | --- | --- |
+| `desktop.list_windows` | allow | Sees no more than the desktop context Jarvix may already gather |
+| `desktop.focus_window` | allow | Changes only where you are looking, and you can see it happen |
+| `desktop.move_window` | ask | Changes your workspace layout |
+| `desktop.close_window` | ask | Closes something you might be in the middle of |
+| `desktop.launch_app` | ask | Starts a program |
+
+The confirmation names the actual window — "I want to close firefox, the window
+titled GitHub. Should I go ahead?" — generated from the live window list, never
+from the assistant's description of what it is doing. Override any of them
+under `[tools.policy.tool]`, e.g. `"desktop.move_window" = "allow"` or
+`"desktop.close_window" = "deny"`.
+
+`desktop_apps` restricts what may be launched:
+
+```toml
+[tools]
+desktop_apps = ["firefox", "alacritty", "/opt/apps/notes"]
+```
+
+Each entry is one program — a name found on PATH or an absolute path — because
+applications are executed directly, never through a shell. Empty (the default)
+allows anything installed. A category also works ("open a browser") when
+exactly one such application is installed; when several are, Jarvix asks which.
 
 ## Advisors (asking a stronger assistant)
 

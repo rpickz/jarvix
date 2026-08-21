@@ -151,8 +151,20 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // into the artifact directory and opens a viewer, so it stays silent. A
 // [tools.policy.tool] entry overrides these; genuinely unknown tools still
 // fall through to the ask default.
+//
+// The two window verbs here are the reads. Listing windows sees no more than
+// the desktop context Jarvix may already gather, and focusing one changes
+// nothing but where the user is looking — the user sees it happen, and undoes
+// it by looking back. Confirming either would mean a question before every
+// "put me back in the browser", which is the interaction this exists to
+// replace. Moving, closing and launching are absent on purpose: they are
+// state changes, so they take the policy default (ask), and
+// `[tools.policy.tool]."desktop.move_window" = "allow"` is how a user who
+// disagrees says so.
 var builtinToolDefaults = map[string]PolicyDecision{
-	"artifact.create": PolicyAllow,
+	"artifact.create":   PolicyAllow,
+	ListWindowsToolName: PolicyAllow,
+	FocusWindowToolName: PolicyAllow,
 }
 
 // ToolDecision returns the configured tier for a tool: its per-tool entry,

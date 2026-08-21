@@ -37,6 +37,27 @@ type Progressive interface {
 	Activity(input json.RawMessage) (label, waiting string, ok bool)
 }
 
+// Confirmable is optionally implemented by a tool whose ask-tier confirmation
+// must name something only the tool can know. The gate decides the *tier* from
+// configuration, as it always does; this decides the *words*, and it decides
+// them from the tool's own view of the world — the live window inventory, not
+// the model's description of it.
+//
+// Without it, "close my browser" is confirmed as "I want to use the
+// desktop.close_window tool. Should I go ahead?", which asks the user to
+// approve a tool rather than an action. With it, they are asked about the
+// window that is actually about to close, generated daemon-side, so a model
+// cannot describe closing their editor as closing a scratch window.
+//
+// ok is false when this particular call has nothing better to offer than the
+// generic question — unparseable arguments, or nothing that resolves.
+type Confirmable interface {
+	// Confirmation returns the exact action being judged (published verbatim,
+	// and what a remembered approval is keyed on) and the one-sentence spoken
+	// question.
+	Confirmation(input json.RawMessage) (command, summary string, ok bool)
+}
+
 // Registry holds the enabled tools.
 type Registry struct {
 	tools map[string]Tool
@@ -78,7 +99,20 @@ func (r *Registry) Check(call ai.ToolCall) Verdict {
 	if r.policy == nil {
 		return Verdict{Decision: PolicyAllow, Tool: call.Name, Rule: "no policy installed"}
 	}
-	return r.policy.Decide(call)
+	verdict := r.policy.Decide(call)
+	// The gate settled the tier; a Confirmable tool now supplies the sentence
+	// the user actually hears, from what it can see (Confirmable). Only for
+	// the ask tier: nothing else asks a question.
+	if verdict.Decision == PolicyAsk {
+		if tool, registered := r.tools[call.Name]; registered {
+			if c, confirmable := tool.(Confirmable); confirmable {
+				if command, summary, ok := c.Confirmation(json.RawMessage(call.Arguments)); ok {
+					verdict.Command, verdict.Summary = command, summary
+				}
+			}
+		}
+	}
+	return verdict
 }
 
 // Activity reports how a call should be surfaced while it runs, for tools

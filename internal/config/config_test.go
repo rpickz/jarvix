@@ -627,3 +627,50 @@ func TestPerformanceSettingsAreEditableAndIdleClass(t *testing.T) {
 		}
 	}
 }
+
+func TestDesktopToolDefaults(t *testing.T) {
+	cfg := Default()
+	// On by default, unlike shell.run: each verb is one bounded action on a
+	// window the compositor named, and the state-changing ones still ask.
+	if !cfg.Tools.Desktop {
+		t.Error("tools.desktop should default on")
+	}
+	if len(cfg.Tools.DesktopApps) != 0 {
+		t.Errorf("tools.desktop_apps default = %v, want anything on PATH", cfg.Tools.DesktopApps)
+	}
+}
+
+func TestDesktopToolOverridesAndValidation(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tools]
+desktop = false
+desktop_apps = ["firefox", "/opt/apps/notes"]
+`)
+	if cfg.Tools.Desktop {
+		t.Error("tools.desktop should be off")
+	}
+	if !slices.Equal(cfg.Tools.DesktopApps, []string{"firefox", "/opt/apps/notes"}) {
+		t.Errorf("desktop_apps = %v", cfg.Tools.DesktopApps)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestDesktopAppsValidationRejectsUnlaunchableEntries(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tools]
+desktop_apps = ["", "flatpak run org.x.App", "bin/relative"]
+`)
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation errors")
+	}
+	// Each problem names the entry and why it can never launch, because the
+	// alternative is a refusal the user only hears when they ask out loud.
+	for _, want := range []string{"empty entry", "whitespace", "absolute path"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+}

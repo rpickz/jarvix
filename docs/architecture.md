@@ -163,6 +163,28 @@ read as yes/no. A decline, a 30-second timeout, or an interruption returns
 "declined by user" to the model — the tool loop continues so the assistant
 can answer gracefully, and nothing has executed.
 
+### Acting on the desktop
+
+Five tools let the assistant say what is open, focus a window, move one to
+another workspace, close one, and start an application
+([ADR 0022](adr/0022-desktop-window-control.md)). The shape is the same one
+delegation uses: the model chooses *which entry of a list Jarvix produced*,
+never what runs. It supplies a loose description ("my browser", "the one about
+pull requests"); the match is made in Go against `hyprctl clients -j`, and what
+reaches a subprocess is a window address the compositor reported, a
+range-checked workspace number, or a binary resolved through `exec.LookPath` or
+the configured allow list. No shell, at any point.
+
+Several matches is a question naming them, never a pick. A resolved address is
+carried through the confirmation and the wait unchanged, and re-checked against
+the live inventory (address, window id, class) immediately before dispatch, so
+a window that appeared or moved in between can make an action fail but can
+never redirect it. The two reads run silently; moving, closing and launching
+confirm first, with the question generated from the inventory ("I want to close
+firefox, the window titled GitHub") rather than from the model's description.
+The compositor sits behind an interface with a fake, so none of this needs
+Hyprland to test — and a missing one degrades to a spoken sentence.
+
 ### Delegating to a stronger assistant
 
 A request beyond the local model is handed to an assistant CLI the user has
