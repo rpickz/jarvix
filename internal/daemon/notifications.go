@@ -46,6 +46,10 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 			case "error":
 				errStage, _ = ev.Data["stage"].(string)
 				errMessage, _ = ev.Data["message"].(string)
+			case "session.timings":
+				// Retained past the session so `jarvix status --last` can
+				// print the budget of the interaction that just happened.
+				d.setLastTimings(ev.Data)
 			case "session.finished":
 				// Retain the failure past the session so a window opened by
 				// clicking the error notification can still render it.
@@ -80,6 +84,27 @@ func (d *Daemon) lastError() (stage, message string) {
 	d.errMu.Lock()
 	defer d.errMu.Unlock()
 	return d.lastErrStage, d.lastErrMessage
+}
+
+// setLastTimings records the latency report of the session that just ended.
+// The map is copied because the event's own map is shared with every other
+// bus subscriber.
+func (d *Daemon) setLastTimings(data map[string]any) {
+	copied := make(map[string]any, len(data))
+	for k, v := range data {
+		copied[k] = v
+	}
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	d.lastTimings = copied
+}
+
+// lastTimingsReport returns the retained latency report for status.get, or nil
+// when no session has finished since the daemon started.
+func (d *Daemon) lastTimingsReport() map[string]any {
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	return d.lastTimings
 }
 
 // buildNotification decides what a finished session's notification says,

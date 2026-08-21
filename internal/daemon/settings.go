@@ -283,22 +283,32 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		return true, ""
 	}
 
-	deps, err := fillDeps(merged, d.paths, d.injected)
+	deps, workers, err := fillDeps(merged, d.paths, d.injected, d.log)
 	if err != nil {
 		return false, err.Error()
 	}
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, engineOptions(merged)); err != nil {
-		// The engine kept its old collaborators. Live settings still land, so
-		// the notification switches never wait on an idle engine.
+		// The engine kept its old collaborators, so the workers just built are
+		// unreachable — close them before they are dropped. Nothing has been
+		// spawned yet (supervisors start lazily), which is what makes this
+		// safe rather than a restart. Live settings still land, so the
+		// notification switches never wait on an idle engine.
+		workers.Close()
 		d.cfgMu.Lock()
 		d.cfg.UI = merged.UI
 		d.cfgMu.Unlock()
 		return false, err.Error()
 	}
+	// The swap succeeded: the previous configuration's engine processes are
+	// nobody's children now, so kill them. Without this a reload leaks a
+	// whisper-server and a Python interpreter per reload.
 	d.cfgMu.Lock()
+	previous := d.warm
 	d.cfg = merged
+	d.warm = workers
 	d.cfgMu.Unlock()
+	previous.Close()
 	d.log.Info("configuration applied", "component", "daemon",
 		"provider", merged.AI.Provider, "model", merged.AI.Model, "tts", merged.TTS.Provider)
 	return true, ""

@@ -532,3 +532,75 @@ run = ""
 		t.Errorf("disabled intents should not be validated: %v", err)
 	}
 }
+
+func TestPerformanceDefaultsKeepEnginesWarm(t *testing.T) {
+	cfg := Default()
+	if !cfg.Performance.WarmEngines {
+		t.Error("warm engines must be on by default; presence is the product (ADR 0018)")
+	}
+	if cfg.Performance.WarmIdleReapSec != 600 || cfg.Performance.WarmMemoryCapMB != 2048 {
+		t.Errorf("performance defaults = %+v", cfg.Performance)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the defaults must validate: %v", err)
+	}
+}
+
+func TestPerformanceSectionParses(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[performance]
+warm_engines = false
+warm_memory_cap_mb = 0
+warm_idle_reap_sec = 0
+`)
+	if cfg.Performance.WarmEngines {
+		t.Error("warm_engines = false was not read")
+	}
+	// Zero is the documented "no cap" / "never reap" value, not an error.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("zeroes must be accepted: %v", err)
+	}
+}
+
+func TestPerformanceValidationRejectsUnusableValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		toml string
+		want string
+	}{
+		{"negative cap", "[performance]\nwarm_memory_cap_mb = -1\n", "warm_memory_cap_mb"},
+		{"negative reap", "[performance]\nwarm_idle_reap_sec = -5\n", "warm_idle_reap_sec"},
+		{
+			// A cap below any engine's working set would retire the worker the
+			// moment it loaded its model: a restart loop, not a memory budget.
+			name: "cap smaller than an engine",
+			toml: "[performance]\nwarm_engines = true\nwarm_memory_cap_mb = 16\n",
+			want: "at least",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := writeAndLoad(t, tc.toml).Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want a message mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPerformanceSettingsAreEditableAndIdleClass(t *testing.T) {
+	// The warm workers live inside the STT/TTS adapters, and adapters are only
+	// ever swapped between sessions — so these must not be live-class.
+	for _, key := range []string{
+		"performance.warm_engines",
+		"performance.warm_memory_cap_mb",
+		"performance.warm_idle_reap_sec",
+	} {
+		s, ok := SettingFor(key)
+		if !ok {
+			t.Fatalf("%s is not in the settings registry", key)
+		}
+		if s.Reload != ReloadIdle {
+			t.Errorf("%s reload class = %q, want idle", key, s.Reload)
+		}
+	}
+}

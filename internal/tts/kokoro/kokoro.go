@@ -73,6 +73,20 @@ func (s *Synthesizer) voicesPath() string {
 	return filepath.Join(defaultDir(), "models", "kokoro", "voices-v1.0.bin")
 }
 
+func (s *Synthesizer) voice() string {
+	if s.Voice != "" {
+		return s.Voice
+	}
+	return "af_heart"
+}
+
+func (s *Synthesizer) speed() float64 {
+	if s.Speed > 0 {
+		return s.Speed
+	}
+	return 1.0
+}
+
 // Name implements tts.Synthesizer.
 func (s *Synthesizer) Name() string { return "kokoro" }
 
@@ -101,17 +115,8 @@ func (s *Synthesizer) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 	if text == "" {
 		return tts.Format{}, nil, fmt.Errorf("nothing to speak")
 	}
-	voice := s.Voice
-	if voice == "" {
-		voice = "af_heart"
-	}
-	speed := s.Speed
-	if speed <= 0 {
-		speed = 1.0
-	}
-
 	cmd := exec.CommandContext(ctx, s.python(), s.script(),
-		"--voice", voice, "--speed", strconv.FormatFloat(speed, 'f', 2, 64))
+		"--voice", s.voice(), "--speed", strconv.FormatFloat(s.speed(), 'f', 2, 64))
 	cmd.Cancel = func() error { return cmd.Process.Kill() }
 	cmd.Env = append(os.Environ(),
 		"JARVIX_KOKORO_MODEL="+s.modelPath(),

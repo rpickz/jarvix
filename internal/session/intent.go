@@ -94,6 +94,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 			"intent", m.Name, "error", runErr.Error())
 	}
 
+	// The router's answer exists now, which is this path's equivalent of a
+	// provider's first token. Marking it keeps the latency report coherent
+	// across both paths (ADR 0018): the "thinking" stage becomes the intent's
+	// own execution time, and jarvix_ms correctly claims the whole budget —
+	// there is no model here to blame any of it on.
+	s.timings.markFirstDelta()
 	e.publishIntent(s, m, ack, runErr, started)
 	e.speakAck(s, ack)
 
