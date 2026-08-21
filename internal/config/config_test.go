@@ -681,3 +681,29 @@ desktop_apps = ["", "flatpak run org.x.App", "bin/relative"]
 		}
 	}
 }
+
+func TestRetentionDefaultsOnAndValidates(t *testing.T) {
+	cfg := Default()
+	if cfg.Conversation.Retention != RetentionOn {
+		t.Errorf("default retention = %q, want %q", cfg.Conversation.Retention, RetentionOn)
+	}
+	// A partial [conversation] table keeps the default: an existing config
+	// file must not silently switch archiving off by predating the key.
+	cfg, err := parse([]byte("[conversation]\nhistory_turns = 4\n"), Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Conversation.Retention != RetentionOn {
+		t.Errorf("retention after partial table = %q, want %q", cfg.Conversation.Retention, RetentionOn)
+	}
+	cfg.Conversation.Retention = RetentionOff
+	cfg.Voices = nil
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("retention off must validate: %v", err)
+	}
+	cfg.Conversation.Retention = "sometimes"
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "conversation.retention") {
+		t.Errorf("bad retention validated: %v", err)
+	}
+}

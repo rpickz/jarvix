@@ -203,6 +203,15 @@ func Settings() []Setting {
 		{Key: "conversation.follow_up_window_sec", Label: "Follow-up window (seconds)", Type: TypeInt, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Conversation.FollowUpWindowSec },
 			set: func(c *Config, v any) { c.Conversation.FollowUpWindowSec = v.(int) }},
+		// Retention is the archive's off switch (ADR 0027): a privacy control
+		// the user reaches for in the moment, so it belongs in the registry
+		// beside the context switches, not behind a hand edit and a restart.
+		// Idle-class: the engine's archive option is rebuilt with its options,
+		// and turning it off stops writing without touching what is kept.
+		{Key: "conversation.retention", Label: "Keep conversations until deleted", Type: TypeString, Reload: ReloadIdle,
+			Enum: []string{RetentionOn, RetentionOff},
+			Get:  func(c Config) any { return c.Conversation.Retention },
+			set:  func(c *Config, v any) { c.Conversation.Retention = v.(string) }},
 
 		// The intent table itself is rebuilt with the engine, so these are
 		// idle-class. [[intents.custom]] and [[routines]] entries stay

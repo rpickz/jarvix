@@ -8,6 +8,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai/openaicompat"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/memory"
@@ -211,9 +212,13 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 // the daemon's knowledge base (ADR 0025), nil when memory is disabled — it is
 // a parameter rather than rebuilt from cfg because the store is
 // construction-wired (restart-class) and must stay the same instance the
-// memory tools write through.
+// memory tools write through. bus carries the routine progress events
+// (ADR 0026). archive is the durable conversation store (ADR 0027), a
+// parameter for the same reason as book: one instance serves the engine's
+// appends and the conversation.* IPC methods, and only the retention switch
+// here decides whether the engine writes to it.
 func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
-	book *memory.Book, logger *slog.Logger) session.Options {
+	book *memory.Book, archive conversations.Store, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -230,6 +235,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Memory:            memoryInjector(book),
+		Archive:           conversationArchive(cfg, archive),
 		WakeWord:          cfg.Activation.WakeWord,
 		Lexicon:           cfg.TTS.Lexicon,
 	}
@@ -266,6 +272,18 @@ func memoryInjector(book *memory.Book) session.MemoryInjector {
 		return nil
 	}
 	return book
+}
+
+// conversationArchive gates the durable archive (ADR 0027) on the retention
+// switch: "off" hands the engine nil, which means absent — nothing staged,
+// nothing written — while the daemon keeps its own handle for listing and
+// deletion. Same typed-nil discipline as the collaborators above: disabled
+// must mean a nil interface, never an interface holding a nil pointer.
+func conversationArchive(cfg config.Config, archive conversations.Store) conversations.Store {
+	if cfg.Conversation.Retention == config.RetentionOff {
+		return nil
+	}
+	return archive
 }
 
 // intentRouter compiles the deterministic intent table (ADR 0017). Nil means

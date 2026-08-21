@@ -138,6 +138,7 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 	e.finishLocked(s)
 	e.mu.Unlock()
 	e.persistHistory()
+	e.persistArchive()
 }
 
 // runDesktopIntent carries out an intent that acts on the compositor —

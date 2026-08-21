@@ -1,0 +1,5 @@
+{"schema":1,"id":"20260821-100001-test"}
+{"role":"user","text":"what is on my calendar?","ts":"2026-08-21T10:30:00Z"}
+{"role":"assistant","text":"Two meetings, both this morning.","ts":"2026-08-21T10:30:00Z"}
+{"role":"user","text":"move the second one","ts":"2026-08-21T10:31:00Z"}
+{"role":"assistant","text":"Done — it is at three now.","ts":"2026-08-21T10:31:00Z"}

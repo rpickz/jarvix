@@ -22,7 +22,11 @@ Usage:
   jarvix cancel                 Cancel the current interaction
   jarvix confirm                Approve the pending tool confirmation
   jarvix deny                   Decline the pending tool confirmation
-  jarvix new                    Start a fresh conversation (forget context)
+  jarvix new                    Start a fresh conversation (the old one is archived)
+  jarvix conversations          List archived conversations, newest first
+  jarvix conversations show <id>   Print one conversation (read-only)
+  jarvix conversations open <id>   Continue one as the active conversation
+  jarvix conversations delete <id> Delete one from disk (--all deletes every one)
   jarvix memory list [query]    List remembered facts (the knowledge base)
   jarvix memory forget <what>   Delete a remembered fact, by id or by words
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
@@ -98,6 +102,8 @@ func run(args []string) int {
 		err = cmdConfirm(paths, false)
 	case "new":
 		err = cmdNewConversation(paths)
+	case "conversations":
+		err = cmdConversations(paths, rest)
 	case "memory":
 		switch {
 		case len(rest) >= 1 && rest[0] == "list":

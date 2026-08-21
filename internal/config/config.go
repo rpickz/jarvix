@@ -389,7 +389,21 @@ type Conversation struct {
 	// inactivity, so a new question does not inherit a stale thread. 0 keeps
 	// context until Jarvix restarts or the conversation is reset explicitly.
 	FollowUpWindowSec int `toml:"follow_up_window_sec"`
+	// Retention archives every conversation to disk until the user deletes it
+	// (ADR 0027): "on" (the default) keeps whole conversations — untouched by
+	// history_turns, which only governs what the model is sent — and "off"
+	// stops all archive writing without removing anything already kept.
+	Retention string `toml:"retention"`
 }
+
+// Retention values. Strings rather than a bool so the file reads as the
+// decision it is ("retention = \"off\"" is unambiguous where "retention =
+// false" invites guessing what exactly stops), and so a later mode — such as
+// time-bounded retention — is a new value, not a new key.
+const (
+	RetentionOn  = "on"
+	RetentionOff = "off"
+)
 
 // Audio configures capture and playback.
 type Audio struct {
@@ -465,8 +479,9 @@ func Default() Config {
 			Piper:    Piper{Voice: "en_US-amy-medium", Binary: "piper-tts"},
 			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
-		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900},
-		Intents:      Intents{Enabled: true, Terminal: intent.DefaultTerminal},
+		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900,
+			Retention: RetentionOn},
+		Intents: Intents{Enabled: true, Terminal: intent.DefaultTerminal},
 		Tools: Tools{
 			Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true,
 			Desktop: true,
@@ -672,6 +687,11 @@ func (c Config) Validate() error {
 		problems = append(problems, "audio.min_recording_ms must not be negative")
 	} else if c.Audio.MinRecordingMs >= c.Audio.MaxRecordingSec*1000 {
 		problems = append(problems, "audio.min_recording_ms must be smaller than audio.max_recording_sec")
+	}
+	if c.Conversation.Retention != RetentionOn && c.Conversation.Retention != RetentionOff {
+		problems = append(problems, fmt.Sprintf(
+			"conversation.retention %q is invalid; use %q (archive conversations until deleted) or %q",
+			c.Conversation.Retention, RetentionOn, RetentionOff))
 	}
 	if c.Performance.WarmMemoryCapMB < 0 {
 		problems = append(problems,

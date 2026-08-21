@@ -54,3 +54,8 @@ func (p Paths) HistoryFile() string { return filepath.Join(p.State, "history.jso
 // history, because it is machine-local and the user may delete it at will —
 // but unlike history it is a file the user is invited to open and edit.
 func (p Paths) MemoryFile() string { return filepath.Join(p.State, "memory.toml") }
+
+// ConversationsDir returns where archived conversations live (ADR 0027).
+// State, like history: transcripts of what was said in the user's home,
+// machine-local, and deletable at will (`jarvix conversations delete`).
+func (p Paths) ConversationsDir() string { return filepath.Join(p.State, "conversations") }

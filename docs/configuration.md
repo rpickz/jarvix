@@ -270,6 +270,11 @@ history_turns = 16               # remember this many prior exchanges as context
                                  # (0 = every question is standalone)
 follow_up_window_sec = 900       # forget the thread after this idle gap
                                  # (0 = keep until restart or `jarvix new`)
+retention = "on"                 # archive every conversation until you delete it
+                                 # (ADR 0027; `jarvix conversations`). The cap
+                                 # above limits what the model is sent, never
+                                 # what is archived. "off" stops all archive
+                                 # writing; it removes nothing already kept
 
 [audio]
 input_device = ""                # PipeWire target name/serial; empty = default
