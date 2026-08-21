@@ -66,6 +66,13 @@ speed = 1.0                      # speech rate multiplier
 shell = false                    # enable shell.run — see the Tools section below
 shell_timeout_sec = 30           # per-command timeout
 shell_max_output_kb = 16         # captured output cap fed back to the model
+artifacts = true                 # enable artifact.create (diagrams on screen)
+
+[artifacts]                      # rendered diagrams and future documents
+dir = "~/Documents/Jarvix"       # default is your real home path; must be
+                                 # absolute in the file ("~" is not expanded)
+open_command = "xdg-open"        # how a rendered artifact is shown
+render_timeout_sec = 10          # renderer killed past this
 
 [conversation]
 speak_responses = true           # false = text-only sessions
@@ -144,6 +151,27 @@ with tool support. Small models without tool training will not call tools.
 A per-tool permission gate (allow / ask / deny, with spoken confirmation) is
 the next step on the roadmap; today `shell` is a single on/off switch.
 
+## Artifacts (diagrams on screen)
+
+"Jarvix, diagram how my publish pipeline works" makes the assistant write
+Mermaid source and call `artifact.create`: the diagram is rendered to SVG,
+opened in your default viewer, and saved — source and image side by side —
+under `[artifacts] dir` (default `~/Documents/Jarvix`, created private,
+0700) as `<date>-<slug>.mmd` / `.svg`. The spoken answer stays a short
+summary; file paths are never read aloud. `jarvix artifacts` lists the most
+recent ones with paths, and the daemon publishes an `artifact.created` IPC
+event (type, path) for the overlay/notifications.
+
+Rendering needs [mermaid-cli](https://github.com/mermaid-js/mermaid-cli):
+
+```bash
+npm install -g @mermaid-js/mermaid-cli   # or from the AUR: mermaid-cli
+```
+
+Without it the assistant simply answers in prose, and `jarvix doctor` names
+the missing piece. Renders run as a local subprocess (no network), bounded by
+`render_timeout_sec`. See ADR 0011 for the design.
+
 ## Natural voice (Kokoro)
 
 Piper (the default) needs no setup but sounds robotic. Kokoro is markedly
@@ -167,3 +195,4 @@ fences, and list bullets are stripped so nothing reads "asterisk" or
 | State | `~/.local/state/jarvix/` |
 | Socket | `$XDG_RUNTIME_DIR/jarvix.sock` |
 | Recordings (transient) | `$XDG_RUNTIME_DIR/jarvix/` (tmpfs, deleted after use) |
+| Artifacts (diagrams) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |

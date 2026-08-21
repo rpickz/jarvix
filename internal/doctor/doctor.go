@@ -17,6 +17,7 @@ import (
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
+	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
 )
@@ -50,6 +51,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkWhisperBinary,
 		checkWhisperModel,
 		checkTTS,
+		checkArtifactRenderer,
 		checkDaemon,
 		checkProviderConfigured,
 		checkProviderReachable,
@@ -192,6 +194,24 @@ func checkTTS(cfg config.Config, _ config.Paths) Result {
 			Fix:    "Install voices: sudo pacman -S piper-voices-en-us (AUR),\nor set tts.piper.voice to a downloaded .onnx path"}
 	}
 	return Result{Status: OK, Name: "Piper voice available", Detail: cfg.TTS.Piper.Voice}
+}
+
+// checkArtifactRenderer is a Warn, not a Fail, when mmdc is missing: the
+// artifact tool degrades to prose answers on its own, so a missing renderer
+// costs a feature, not the assistant.
+func checkArtifactRenderer(cfg config.Config, _ config.Paths) Result {
+	if !cfg.Tools.Artifacts {
+		return Result{Status: OK, Name: "diagram rendering",
+			Detail: "disabled ([tools] artifacts = false)"}
+	}
+	r := &tools.MermaidRenderer{}
+	if err := r.Available(); err != nil {
+		return Result{Status: Warn, Name: "diagram renderer installed",
+			Detail: err.Error(),
+			Fix:    "Install mermaid-cli: " + tools.MermaidInstallHint}
+	}
+	return Result{Status: OK, Name: "diagram renderer installed",
+		Detail: "mmdc → " + cfg.Artifacts.Dir}
 }
 
 func checkDaemon(_ config.Config, paths config.Paths) Result {

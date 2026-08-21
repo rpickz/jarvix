@@ -20,8 +20,8 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tools"
-	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
 )
 
@@ -90,6 +90,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
 	}
 
+	bus := session.NewBus(logger)
 	registry := tools.NewRegistry(logger)
 	systemPrompt := cfg.AI.SystemPrompt
 	if cfg.Tools.Shell {
@@ -101,8 +102,23 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		systemPrompt += config.ToolSystemPrompt
 		logger.Info("tool enabled", "component", "tools", "tool", "shell.run")
 	}
-
-	bus := session.NewBus(logger)
+	if cfg.Tools.Artifacts {
+		registry.Register(&tools.Artifact{
+			Dir:         cfg.Artifacts.Dir,
+			OpenCommand: cfg.Artifacts.OpenCommand,
+			Timeout:     time.Duration(cfg.Artifacts.RenderTimeoutSec) * time.Second,
+			Renderers:   []tools.Renderer{&tools.MermaidRenderer{}},
+			// The event carries the path so the window/notification can link
+			// to the file; spoken summaries deliberately never do.
+			OnCreated: func(format, path string) {
+				bus.Publish(session.Event{Type: "artifact.created",
+					Data: map[string]any{"type": format, "path": path}})
+			},
+			Log: logger,
+		})
+		systemPrompt += config.ArtifactSystemPrompt
+		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
+	}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, bus, logger, session.Options{
 			Model:          cfg.AI.Model,
