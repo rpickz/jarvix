@@ -120,4 +120,12 @@ func TestCIWorkflowGradesEveryBranchWithAPinnedLinter(t *testing.T) {
 	if !strings.Contains(workflow, "concurrency:") {
 		t.Error("with push covering every branch, a concurrency group is what stops a branch with an open PR being graded twice")
 	}
+	// The push trigger already grades a same-repo branch, so the duplicate
+	// pull_request run is skipped rather than cancelled: a skipped job is
+	// neutral, a cancelled one shows up red next to the green result. Fork
+	// PRs still need the pull_request trigger, hence a guard rather than
+	// dropping it.
+	if guards := strings.Count(workflow, "github.event.pull_request.head.repo.full_name != github.repository"); guards != 2 {
+		t.Errorf("both jobs must skip the duplicate same-repo pull_request run, found %d guards", guards)
+	}
 }

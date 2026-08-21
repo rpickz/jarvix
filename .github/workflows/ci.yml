@@ -13,18 +13,25 @@ on:
 permissions:
   contents: read
 
-# One run per commit. With push covering every branch, a branch that also has
-# an open PR fires both triggers for the same code; keying the group on the
-# commit (github.sha for a push, the PR's head sha for a pull_request — the
-# same value) makes the second trigger cancel the redundant first instead of
-# paying for both. Distinct commits land in distinct groups, so no push ever
-# loses its verdict to a later one.
+# One run per commit, belt to the braces of the same-repo guard on each job
+# below. Keyed on the commit (github.sha for a push, the PR's head sha for a
+# pull_request — the same value) rather than on the branch: distinct commits
+# land in distinct groups, so no push ever loses its verdict to a later one,
+# which is the promise in the first line of this file.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
+# Both jobs carry the same guard: skip the pull_request run for a branch in
+# this repo, because the push trigger above already graded that exact commit
+# and checks attach to the commit, so the PR shows the verdict either way. A
+# skipped job is neutral — letting concurrency cancel the duplicate instead
+# would leave a red "cancelled" entry sitting next to the green one. Fork PRs
+# are why the pull_request trigger stays at all: their pushes land in someone
+# else's repository and fire no push event here.
 jobs:
   test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -63,6 +70,7 @@ jobs:
           path: coverage.out
 
   lint:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
