@@ -122,16 +122,23 @@ artifacts = true                 # enable artifact.create (diagrams, documents,
                                  # spreadsheets, sketches on screen)
 
 [artifacts]                      # where the assistant's files land and open
-dir = "~/Documents/Jarvix"       # default is your real home path; must be
-                                 # absolute in the file ("~" is not expanded)
-open_command = "xdg-open"        # how an artifact is shown (all formats)
+dir = "/home/you/Documents/Jarvix"
+                                 # must be an absolute path — "~" is NOT
+                                 # expanded; write your real home directory.
+                                 # The default is already <your home>/Documents/Jarvix,
+                                 # so leave this out unless you want it elsewhere.
+open_command = "xdg-open"        # how an artifact is shown (all formats).
+                                 # A string is split on whitespace; use an
+                                 # array when a path or argument contains a
+                                 # space: ["/opt/my viewer/bin/view", "--new"]
 render_timeout_sec = 10          # renderer killed past this
 
 [artifacts.open_commands]        # optional per-format viewer overrides;
                                  # formats without an entry use open_command
 # document = "obsidian"          # .md drafts in your editor of choice
-# spreadsheet = "libreoffice"    # .csv tables in a spreadsheet app
-# excalidraw = "none"            # "" or "none" = no viewer: the file is
+# spreadsheet = ["flatpak", "run", "org.libreoffice.LibreOffice"]
+                                 # array form: argv, no shell, spaces safe
+# excalidraw = "none"            # "", [] or "none" = no viewer: the file is
                                  # saved and announced by name, not opened
 
 [tools.policy]                   # the permission gate (see the Tools section)
@@ -364,8 +371,11 @@ never saved. Artifact source is capped at 1 MB; oversized content is
 refused, never truncated.
 
 Per-format viewers come from `[artifacts.open_commands]` (falling back to
-`open_command`, default `xdg-open`). Setting a format's entry to `""` or
-`"none"` means "no viewer": the assistant saves the file and tells you its
+`open_command`, default `xdg-open`). Each entry is either a string, split on
+whitespace, or an argv array — viewers are exec'd directly, never through a
+shell, so a viewer under `/opt/my viewer/bin` needs the array form
+(`["/opt/my viewer/bin/view", "--new"]`) to survive. Setting a format's entry
+to `""`, `[]`, or `"none"` means "no viewer": the assistant saves the file and tells you its
 name instead of opening anything — useful for `.excalidraw`, which usually
 wants dragging into [excalidraw.com](https://excalidraw.com) rather than a
 local handler.

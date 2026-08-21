@@ -53,6 +53,14 @@ Manual install from this tarball (Arch users: prefer the AUR package):
     systemctl --user daemon-reload
     systemctl --user enable --now jarvixd
 
+Install the helper scripts too. \`jarvix setup\` delegates the Kokoro voice
+and Hyprland binding steps to them, and this is one of the directories it
+looks in — leave them in the unpacked tarball and those steps silently
+disappear from the wizard:
+
+    mkdir -p ~/.local/share/jarvix/scripts
+    install -m755 scripts/*.sh ~/.local/share/jarvix/scripts/
+
 Copy the Omarchy overlay plugin (don't symlink from a temporary directory):
 
     mkdir -p ~/.config/omarchy/plugins

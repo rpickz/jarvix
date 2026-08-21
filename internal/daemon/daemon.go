@@ -102,7 +102,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		registry.Register(&tools.Artifact{
 			Dir:          cfg.Artifacts.Dir,
 			OpenCommand:  cfg.Artifacts.OpenCommand,
-			OpenCommands: cfg.Artifacts.OpenCommands,
+			OpenCommands: artifactOpenCommands(cfg.Artifacts.OpenCommands),
 			Timeout:      time.Duration(cfg.Artifacts.RenderTimeoutSec) * time.Second,
 			// Adding a format is exactly this: implement Renderer (plus
 			// SourceValidator for structured formats) and append it here.
@@ -184,6 +184,21 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	}
 	d.registerMethods()
 	return d, nil
+}
+
+// artifactOpenCommands converts the config's per-format viewer overrides into
+// the plain argv map the tool takes. The tool package deliberately does not
+// import config — it is reusable on its own terms — so the named
+// config.Command element type is shed here.
+func artifactOpenCommands(in map[string]config.Command) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for format, argv := range in {
+		out[format] = argv
+	}
+	return out
 }
 
 // Run listens on the socket and serves until ctx is cancelled.

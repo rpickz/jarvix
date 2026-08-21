@@ -138,3 +138,30 @@ func TestTablesWithPrefix(t *testing.T) {
 		t.Fatal("unexpected tools tables")
 	}
 }
+
+// config.toml is user state: it records local paths, the machine's advisor
+// binaries, and the shell-tool policy. Every other file Jarvix writes is
+// 0600, and a pre-existing 0644 config (written by an earlier build, or by
+// hand) must be tightened rather than preserved
+// (raised in review of #20).
+func TestSaveWritesConfigPrivate(t *testing.T) {
+	for name, seed := range map[string]string{
+		"new file":               "",
+		"pre-existing 0644 file": "[tts]\nprovider = \"piper\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := loadString(t, seed)
+			f.Set("ai", "provider", "ollama")
+			if err := f.Save(); err != nil {
+				t.Fatal(err)
+			}
+			fi, err := os.Stat(f.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := fi.Mode().Perm(); perm != 0o600 {
+				t.Errorf("config mode = %o, want 0600", perm)
+			}
+		})
+	}
+}

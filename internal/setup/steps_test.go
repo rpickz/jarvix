@@ -336,3 +336,31 @@ func TestVerifyStepOffersWhisperDownload(t *testing.T) {
 		t.Fatalf("checks must be re-run after the download, got %d runs", calls)
 	}
 }
+
+// `jarvix setup input` prints commands for the user to run as root when it
+// cannot do the work itself, so accepting that prompt does not mean
+// push-to-talk works. Returning nil there listed Activation as finished in
+// the wizard's closing summary — the one place the user looks to find out
+// what is still outstanding (raised in review of #20).
+func TestActivationStepPrintedInstructionsStillNeedAttention(t *testing.T) {
+	var out strings.Builder
+	step := ActivationStep(ActivationDeps{
+		// Accept the input prompt, decline the bindings script.
+		Out: &out, Prompt: &fakePrompter{confirms: []bool{true, false}},
+		InputAccessible:   func() bool { return false },
+		BindingsInstalled: func() bool { return false },
+		SetupInput:        func() error { return nil }, // printed the commands, changed nothing
+		BindingsScript:    "/opt/install-hyprland-bindings.sh",
+		RunScript:         func(string) error { t.Fatal("declined"); return nil },
+	})
+	err := step.Run()
+	if err == nil {
+		t.Fatal("neither activation route works yet; the step must report that it needs attention")
+	}
+	if !strings.Contains(err.Error(), "jarvix setup") {
+		t.Errorf("error must name the follow-up: %v", err)
+	}
+	if !strings.Contains(out.String(), "Follow the printed commands") {
+		t.Errorf("the printed guidance must survive: %q", out.String())
+	}
+}

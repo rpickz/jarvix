@@ -63,6 +63,15 @@ func (*ExcalidrawRenderer) ValidateSource(source string) error {
 	if err := json.Unmarshal(rawElements, &elements); err != nil {
 		return fmt.Errorf(`scene "elements" must be a JSON array of element objects`)
 	}
+	// encoding/json happily decodes JSON null into a nil slice, so the check
+	// above passes for `"elements": null` — a scene Excalidraw refuses to
+	// load with its opaque "couldn't load" error, which is exactly what this
+	// validator exists to pre-empt. An empty array decodes to a non-nil
+	// empty slice, so a blank canvas still validates
+	// (raised in review of #19).
+	if elements == nil {
+		return fmt.Errorf(`scene "elements" is null; use an array of element objects, or [] for an empty canvas`)
+	}
 	for i, raw := range elements {
 		var element struct {
 			Type string   `json:"type"`

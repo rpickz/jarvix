@@ -48,20 +48,61 @@ type Tools struct {
 	Policy           ToolsPolicy `toml:"policy"`
 }
 
+// Command is a viewer invocation: argv, not a shell line. Jarvix never runs
+// a viewer through a shell, so quoting and globbing would be silently
+// ignored — the argv form is what actually reaches exec.
+//
+// Both TOML shapes decode into it:
+//
+//	open_command = "xdg-open"                     # split on whitespace
+//	open_command = ["/opt/my viewer/bin/view", "--new"]
+//
+// The string form is the original config shape and stays supported, so every
+// config written before the array existed keeps working unchanged. It splits
+// on whitespace, which means it cannot express a viewer whose path or
+// argument *contains* whitespace — that is exactly what the array form is
+// for, and the reason it was added (raised in review of #19).
+type Command []string
+
+// UnmarshalTOML implements toml.Unmarshaler for both accepted shapes.
+func (c *Command) UnmarshalTOML(v any) error {
+	switch t := v.(type) {
+	case string:
+		// Legacy shorthand: whitespace-separated argv. Empty (or the
+		// literal "none") stays empty, which callers read as "no viewer".
+		*c = strings.Fields(t)
+		return nil
+	case []any:
+		argv := make(Command, 0, len(t))
+		for i, raw := range t {
+			s, ok := raw.(string)
+			if !ok {
+				return fmt.Errorf("element %d is %T; a command array holds strings only", i, raw)
+			}
+			argv = append(argv, s)
+		}
+		*c = argv
+		return nil
+	default:
+		return fmt.Errorf("must be a string (\"xdg-open\") or an array of strings ([\"/opt/my viewer\", \"--new\"]), got %T", v)
+	}
+}
+
 // Artifacts configures where rendered artifacts (diagrams, later documents)
 // land and how they are shown.
 type Artifacts struct {
 	// Dir is where artifacts are saved. Created 0700 on first use; must be
-	// absolute ("~" is not expanded).
+	// absolute ("~" is not expanded — write the real path).
 	Dir string `toml:"dir"`
-	// OpenCommand launches a rendered artifact in a viewer.
-	OpenCommand string `toml:"open_command"`
+	// OpenCommand launches a rendered artifact in a viewer. Either a string
+	// ("xdg-open", split on whitespace) or an argv array — see Command.
+	OpenCommand Command `toml:"open_command"`
 	// OpenCommands overrides OpenCommand per artifact format, e.g. under
-	// [artifacts.open_commands]: document = "obsidian". An entry set to ""
-	// or "none" declares the format has no viewer — the artifact is saved
-	// and announced by name, nothing is launched. Formats without an entry
-	// fall back to OpenCommand.
-	OpenCommands map[string]string `toml:"open_commands"`
+	// [artifacts.open_commands]: document = "obsidian". An entry set to "",
+	// [], or "none" declares the format has no viewer — the artifact is
+	// saved and announced by name, nothing is launched. Formats without an
+	// entry fall back to OpenCommand.
+	OpenCommands map[string]Command `toml:"open_commands"`
 	// RenderTimeoutSec bounds one render; the renderer is killed past it.
 	RenderTimeoutSec int `toml:"render_timeout_sec"`
 }
@@ -260,7 +301,7 @@ func Default() Config {
 		},
 		Artifacts: Artifacts{
 			Dir:              filepath.Join(home, "Documents", "Jarvix"),
-			OpenCommand:      "xdg-open",
+			OpenCommand:      Command{"xdg-open"},
 			RenderTimeoutSec: 10,
 		},
 		Audio: Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
@@ -406,7 +447,7 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"artifacts.dir %q must be an absolute path (\"~\" is not expanded)", c.Artifacts.Dir))
 	}
-	if strings.TrimSpace(c.Artifacts.OpenCommand) == "" {
+	if len(c.Artifacts.OpenCommand) == 0 || strings.TrimSpace(c.Artifacts.OpenCommand[0]) == "" {
 		problems = append(problems, "artifacts.open_command is empty; \"xdg-open\" opens the default viewer")
 	}
 	if c.Artifacts.RenderTimeoutSec <= 0 {

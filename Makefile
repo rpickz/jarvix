@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test ci coverage vet lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean release-snapshot
+.PHONY: all build test ci coverage vet gofmt-check lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean release-snapshot
 
 all: build
 
@@ -16,10 +16,13 @@ build:
 test:
 	$(GO) test ./...
 
-# What CI runs (.github/workflows/ci.yml) — race detector, twice, plus lint.
-ci: vet
+# What CI runs (.github/workflows/ci.yml), in the same order: build, vet,
+# gofmt, race detector twice, lint. It used to skip the build and the gofmt
+# check, so `make ci` could pass on a commit the gate then rejected — keep the
+# two in step (raised in review of #15).
+ci: vet gofmt-check lint
+	$(GO) build ./...
 	$(GO) test -race -count=2 ./...
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "golangci-lint not installed; skipped"
 
 coverage:
 	$(GO) test -coverprofile=coverage.out ./...
@@ -28,9 +31,27 @@ coverage:
 vet:
 	$(GO) vet ./...
 
+# gofmt reports unformatted files on stdout and still exits 0, so the check
+# has to inspect the output rather than the status.
+gofmt-check:
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
+	fi
+
+# Availability and outcome are checked separately, and deliberately so:
+# `command -v X && X run || echo "not installed"` reports a NONZERO lint exit
+# as "not installed" and lets `make ci` pass with real findings. Here the
+# `||` fallback is gone, so the linter's exit status is the recipe's exit
+# status (raised in review of #15).
 lint: vet
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || \
-		{ command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || echo "golangci-lint/staticcheck not installed; ran go vet only"; }
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	elif command -v staticcheck >/dev/null 2>&1; then \
+		staticcheck ./...; \
+	else \
+		echo "golangci-lint/staticcheck not installed; ran go vet only"; \
+	fi
 
 install: build
 	install -Dm755 bin/jarvix  $(BINDIR)/jarvix

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func newArtifact(t *testing.T, r Renderer) (*Artifact, *[]string) {
 	a := &Artifact{
 		Dir:       filepath.Join(t.TempDir(), "artifacts"),
 		Renderers: []Renderer{r},
-		openFn: func(_, path string) error {
+		openFn: func(_ []string, path string) error {
 			opened = append(opened, path)
 			return nil
 		},
@@ -218,7 +219,7 @@ func TestArtifactViewerFailureStillSaves(t *testing.T) {
 	a := &Artifact{
 		Dir:       filepath.Join(t.TempDir(), "artifacts"),
 		Renderers: []Renderer{fake},
-		openFn:    func(string, string) error { return fmt.Errorf("no display") },
+		openFn:    func([]string, string) error { return fmt.Errorf("no display") },
 	}
 	out := runArtifact(t, a, "headless", "graph TD")
 	if !strings.Contains(out, "could not be opened") || !strings.Contains(out, "jarvix artifacts") {
@@ -342,21 +343,22 @@ func TestArtifactOversizedSourceRefusedNotTruncated(t *testing.T) {
 }
 
 func TestArtifactPerFormatOpenCommandOverride(t *testing.T) {
-	var commands []string
+	var commands [][]string
 	a := &Artifact{
 		Dir:          filepath.Join(t.TempDir(), "artifacts"),
-		OpenCommand:  "xdg-open",
-		OpenCommands: map[string]string{"fakedoc": "obsidian"},
+		OpenCommand:  []string{"xdg-open"},
+		OpenCommands: map[string][]string{"fakedoc": {"obsidian"}},
 		Renderers:    []Renderer{&fakePassthrough{}, &fakeRenderer{}},
-		openFn: func(command, _ string) error {
-			commands = append(commands, command)
+		openFn: func(argv []string, _ string) error {
+			commands = append(commands, argv)
 			return nil
 		},
 	}
 	runFormat(t, a, "fakedoc", "with override", "x")
 	runFormat(t, a, "fake", "without override", "x")
-	if len(commands) != 2 || commands[0] != "obsidian" || commands[1] != "xdg-open" {
-		t.Errorf("open commands = %v, want [obsidian xdg-open]", commands)
+	if len(commands) != 2 || !slices.Equal(commands[0], []string{"obsidian"}) ||
+		!slices.Equal(commands[1], []string{"xdg-open"}) {
+		t.Errorf("open commands = %v, want [[obsidian] [xdg-open]]", commands)
 	}
 }
 
@@ -364,13 +366,13 @@ func TestArtifactPerFormatOpenCommandOverride(t *testing.T) {
 // is still saved and the result names it — by base name only, never a
 // directory path, because the name is the user's only handle on the file.
 func TestArtifactNoViewerConfiguredSavesAndNamesTheFile(t *testing.T) {
-	for _, override := range []string{"", "none"} {
+	for _, override := range [][]string{{}, {""}, {"none"}, nil} {
 		var opened []string
 		a := &Artifact{
 			Dir:          filepath.Join(t.TempDir(), "artifacts"),
-			OpenCommands: map[string]string{"fakedoc": override},
+			OpenCommands: map[string][]string{"fakedoc": override},
 			Renderers:    []Renderer{&fakePassthrough{}},
-			openFn: func(_, path string) error {
+			openFn: func(_ []string, path string) error {
 				opened = append(opened, path)
 				return nil
 			},
@@ -378,16 +380,16 @@ func TestArtifactNoViewerConfiguredSavesAndNamesTheFile(t *testing.T) {
 		out := runFormat(t, a, "fakedoc", "orphan", "x")
 		base := time.Now().Format("2006-01-02") + "-orphan.txt"
 		if _, err := os.Stat(filepath.Join(a.Dir, base)); err != nil {
-			t.Errorf("override %q: artifact not saved: %v", override, err)
+			t.Errorf("override %v: artifact not saved: %v", override, err)
 		}
 		if len(opened) != 0 {
-			t.Errorf("override %q: nothing must be opened, got %v", override, opened)
+			t.Errorf("override %v: nothing must be opened, got %v", override, opened)
 		}
 		if !strings.Contains(out, base) || !strings.Contains(out, "no viewer is configured") {
-			t.Errorf("override %q: result = %q, want the base name and an explanation", override, out)
+			t.Errorf("override %v: result = %q, want the base name and an explanation", override, out)
 		}
 		if strings.Contains(out, a.Dir) {
-			t.Errorf("override %q: result leaks the directory: %q", override, out)
+			t.Errorf("override %v: result leaks the directory: %q", override, out)
 		}
 	}
 }
@@ -434,7 +436,7 @@ func TestArtifactFormatsShareOneSeam(t *testing.T) {
 		Dir:       filepath.Join(t.TempDir(), "artifacts"),
 		Renderers: renderers,
 		OnCreated: func(format, path string) { created[format] = path },
-		openFn: func(_, path string) error {
+		openFn: func(_ []string, path string) error {
 			opened = append(opened, path)
 			return nil
 		},
@@ -474,5 +476,105 @@ func TestArtifactFormatsShareOneSeam(t *testing.T) {
 	}
 	if len(opened) != len(renderers) {
 		t.Errorf("opened %d artifacts, want %d", len(opened), len(renderers))
+	}
+}
+
+// A stat of the output path that fails for any reason other than "not there"
+// says nothing about whether the name is free. Reusing it would let the
+// render write straight through whatever holds the path — here a symlink,
+// but a permission or IO error reads the same way. Refusing is the only safe
+// answer (raised in review of #17).
+func TestArtifactUnreadableExistingOutputIsRefusedNotOverwritten(t *testing.T) {
+	a, opened := newArtifact(t, &fakeRenderer{})
+	if err := os.MkdirAll(a.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A self-referential symlink: os.Stat fails with ELOOP, which is neither
+	// nil nor fs.ErrNotExist — the exact ambiguity the fix is about.
+	outPath := filepath.Join(a.Dir, time.Now().Format("2006-01-02")+"-collide.out")
+	if err := os.Symlink(outPath, outPath); err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := json.Marshal(map[string]string{"format": "fake", "title": "collide", "source": "x"})
+	out, err := a.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatalf("an unreadable output path must be an error, got result %q", out)
+	}
+	if !strings.Contains(err.Error(), "collide.out") {
+		t.Errorf("error must name the file it refused to touch: %v", err)
+	}
+	srcPath := filepath.Join(a.Dir, time.Now().Format("2006-01-02")+"-collide.src")
+	if _, statErr := os.Stat(srcPath); statErr == nil {
+		t.Error("refusing the name must not leave a claimed source file behind")
+	}
+	if len(*opened) != 0 {
+		t.Error("nothing must be opened")
+	}
+}
+
+// A failed write must not leave the O_EXCL placeholder behind: for a
+// passthrough format that file IS the artifact, so `jarvix artifacts` would
+// list a truncated or empty file as a finished document
+// (raised in review of #19).
+func TestArtifactWriteFailureLeavesNoPlaceholder(t *testing.T) {
+	a, opened := newArtifact(t, &fakePassthrough{})
+	a.writeFn = func(path string, _ []byte, _ os.FileMode) error {
+		// Stand in for ENOSPC: the placeholder exists, the content does not.
+		return fmt.Errorf("write %s: no space left on device", path)
+	}
+	input, _ := json.Marshal(map[string]string{"format": "fakedoc", "title": "doomed", "source": "x"})
+	if _, err := a.Execute(context.Background(), input); err == nil {
+		t.Fatal("a failed write must be an error")
+	}
+	entries, err := os.ReadDir(a.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("failed write left %v behind; a partial artifact must not be listable", entries)
+	}
+	if len(*opened) != 0 {
+		t.Error("nothing must be opened")
+	}
+}
+
+// Passthrough formats are saved verbatim; nothing renders them. The tool
+// result is the model's only account of what happened and may be spoken, so
+// it must not claim a render that never ran (raised in review of #19).
+func TestArtifactViewerFailureSaysSavedNotRenderedForPassthrough(t *testing.T) {
+	for format, want := range map[string]string{
+		"fakedoc": "The artifact was saved, but",
+		"fake":    "The artifact was rendered and saved, but",
+	} {
+		a := &Artifact{
+			Dir:       filepath.Join(t.TempDir(), "artifacts"),
+			Renderers: []Renderer{&fakePassthrough{}, &fakeRenderer{}},
+			openFn:    func([]string, string) error { return fmt.Errorf("no display") },
+		}
+		out := runFormat(t, a, format, "headless", "x")
+		if !strings.Contains(out, want) {
+			t.Errorf("format %q: result = %q, want it to start %q", format, out, want)
+		}
+	}
+}
+
+// A viewer under a path with spaces has to reach exec as one argv element;
+// the old whitespace-split command string could not express it
+// (raised in review of #19).
+func TestArtifactOpenCommandArgvIsNotResplit(t *testing.T) {
+	var got []string
+	a := &Artifact{
+		Dir:       filepath.Join(t.TempDir(), "artifacts"),
+		Renderers: []Renderer{&fakePassthrough{}},
+		OpenCommands: map[string][]string{
+			"fakedoc": {"/opt/my viewer/bin/view", "--new window"},
+		},
+		openFn: func(argv []string, _ string) error { got = argv; return nil },
+	}
+	runFormat(t, a, "fakedoc", "spacey", "x")
+	want := []string{"/opt/my viewer/bin/view", "--new window"}
+	if !slices.Equal(got, want) {
+		t.Errorf("argv = %q, want %q", got, want)
 	}
 }

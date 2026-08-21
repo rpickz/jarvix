@@ -83,10 +83,31 @@ func (f *File) Load() ([]ai.Message, time.Time, error) {
 		return nil, time.Time{}, fmt.Errorf("history version %d is not supported", doc.Version)
 	}
 	messages := make([]ai.Message, 0, len(doc.Messages))
-	for _, m := range doc.Messages {
+	for i, m := range doc.Messages {
+		// A hand-edited or half-corrupted file can still be valid JSON while
+		// carrying a role no provider understands. Loading it unchecked turns
+		// the corruption into a malformed provider request mid-conversation;
+		// treating it as a load error gets the documented degradation instead
+		// — warn, and start from an empty history (raised in review of #16).
+		if !knownRole(ai.Role(m.Role)) {
+			return nil, time.Time{}, fmt.Errorf("history message %d has unknown role %q", i, m.Role)
+		}
 		messages = append(messages, ai.Message{Role: ai.Role(m.Role), Content: m.Content})
 	}
 	return messages, doc.LastTurn, nil
+}
+
+// knownRole reports whether a role read from disk is one the ai package
+// defines. Every role is accepted, not just the user/assistant pair the
+// engine currently persists: rejecting a role the type system knows about
+// would turn a future engine change into a silent history wipe.
+func knownRole(r ai.Role) bool {
+	switch r {
+	case ai.RoleUser, ai.RoleAssistant, ai.RoleSystem, ai.RoleTool:
+		return true
+	default:
+		return false
+	}
 }
 
 // Save implements Store.
@@ -117,6 +138,15 @@ func (f *File) Save(messages []ai.Message, lastTurn time.Time) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
+	// MkdirAll applies its mode only to directories it creates, and even then
+	// the umask can clear bits. A state directory that already exists — made
+	// by an older build, another tool, or a permissive umask — keeps whatever
+	// modes it had, so the 0700 privacy requirement (ADR 0011) was documented
+	// but not enforced. Assert it on every save; the content is user speech
+	// (raised in review of #16).
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("secure state dir: %w", err)
+	}
 	// Temp file in the same directory so the final rename is atomic on the
 	// same filesystem. CreateTemp already creates it 0600.
 	tmp, err := os.CreateTemp(dir, ".history-*.tmp")
@@ -138,7 +168,37 @@ func (f *File) Save(messages []ai.Message, lastTurn time.Time) error {
 	if err := os.Rename(tmp.Name(), f.Path); err != nil {
 		return fmt.Errorf("write history: %w", err)
 	}
+	// CreateTemp asks for 0600 but the umask can still clear bits, and the
+	// rename carries whatever the temp file ended up with onto the real path.
+	// Reassert it rather than hope (ADR 0011: 0600 in a 0700 directory).
+	if err := os.Chmod(f.Path, 0o600); err != nil {
+		return fmt.Errorf("secure history file: %w", err)
+	}
+	// fsync the containing directory. Rename is atomic — a reader sees the
+	// old file or the new one, never a torn one — but atomic is not durable:
+	// the new directory entry can still be sitting in the page cache when the
+	// machine loses power, which would resurrect the previous history or lose
+	// the file entirely. ADR 0011 claims fsync+rename crash safety, and this
+	// is the half that was missing (raised in review of #16).
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("write history: %w", err)
+	}
 	return nil
+}
+
+// syncDir fsyncs a directory so entries created or renamed inside it survive
+// a crash. Opening a directory read-only and calling Sync is the portable
+// POSIX spelling; on Linux it is exactly what a durable rename needs.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // Clear implements Store.

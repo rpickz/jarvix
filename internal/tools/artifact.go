@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -73,16 +74,19 @@ type Artifact struct {
 	// Dir is the directory artifacts land in, created 0700 on first use.
 	// The model never controls the directory — only a slugified filename.
 	Dir string
-	// OpenCommand launches the rendered file in a viewer. Empty means
-	// DefaultOpenCommand.
-	OpenCommand string
+	// OpenCommand is the viewer argv (program then arguments) the rendered
+	// file is appended to. Empty means DefaultOpenCommand. It is argv rather
+	// than a command line because the viewer is exec'd directly, never
+	// through a shell: a path or argument containing spaces has to arrive as
+	// its own element, which a split string cannot express.
+	OpenCommand []string
 	// OpenCommands overrides OpenCommand per format (keyed by
 	// Renderer.Format()), so documents can open in an editor while
-	// spreadsheets open in a spreadsheet app. An entry explicitly set to ""
-	// or "none" declares the format has no viewer: the artifact is saved
-	// and announced by base name, and nothing is launched. Formats without
-	// an entry fall back to OpenCommand.
-	OpenCommands map[string]string
+	// spreadsheets open in a spreadsheet app. An entry explicitly set to
+	// empty, or to the single word "none", declares the format has no
+	// viewer: the artifact is saved and announced by base name, and nothing
+	// is launched. Formats without an entry fall back to OpenCommand.
+	OpenCommands map[string][]string
 	// Timeout bounds one render. Zero means DefaultRenderTimeout.
 	Timeout time.Duration
 	// Renderers are the enabled per-format renderers.
@@ -96,7 +100,11 @@ type Artifact struct {
 	Log *slog.Logger
 
 	// openFn overrides viewer launch in tests.
-	openFn func(command, path string) error
+	openFn func(argv []string, path string) error
+	// writeFn overrides the artifact write in tests, so the failure path
+	// below (ENOSPC, short write) can be exercised without filling a disk.
+	// Nil uses os.WriteFile.
+	writeFn func(path string, data []byte, perm os.FileMode) error
 }
 
 // Artifact tool defaults.
@@ -220,7 +228,17 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(srcPath, []byte(args.Source), 0o600); err != nil {
+	write := a.writeFn
+	if write == nil {
+		write = os.WriteFile
+	}
+	if err := write(srcPath, []byte(args.Source), 0o600); err != nil {
+		// claimPaths already created srcPath (O_EXCL) to reserve the name, so
+		// a failed write leaves a truncated or empty file behind. For a
+		// passthrough format that file IS the artifact, and `jarvix artifacts`
+		// would list the wreckage as a finished document. Unclaim the name so
+		// nothing half-written survives and a retry starts clean.
+		_ = os.Remove(srcPath)
 		return "", fmt.Errorf("artifact.create: write source: %w", err)
 	}
 
@@ -264,19 +282,29 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 	// deliberate exception is the no-viewer case below, which names the file
 	// by base name only — with nothing opening on screen, the name is the
 	// user's only handle on their new file.
-	command, hasViewer := a.openCommandFor(renderer.Format())
+	// What actually happened to the file, in the words the model may repeat
+	// aloud. Passthrough formats are saved verbatim and never rendered, so
+	// claiming a render would have Jarvix describe a step that did not run
+	// (raised in review of #19).
+	produced := "saved"
+	if srcPath != outPath {
+		produced = "rendered and saved"
+	}
+
+	argv, hasViewer := a.openCommandFor(renderer.Format())
 	if !hasViewer {
 		return fmt.Sprintf("The artifact was saved as %q in the user's Jarvix artifacts folder, "+
 			"and no viewer is configured for %s artifacts, so it was not opened. Tell the user it "+
 			"is saved under that name, in a summary of at most two sentences. Do not recite the "+
 			"artifact source or any directory paths.", filepath.Base(outPath), renderer.Format()), nil
 	}
-	if err := a.open(command, outPath); err != nil {
+	if err := a.open(argv, outPath); err != nil {
 		logger.Warn("artifact viewer failed to open", "component", "tools",
 			"tool", a.Name(), "error", err.Error())
-		return "The artifact was rendered and saved, but the viewer could not be opened automatically. " +
-			"Tell the user it is in their Jarvix artifacts folder (the `jarvix artifacts` command lists it), " +
-			"in a summary of at most two sentences. Do not recite the artifact source, file names, or paths.", nil
+		return fmt.Sprintf("The artifact was %s, but the viewer could not be opened automatically. "+
+			"Tell the user it is in their Jarvix artifacts folder (the `jarvix artifacts` command lists it), "+
+			"in a summary of at most two sentences. Do not recite the artifact source, file names, or paths.",
+			produced), nil
 	}
 	return "The artifact is now open on the user's screen and saved in their Jarvix artifacts " +
 		"folder. Answer with a summary of at most two sentences describing what it shows. " +
@@ -310,6 +338,16 @@ func (a *Artifact) claimPaths(slug string, r Renderer) (srcPath, outPath string,
 		outPath = filepath.Join(a.Dir, name+r.OutputExt())
 		if _, statErr := os.Stat(outPath); statErr == nil {
 			continue // stale output from an earlier run holds the name
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			// Anything other than "it is not there" — a permission error, an
+			// IO error, a symlink loop — tells us nothing about whether the
+			// name is free. Treating it as free is the dangerous reading: the
+			// O_EXCL claim on the *source* can still succeed (different
+			// extension), and the render would then write straight through
+			// whatever holds outPath. Refuse instead of overwriting
+			// (raised in review of #17).
+			return "", "", fmt.Errorf("artifact.create: check existing artifact %q: %w",
+				filepath.Base(outPath), statErr)
 		}
 		f, openErr := os.OpenFile(srcPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(openErr, os.ErrExist) {
@@ -326,33 +364,45 @@ func (a *Artifact) claimPaths(slug string, r Renderer) (srcPath, outPath string,
 	return "", "", fmt.Errorf("artifact.create: could not find a free filename for %q", base)
 }
 
-// openCommandFor resolves the viewer command for a format: a per-format
-// override wins, the shared OpenCommand is the fallback, and an override
-// explicitly set to "" or "none" means the format has no viewer at all —
-// the caller announces the saved file instead of launching anything.
-func (a *Artifact) openCommandFor(format string) (command string, hasViewer bool) {
+// openCommandFor resolves the viewer argv for a format: a per-format override
+// wins, the shared OpenCommand is the fallback, and an override that is empty
+// or the single word "none" means the format has no viewer at all — the
+// caller announces the saved file instead of launching anything.
+func (a *Artifact) openCommandFor(format string) (argv []string, hasViewer bool) {
 	if override, ok := a.OpenCommands[format]; ok {
-		override = strings.TrimSpace(override)
-		if override == "" || override == "none" {
-			return "", false
+		if noViewer(override) {
+			return nil, false
 		}
 		return override, true
 	}
-	if a.OpenCommand != "" {
+	if len(a.OpenCommand) > 0 && !noViewer(a.OpenCommand) {
 		return a.OpenCommand, true
 	}
-	return DefaultOpenCommand, true
+	return []string{DefaultOpenCommand}, true
+}
+
+// noViewer reports whether an argv declares "this format has no viewer":
+// nothing at all, or the single word "none" (the spelling the docs use, kept
+// because it reads better in a config file than an empty array).
+func noViewer(argv []string) bool {
+	if len(argv) == 0 {
+		return true
+	}
+	return len(argv) == 1 && (strings.TrimSpace(argv[0]) == "" || strings.TrimSpace(argv[0]) == "none")
 }
 
 // open launches the viewer and does not wait for it: xdg-open hands off and
 // exits, but a direct viewer (eog, imv) would block until closed — and it
-// must outlive the session, so it runs outside the session context.
-func (a *Artifact) open(command, path string) error {
+// must outlive the session, so it runs outside the session context. argv is
+// used verbatim, never re-split, so a viewer living under a path with spaces
+// launches correctly.
+func (a *Artifact) open(argv []string, path string) error {
 	if a.openFn != nil {
-		return a.openFn(command, path)
+		return a.openFn(argv, path)
 	}
-	parts := strings.Fields(command)
-	cmd := exec.Command(parts[0], append(parts[1:], path)...) //nolint:gosec // command comes from validated config, path from claimPaths
+	args := make([]string, 0, len(argv))
+	args = append(args, argv[1:]...)
+	cmd := exec.Command(argv[0], append(args, path)...) //nolint:gosec // argv comes from validated config, path from claimPaths
 	if err := cmd.Start(); err != nil {
 		return err
 	}

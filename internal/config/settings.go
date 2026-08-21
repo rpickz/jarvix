@@ -198,9 +198,13 @@ func Settings() []Setting {
 		{Key: "artifacts.dir", Label: "Artifact directory", Type: TypeString, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Artifacts.Dir },
 			set: func(c *Config, v any) { c.Artifacts.Dir = v.(string) }},
-		{Key: "artifacts.open_command", Label: "Artifact viewer command", Type: TypeString, Reload: ReloadRestart,
-			Get: func(c Config) any { return c.Artifacts.OpenCommand },
-			set: func(c *Config, v any) { c.Artifacts.OpenCommand = v.(string) }},
+		// A list, not a string: the viewer is exec'd directly, so a path or
+		// argument containing a space has to stay its own argv element. The
+		// CLI's comma form ("flatpak,run,org.libreoffice.LibreOffice") is how
+		// that is spelled from a shell.
+		{Key: "artifacts.open_command", Label: "Artifact viewer command", Type: TypeStringList, Reload: ReloadRestart,
+			Get: func(c Config) any { return append([]string(nil), c.Artifacts.OpenCommand...) },
+			set: func(c *Config, v any) { c.Artifacts.OpenCommand = Command(v.([]string)) }},
 		{Key: "artifacts.render_timeout_sec", Label: "Artifact render timeout (seconds)", Type: TypeInt, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Artifacts.RenderTimeoutSec },
 			set: func(c *Config, v any) { c.Artifacts.RenderTimeoutSec = v.(int) }},
