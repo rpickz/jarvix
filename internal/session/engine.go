@@ -139,6 +139,13 @@ type Engine struct {
 	// it is still working (ADR 0016). Immutable after construction; tests
 	// shorten it.
 	progressAfter time.Duration
+	// speakerQueued, when non-nil, runs on the enqueueing goroutine the
+	// instant an utterance has been handed to the speaker's run loop. It is
+	// the seam for issue #80's deterministic interleaving test: a slow CI
+	// runner parked the enqueuer exactly there while the answer went on to
+	// announce itself, and the test parks it on purpose to pin that window.
+	// Nil in production; set only before a session starts.
+	speakerQueued func()
 	// speech renders assistant text as its spoken form, carrying the
 	// configured pronunciation lexicon. Rebuilt (never mutated) by
 	// Reconfigure, so a session already speaking keeps the one it started
