@@ -45,6 +45,11 @@ func cmdStatus(paths config.Paths, last bool) error {
 	printWarmWorkers(status["warm"])
 	if last {
 		printTimings(status["last_timings"])
+		// "What did that cost?" and "what did it see?" are the same question
+		// asked of the same interaction, so one flag answers both (ADR 0019).
+		if err := printLastContext(client); err != nil {
+			return err
+		}
 	}
 	if pol, ok := status["policy"].(map[string]any); ok {
 		fmt.Printf("policy:   default=%v confirm_timeout=%vs remember_for_conversation=%v\n",
@@ -67,6 +72,7 @@ func cmdStatus(paths config.Paths, last bool) error {
 // a person recognises. Order matters: the pipeline should read as a pipeline.
 var timingLabels = []struct{ key, label string }{
 	{session.StageCaptureToTranscript, "release → transcript"},
+	{session.StageContext, "desktop context gathered"},
 	{session.StageTranscriptToDelta, "transcript → first token (model)"},
 	{session.StageDeltaToFirstPCM, "first token → first audio sample"},
 	{session.StageFirstPCMToAudioOut, "first sample → audio out"},

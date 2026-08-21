@@ -28,6 +28,9 @@ type Config struct {
 	Intents      Intents      `toml:"intents"`
 	Tools        Tools        `toml:"tools"`
 	Artifacts    Artifacts    `toml:"artifacts"`
+	// Context is what Jarvix may look at on the desktop before answering
+	// (see context.go). Every source is opt-in; the clipboard defaults off.
+	Context Context `toml:"context"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
 	// delegation entirely — the tool is not registered.
@@ -333,6 +336,14 @@ func Default() Config {
 			OpenCommand:      Command{"xdg-open"},
 			RenderTimeoutSec: 10,
 		},
+		// Window and selection are on: a title bar is already on screen, and a
+		// selection is what the user is pointing at as they speak. The
+		// clipboard is off — it holds whatever was last copied for any
+		// purpose, and turning that on is the user's decision to make.
+		Context: Context{
+			Window: true, Selection: true, Clipboard: false,
+			MaxChars: 2000, TimeoutMs: MaxContextTimeoutMs,
+		},
 		Audio: Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		// Warm by default: presence is the product, and the memory is
 		// reclaimed after ten idle minutes. The cap is a leak detector, not a
@@ -543,6 +554,7 @@ func (c Config) Validate() error {
 	}
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
+	problems = append(problems, c.contextProblems()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:

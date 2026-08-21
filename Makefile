@@ -99,13 +99,14 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzWireDecode$$' -fuzztime=$(FUZZTIME) ./internal/ipc
 	$(GO) test -run='^$$' -fuzz='^FuzzReadStream$$' -fuzztime=$(FUZZTIME) ./internal/ai/openaicompat
 	$(GO) test -run='^$$' -fuzz='^FuzzRouterMatch$$' -fuzztime=$(FUZZTIME) ./internal/intent
+	$(GO) test -run='^$$' -fuzz='^FuzzRedact$$' -fuzztime=$(FUZZTIME) ./internal/desktop
 
 # Latency/throughput benchmarks over our own pipeline (fakes, not engines).
 # BENCHCOUNT=5 gives benchstat-able samples; CI passes it, local runs default
 # to one — same command either way.
 BENCHCOUNT ?= 1
 bench:
-	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCHCOUNT) ./internal/session ./internal/intent
+	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCHCOUNT) ./internal/session ./internal/intent ./internal/desktop
 
 # The same latency question against the REAL local engines (ADR 0018). Not run
 # by CI: it measures the machine, not the code, so it lives behind a build tag

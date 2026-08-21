@@ -50,7 +50,7 @@ to each field in the settings screen:
 | Class | Options | When it takes effect |
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
-| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
 
 A reload that fails validation keeps the running configuration and reports
@@ -172,6 +172,16 @@ terminal = "alacritty"           # what "open terminal" launches; a single
 match = "lock the screen"        # literal phrase, matched whole and exactly
 run = "hyprlock"                 # shell command, subject to [tools.policy]
 say = "Locking."                 # spoken acknowledgement (default: "Done.")
+
+[context]                        # what Jarvix may look at before it answers
+window = true                    # the focused window's app and title
+selection = true                 # text you have highlighted (primary selection)
+clipboard = false                # what you last copied — opt-in, see below
+max_chars = 2000                 # per source; longer content is truncated
+                                 # with a marker
+timeout_ms = 300                 # gathering budget, per source and in total
+                                 # (sources run in parallel). May be lowered,
+                                 # never raised above 300
 
 [conversation]
 speak_responses = true           # false = text-only sessions
@@ -335,7 +345,7 @@ Some things are not questions. "Volume thirty" has exactly one right outcome,
 and waiting seconds for a language model to reach it is absurd — so Jarvix
 matches a table of fixed phrases *before* the AI and, on a hit, runs a local
 command in microseconds with no model call at all
-([ADR 0018](adr/0017-deterministic-intent-router.md)).
+([ADR 0017](adr/0017-deterministic-intent-router.md)).
 
 The shipped table:
 
@@ -390,6 +400,90 @@ running. To make your own intents instant, either allow that identity —
 
 A malformed entry fails validation at startup, naming the entry:
 `intents.custom[1]: match "…" has no run command`.
+
+## Desktop context (`[context]`)
+
+Ask "what does this error mean?" with a stack trace selected and Jarvix
+answers *that* error. Before each question reaches the model, the daemon
+gathers what you are looking at — the focused window, your selection, your
+clipboard — and offers it as a clearly-delimited system message
+([ADR 0019](adr/0019-desktop-context.md)):
+
+```text
+Desktop context: what the user is looking at on this computer right now…
+
+--- active window ---
+Alacritty — nvim internal/session/engine.go
+--- end active window ---
+
+--- selected text ---
+panic: runtime error: index out of range [5] with length 3
+--- end selected text ---
+```
+
+| Source | Default | Read with |
+|---|---|---|
+| `window` | on | `hyprctl activewindow -j` |
+| `selection` | on | `wl-paste --primary --no-newline --type text` |
+| `clipboard` | **off** | `wl-paste --no-newline --type text` |
+
+The clipboard is the one source that is off by default: a window title is
+already on screen and a selection is what you are pointing at, but the
+clipboard holds whatever you last copied, for any purpose. Turn it on when you
+want "reply to this" to work:
+
+```bash
+jarvix config set context.clipboard=true     # applies between sessions
+jarvix config set context.selection=false    # or take an eye away
+```
+
+What the design guarantees:
+
+- **A source that is off is never read.** No `wl-paste`, no `hyprctl`, no
+  subprocess at all — the gatherer does not exist. With every source off,
+  context costs a session literally nothing.
+- **Never more than 300ms.** Sources are gathered in parallel, each under
+  `timeout_ms`, and anything slow, hung, or missing degrades to *no context*
+  rather than to a slower answer. `timeout_ms` may be lowered but not raised:
+  the budget is the feature's premise. (Measured on a live Hyprland session:
+  about 2ms.)
+- **Secrets are redacted before the model sees them.** Private-key headers,
+  vendor token prefixes (`sk-…`, `ghp_…`, `AKIA…`), labelled assignments
+  (`api_key = "…"`), and high-entropy random tokens replace the *whole*
+  source with `[looks like a secret — not shared]`. It is a heuristic, and
+  the first line of defence is still that the clipboard is opt-in.
+- **You can always see what it saw.** `jarvix status --last` prints the exact
+  text that reached the model, already truncated and redacted, beside the
+  latency budget of the same interaction — what it cost and what it saw are
+  the same question:
+
+  ```text
+  last:     session s7
+            release → transcript                 412 ms
+            desktop context gathered               2 ms
+            transcript → first token (model)     286 ms
+            release → first audio (total)        901 ms
+              of which Jarvix (excl. model)      615 ms
+  context:  session s7, captured just now, gathered in 2ms
+            window     (26 chars)
+              Alacritty — nvim internal/session/engine.go
+            selection  (4212 chars, truncated)
+              panic: runtime error: index out of range [5] with length 3
+              …
+  ```
+
+  Gathering is reported as its own stage (`context_ms`) and counted in
+  Jarvix's own number rather than inside the model's thinking time — a cost
+  hidden in the figure it inflates would be worse than not measuring it.
+
+- **Captured content is never logged and never persisted.** The debug log
+  records which sources contributed and how many characters each held, never
+  what they said. A capture lives for one turn — it is not written into the
+  conversation history, and it does not survive a daemon restart.
+
+`jarvix doctor` lists the enabled sources and whether `hyprctl` and `wl-paste`
+are installed (`sudo pacman -S wl-clipboard`). A missing binary is a warning,
+never a failure: the assistant simply answers without eyes.
 
 ## Tools (assistant actions)
 

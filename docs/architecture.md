@@ -119,6 +119,24 @@ follow-up that *does* reach the model has the context. User-defined intents
 (`[[intents.custom]]`) run real shell commands and therefore pass the same
 permission gate the model's tool calls do.
 
+### Desktop context
+
+A transcript the router does not claim goes to the model — and only then does
+Jarvix look at the screen ([ADR 0019](adr/0019-desktop-context.md)). Inside
+`think()`, before the request is built, the enabled sources (active window,
+primary selection, clipboard) are gathered in parallel by short-lived
+subprocesses (`hyprctl`, `wl-paste`) inside a 300ms budget, redacted, capped,
+and inserted as one delimited `system` message immediately before the user's
+question.
+
+The placement is the design: gathering at session start would charge every
+deterministic intent for a capture it never uses, so context lives on the
+model path and nowhere else. Sources are opt-in per source (`[context]`, with
+the clipboard off by default) and a disabled source has no gatherer at all —
+nothing is executed. Whatever was captured is retained for `context.last` /
+`jarvix status --last`, published as a `context.captured` event carrying sizes
+only, never logged, and never written to disk.
+
 ### Tool confirmations
 
 Every tool call passes a permission gate before it executes

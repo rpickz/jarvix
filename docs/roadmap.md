@@ -12,13 +12,23 @@ conversation memory across turns. Local STT (whisper.cpp), local TTS (Piper
 or the more natural Kokoro), provider-independent AI, tool calling
 (`shell.run`), Omarchy overlay, `jarvix` CLI, `jarvix doctor`.
 
-## Phase 2 — Desktop context
+## Phase 2 — Desktop context (window/selection/clipboard done)
 
-The conversation gains eyes: active window, selected text, clipboard,
-optionally a screen region — gathered by the daemon at session start and
-offered to the model. "What does this error mean?" while a terminal is
-focused should just work. Requires the permissions architecture to say what
-Jarvix may look at.
+The conversation gains eyes: active window, selected text, and clipboard are
+gathered by the daemon and offered to the model, so "what does this error
+mean?" with a stack trace selected answers *that* error
+([ADR 0019](adr/0019-desktop-context.md)). Every source is opt-in
+(`[context]`, clipboard off by default), a disabled source is never read at
+all, gathering is parallel inside a 300ms hard budget (measured: ~2ms), and
+anything that looks like a secret is redacted before it leaves the machine.
+What was captured is always inspectable afterwards with
+`jarvix status --last`.
+
+Gathering happens on the model path only — after the Phase 3 intent router —
+so a deterministic intent never pays for eyes it does not use.
+
+Remaining: the optional **screen region** (capture + OCR), which needs its own
+consent UX, and the `desktop.*` action tools in Phase 4.
 
 ## Phase 3 — Deterministic local intents (done)
 

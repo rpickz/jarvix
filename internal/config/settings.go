@@ -167,6 +167,28 @@ func Settings() []Setting {
 			Get: func(c Config) any { return c.Intents.Terminal },
 			set: func(c *Config, v any) { c.Intents.Terminal = v.(string) }},
 
+		// Desktop context belongs in the registry because these are the
+		// switches a user reaches for *in the moment* — "don't look at my
+		// clipboard right now" must not require editing a file and restarting
+		// a daemon. They are idle-class: the collector is rebuilt with the
+		// engine's options, so the change lands between sessions, never
+		// underneath one that is already gathering.
+		{Key: "context.window", Label: "See the active window", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Context.Window },
+			set: func(c *Config, v any) { c.Context.Window = v.(bool) }},
+		{Key: "context.selection", Label: "See selected text", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Context.Selection },
+			set: func(c *Config, v any) { c.Context.Selection = v.(bool) }},
+		{Key: "context.clipboard", Label: "See the clipboard", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Context.Clipboard },
+			set: func(c *Config, v any) { c.Context.Clipboard = v.(bool) }},
+		{Key: "context.max_chars", Label: "Context characters per source", Type: TypeInt, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Context.MaxChars },
+			set: func(c *Config, v any) { c.Context.MaxChars = v.(int) }},
+		{Key: "context.timeout_ms", Label: "Context gathering budget (milliseconds)", Type: TypeInt, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Context.TimeoutMs },
+			set: func(c *Config, v any) { c.Context.TimeoutMs = v.(int) }},
+
 		{Key: "audio.input_device", Label: "Microphone device", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Audio.InputDevice },
 			set: func(c *Config, v any) { c.Audio.InputDevice = v.(string) }},

@@ -53,6 +53,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkTTS,
 		checkArtifactRenderer,
 		checkIntentBinaries,
+		checkContextSources,
 		checkDaemon,
 		checkWarmEngines,
 		checkProviderConfigured,

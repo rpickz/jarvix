@@ -16,6 +16,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/stt"
@@ -55,6 +56,10 @@ type Options struct {
 	// IntentRunner executes matched intents. Nil alongside a router installs
 	// the real one; tests substitute a fake so no test touches wpctl.
 	IntentRunner intent.Runner
+	// Context gathers opt-in desktop context — active window, selection,
+	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
+	// entirely: no gathering, no message, no cost.
+	Context ContextCollector
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -116,6 +121,14 @@ type Engine struct {
 	// follow-up questions have context. Guarded by mu.
 	history  []ai.Message
 	lastTurn time.Time
+
+	// The most recent desktop context capture, kept so the user can always
+	// audit what Jarvix saw (ADR 0019). It outlives its session deliberately —
+	// `jarvix status --last` is asked *after* the answer — but never outlives
+	// the daemon: context is not persisted. Guarded by mu.
+	lastContext        desktop.Snapshot
+	lastContextSession string
+	lastContextTaken   bool
 }
 
 // sess is one interaction from start to finish.
@@ -599,7 +612,11 @@ const maxToolRounds = 6
 // continues, until the model produces a final answer or the round budget is
 // exhausted. Prior exchanges are carried in as conversation context.
 func (e *Engine) think(s *sess) {
-	messages := e.conversationMessages(s.transcript)
+	// Desktop context is gathered here and nowhere earlier: this function is
+	// the one path that opens a provider request, so a transcript the intent
+	// router already claimed never waits on hyprctl or wl-paste (ADR 0019).
+	snapshot := e.gatherContext(s)
+	messages := e.conversationMessages(s.transcript, snapshot)
 
 	var toolDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
@@ -746,8 +763,16 @@ func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
 
 // conversationMessages builds the provider message list for a new turn:
 // system prompt, carried-over history (reset if the follow-up window lapsed),
-// then the new user message.
-func (e *Engine) conversationMessages(userText string) []ai.Message {
+// the desktop context capture, then the new user message.
+//
+// Context sits last-but-one on purpose. It is a system message, so the model
+// reads it as ground truth about the machine rather than as something the
+// user typed; and it sits *after* the history so that "right now" is
+// unambiguous — a capture describes the moment of this question, and placing
+// it before older turns would invite the model to read it as their context
+// too. It is never committed to history (commitTurn stores the question and
+// the answer), so a capture lives exactly one turn.
+func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot) []ai.Message {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.opts.FollowUpWindow > 0 && !e.lastTurn.IsZero() &&
@@ -760,11 +785,14 @@ func (e *Engine) conversationMessages(userText string) []ai.Message {
 		// must ask again.
 		e.approvals = make(map[string]bool)
 	}
-	msgs := make([]ai.Message, 0, len(e.history)+2)
+	msgs := make([]ai.Message, 0, len(e.history)+3)
 	if e.opts.SystemPrompt != "" {
 		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: e.opts.SystemPrompt})
 	}
 	msgs = append(msgs, e.history...)
+	if captured := snapshot.Message(); captured != "" {
+		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: captured})
+	}
 	msgs = append(msgs, ai.Message{Role: ai.RoleUser, Content: userText})
 	return msgs
 }

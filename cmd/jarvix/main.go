@@ -15,6 +15,7 @@ const usage = `jarvix — voice-native computer interaction for Omarchy
 Usage:
   jarvix status                 Show daemon state and warm-engine workers
   jarvix status --last          ...plus the last interaction's stage latencies
+                                and the desktop context Jarvix was given
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
@@ -59,7 +60,16 @@ func run(args []string) int {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "status":
-		err = cmdStatus(paths, len(rest) > 0 && rest[0] == "--last")
+		// An unrecognised flag is refused rather than silently treated as
+		// "no flag": `jarvix status --lastt` must not look like it worked.
+		switch {
+		case len(rest) == 0:
+			err = cmdStatus(paths, false)
+		case rest[0] == "--last":
+			err = cmdStatus(paths, true)
+		default:
+			return fail(fmt.Errorf("usage: jarvix status [--last]"))
+		}
 	case "ask":
 		if len(rest) < 1 {
 			return fail(fmt.Errorf("usage: jarvix ask \"question\""))

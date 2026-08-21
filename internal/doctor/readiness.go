@@ -44,6 +44,7 @@ func SettingsChecks(cfg config.Config, paths config.Paths) []ReadinessResult {
 		{checkWhisperModel, "stt.whisper.model"},
 		{checkTTS, "tts.provider"},
 		{checkArtifactRenderer, "tools.artifacts"},
+		{checkContextSources, "context.window"},
 		{checkPushToTalk, "activation.ptt_chord"},
 	}
 	results := make([]ReadinessResult, 0, len(checks))
