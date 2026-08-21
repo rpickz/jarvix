@@ -162,7 +162,7 @@ func (p *PipeWirePlayer) Play(ctx context.Context, sampleRate, channels int, chu
 	}
 
 	writeErr := func() error {
-		defer stdin.Close()
+		defer func() { _ = stdin.Close() }()
 		for {
 			select {
 			case c, ok := <-chunks:
