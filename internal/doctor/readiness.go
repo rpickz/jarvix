@@ -58,6 +58,10 @@ func SettingsChecks(cfg config.Config, paths config.Paths) []ReadinessResult {
 		// with it on it is a local probe that presses nothing (ADR 0023).
 		{checkTyping, "tools.typing.enable"},
 		{checkPushToTalk, "activation.ptt_chord"},
+		// Background listening dials the daemon, which is the caller here —
+		// so this is the one settings check that is deliberately the offline
+		// half only: is the detector installed at all (see checkWakeWord).
+		{checkWakeInstalled, "activation.mode"},
 	}
 	results := make([]ReadinessResult, 0, len(checks))
 	for _, c := range checks {

@@ -66,6 +66,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkPlugin,
 		checkKeybindings,
 		checkPushToTalk,
+		checkWakeWord,
 	}
 	results := make([]Result, 0, len(checks))
 	for _, check := range checks {

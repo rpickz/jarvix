@@ -24,6 +24,8 @@ Usage:
   jarvix new                    Start a fresh conversation (forget context)
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
+  jarvix mute                   Close the microphone: kill background capture
+  jarvix unmute                 Listen for the wake word again
   jarvix window                 Open/close the conversation window
   jarvix artifacts [--json]     List recent artifacts (diagrams, documents, sheets, sketches)
   jarvix voices [--json]        List installed voices by language, accent, and gender
@@ -96,6 +98,10 @@ func run(args []string) int {
 			return fail(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
 		}
 		err = cmdPTT(paths, rest[0])
+	case "mute":
+		err = cmdMute(paths, true)
+	case "unmute":
+		err = cmdMute(paths, false)
 	case "window":
 		err = cmdWindow()
 	case "artifacts":

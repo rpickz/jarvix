@@ -191,6 +191,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, logger *slo
 		Intents:           intentRouter(cfg),
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
+		WakeWord:          cfg.Activation.WakeWord,
 		Lexicon:           cfg.TTS.Lexicon,
 	}
 }
