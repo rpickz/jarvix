@@ -14,14 +14,15 @@ import (
 // data like the real tools, and honour SIGINT the way pw-record does.
 
 // pwRecordStub writes its argv, produces a WAV-sized file at the last
-// argument, then waits for SIGINT/SIGTERM like the real recorder.
+// argument, then waits for SIGINT/SIGTERM like the real recorder. exec makes
+// the sleeper *be* the recorded process: the recorder's SIGINT/kill reaches
+// it directly, so no child outlives the test (a backgrounded sleep would be
+// orphaned — the shell dies, the sleeper lingers for a minute).
 const pwRecordStub = `#!/bin/sh
 printf '%s\n' "$@" > "$JARVIX_STUB_DIR/pw-record.args"
 for last in "$@"; do :; done
 head -c "${JARVIX_STUB_WAV_BYTES:-4096}" /dev/zero > "$last"
-trap 'exit 0' INT TERM
-sleep 60 &
-wait $!
+exec sleep 60
 `
 
 // pwPlayStub writes its argv, consumes stdin to a file, then exits with the

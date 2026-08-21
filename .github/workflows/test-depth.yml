@@ -45,9 +45,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run benchmarks
-        # -count=5 gives benchstat-able samples; CI hardware is noisy, so
-        # treat these as trend data, not a gate.
-        run: go test -run='^$' -bench=. -benchmem -count=5 ./internal/session | tee bench.txt
+        # Same make target as local runs — BENCHCOUNT=5 gives benchstat-able
+        # samples; CI hardware is noisy, so treat these as trend data, not a
+        # gate.
+        run: make bench BENCHCOUNT=5 | tee bench.txt
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ github.sha }}

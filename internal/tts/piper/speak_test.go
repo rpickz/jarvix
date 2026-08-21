@@ -122,12 +122,15 @@ func TestSpeakSurfacesProcessFailure(t *testing.T) {
 
 func TestSpeakCancellationEndsStream(t *testing.T) {
 	dir := t.TempDir()
-	// This stub emits one chunk then blocks, so cancellation lands mid-stream.
+	// This stub emits one chunk then blocks, so cancellation lands
+	// mid-stream. exec replaces the shell with the sleeper so the kill on
+	// cancellation reaches the long-lived process itself and nothing
+	// outlives the test.
 	bin := filepath.Join(dir, "piper-stub")
 	script := `#!/bin/sh
 cat > /dev/null
 printf 'FIRST-CHUNK'
-sleep 60
+exec sleep 60
 `
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
