@@ -189,7 +189,7 @@ func (sp *streamingSpeaker) run() {
 	// synth renders one sentence and forwards its PCM into the shared stream,
 	// starting playback (and the Speaking state) lazily on the first audio.
 	synth := func(sentence string) error {
-		spoken := speechText(sentence)
+		spoken := sp.e.spokenForm(sentence)
 		if spoken == "" {
 			return nil
 		}

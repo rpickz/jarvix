@@ -97,6 +97,17 @@ func FuzzSpeechText(f *testing.F) {
 	f.Add("2 * 3 = 6")
 	f.Add("*")
 	f.Add("`")
+	// Numeric seeds for the number expansion (issue #30): every shape it
+	// claims, plus the shapes it must decline. Expansion runs on arbitrary
+	// text, so "unparseable numbers pass through, never panic" is a fuzzing
+	// question, not a table-test one.
+	f.Add("9.2 million files, 82.4% full, £3.50 each")
+	f.Add("v1.5.2 took 4.7s and 1.5GB, 3-5 times")
+	f.Add("1st 2nd 3rd 21st 100th")
+	f.Add("127.0.0.1:8080 /var/log/syslog.1 sail-8.5/app 2026-08-21")
+	f.Add("999999999999999999999999.99999999999999")
+	f.Add("$-1.--2.3..4")
+	f.Add("Golang, Kubernetes, nginx, PostgreSQL, sudo")
 	f.Fuzz(func(t *testing.T, text string) {
 		got := speechText(text)
 		if strings.ContainsAny(got, "`*") {
@@ -104,6 +115,12 @@ func FuzzSpeechText(f *testing.F) {
 		}
 		if got != strings.TrimSpace(got) {
 			t.Fatalf("speech text not trimmed: %q", got)
+		}
+		// Expansion must be a pure function of the text: the same input twice
+		// is the same spoken form, whatever order the compiled tables were
+		// built in.
+		if again := speechText(text); again != got {
+			t.Fatalf("speech text is not deterministic: %q -> %q then %q", text, got, again)
 		}
 	})
 }

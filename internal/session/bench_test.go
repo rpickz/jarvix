@@ -198,6 +198,29 @@ func BenchmarkSentencer(b *testing.B) {
 	}
 }
 
+// BenchmarkSpeechText measures the cost of turning one sentence into its
+// spoken form — markdown stripped, lexicon applied, numbers expanded. It runs
+// per sentence between the model and synthesis, so it is on the same hot path
+// as the sentencer. Two shapes, because the work is data-dependent: prose
+// with no digits takes the cheap path out of the number expander.
+func BenchmarkSpeechText(b *testing.B) {
+	cases := map[string]string{
+		"prose": "The **web** service is running and the database is healthy, " +
+			"with `nginx` in front of it.",
+		"numbers": "Disk is 82.4% full, 1.5GB free of 512GB; the backup took " +
+			"4.7s and moved 9.2 million files on v1.5.2.",
+	}
+	for name, text := range cases {
+		b.Run(name, func(b *testing.B) {
+			b.SetBytes(int64(len(text)))
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = speechText(text)
+			}
+		})
+	}
+}
+
 // BenchmarkBusFanout measures event fan-out cost to N subscribers — the cost
 // the engine pays on every published event with N IPC clients connected.
 func BenchmarkBusFanout(b *testing.B) {

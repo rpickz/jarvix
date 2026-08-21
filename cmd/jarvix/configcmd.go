@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/rpickz/jarvix/internal/config"
@@ -198,6 +199,19 @@ func displayValue(v any) string {
 		parts := make([]string, 0, len(t))
 		for _, e := range t {
 			parts = append(parts, fmt.Sprintf("%v", e))
+		}
+		return strings.Join(parts, ",")
+	case map[string]any:
+		// Rendered in the same key=value,key=value form `config set` accepts,
+		// sorted so the output is stable between runs.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%v", k, t[k]))
 		}
 		return strings.Join(parts, ",")
 	case float64:

@@ -233,6 +233,13 @@ type TTS struct {
 	Provider string `toml:"provider"` // "piper" or "kokoro"
 	Piper    Piper  `toml:"piper"`
 	Kokoro   Kokoro `toml:"kokoro"`
+	// Lexicon respells words the voice mispronounces: term → spoken form,
+	// written as a [tts.lexicon] table. These are the user's entries only;
+	// Jarvix merges them over its own shipped defaults (Golang, Kubernetes,
+	// nginx, …), so an entry here either adds a word or overrides a default.
+	// Terms match case-insensitively on word boundaries, and the change is
+	// spoken-only — the overlay always shows the original text.
+	Lexicon map[string]string `toml:"lexicon"`
 }
 
 // Piper configures the Piper adapter.

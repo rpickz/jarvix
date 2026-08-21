@@ -50,7 +50,7 @@ to each field in the settings screen:
 | Class | Options | When it takes effect |
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
-| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
 
 A reload that fails validation keeps the running configuration and reports
@@ -116,6 +116,12 @@ binary = "piper-tts"
 [tts.kokoro]                     # requires scripts/setup-kokoro.sh first
 voice = "af_heart"               # Kokoro voice id
 speed = 1.0                      # speech rate multiplier
+
+[tts.lexicon]                    # how words are pronounced: term = spoken form
+# Kubernetes = "koo ber net eez" # merged over the shipped defaults, so an
+# k9s = "kay nine ess"           # entry adds a word or overrides a default.
+                                 # Matched case-insensitively on word
+                                 # boundaries; spoken output only.
 
 [tools]                          # the assistant can act on your computer
 shell = false                    # enable shell.run — see the Tools section below
@@ -671,6 +677,60 @@ scripts/setup-kokoro.sh          # Python venv + kokoro-onnx + models (~340 MB)
 Assistant answers are normalised before they are spoken — markdown, code
 fences, and list bullets are stripped so nothing reads "asterisk" or
 "backtick" aloud — while the overlay still shows the formatted text.
+
+### Numbers
+
+The engine's own handling of figures is not good enough for an assistant that
+reports them: Kokoro reads "9.2 million" as "nine two million", dropping the
+decimal point and with it the meaning. Numbers are therefore expanded to their
+spoken form before synthesis:
+
+| Written | Spoken |
+|---|---|
+| `9.2 million`, `3.14` | nine point two million, three point one four |
+| `82.4%` | eighty two point four percent |
+| `£3.50`, `$1`, `$9.2m` | three pounds fifty, one dollar, nine point two million dollars |
+| `v1.5.2`, `1.5.2` | version one point five point two, one point five point two |
+| `4.7s`, `250ms`, `2 mins` | four point seven seconds, two hundred and fifty milliseconds, two minutes |
+| `1.5GB`, `512MB` | one point five gigabytes, five hundred and twelve megabytes |
+| `3-5` | three to five |
+| `21st` | twenty first |
+| `-3.5` | minus three point five |
+
+Numbers that belong to something else are left exactly as they are: bare
+integers (`port 8080`, `1995` — every engine reads those correctly), and
+anything wedged against letters, a slash, a colon or an underscore
+(`sail-8.5/app`, `127.0.0.1:8080`, `2026-08-21`, `COVID-19`). A figure the
+expander cannot parse is passed through unchanged rather than failing the
+answer.
+
+### Pronunciation lexicon (`[tts.lexicon]`)
+
+Technical vocabulary is the vocabulary Jarvix says most, and it is exactly
+what a voice model guesses at: Kokoro reads "Golang" with the vowel of *posh*
+rather than *going*. The lexicon respells a term before synthesis:
+
+```toml
+[tts.lexicon]
+Kubernetes = "koo ber net eez"   # override a shipped default
+k9s = "kay nine ess"             # or add your own word
+```
+
+Jarvix ships defaults for `Golang`, `Kubernetes`, `nginx`, `PostgreSQL`,
+`Hyprland`, `Wayland`, `PipeWire` and `sudo`; your entries are merged over
+them, so writing a term here either adds a word or replaces a default —
+including replacing one with the original spelling to turn it off.
+
+Terms match case-insensitively and only on whole words, so an entry never
+corrupts a longer word that contains it ("sudo" leaves "sudoku" alone). Only
+the *spoken* form changes: the overlay and the conversation window always show
+what the assistant actually wrote. The lexicon is an idle-class setting, so a
+fix applies on the next answer after `jarvix config reload` — no restart.
+
+```bash
+jarvix config get tts.lexicon
+jarvix config set 'tts.lexicon=Kubernetes=koo ber net eez,k9s=kay nine ess'
+```
 
 ## XDG paths
 

@@ -60,6 +60,10 @@ type Options struct {
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.
 	Context ContextCollector
+	// Lexicon respells terms the voice mispronounces, term → spoken form
+	// ([tts.lexicon]). Merged over the shipped defaults; nil is the defaults
+	// alone. Spoken output only — the overlay shows the original text.
+	Lexicon map[string]string
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -95,6 +99,11 @@ type Engine struct {
 	// it is still working (ADR 0016). Immutable after construction; tests
 	// shorten it.
 	progressAfter time.Duration
+	// speech renders assistant text as its spoken form, carrying the
+	// configured pronunciation lexicon. Rebuilt (never mutated) by
+	// Reconfigure, so a session already speaking keeps the one it started
+	// with; read without the lock like the other swappable collaborators.
+	speech *speechNormalizer
 
 	// active tracks the session goroutines (transcribe, think) that read the
 	// swappable collaborators and options without holding mu. Reconfigure
@@ -185,6 +194,7 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 			return t.C, func() { t.Stop() }
 		},
 		progressAfter: DefaultToolProgressAfter,
+		speech:        newSpeechNormalizer(opts.Lexicon),
 		approvals:     make(map[string]bool),
 		state:         StateIdle,
 	}
@@ -926,6 +936,9 @@ func (e *Engine) Reconfigure(provider ai.Provider, transcriber stt.Transcriber,
 	e.recorder = recorder
 	e.player = player
 	e.opts = opts
+	// A lexicon edit is meant to be heard on the next answer, not after a
+	// restart, so the normalizer is rebuilt with the rest of the collaborators.
+	e.speech = newSpeechNormalizer(opts.Lexicon)
 
 	// Conversation memory follows the new limits immediately, mirroring what
 	// loadHistory enforces at construction.

@@ -317,7 +317,7 @@ func (e *Engine) speakPrompt(s *sess, text string) {
 	if !e.opts.SpeakResponses || e.tts == nil || e.player == nil {
 		return
 	}
-	spoken := speechText(text)
+	spoken := e.spokenForm(text)
 	if spoken == "" {
 		return
 	}
