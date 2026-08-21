@@ -32,9 +32,10 @@ import (
 //     not because tests need one — though they need one too: no test in this
 //     tree may require a running Hyprland.
 
-// Window is one window as the compositor sees it. Everything the matcher and
-// the spoken summaries need, and nothing else: geometry, monitors, and the
-// dozens of other fields hyprctl reports are deliberately not modelled.
+// Window is one window as the compositor sees it. Everything the matcher,
+// the spoken summaries, and layout capture (#62) need, and nothing else:
+// monitors, groups, and the dozens of other fields hyprctl reports are
+// deliberately not modelled.
 type Window struct {
 	// Address is the compositor's stable handle for this window and the only
 	// thing ever dispatched against. Opaque: it is never spoken, and never
@@ -63,6 +64,13 @@ type Window struct {
 	StableID string
 	// PID is the owning process, logged for the audit trail.
 	PID int
+	// X and Y are the window's top-left corner in global pixels, and Width
+	// and Height its size. They exist for layout capture (#62), which must
+	// record a floating window's geometry to reproduce it; tiled geometry
+	// belongs to the layout and is carried only for completeness. All four
+	// are zero on a compositor that does not report geometry.
+	X, Y          int
+	Width, Height int
 }
 
 // Describe renders a window for humans: "Firefox — GitHub". The em dash is
@@ -687,6 +695,11 @@ type hyprClient struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	} `json:"workspace"`
+	// At and Size are [x, y] and [width, height] in pixels, decoded for
+	// layout capture (#62). Slices rather than [2]int so an inventory from a
+	// compositor that omits them still parses.
+	At   []int `json:"at"`
+	Size []int `json:"size"`
 }
 
 // flexString decodes a field Hyprland has emitted as both a JSON string and a
@@ -730,7 +743,7 @@ func parseClients(out string) ([]Window, error) {
 		if !c.Mapped || strings.TrimSpace(c.Address) == "" {
 			continue
 		}
-		found = append(found, ranked{rank: c.FocusHistoryID, win: Window{
+		w := Window{
 			Address:       c.Address,
 			Class:         strings.TrimSpace(c.Class),
 			Title:         strings.TrimSpace(c.Title),
@@ -741,7 +754,14 @@ func parseClients(out string) ([]Window, error) {
 			Focused:       c.FocusHistoryID == 0,
 			StableID:      string(c.StableID),
 			PID:           c.PID,
-		}})
+		}
+		if len(c.At) == 2 {
+			w.X, w.Y = c.At[0], c.At[1]
+		}
+		if len(c.Size) == 2 {
+			w.Width, w.Height = c.Size[0], c.Size[1]
+		}
+		found = append(found, ranked{rank: c.FocusHistoryID, win: w})
 	}
 	// Most-recently-focused first: it is the order the user thinks in ("the
 	// one I was just in"), and it makes a long inventory's truncation drop
