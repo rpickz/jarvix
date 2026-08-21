@@ -157,3 +157,35 @@ cold path stays a supported, tested configuration rather than a legacy one.
   the real engines. It is deliberately not in CI: it measures the machine, not
   the code. The hermetic `make bench` still guards Jarvix's own overhead,
   which is ~25 µs of the budget.
+
+## Amendment (issue #72): the instrument never reads negative
+
+A live session published `jarvix_ms=-3835` on a turn that contained a tool
+round and a confirmation wait. The arithmetic was "total minus thinking",
+where thinking was measured to the first *text* delta: a first round that
+emitted only a tool call pushed that mark past the confirmation question's
+audio, so the subtraction included the user's decision time and the tool's
+runtime and went negative. Two attribution decisions fix it, both following
+the `context_ms` precedent (ADR 0019 / #34) — name the span, charge the
+right party:
+
+- **`first provider delta` is the first output, tool call included.** A tool
+  call is the model's first product exactly as a token is; counting it keeps
+  the pipeline marks in pipeline order on every turn shape.
+- **Tool execution (`tool_ms`) and confirmation waits (`confirm_wait_ms`)
+  are excluded spans, reported as their own stages.** How long `docker ps`
+  takes is the command's runtime; how long the user deliberates over "should
+  I go ahead?" is the user's time. Both are visible in the timings — the
+  turn's real length stays on the record — and neither is charged to
+  `jarvix_ms` or to the model. Pipeline spans are reported net of the
+  excluded time that fell inside them.
+
+`jarvix_ms` is therefore `release_to_first_audio_ms` minus the model's time
+to first output minus the excluded time before the first sound — which
+equals the sum of the Jarvix-owned pipeline spans, each a real elapsed
+interval, so it is non-negative by construction. The invariant (every stage
+≥ 0; thinking + jarvix + excluded-in-window = the wall clock) is asserted
+across every turn shape in `internal/session/timings_test.go`, with the
+incident's exact shape as a named regression test. A session cancelled
+mid-wait settles the open span at report time: partial timings publish
+consistently or not at all, never negative.

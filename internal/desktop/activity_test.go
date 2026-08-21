@@ -117,6 +117,12 @@ func TestActivityRowVocabulary(t *testing.T) {
 			"transcript_to_first_delta_ms": 1200, "jarvix_ms": 400, "release_to_first_audio_ms": 2400},
 			ActivityRow{Kind: ActivityKindTimings, Label: "Timings",
 				Detail: "transcribe 800ms · model 1.2s · jarvix 400ms · to audio 2.4s"}},
+		// The excluded spans (#72) take their place in the line — between the
+		// model's time and Jarvix's, which is where they fell.
+		{"session.timings", map[string]any{"transcript_to_first_delta_ms": 1200,
+			"tool_ms": 5300, "confirm_wait_ms": 8000, "jarvix_ms": 400},
+			ActivityRow{Kind: ActivityKindTimings, Label: "Timings",
+				Detail: "model 1.2s · tools 5.3s · confirming 8.0s · jarvix 400ms"}},
 		{"error", map[string]any{"stage": "assistant", "message": "model exploded"},
 			ActivityRow{Kind: ActivityKindError, Failed: true,
 				Label: "Failed at assistant", Detail: "model exploded"}},

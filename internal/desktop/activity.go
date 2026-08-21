@@ -438,6 +438,11 @@ func timingsRows(data map[string]any) []ActivityRow {
 		{"capture_to_transcript_ms", "transcribe"},
 		{"context_ms", "context"},
 		{"transcript_to_first_delta_ms", "model"},
+		// The excluded spans (issue #72): time inside tool executions and
+		// time spent waiting on the user's confirmation answer — the turn's
+		// real length, attributed to neither Jarvix nor the model.
+		{"tool_ms", "tools"},
+		{"confirm_wait_ms", "confirming"},
 		{"jarvix_ms", "jarvix"},
 		{"release_to_first_audio_ms", "to audio"},
 	}

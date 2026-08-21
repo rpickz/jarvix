@@ -30,6 +30,24 @@ func TestLaunchRefusalPublishesTheReason(t *testing.T) {
 	}
 }
 
+// A near-match refusal (#71) is still a refusal — nothing launched — so the
+// feed's row carries both facts in one clause: not installed, but this is.
+func TestLaunchNearMatchRefusalPublishesTheSuggestion(t *testing.T) {
+	stubApp(t, "chromium")
+	h := newHarness(t)
+	out := h.run(t, LaunchAppToolName, map[string]any{"app": "chrome"})
+	if !strings.Contains(out, "chromium is") {
+		t.Fatalf("launch = %q, want the near-match suggestion", out)
+	}
+	refusals := h.firedRefusals()
+	if len(refusals) != 1 || refusals[0] != "launch:chrome:it is not installed, but chromium is" {
+		t.Errorf("refusals = %v, want the reason with its suggestion", refusals)
+	}
+	if got := h.firedEvents(); len(got) != 0 {
+		t.Errorf("a refused launch must not also publish an action: %v", got)
+	}
+}
+
 func TestLaunchFailurePublishesAGenericReason(t *testing.T) {
 	stubApp(t, "firefox")
 	h := newHarness(t)

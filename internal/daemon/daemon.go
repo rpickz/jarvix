@@ -16,6 +16,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/doctor"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
@@ -835,6 +836,10 @@ func (d *Daemon) registerMethods() {
 			// The archive and its search: counts and states only — whether
 			// search is active is status's business, what was searched is not.
 			"conversations": d.conversationsReport(),
+			// What one turn costs before the user says a word, so "does my
+			// model's context window fit the prompt?" is answerable after
+			// setup, not only under doctor (issue #71).
+			"prompt_budget": d.promptBudgetReport(),
 		}, nil
 	})
 	d.registerActivityMethods()
@@ -845,6 +850,15 @@ func (d *Daemon) registerMethods() {
 	d.registerTextMethods()
 	d.registerWakeMethods()
 	d.registerRoutineMethods()
+}
+
+// promptBudgetReport measures what one turn sends before the user has said
+// anything: the composed system prompt plus the schemas of the tools actually
+// registered — the daemon's registry is the truth here, which is why doctor
+// asks the daemon rather than re-deriving the list from the file (issue #71).
+func (d *Daemon) promptBudgetReport() map[string]any {
+	cfg := d.runningConfig()
+	return doctor.EstimatePromptBudget(assistantSystemPrompt(cfg), d.registry.Defs(), cfg).Report()
 }
 
 // effectivePolicy reports the permission gate as it actually applies: the

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,9 @@ const (
 type Desktop struct {
 	comp     desktop.Compositor
 	launcher appLauncher
+	// lookPath resolves a bare name on PATH — exec.LookPath in production, a
+	// canned map in tests (the same seam routine capture keeps).
+	lookPath func(name string) (string, error)
 	// apps is the configured launch allow list. Empty means "anything on
 	// PATH", which is the sensible default for a machine whose owner is
 	// talking to it: launching an installed application is not an escalation,
@@ -151,6 +155,9 @@ type DesktopOptions struct {
 	// launcher overrides process execution in tests; the real path is
 	// execLauncher.
 	launcher appLauncher
+	// lookPath overrides PATH resolution in tests; the real path is
+	// exec.LookPath.
+	lookPath func(name string) (string, error)
 }
 
 // NewDesktop builds the window tools' shared state.
@@ -158,6 +165,7 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 	d := &Desktop{
 		comp:      opts.Compositor,
 		launcher:  opts.launcher,
+		lookPath:  opts.lookPath,
 		apps:      append([]string(nil), opts.Apps...),
 		ttl:       opts.InventoryTTL,
 		timeout:   opts.Timeout,
@@ -168,6 +176,9 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 	}
 	if d.launcher == nil {
 		d.launcher = &execLauncher{scrubEnv: opts.ScrubEnv}
+	}
+	if d.lookPath == nil {
+		d.lookPath = exec.LookPath
 	}
 	if d.ttl <= 0 {
 		d.ttl = DefaultInventoryTTL
@@ -472,6 +483,25 @@ func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 		return fmt.Sprintf("Several applications match %q: %s. Ask the user which one they meant "+
 			"and call again with that name. Do not guess.", name, strings.Join(candidates, ", ")), nil
 	case err != nil:
+		// A dead-end refusal when a near-match is installed costs the user
+		// the feature: told "use chrome" on a chromium machine, the model had
+		// no way to discover the right name (issue #71). Name it, so the
+		// recovery is one question and one retry rather than a shrug.
+		if alternatives := d.installedNearMatches(name); errors.Is(err, errNotInstalled) &&
+			len(alternatives) > 0 {
+			d.log.Info("launch refused", "component", "tools", "tool", LaunchAppToolName,
+				"app", name, "reason", err.Error(),
+				"near_matches", strings.Join(alternatives, ","))
+			// Still a refusal — nothing launched — so the activity feed gets
+			// its row (issue #70), reason and suggestion together: the same
+			// facts the model is being told, in one clause.
+			d.publishRefusal("launch", name,
+				fmt.Sprintf("it is not installed, but %s", spokenInstalled(alternatives)))
+			return fmt.Sprintf("%q is not installed, but %s. Ask the user in one short sentence "+
+				"whether to open %s instead; only if they say yes, call this tool again with that "+
+				"name. Do not describe anything as opened.", name, spokenInstalled(alternatives),
+				spokenChoice(alternatives)), nil
+		}
 		d.log.Info("launch refused", "component", "tools", "tool", LaunchAppToolName,
 			"app", name, "reason", err.Error())
 		// The resolver's sentence is the reason the user needs ("it is not
@@ -512,7 +542,7 @@ func (d *Desktop) resolveApp(name string) (binary string, candidates []string, e
 	}
 	entry, permitted := d.allowedApp(name)
 	if permitted {
-		if path, lookErr := lookupBinary(entry); lookErr == nil {
+		if path, lookErr := d.lookupBinary(entry); lookErr == nil {
 			return path, nil, nil
 		}
 	}
@@ -524,7 +554,7 @@ func (d *Desktop) resolveApp(name string) (binary string, candidates []string, e
 	case 0:
 	case 1:
 		allowed, _ := d.allowedApp(installed[0])
-		if path, lookErr := lookupBinary(allowed); lookErr == nil {
+		if path, lookErr := d.lookupBinary(allowed); lookErr == nil {
 			return path, nil, nil
 		}
 	default:
@@ -533,7 +563,117 @@ func (d *Desktop) resolveApp(name string) (binary string, candidates []string, e
 	if !permitted {
 		return "", nil, fmt.Errorf("it is not on the allowed list (%s)", strings.Join(d.apps, ", "))
 	}
-	return "", nil, errors.New("it is not installed")
+	return "", nil, errNotInstalled
+}
+
+// errNotInstalled is the refusal that may carry a near-match suggestion: only
+// "not installed" invites one, because an allow-list refusal already names
+// everything the user permitted.
+var errNotInstalled = errors.New("it is not installed")
+
+// launchAliases maps a name a user is likely to say — or a model is likely to
+// be told ("use chrome") — to the binaries that commonly provide it on Linux.
+// Deliberately small and curated, like appCategories: each entry is a spelling
+// mismatch seen in the wild, not a guess at intent. Every suggestion is still
+// gated on being installed and permitted before it is spoken.
+var launchAliases = map[string][]string{
+	"chrome":           {"chromium", "google-chrome-stable", "google-chrome"},
+	"google-chrome":    {"google-chrome-stable", "chromium"},
+	"chromium-browser": {"chromium"},
+	"code":             {"codium", "code-oss", "vscodium"},
+	"vscode":           {"code", "codium", "code-oss", "vscodium"},
+	"vs-code":          {"code", "codium", "code-oss", "vscodium"},
+	"telegram":         {"telegram-desktop"},
+	"signal":           {"signal-desktop"},
+	"1password":        {"1password-gui"},
+	"gedit":            {"gnome-text-editor"},
+}
+
+// maxLaunchSuggestions bounds a refusal to what fits in one spoken sentence.
+const maxLaunchSuggestions = 3
+
+// LaunchCandidates expands one program name into the spellings a launch
+// command may actually be installed under: the name itself, then the
+// "-desktop" packaging convention ("signal" → "signal-desktop"). It is the
+// one copy of that convention — routine capture derives launch commands from
+// window classes through it, and the launcher's near-match suggestions reuse
+// it, so the two features can never disagree about what a class launches.
+func LaunchCandidates(name string) []string {
+	return []string{name, name + "-desktop"}
+}
+
+// installedNearMatches names what IS installed (and permitted) when name
+// itself is not. Three sources, strongest reading first: the curated alias
+// table, the "-desktop" packaging convention shared with routine capture
+// (LaunchCandidates), and the other members of any category the name belongs
+// to — the same table "focus my browser" resolves through, so "firefox is not
+// installed" on a chromium machine can end with the name that works.
+func (d *Desktop) installedNearMatches(name string) []string {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	seen := map[string]bool{lower: true}
+	var out []string
+	consider := func(candidate string) {
+		c := strings.ToLower(candidate)
+		if len(out) >= maxLaunchSuggestions || seen[c] || !validAppName(c) {
+			return
+		}
+		seen[c] = true
+		entry, permitted := d.allowedApp(c)
+		if !permitted {
+			return
+		}
+		if _, err := d.lookupBinary(entry); err != nil {
+			return
+		}
+		out = append(out, c)
+	}
+	for _, alias := range launchAliases[lower] {
+		consider(alias)
+	}
+	for _, candidate := range LaunchCandidates(lower)[1:] {
+		consider(candidate)
+	}
+	// Category siblings, in a stable order so the same machine always makes
+	// the same suggestion.
+	categories := make([]string, 0, len(appCategories))
+	for category := range appCategories {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	for _, category := range categories {
+		members := appCategories[category]
+		member := false
+		for _, m := range members {
+			if strings.EqualFold(m, lower) {
+				member = true
+				break
+			}
+		}
+		if !member {
+			continue
+		}
+		for _, m := range members {
+			consider(m)
+		}
+	}
+	return out
+}
+
+// spokenInstalled renders the suggestions as the clause after "but":
+// "chromium is", "chromium and codium are".
+func spokenInstalled(names []string) string {
+	if len(names) == 1 {
+		return names[0] + " is"
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " are"
+}
+
+// spokenChoice is how the refusal refers to the suggestions when asking.
+func spokenChoice(names []string) string {
+	if len(names) == 1 {
+		return names[0]
+	}
+	return "one of them"
 }
 
 // allowedApp matches a spoken name against the allow list (or, with no list,
@@ -564,7 +704,7 @@ func (d *Desktop) installedCategoryApps(name string) []string {
 		if !ok {
 			continue
 		}
-		if _, err := lookupBinary(entry); err == nil {
+		if _, err := d.lookupBinary(entry); err == nil {
 			found = append(found, term)
 		}
 	}
@@ -592,8 +732,8 @@ func validAppName(name string) bool {
 
 // lookupBinary resolves an allow-list entry: an absolute path must exist and
 // be executable, a bare name is looked up on PATH. The same rule advisor.ask
-// follows — exec.LookPath only, no invocation.
-func lookupBinary(entry string) (string, error) {
+// follows — a lookup only, no invocation.
+func (d *Desktop) lookupBinary(entry string) (string, error) {
 	if filepath.IsAbs(entry) {
 		info, err := os.Stat(entry)
 		if err != nil {
@@ -604,7 +744,7 @@ func lookupBinary(entry string) (string, error) {
 		}
 		return entry, nil
 	}
-	return exec.LookPath(entry)
+	return d.lookPath(entry)
 }
 
 // windows returns the inventory, reusing a recent capture. The cache exists so

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -321,6 +322,86 @@ func (c *Client) statusError(resp *http.Response) error {
 		msg = http.StatusText(resp.StatusCode)
 	}
 	return fmt.Errorf("%s: HTTP %d: %s", c.name, resp.StatusCode, msg)
+}
+
+// ServedContext is what ollama reports about the model it will actually
+// serve: the num_ctx the model is configured to run with (0 when the model
+// sets none and ollama will fall back to its own default), and the
+// architecture's maximum context length (0 when the report does not carry
+// one).
+type ServedContext struct {
+	NumCtx int
+	MaxCtx int
+}
+
+// servedContextTimeout bounds the introspection call: doctor must never hang
+// on a dead provider for a best-effort reading.
+const servedContextTimeout = 3 * time.Second
+
+// OllamaServedContext reads the served model's context window from ollama's
+// native /api/show endpoint (which lives beside the OpenAI-compatible /v1
+// surface this client normally speaks). Best-effort by design: only ollama
+// answers it, so callers degrade silently on any error. Used by jarvix
+// doctor's context-floor check and by `jarvix status` (issue #71) — the live
+// incident ran qwen2.5:7b at a 4096-token window under a prompt that needed
+// more, and nothing said so.
+func (c *Client) OllamaServedContext(ctx context.Context, model string) (ServedContext, error) {
+	ctx, cancel := context.WithTimeout(ctx, servedContextTimeout)
+	defer cancel()
+	payload, err := json.Marshal(map[string]string{"model": model})
+	if err != nil {
+		return ServedContext{}, err
+	}
+	root := strings.TrimSuffix(c.baseURL, "/v1")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, root+"/api/show",
+		bytes.NewReader(payload))
+	if err != nil {
+		return ServedContext{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ServedContext{}, fmt.Errorf("%s: /api/show: %w", c.name, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ServedContext{}, c.statusError(resp)
+	}
+	var body struct {
+		// Parameters is the modelfile's parameter block as text; a num_ctx
+		// variant (`ollama create` with `PARAMETER num_ctx 16384`) states its
+		// window here.
+		Parameters string `json:"parameters"`
+		// ModelInfo carries the architecture limits under keys like
+		// "qwen2.context_length".
+		ModelInfo map[string]any `json:"model_info"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return ServedContext{}, fmt.Errorf("%s: /api/show: %w", c.name, err)
+	}
+	served := ServedContext{NumCtx: parseNumCtx(body.Parameters)}
+	for key, value := range body.ModelInfo {
+		if !strings.HasSuffix(key, ".context_length") {
+			continue
+		}
+		if n, ok := value.(float64); ok && int(n) > 0 {
+			served.MaxCtx = int(n)
+		}
+	}
+	return served, nil
+}
+
+// parseNumCtx finds `num_ctx <n>` in a modelfile parameter block.
+func parseNumCtx(parameters string) int {
+	for _, line := range strings.Split(parameters, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "num_ctx" {
+			if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // Probe checks the endpoint is reachable and authenticated by listing models.

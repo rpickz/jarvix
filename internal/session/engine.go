@@ -380,6 +380,10 @@ func (e *Engine) startSessionLocked() (string, error) {
 		ctx:     ctx,
 		cancel:  cancel,
 		started: time.Now(),
+		// The timing marks share the engine's injectable clock, so tests can
+		// drive the latency arithmetic (issue #72) the way they drive the
+		// follow-up window.
+		timings: timings{now: e.now},
 	}
 	e.log.Info("session started", "component", "session", "session_id", e.current.id)
 	return e.current.id, nil
@@ -1012,6 +1016,12 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 				}
 			}
 		case ai.EventToolCall:
+			// A tool call is the provider's first output as much as a token
+			// is. Without this mark, a round that narrates nothing would push
+			// firstDelta past the confirmation question's audio and the
+			// pipeline marks would fall out of order — the arithmetic behind
+			// issue #72's negative jarvix_ms.
+			s.timings.markFirstDelta()
 			calls = append(calls, ev.Call)
 		case ai.EventError:
 			if s.ctx.Err() == nil {
