@@ -26,9 +26,13 @@ type Config struct {
 	Conversation Conversation `toml:"conversation"`
 	Tools        Tools        `toml:"tools"`
 	Artifacts    Artifacts    `toml:"artifacts"`
-	Audio        Audio        `toml:"audio"`
-	UI           UI           `toml:"ui"`
-	Log          Log          `toml:"log"`
+	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
+	// [advisors.<name>] table each (see advisors.go). Empty disables
+	// delegation entirely — the tool is not registered.
+	Advisors map[string]Advisor `toml:"advisors"`
+	Audio    Audio              `toml:"audio"`
+	UI       UI                 `toml:"ui"`
+	Log      Log                `toml:"log"`
 }
 
 // Tools configures the assistant's tool access. shell.run is opt-in: it
@@ -350,6 +354,9 @@ func parse(data []byte, cfg Config) (Config, error) {
 		}
 		cfg.AI.Endpoints[name] = base
 	}
+	// [advisors.<name>] decodes straight into the map (no scalars share the
+	// table, unlike [ai]), so it only needs its presets applying.
+	applyAdvisorDefaults(&cfg)
 	return cfg, nil
 }
 
@@ -441,6 +448,7 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	problems = append(problems, c.validateAdvisors()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:

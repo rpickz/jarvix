@@ -110,6 +110,22 @@ read as yes/no. A decline, a 30-second timeout, or an interruption returns
 "declined by user" to the model — the tool loop continues so the assistant
 can answer gracefully, and nothing has executed.
 
+### Delegating to a stronger assistant
+
+A request beyond the local model is handed to an assistant CLI the user has
+installed and authenticated, and its answer is spoken back
+([ADR 0016](adr/0016-advisor-delegation.md)). It is an ordinary tool
+(`advisor.ask`) behind the same gate: the model chooses which configured
+advisor and what to ask, while the binary, argv, environment, and timeout
+come from `[advisors.<name>]`. No shell is involved, the question is a single
+argument or stdin, the child runs in its own process group (killed as a group
+on timeout or cancellation) with credentials scrubbed from its environment,
+and the answer is capped at 64 KB. Consulting an advisor that only answers is
+silent; one that can act on the machine — or one running a hand-written
+command line — asks first. Because a consultation can take minutes, the tool
+declares a label (`tool.started` `detail`, shown for the duration) and Jarvix
+says once, after ten seconds, that it is still working (`tool.progress`).
+
 ### Cancellation and interruption
 
 Every stage runs under one `context.Context` per session. Cancelling it:

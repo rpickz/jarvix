@@ -63,7 +63,9 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 	for _, check := range checks {
 		results = append(results, check(cfg, paths))
 	}
-	return results
+	// One result per configured advisor, so a CLI that moved is visible
+	// before someone asks Jarvix to consult it (ADR 0016).
+	return append(results, advisorChecks(cfg)...)
 }
 
 // Healthy reports whether no check failed (warnings are tolerated).

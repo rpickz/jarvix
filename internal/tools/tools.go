@@ -25,6 +25,18 @@ type Tool interface {
 	Execute(ctx context.Context, input json.RawMessage) (string, error)
 }
 
+// Progressive is optionally implemented by tools whose work can outlast the
+// user's patience. A voice session gives no other sign of life: without this,
+// a two-minute advisor consultation is indistinguishable from a hang.
+type Progressive interface {
+	// Activity describes one pending call for humans: label is the short
+	// present-tense phrase the overlay shows for the duration ("Consulting
+	// claude…"), and waiting is the single sentence Jarvix speaks if the call
+	// is still running when the progress threshold passes. ok is false when
+	// this particular call needs neither — nothing slow is happening.
+	Activity(input json.RawMessage) (label, waiting string, ok bool)
+}
+
 // Registry holds the enabled tools.
 type Registry struct {
 	tools map[string]Tool
@@ -67,6 +79,21 @@ func (r *Registry) Check(call ai.ToolCall) Verdict {
 		return Verdict{Decision: PolicyAllow, Tool: call.Name, Rule: "no policy installed"}
 	}
 	return r.policy.Decide(call)
+}
+
+// Activity reports how a call should be surfaced while it runs, for tools
+// that implement Progressive. ok is false for every other tool, which is the
+// common case: most calls finish before anyone could wonder.
+func (r *Registry) Activity(call ai.ToolCall) (label, waiting string, ok bool) {
+	t, registered := r.tools[call.Name]
+	if !registered {
+		return "", "", false
+	}
+	p, progressive := t.(Progressive)
+	if !progressive {
+		return "", "", false
+	}
+	return p.Activity(json.RawMessage(call.Arguments))
 }
 
 // Names returns registered tool names in registration order.

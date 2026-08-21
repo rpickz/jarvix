@@ -21,7 +21,10 @@ Release            →  transcribed (whisper.cpp, on device)
 
 Jarvix is not dictation, and it is not a voice wrapper around a chatbot. Ask
 "what's happening in docker?" and it runs `docker ps` itself and summarises
-the result aloud. The long-term goal is a system that routes natural intent
+the result aloud. Ask something its small local model has no business
+answering and it hands the question to a stronger assistant CLI you already
+have installed — "ask Claude to review my publish pipeline" — and speaks the
+answer back. The long-term goal is a system that routes natural intent
 to the right mechanism: deterministic local commands, desktop context, AI
 reasoning, tools, or speech — see [docs/roadmap.md](docs/roadmap.md).
 

@@ -220,8 +220,10 @@ func TestAdvisorsStepRecordsDetectedCLIs(t *testing.T) {
 	f := loadString(t, "")
 	var out strings.Builder
 	paths := map[string]string{"claude": "/usr/bin/claude", "aider": "/home/u/.local/bin/aider"}
+	// Advisors are offered in the preset table's (alphabetical) order, so
+	// aider is asked about first and declined; claude is accepted.
 	step := AdvisorsStep(AdvisorsDeps{
-		File: f, Out: &out, Prompt: &fakePrompter{confirms: []bool{true, false}},
+		File: f, Out: &out, Prompt: &fakePrompter{confirms: []bool{false, true}},
 		LookPath: func(name string) (string, error) {
 			if p, ok := paths[name]; ok {
 				return p, nil
