@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/doctor"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
@@ -122,6 +124,17 @@ func cmdPTT(paths config.Paths, phase string) error {
 		// running session first.
 		return beginListening()
 	}
+}
+
+// cmdWindow toggles the conversation window. The window is rendered by the
+// Omarchy shell plugin and shows its own "daemon is not running" state, so
+// this deliberately never touches the daemon socket — the window must open
+// even when jarvixd is down (see ADR 0013).
+func cmdWindow() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	windows := &desktop.WindowClient{}
+	return windows.Toggle(ctx)
 }
 
 func cmdAsk(paths config.Paths, question string) error {

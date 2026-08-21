@@ -125,11 +125,15 @@ func TestCorruptHistoryFileStartsEmpty(t *testing.T) {
 	}
 
 	// Construction must not crash, and the engine must still converse.
-	h := newHarnessWithStore(t, Options{HistoryTurns: 8}, &history.File{Path: path})
+	store := notifying(&history.File{Path: path})
+	h := newHarnessWithStore(t, Options{HistoryTurns: 8}, store)
 	h.ask(t, "hello")
 	if n := len(h.provider.LastRequest.Messages); n != 1 {
 		t.Errorf("corrupt history produced %d messages, want just the new question", n)
 	}
+	// Persistence runs after session.finished; wait for the write so TempDir
+	// cleanup cannot race the store's temp-file-and-rename dance.
+	store.awaitSave(t)
 }
 
 func TestHistoryDisabledClearsDiskAndNeverWrites(t *testing.T) {

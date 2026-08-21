@@ -19,6 +19,7 @@ Usage:
   jarvix new                    Start a fresh conversation (forget context)
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
+  jarvix window                 Open/close the conversation window
   jarvix artifacts              List recent artifacts (diagrams, documents, sheets, sketches)
   jarvix doctor                 Check every dependency and explain failures
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
@@ -60,6 +61,8 @@ func main() {
 			fatal(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
 		}
 		err = cmdPTT(paths, args[0])
+	case "window":
+		err = cmdWindow()
 	case "artifacts":
 		err = cmdArtifacts(cfg)
 	case "doctor":

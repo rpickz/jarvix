@@ -20,6 +20,37 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestNotificationDefaultsOn(t *testing.T) {
+	cfg := Default()
+	if !cfg.UI.Notifications {
+		t.Error("ui.notifications should default to true")
+	}
+	if !cfg.UI.NotificationPreview {
+		t.Error("ui.notification_preview should default to true")
+	}
+}
+
+func TestNotificationKeysOverride(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[ui]
+notifications = false
+notification_preview = false
+`)
+	if cfg.UI.Notifications {
+		t.Error("notifications should be off")
+	}
+	if cfg.UI.NotificationPreview {
+		t.Error("notification_preview should be off")
+	}
+	// Untouched [ui] defaults survive a partial table.
+	if !cfg.UI.ShowTranscript {
+		t.Error("show_transcript default lost")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
 func TestLoadOverridesDefaults(t *testing.T) {
 	cfg := writeAndLoad(t, `
 [ai]
