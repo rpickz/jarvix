@@ -145,9 +145,9 @@ type Engine struct {
 	// with; read without the lock like the other swappable collaborators.
 	speech *speechNormalizer
 
-	// active tracks the session goroutines (transcribe, think, recording
-	// teardown) that read the swappable collaborators and options without
-	// holding mu. Reconfigure waits on it so a swap never races a draining
+	// active tracks the session goroutines (transcribe, think, runIntent,
+	// recording teardown) that read the swappable collaborators and options
+	// without holding mu. Reconfigure waits on it so a swap never races a draining
 	// goroutine — a cancelled session's think() can still be executing briefly
 	// after current is nil (ADR 0015) — and Shutdown waits on it so the daemon
 	// does not exit through the tail of a finished session, which is where the
