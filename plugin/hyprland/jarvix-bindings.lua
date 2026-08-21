@@ -17,4 +17,6 @@ if o.cmd_present("jarvix") then
   -- SUPER+ESCAPE is Omarchy's system menu; keep the same modifiers as the
   -- talk chord for cancel instead.
   o.bind("SUPER + ALT + ESCAPE", "Cancel Jarvix", "jarvix cancel")
+  -- The conversation window (same surface a notification click opens).
+  o.bind("SUPER + ALT + C", "Jarvix conversation window", "jarvix window")
 end

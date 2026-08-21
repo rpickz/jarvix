@@ -102,6 +102,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Interrupt mid-speech | Hold the chord again — it stops talking and listens |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
+| Review the conversation | Click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |
 | Fresh conversation | `jarvix new` (forget the current thread) |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |

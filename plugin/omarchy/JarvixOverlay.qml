@@ -111,15 +111,25 @@ Item {
     onTriggered: { if (!daemon.connected) daemon.connected = true }
   }
 
-  // Shell contract for summoned panels; Jarvix shows itself from daemon
-  // state, so these only exist to keep `omarchy-shell shell summon` harmless.
-  function open() {}
-  function close() {}
+  // The conversation window: the click-through target for notifications and
+  // `jarvix window`. It manages its own daemon connection (ADR 0013).
+  JarvixWindow { id: convWindow }
+
+  // Shell contract for summoned panels. The overlay itself derives its
+  // visibility from daemon state, so summoning Jarvix opens the conversation
+  // window — the surface a user summons *to*.
+  function open() { convWindow.openWindow() }
+  function close() { convWindow.closeWindow() }
 
   IpcHandler {
     target: "jarvix"
     function state(): string { return root.sessionState }
     function ping(): string { return "ok" }
+    // Window controls, driven by `omarchy-shell jarvix <fn>`: the CLI's
+    // `jarvix window` toggles; a notification click opens.
+    function openWindow(): string { convWindow.openWindow(); return "open" }
+    function closeWindow(): string { convWindow.closeWindow(); return "closed" }
+    function toggleWindow(): string { convWindow.toggleWindow(); return convWindow.visible ? "open" : "closed" }
   }
 
   // --- presentation -------------------------------------------------------
