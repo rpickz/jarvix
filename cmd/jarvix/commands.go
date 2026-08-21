@@ -10,6 +10,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/doctor"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
@@ -44,7 +45,14 @@ func cmdCancel(paths config.Paths) error {
 func cmdNewConversation(paths config.Paths) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
-		return err
+		// No daemon means no in-memory thread to reset — but a persisted
+		// conversation may still sit on disk, and it would resurrect when the
+		// daemon next starts. Clear it directly so "new" always means new.
+		if clearErr := (&history.File{Path: paths.HistoryFile()}).Clear(); clearErr != nil {
+			return clearErr
+		}
+		fmt.Println("started a fresh conversation (daemon not running; cleared saved history)")
+		return nil
 	}
 	defer func() { _ = client.Close() }()
 	if err := client.Call("conversation.reset", nil, nil); err != nil {

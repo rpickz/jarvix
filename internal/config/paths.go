@@ -44,3 +44,8 @@ func (p Paths) ConfigFile() string { return filepath.Join(p.Config, "config.toml
 
 // WhisperModelDir returns where Whisper models are stored.
 func (p Paths) WhisperModelDir() string { return filepath.Join(p.Data, "models", "whisper") }
+
+// HistoryFile returns where conversation history is persisted across daemon
+// restarts. State, not data: it is machine-local operational memory the user
+// may delete at will (jarvix new).
+func (p Paths) HistoryFile() string { return filepath.Join(p.State, "history.json") }
