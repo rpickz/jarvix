@@ -177,16 +177,20 @@ func TestShutdownGivesUpAfterTheGracePeriod(t *testing.T) {
 // blockingProvider parks inside Chat until the session context is cancelled —
 // a model call still streaming when the user stops the daemon.
 type blockingProvider struct {
-	entered chan struct{}
-	left    chan struct{}
+	entered  chan struct{}
+	left     chan struct{}
+	entering sync.Once
+	leaving  sync.Once
 }
 
 func (p *blockingProvider) Name() string { return "blocking" }
 
 func (p *blockingProvider) Chat(ctx context.Context, _ ai.ChatRequest) (<-chan ai.Event, error) {
-	close(p.entered)
+	// Once-guarded so a regression that starts a *second* session reports
+	// itself as a failed assertion rather than a panic on a closed channel.
+	p.entering.Do(func() { close(p.entered) })
 	<-ctx.Done()
-	close(p.left)
+	p.leaving.Do(func() { close(p.left) })
 	return nil, ctx.Err()
 }
 

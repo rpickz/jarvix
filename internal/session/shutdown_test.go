@@ -114,16 +114,20 @@ func TestShutdownIsBoundedByItsContext(t *testing.T) {
 // which is what a real provider call looks like when the user walks away
 // mid-answer. entered and left make the goroutine's lifetime observable.
 type blockingProvider struct {
-	entered chan struct{}
-	left    chan struct{}
+	entered  chan struct{}
+	left     chan struct{}
+	entering sync.Once
+	leaving  sync.Once
 }
 
 func (p *blockingProvider) Name() string { return "blocking" }
 
 func (p *blockingProvider) Chat(ctx context.Context, _ ai.ChatRequest) (<-chan ai.Event, error) {
-	close(p.entered)
+	// Once-guarded so a regression that starts a *second* session reports
+	// itself as a failed assertion rather than a panic on a closed channel.
+	p.entering.Do(func() { close(p.entered) })
 	<-ctx.Done()
-	close(p.left)
+	p.leaving.Do(func() { close(p.left) })
 	return nil, ctx.Err()
 }
 
@@ -169,6 +173,49 @@ func TestShutdownCancelsAndDrainsASessionInFlight(t *testing.T) {
 	}
 	if !sawEvent(events, "session.cancelled") {
 		t.Error("the in-flight session was drained without a session.cancelled event")
+	}
+}
+
+// A typed turn (ADR 0021) reaches the engine by a different door — SubmitText
+// composes start+submit under one lock — but it is the same session
+// afterwards. Both halves of that are asserted here, because a second entry
+// point is exactly how a shutdown gap gets reopened: the door has to be shut
+// to typing too, and a typed session in flight has to be drained like a spoken
+// one.
+func TestShutdownDrainsAndRefusesTypedTurns(t *testing.T) {
+	provider := &blockingProvider{entered: make(chan struct{}), left: make(chan struct{})}
+	bus := NewBus(nil)
+	_, unsubscribe := bus.Subscribe()
+	t.Cleanup(unsubscribe)
+	eng := NewEngine(provider, &stt.Fake{Text: "unused"}, &tts.Fake{},
+		&audio.FakeRecorder{Clip: audio.Clip{WAVPath: t.TempDir() + "/rec.wav"}},
+		&audio.FakePlayer{}, nil, nil, bus, nil, Options{Model: "test-model"})
+
+	if _, err := eng.SubmitText("a typed question that never gets answered"); err != nil {
+		t.Fatal(err)
+	}
+	<-provider.entered
+
+	if err := eng.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case <-provider.left:
+	default:
+		t.Error("Shutdown returned while a typed turn was still with the provider")
+	}
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := eng.Shutdown(expired); err != nil {
+		t.Errorf("a typed turn's goroutines were still in flight when Shutdown returned: %v", err)
+	}
+
+	// The refusal lives in startSessionLocked, so typing is turned away on the
+	// same terms as speaking rather than slipping past a StartSession-only guard.
+	if _, err := eng.SubmitText("another typed question"); err == nil {
+		t.Error("a typed turn started a session after shutdown")
+	} else if errors.Is(err, ErrEmptyText) {
+		t.Errorf("typed turn refused for the wrong reason: %v", err)
 	}
 }
 

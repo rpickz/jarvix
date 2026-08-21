@@ -13,8 +13,13 @@ import (
 )
 
 // notifyingStore wraps a Store and signals each completed Save. Persistence
-// runs after session.finished, off the engine's lock path, so tests must
-// wait for it explicitly rather than assume it happened by event time.
+// runs after session.finished, off the engine's lock path, so a test that
+// needs the write to be *on disk* — a simulated restart reading it back — must
+// wait for it rather than assume it happened by event time.
+//
+// It is not needed to keep t.TempDir's cleanup from racing the write: the
+// harness drains the engine when the test ends (see newHarnessWithStore), so
+// awaitSave marks a real ordering requirement wherever it still appears.
 type notifyingStore struct {
 	history.Store
 	saved chan struct{}
@@ -131,9 +136,6 @@ func TestCorruptHistoryFileStartsEmpty(t *testing.T) {
 	if n := len(h.provider.LastRequest.Messages); n != 1 {
 		t.Errorf("corrupt history produced %d messages, want just the new question", n)
 	}
-	// Persistence runs after session.finished; wait for the write so TempDir
-	// cleanup cannot race the store's temp-file-and-rename dance.
-	store.awaitSave(t)
 }
 
 func TestHistoryDisabledClearsDiskAndNeverWrites(t *testing.T) {

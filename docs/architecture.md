@@ -105,6 +105,15 @@ order those happen in. Push-to-talk release sends `voice.stop` +
 `session.submit` back-to-back; `jarvix ask` sends `session.submit` with text
 and skips audio entirely.
 
+Typing is the third producer of turns, alongside the microphone and the CLI.
+The conversation window's composer sends `session.text`
+([ADR 0021](adr/0021-typed-turns-composed-daemon-side.md)), which is those
+same two calls composed in the daemon so the one decision between them — new
+turn, or answer to a pending confirmation — is made once, under the session
+lock, in code that can be tested. A typed turn is a turn like any other: same
+history, same intent router, same tools, same spoken answer, and the same
+interruption contract if one is already running.
+
 ### Deterministic intents
 
 Before a transcript reaches the model it is offered to an explicit grammar
@@ -146,7 +155,9 @@ commands run silently, deny-listed patterns never run, and everything else
 pauses the session in `AwaitingConfirmation` — Jarvix speaks a one-sentence
 summary generated from the parsed command, publishes the exact command
 (`tool.confirmation_required`), and waits. The user answers with
-`jarvix confirm`/`jarvix deny`, a typed `session.submit`, or by voice: a
+`jarvix confirm`/`jarvix deny`, a typed `session.submit` or `session.text`
+(the conversation window's composer — "yes" there answers the question rather
+than asking a new one), or by voice: a
 push-to-talk press while awaiting flows into the pending confirmation
 (`AwaitingConfirmation → Listening → Transcribing`), and the transcript is
 read as yes/no. A decline, a 30-second timeout, or an interruption returns
@@ -194,7 +205,8 @@ notifications dispatch the same way.
 
 `Daemon.Run` therefore does not return when the socket stops accepting: it
 drains that tail work first, in dependency order — session goroutines
-(cancelling anything in flight), IPC connections, notification delivery — and
+(cancelling anything in flight, spoken or typed alike), IPC connections,
+notification delivery — and
 kills the warm workers last, because a draining session may still be speaking
 through one ([ADR 0018](adr/0018-supervised-persistent-engine-workers.md)).
 Without this a `systemctl --user restart jarvixd` could land in the gap and
@@ -254,7 +266,10 @@ a normal toplevel showing the full current conversation, opened by clicking
 the desktop notification the daemon sends when a session finishes, or by
 `jarvix window` / `Super+Alt+C`. It renders the `conversation.get` snapshot
 and live-appends from the same event stream as the overlay; its socket is
-connected only while it is open. Notifications go out via `notify-send`
+connected only while it is open. It also **takes input**: a composer at the
+bottom sends what you type as a turn (`session.text`), so the window is
+somewhere you talk to Jarvix and not only somewhere you read what it said.
+Notifications go out via `notify-send`
 (`org.freedesktop.Notifications`) from a bus subscriber inside the daemon —
 `ui.notifications` / `ui.notification_preview` control them (see
 [configuration.md](configuration.md)). Window technology choice:

@@ -552,6 +552,7 @@ func (d *Daemon) registerMethods() {
 	})
 	d.registerConfigMethods()
 	d.registerContextMethods()
+	d.registerTextMethods()
 }
 
 // effectivePolicy reports the permission gate as it actually applies: the
