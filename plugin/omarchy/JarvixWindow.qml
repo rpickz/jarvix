@@ -245,6 +245,80 @@ FloatingWindow {
     submitInFlight = ""
   }
 
+  // --- confirmation card ---------------------------------------------------
+  // The permission gate's question, rendered in the conversation flow (issue
+  // #76): the spoken question, the exact command verbatim from the daemon
+  // (never summarised here — ADR 0014's property that the model cannot
+  // describe `rm -rf ~` as tidying up extends to this card), and two buttons.
+  // The card decides nothing (ADR 0013): the buttons call session.confirm
+  // with an explicit boolean — the same single gate path every other answer
+  // mode resolves through — and the card's state changes only on the
+  // daemon's own events and snapshot.
+  property int pendingCardIndex: -1    // index into turns; -1 when no card is open
+  property int confirmTimeoutSec: 0    // the configured window, from the daemon
+  property double confirmDeadlineMs: 0 // absolute auto-decline time; 0 = clock not started
+  property double confirmNowMs: 0      // ticked by confirmCountdown so the binding updates
+  property int confirmRequestId: 0
+
+  // Seconds left before auto-decline, or -1 while the daemon has not started
+  // the clock (the question is still being spoken aloud). Clamped at 0: only
+  // the daemon declines, so a countdown that reaches zero keeps waiting for
+  // the tool.declined event rather than resolving the card itself.
+  readonly property int confirmRemainingSec: confirmDeadlineMs > 0
+    ? Math.max(0, Math.ceil((confirmDeadlineMs - confirmNowMs) / 1000)) : -1
+
+  function appendConfirmationCard(summary, command, timeoutSec, deadlineMs) {
+    turns.append({ role: "confirmation", text: summary, command: command, outcome: "" })
+    pendingCardIndex = turns.count - 1
+    confirmTimeoutSec = timeoutSec
+    confirmDeadlineMs = deadlineMs
+    confirmNowMs = Date.now()
+  }
+
+  // resolveConfirmationCard marks the open card with its outcome and stops
+  // the countdown. The card stays in the transcript — the record of what was
+  // asked and answered. A resolution with no card open (the decline that
+  // follows an unavailable gate never had a question) is a no-op.
+  function resolveConfirmationCard(outcome) {
+    if (pendingCardIndex < 0) return
+    turns.setProperty(pendingCardIndex, "outcome", outcome)
+    pendingCardIndex = -1
+    confirmDeadlineMs = 0
+  }
+
+  // declineOutcome words a tool.declined source for the card. The source
+  // vocabulary is the daemon's and closed (docs/ipc.md); mapping it to a
+  // sentence is presentation, like stateLabel. An unknown source shows as
+  // itself — a refusal must never lose its reason.
+  function declineOutcome(source) {
+    switch (source) {
+    case "cli": case "text": case "voice":
+      return "Declined — you said no"
+    case "timeout":
+      return "Declined — timed out after " + confirmTimeoutSec + "s"
+    case "interrupted":
+      return "Declined — the session was interrupted"
+    case "error": case "unavailable":
+      return "Declined — you could not be asked"
+    }
+    return "Declined — " + source
+  }
+
+  // answerConfirmation is what the ✓ and ✗ buttons (and Y/N on the focused
+  // card) do: one session.confirm call carrying a literal boolean. No text is
+  // interpreted here — the yes/no vocabulary lives in the daemon, once. The
+  // card resolves on the daemon's tool.confirmed / tool.declined event, not
+  // on the click.
+  function answerConfirmation(approved) {
+    if (!daemon.connected || pendingCardIndex < 0) return
+    confirmRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: confirmRequestId, method: "session.confirm",
+      params: { approved: approved }
+    }) + "\n")
+  }
+
   // --- history requests ---------------------------------------------------
   // Each history request takes an id from the same counter as typed turns,
   // so a reply is matched to exactly the request that asked for it.
@@ -384,9 +458,22 @@ FloatingWindow {
   // events append incrementally from here on.
   function loadSnapshot(result) {
     turns.clear()
+    pendingCardIndex = -1
+    confirmDeadlineMs = 0
     var list = result.turns || []
     for (var i = 0; i < list.length; i++) {
-      turns.append({ role: String(list[i].role), text: String(list[i].text) })
+      turns.append({ role: String(list[i].role), text: String(list[i].text),
+        command: "", outcome: "" })
+    }
+    // A window opened *during* a confirmation wait missed the events that
+    // announced it, so the snapshot carries the pending question (issue #76)
+    // and the card renders here — same facts, same daemon, no blindness.
+    if (result.confirmation) {
+      appendConfirmationCard(
+        String(result.confirmation.summary || ""),
+        String(result.confirmation.command || ""),
+        Number(result.confirmation.timeout_sec || 0),
+        Number(result.confirmation.deadline_ms || 0))
     }
     sessionState = String(result.state || "idle")
     assistantStreaming = false
@@ -420,11 +507,11 @@ FloatingWindow {
       // a pending tool confirmation ("yes", spoken or typed) is a second, and
       // showing it is right: the user answered and should see their answer.
       // Events never repeat, so appending cannot double a turn.
-      turns.append({ role: "user", text: String(params.text || "") })
+      turns.append({ role: "user", text: String(params.text || ""), command: "", outcome: "" })
       break
     case "assistant.delta":
       if (!assistantStreaming) {
-        turns.append({ role: "assistant", text: "" })
+        turns.append({ role: "assistant", text: "", command: "", outcome: "" })
         assistantStreaming = true
       }
       var chunk = String(params.content || "")
@@ -443,9 +530,29 @@ FloatingWindow {
           turns.setProperty(turns.count - 1, "text", full)
         }
       } else if (full !== "") {
-        turns.append({ role: "assistant", text: full })
+        turns.append({ role: "assistant", text: full, command: "", outcome: "" })
       }
       assistantStreaming = false
+      break
+    case "tool.confirmation_required":
+      // The gate asked: render the card in the conversation flow. The
+      // command is the daemon's verbatim string; the deadline is unknown
+      // until the daemon says the clock has started (the question may still
+      // be being spoken), so the countdown starts at "up to timeout_sec".
+      appendConfirmationCard(String(params.summary || ""), String(params.command || ""),
+        Number(params.timeout_sec || 0), 0)
+      break
+    case "tool.confirmation_deadline":
+      // The countdown starts: the daemon computed the deadline from its
+      // configured timeout. Everything the ticker shows derives from this.
+      confirmDeadlineMs = Number(params.deadline_ms || 0)
+      confirmNowMs = Date.now()
+      break
+    case "tool.confirmed":
+      resolveConfirmationCard("Approved")
+      break
+    case "tool.declined":
+      resolveConfirmationCard(declineOutcome(String(params.source || "")))
       break
     case "error":
       errorStage = String(params.stage || "")
@@ -454,6 +561,11 @@ FloatingWindow {
       break
     case "session.finished":
     case "session.cancelled":
+      // The daemon never lets a confirmation outlive its session; a card
+      // still open here means its resolution event was dropped (this window
+      // was a slow client). Close it as ended rather than leaving buttons
+      // that look answerable — the daemon would refuse them anyway.
+      resolveConfirmationCard("Declined — the session ended")
       assistantStreaming = false
       break
     case "activity.row":
@@ -494,6 +606,12 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.submitRequestId) {
           win.handleSubmitReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.confirmRequestId) {
+          // A click that lost the race — the confirmation had already
+          // resolved by voice, text, CLI, timeout, or interruption — comes
+          // back as an error. Deliberately swallowed: the resolution event
+          // renders the card's real outcome, and a banner for "you were a
+          // moment late" would alarm without informing.
         } else if (frame.id !== undefined && frame.id === win.activityRequestId) {
           if (frame.result) win.loadActivity(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
@@ -549,6 +667,17 @@ FloatingWindow {
     interval: 2000
     repeat: false
     onTriggered: { if (win.visible && !daemon.connected) daemon.connected = true }
+  }
+
+  // Ticks the countdown on the open confirmation card. The remaining time is
+  // always *derived* from the daemon's absolute deadline — this timer only
+  // refreshes the arithmetic, so a missed or slow tick can never drift it.
+  Timer {
+    id: confirmCountdown
+    interval: 250
+    repeat: true
+    running: win.visible && win.pendingCardIndex >= 0 && win.confirmDeadlineMs > 0
+    onTriggered: win.confirmNowMs = Date.now()
   }
 
   // --- presentation -------------------------------------------------------
@@ -1168,7 +1297,8 @@ FloatingWindow {
         spacing: Style.space(4)
 
         Text {
-          text: model.role === "user" ? "You" : "Jarvix"
+          text: model.role === "user" ? "You"
+            : model.role === "confirmation" ? "Jarvix asks permission" : "Jarvix"
           font.family: Style.font.family
           font.bold: true
           font.pixelSize: Style.font.subtitle
@@ -1177,12 +1307,174 @@ FloatingWindow {
             : Color.accent
         }
         Text {
+          visible: model.role !== "confirmation"
           text: model.text
           width: parent.width
           wrapMode: Text.Wrap
           font.family: Style.font.family
           font.pixelSize: Style.font.subtitle
           color: Color.popups.text
+        }
+
+        // The confirmation card (issue #76): the question, the exact command
+        // verbatim from the daemon in a monospace block, approve/decline
+        // buttons, and the countdown. Resolved cards stay in the transcript
+        // with their outcome as text and the buttons disabled — the record of
+        // what was asked and answered, twin to the activity feed's gate rows.
+        Rectangle {
+          id: confirmCard
+          visible: model.role === "confirmation"
+          width: parent.width
+          height: visible ? cardBody.height + Style.space(20) : 0
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.accent, 0.08)
+          // The focus ring: a colour *and* a thicker border, like the composer.
+          border.color: confirmCard.activeFocus ? Color.accent : Util.alpha(Color.accent, 0.5)
+          border.width: confirmCard.activeFocus ? 2 : 1
+          activeFocusOnTab: visible && model.outcome === ""
+          Accessible.role: Accessible.Grouping
+          Accessible.name: "Permission question: " + model.text
+            + " Command: " + model.command
+            + (model.outcome !== "" ? " " + model.outcome : "")
+          Accessible.description: model.outcome === ""
+            ? "Press Y to approve or N to decline" : "Already answered"
+
+          // Y and N answer the focused card — the click's keyboard twin. The
+          // keys carry a literal boolean to the same session.confirm call;
+          // nothing here interprets words (the composer's typed "yes" goes
+          // through session.text and is read in the daemon).
+          Keys.onPressed: function(event) {
+            if (model.outcome !== "") return
+            if (event.key === Qt.Key_Y) {
+              event.accepted = true
+              win.answerConfirmation(true)
+            } else if (event.key === Qt.Key_N) {
+              event.accepted = true
+              win.answerConfirmation(false)
+            }
+          }
+
+          Column {
+            id: cardBody
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Style.space(10)
+            spacing: Style.space(8)
+
+            Text {
+              text: model.text
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+
+            // The exact command, monospace, exactly as the daemon published
+            // it. Never summarised or reworded here: this block is the ground
+            // truth the user is approving (ADR 0014).
+            Rectangle {
+              width: parent.width
+              height: commandText.height + Style.space(12)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.popups.text, 0.08)
+
+              Text {
+                id: commandText
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.margins: Style.space(8)
+                text: model.command
+                wrapMode: Text.WrapAnywhere
+                font.family: "monospace"
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+            }
+
+            Row {
+              spacing: Style.space(8)
+
+              Rectangle {
+                id: approveButton
+                enabled: model.outcome === "" && win.socketReady
+                opacity: enabled ? 1.0 : 0.45
+                width: approveLabel.width + Style.space(24)
+                height: approveLabel.height + Style.space(10)
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.accent, approveButton.activeFocus ? 0.35 : 0.18)
+                border.color: Color.accent
+                border.width: approveButton.activeFocus ? 2 : 1
+                activeFocusOnTab: enabled
+                Accessible.role: Accessible.Button
+                Accessible.name: "Approve — run the command"
+                Keys.onReturnPressed: win.answerConfirmation(true)
+                Keys.onSpacePressed: win.answerConfirmation(true)
+                Text {
+                  id: approveLabel
+                  anchors.centerIn: parent
+                  text: "✓ Approve"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.subtitle
+                  color: Color.popups.text
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: approveButton.enabled
+                  onClicked: win.answerConfirmation(true)
+                }
+              }
+
+              Rectangle {
+                id: declineButton
+                enabled: model.outcome === "" && win.socketReady
+                opacity: enabled ? 1.0 : 0.45
+                width: declineLabel.width + Style.space(24)
+                height: declineLabel.height + Style.space(10)
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.popups.text, declineButton.activeFocus ? 0.18 : 0.08)
+                border.color: Util.alpha(Color.popups.text, 0.5)
+                border.width: declineButton.activeFocus ? 2 : 1
+                activeFocusOnTab: enabled
+                Accessible.role: Accessible.Button
+                Accessible.name: "Decline — do not run the command"
+                Keys.onReturnPressed: win.answerConfirmation(false)
+                Keys.onSpacePressed: win.answerConfirmation(false)
+                Text {
+                  id: declineLabel
+                  anchors.centerIn: parent
+                  text: "✗ Decline"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.subtitle
+                  color: Color.popups.text
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: declineButton.enabled
+                  onClicked: win.answerConfirmation(false)
+                }
+              }
+            }
+
+            // The countdown while pending, the outcome once resolved — both
+            // as text, never colour alone. The seconds derive from the
+            // daemon's deadline; before the clock starts (the question is
+            // still being spoken) only the configured maximum can be said.
+            Text {
+              text: model.outcome !== "" ? model.outcome
+                : win.confirmRemainingSec >= 0
+                  ? win.confirmRemainingSec + "s left to answer — no answer declines"
+                  : "Up to " + win.confirmTimeoutSec + "s to answer once the question is asked"
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.bold: model.outcome !== ""
+              font.pixelSize: Style.font.subtitle
+              color: model.outcome === "" ? Util.alpha(Color.popups.text, 0.7) : Color.popups.text
+            }
+          }
         }
       }
     }
