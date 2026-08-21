@@ -117,8 +117,8 @@ func TestRecentArtifactsOnAMissingDirectory(t *testing.T) {
 // without the daemon running.
 func TestRunArtifactsJSONIsParseable(t *testing.T) {
 	hermeticEnv(t)
-	// The default artifact directory lives under XDG_DATA_HOME, which
-	// hermeticEnv has already pointed at a temp dir.
+	// The default artifact directory is $HOME/Documents/Jarvix, and
+	// hermeticEnv points HOME at a temp dir — so this really is empty.
 	var code int
 	stdout, stderr := capture(t, func() { code = run([]string{"artifacts", "--json"}) })
 	if code != 0 {

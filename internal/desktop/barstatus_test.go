@@ -367,3 +367,65 @@ console.log(JSON.stringify({
 		}
 	}
 }
+
+// pluginFilePath resolves a file in plugin/omarchy the same way
+// barStateJSPath does, by walking up to the module root.
+func pluginFilePath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return filepath.Join(dir, "plugin", "omarchy", name)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the working directory")
+		}
+		dir = parent
+	}
+}
+
+// A QML file that declares a FloatingWindow must not import Quickshell.Wayland.
+//
+// This looks like a style rule and is not: with that import present,
+// FloatingWindow stops producing a Wayland toplevel while every other symptom
+// still looks healthy. The plugin loads, the IPC handlers answer, `openWindow`
+// returns "open", `visible` reads back true — and there is simply no window,
+// with nothing anywhere logging a complaint. It was added once on the
+// reasonable-sounding theory that FloatingWindow lived in that module, and it
+// silently disabled the conversation window for every user until someone
+// clicked the bar icon and noticed nothing happened.
+//
+// FloatingWindow comes from Quickshell itself; Omarchy's own dev-gallery
+// plugin imports Quickshell alone. The import is entirely legitimate
+// elsewhere — JarvixOverlay.qml needs it for WlrLayershell — so the rule is
+// scoped to the files that actually declare a window. Nothing else in the
+// suite can catch this: the failure is invisible to Go, to the QML parser,
+// and to `omarchy plugin validate` alike.
+func TestFloatingWindowFilesDoNotImportQuickshellWayland(t *testing.T) {
+	names := []string{"JarvixWindow.qml", "JarvixOverlay.qml", "JarvixBar.qml", "JarvixSettings.qml"}
+	checked := 0
+	for _, name := range names {
+		source, err := os.ReadFile(pluginFilePath(t, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		text := string(source)
+		if !strings.Contains(text, "FloatingWindow {") {
+			continue // no window declared here; the import may be needed for other types
+		}
+		checked++
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSpace(line) == "import Quickshell.Wayland" {
+				t.Errorf("%s declares a FloatingWindow and imports Quickshell.Wayland: "+
+					"the window will never map, with no error anywhere — see this test's comment", name)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no FloatingWindow declaration found in the plugin; this guard is no longer watching anything")
+	}
+}

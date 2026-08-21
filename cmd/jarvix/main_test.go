@@ -21,7 +21,12 @@ import (
 // touch the real config, state, or daemon socket.
 func hermeticEnv(t *testing.T) {
 	t.Helper()
-	for _, env := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"} {
+	// HOME is isolated too, and deliberately: the artifact directory defaults
+	// to $HOME/Documents/Jarvix, not to anything under XDG_DATA_HOME. Without
+	// this the artifact tests read whatever the person running them happens to
+	// have made — passing on a clean CI runner and failing on a real machine,
+	// which is the wrong way round for a suite that claims to be hermetic.
+	for _, env := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"} {
 		t.Setenv(env, t.TempDir())
 	}
 }

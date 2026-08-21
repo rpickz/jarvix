@@ -1,9 +1,12 @@
 import QtQuick
+// FloatingWindow comes from Quickshell itself — do NOT add
+// `import Quickshell.Wayland` here. It was added once on the theory that the
+// type lived there; the plugin still loaded and every IPC function still
+// answered, but the window silently never mapped: `openWindow` reported
+// "open", `visible` read back true, and no Wayland toplevel ever existed.
+// Omarchy's own FloatingWindow user (shell/plugins/dev-gallery) imports
+// Quickshell alone, which is the check that settled it.
 import Quickshell
-// FloatingWindow lives in Quickshell.Wayland, not Quickshell: without this
-// import the type does not resolve, JarvixOverlay.qml fails to instantiate
-// the window, and the whole plugin fails to load.
-import Quickshell.Wayland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
