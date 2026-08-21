@@ -77,6 +77,7 @@ func (f *FakePlayer) Play(ctx context.Context, sampleRate, channels int, chunks 
 		}
 		return f.PlayErr
 	}
+	first := true
 	for {
 		select {
 		case c, ok := <-chunks:
@@ -86,6 +87,13 @@ func (f *FakePlayer) Play(ctx context.Context, sampleRate, channels int, chunks 
 			f.mu.Lock()
 			f.played = append(f.played, c)
 			f.mu.Unlock()
+			if first {
+				// The fake honours audio.Trace too, so the latency plumbing is
+				// exercised by every engine test rather than only in front of
+				// a real sound card.
+				first = false
+				firstAudio(ctx)
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}

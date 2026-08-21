@@ -163,6 +163,7 @@ func (p *PipeWirePlayer) Play(ctx context.Context, sampleRate, channels int, chu
 
 	writeErr := func() error {
 		defer func() { _ = stdin.Close() }()
+		first := true
 		for {
 			select {
 			case c, ok := <-chunks:
@@ -172,6 +173,13 @@ func (p *PipeWirePlayer) Play(ctx context.Context, sampleRate, channels int, chu
 				if _, err := stdin.Write(c); err != nil {
 					// pw-play died (or was cancelled); stop feeding it.
 					return err
+				}
+				if first {
+					// The last mark of the latency budget: audio has left
+					// Jarvix. Everything after this is PipeWire's latency,
+					// which we neither own nor can observe.
+					first = false
+					firstAudio(ctx)
 				}
 			case <-ctx.Done():
 				return ctx.Err()

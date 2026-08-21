@@ -31,10 +31,36 @@ type Config struct {
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
 	// delegation entirely — the tool is not registered.
-	Advisors map[string]Advisor `toml:"advisors"`
-	Audio    Audio              `toml:"audio"`
-	UI       UI                 `toml:"ui"`
-	Log      Log                `toml:"log"`
+	Advisors    map[string]Advisor `toml:"advisors"`
+	Audio       Audio              `toml:"audio"`
+	Performance Performance        `toml:"performance"`
+	UI          UI                 `toml:"ui"`
+	Log         Log                `toml:"log"`
+}
+
+// Performance decides how much of the engine stack stays warm between
+// interactions (ADR 0018).
+//
+// The whole section is a memory-for-latency trade. With warm engines off,
+// Jarvix behaves exactly as it did before: whisper reloads its model per
+// transcription and the TTS helper boots per response, costing hundreds of
+// milliseconds on the release-to-first-audio path but leaving nothing resident
+// between questions. With them on, one supervised child per engine stays
+// loaded — which is the difference between "answers begin" and "answers begin
+// after a pause", at the cost of a few hundred MB while the machine is idle.
+type Performance struct {
+	// WarmEngines keeps supervised STT and TTS workers alive between
+	// sessions. Turn it off on a low-RAM machine to get the old behaviour
+	// back, exactly.
+	WarmEngines bool `toml:"warm_engines"`
+	// WarmMemoryCapMB retires a warm worker whose resident set grows past
+	// this, so a leaking engine costs one cold start instead of the machine's
+	// memory. 0 disables the cap.
+	WarmMemoryCapMB int `toml:"warm_memory_cap_mb"`
+	// WarmIdleReapSec frees the warm workers after this long without an
+	// interaction; the next question pays one cold start. 0 keeps them until
+	// jarvixd exits.
+	WarmIdleReapSec int `toml:"warm_idle_reap_sec"`
 }
 
 // Tools configures the assistant's tool access. shell.run is opt-in: it
@@ -308,8 +334,12 @@ func Default() Config {
 			RenderTimeoutSec: 10,
 		},
 		Audio: Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
-		UI:    UI{ShowTranscript: true, ShowResponse: true, Notifications: true, NotificationPreview: true},
-		Log:   Log{Level: "info"},
+		// Warm by default: presence is the product, and the memory is
+		// reclaimed after ten idle minutes. The cap is a leak detector, not a
+		// working budget — whisper base.en plus Kokoro sit well under it.
+		Performance: Performance{WarmEngines: true, WarmMemoryCapMB: 2048, WarmIdleReapSec: 600},
+		UI:          UI{ShowTranscript: true, ShowResponse: true, Notifications: true, NotificationPreview: true},
+		Log:         Log{Level: "info"},
 	}
 }
 
@@ -342,6 +372,12 @@ const ArtifactSystemPrompt = " When the user asks for output better seen than he
 	"source, file names, or paths, because your answer is read aloud. If the tool rejects your " +
 	"source, fix exactly what the error names and retry once; if it fails again, or rendering is " +
 	"unavailable, apologise briefly and answer in prose."
+
+// minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
+// warm (whisper base.en alone is ~165 MB resident). A cap below it would
+// retire the worker the moment it loaded its model, turning warm mode into a
+// restart loop — so it is rejected rather than silently obeyed.
+const minWarmMemoryCapMB = 256
 
 // Load reads the config file at path, applying defaults for anything unset.
 // A missing file is not an error; defaults are returned.
@@ -443,6 +479,19 @@ func (c Config) Validate() error {
 		problems = append(problems, "audio.min_recording_ms must not be negative")
 	} else if c.Audio.MinRecordingMs >= c.Audio.MaxRecordingSec*1000 {
 		problems = append(problems, "audio.min_recording_ms must be smaller than audio.max_recording_sec")
+	}
+	if c.Performance.WarmMemoryCapMB < 0 {
+		problems = append(problems,
+			"performance.warm_memory_cap_mb must not be negative (0 disables the cap)")
+	} else if c.Performance.WarmEngines && c.Performance.WarmMemoryCapMB > 0 &&
+		c.Performance.WarmMemoryCapMB < minWarmMemoryCapMB {
+		problems = append(problems, fmt.Sprintf(
+			"performance.warm_memory_cap_mb is %d; a warm engine needs at least %d MB, so this would retire it on every use",
+			c.Performance.WarmMemoryCapMB, minWarmMemoryCapMB))
+	}
+	if c.Performance.WarmIdleReapSec < 0 {
+		problems = append(problems,
+			"performance.warm_idle_reap_sec must not be negative (0 keeps warm workers until jarvixd exits)")
 	}
 	if c.Artifacts.Dir == "" {
 		problems = append(problems, "artifacts.dir is empty; set the directory rendered artifacts are saved in")

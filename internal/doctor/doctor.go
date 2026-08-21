@@ -54,6 +54,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkArtifactRenderer,
 		checkIntentBinaries,
 		checkDaemon,
+		checkWarmEngines,
 		checkProviderConfigured,
 		checkProviderReachable,
 		checkPlugin,
@@ -233,6 +234,90 @@ func checkDaemon(_ config.Config, paths config.Paths) Result {
 	}
 	return Result{Status: OK, Name: "jarvixd running",
 		Detail: fmt.Sprintf("version %v, state %v", status["version"], status["state"])}
+}
+
+// checkWarmEngines reports the supervised engine processes and what they cost
+// in memory (ADR 0018). The daemon is the only place that knows: warm workers
+// are its children, and their state is not visible on disk. A worker that is
+// merely cold is not a problem — it warms on the next question — but one that
+// keeps restarting is, and that is what this surfaces.
+func checkWarmEngines(cfg config.Config, paths config.Paths) Result {
+	const name = "warm engines"
+	if !cfg.Performance.WarmEngines {
+		return Result{Status: OK, Name: name,
+			Detail: "disabled (performance.warm_engines = false); every session pays a cold start"}
+	}
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return Result{Status: Warn, Name: name,
+			Detail: "enabled, but jarvixd is not running so nothing is warm",
+			Fix:    "Start it: systemctl --user start jarvixd"}
+	}
+	defer func() { _ = client.Close() }()
+	var status map[string]any
+	if err := client.Call("status.get", nil, &status); err != nil {
+		return Result{Status: Warn, Name: name, Detail: "jarvixd did not answer: " + err.Error()}
+	}
+	workers, _ := status["warm"].([]any)
+	if len(workers) == 0 {
+		return Result{Status: Warn, Name: name,
+			Detail: "enabled, but the running daemon has no warm workers",
+			Fix:    "Reload the configuration: jarvix config reload"}
+	}
+
+	var parts []string
+	var restarting []string
+	totalMB := 0.0
+	for _, entry := range workers {
+		w, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		label, _ := w["name"].(string)
+		running, _ := w["running"].(bool)
+		rss := jsonNumber(w["rss_mb"])
+		restarts := jsonNumber(w["restarts"])
+		switch {
+		case running:
+			totalMB += rss
+			parts = append(parts, fmt.Sprintf("%s warm (%.0f MB)", label, rss))
+		default:
+			parts = append(parts, label+" cold")
+		}
+		if restarts >= warmRestartConcern {
+			detail, _ := w["last_error"].(string)
+			restarting = append(restarting, fmt.Sprintf("%s restarted %.0f times (%s)", label, restarts, detail))
+		}
+	}
+	detail := strings.Join(parts, ", ")
+	if totalMB > 0 {
+		detail += fmt.Sprintf("; %.0f MB resident, cap %d MB, reaped after %ds idle",
+			totalMB, cfg.Performance.WarmMemoryCapMB, cfg.Performance.WarmIdleReapSec)
+	}
+	if len(restarting) > 0 {
+		return Result{Status: Warn, Name: name,
+			Detail: detail + " — " + strings.Join(restarting, "; "),
+			Fix: "Check the engine with journalctl --user -u jarvixd -g warm, " +
+				"or turn warm mode off: jarvix config set performance.warm_engines=false"}
+	}
+	return Result{Status: OK, Name: name, Detail: detail}
+}
+
+// warmRestartConcern is how many restarts of one worker stop being routine
+// (an idle reap counts as one) and start being worth a warning.
+const warmRestartConcern = 3
+
+// jsonNumber reads a JSON-decoded number whichever way it landed.
+func jsonNumber(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	return 0
 }
 
 func checkProviderConfigured(cfg config.Config, paths config.Paths) Result {

@@ -180,6 +180,18 @@ func Settings() []Setting {
 			Get: func(c Config) any { return c.Audio.MinRecordingMs },
 			set: func(c *Config, v any) { c.Audio.MinRecordingMs = v.(int) }},
 
+		// Idle class: the warm workers live inside the STT/TTS adapters, and
+		// adapters are only ever swapped between sessions (engine.Reconfigure).
+		{Key: "performance.warm_engines", Label: "Keep engines warm", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Performance.WarmEngines },
+			set: func(c *Config, v any) { c.Performance.WarmEngines = v.(bool) }},
+		{Key: "performance.warm_memory_cap_mb", Label: "Warm worker memory cap (MB)", Type: TypeInt, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Performance.WarmMemoryCapMB },
+			set: func(c *Config, v any) { c.Performance.WarmMemoryCapMB = v.(int) }},
+		{Key: "performance.warm_idle_reap_sec", Label: "Reap warm workers after (seconds)", Type: TypeInt, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Performance.WarmIdleReapSec },
+			set: func(c *Config, v any) { c.Performance.WarmIdleReapSec = v.(int) }},
+
 		{Key: "ui.notifications", Label: "Desktop notifications", Type: TypeBool, Reload: ReloadLive,
 			Get: func(c Config) any { return c.UI.Notifications },
 			set: func(c *Config, v any) { c.UI.Notifications = v.(bool) }},

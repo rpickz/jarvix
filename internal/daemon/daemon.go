@@ -22,6 +22,7 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/warm"
 )
 
 // Daemon is a fully wired jarvixd instance.
@@ -58,6 +59,18 @@ type Daemon struct {
 	injected Deps
 	cfgMu    sync.Mutex
 	cfg      config.Config
+	// warm are the supervised engine processes the running configuration
+	// built. They are the daemon's children in the literal sense: killed on
+	// shutdown, and replaced (old ones killed) whenever a reload rebuilds the
+	// adapters, so a long-running jarvixd never accumulates engine processes.
+	// Guarded by cfgMu, alongside the configuration that produced them.
+	warm warmWorkers
+
+	// The most recent session's latency report (the session.timings payload),
+	// retained for `jarvix status --last`: the numbers are most wanted right
+	// after an interaction felt slow, which is exactly when the event has
+	// already gone out on the bus. Guarded by errMu.
+	lastTimings map[string]any
 }
 
 // Deps are the engine's collaborators, injectable for tests. Zero-value
@@ -84,7 +97,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// Remember what the caller injected before filling from config, so a
 	// later config reload rebuilds only what came from config (settings.go).
 	injected := deps
-	deps, err := fillDeps(cfg, paths, deps)
+	deps, workers, err := fillDeps(cfg, paths, deps, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +199,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
-		paths: paths, injected: injected, cfg: cfg,
+		paths: paths, injected: injected, cfg: cfg, warm: workers,
 	}
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
@@ -219,6 +232,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.server.Listen(); err != nil {
 		return err
 	}
+	// Warm workers die with the daemon. Their process groups would survive a
+	// bare exit — that is the whole point of a persistent worker — so the exit
+	// path has to say so explicitly (ADR 0018).
+	defer d.closeWarm()
 	// Subscribe before serving so no session that a client starts can finish
 	// unobserved. The watcher checks the live ui.notifications switch per
 	// session, so toggling notifications needs no restart (settings.go).
@@ -283,6 +300,43 @@ func (d *Daemon) startPTT(ctx context.Context) {
 
 // Bus exposes the event bus (used by tests).
 func (d *Daemon) Bus() *session.Bus { return d.bus }
+
+// closeWarm shuts down every warm worker of the running configuration.
+func (d *Daemon) closeWarm() {
+	d.cfgMu.Lock()
+	workers := d.warm
+	d.warm = warmWorkers{}
+	d.cfgMu.Unlock()
+	workers.Close()
+}
+
+// warmStatus reports the running configuration's warm workers.
+func (d *Daemon) warmStatus() []warm.Status {
+	d.cfgMu.Lock()
+	workers := d.warm
+	d.cfgMu.Unlock()
+	return workers.Status()
+}
+
+// warmReport renders the warm workers for status.get and doctor.get. The
+// shape is deliberately flat and self-describing: `jarvix doctor` prints it
+// verbatim, and a settings screen can too.
+func (d *Daemon) warmReport() []map[string]any {
+	statuses := d.warmStatus()
+	out := make([]map[string]any, 0, len(statuses))
+	for _, s := range statuses {
+		out = append(out, map[string]any{
+			"name":       s.Name,
+			"running":    s.Running,
+			"pid":        s.PID,
+			"rss_mb":     s.RSSBytes >> 20,
+			"uptime_sec": s.UptimeSec,
+			"restarts":   s.Restarts,
+			"last_error": s.LastError,
+		})
+	}
+	return out
+}
 
 func (d *Daemon) registerMethods() {
 	type submitParams struct {
@@ -386,6 +440,10 @@ func (d *Daemon) registerMethods() {
 			"protocol":   ipc.ProtocolVersion,
 			"ptt":        ptt,
 			"policy":     d.effectivePolicy(),
+			"warm":       d.warmReport(),
+			// The last session's latency budget, so `jarvix status --last`
+			// answers "why did that feel slow" without tailing the journal.
+			"last_timings": d.lastTimingsReport(),
 		}, nil
 	})
 	d.registerConfigMethods()

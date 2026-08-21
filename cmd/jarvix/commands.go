@@ -20,9 +20,13 @@ import (
 	"github.com/rpickz/jarvix/internal/doctor"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/session"
 )
 
-func cmdStatus(paths config.Paths) error {
+// cmdStatus prints the daemon's state. With last set, it also prints the
+// latency budget of the most recent interaction — the "why did that feel slow"
+// answer, without asking anyone to tail the journal.
+func cmdStatus(paths config.Paths, last bool) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
 		return err
@@ -38,6 +42,10 @@ func cmdStatus(paths config.Paths) error {
 	}
 	fmt.Printf("version:  %v (protocol %v)\n", status["version"], status["protocol"])
 	fmt.Printf("socket:   %s\n", paths.Socket)
+	printWarmWorkers(status["warm"])
+	if last {
+		printTimings(status["last_timings"])
+	}
 	if pol, ok := status["policy"].(map[string]any); ok {
 		fmt.Printf("policy:   default=%v confirm_timeout=%vs remember_for_conversation=%v\n",
 			pol["default"], pol["confirm_timeout_sec"], pol["remember_for_conversation"])
@@ -53,6 +61,71 @@ func cmdStatus(paths config.Paths) error {
 		}
 	}
 	return nil
+}
+
+// timingLabels turn the wire keys of session.timings into the pipeline stages
+// a person recognises. Order matters: the pipeline should read as a pipeline.
+var timingLabels = []struct{ key, label string }{
+	{session.StageCaptureToTranscript, "release → transcript"},
+	{session.StageTranscriptToDelta, "transcript → first token (model)"},
+	{session.StageDeltaToFirstPCM, "first token → first audio sample"},
+	{session.StageFirstPCMToAudioOut, "first sample → audio out"},
+	{session.StageReleaseToFirstAudio, "release → first audio (total)"},
+	{session.StageJarvixOverhead, "  of which Jarvix (excl. model)"},
+}
+
+// printTimings renders the last session's latency budget.
+func printTimings(v any) {
+	report, ok := v.(map[string]any)
+	if !ok || len(report) == 0 {
+		fmt.Println("last:     no interaction has finished since jarvixd started")
+		return
+	}
+	fmt.Printf("last:     session %v\n", report["session_id"])
+	for _, stage := range timingLabels {
+		ms, ok := report[stage.key]
+		if !ok {
+			continue
+		}
+		fmt.Printf("          %-33s %5.0f ms\n", stage.label, toFloat(ms))
+	}
+}
+
+// printWarmWorkers summarises the supervised engine processes, one line each,
+// so the memory they hold is visible where the daemon's state is.
+func printWarmWorkers(v any) {
+	workers, ok := v.([]any)
+	if !ok || len(workers) == 0 {
+		return
+	}
+	for _, entry := range workers {
+		w, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		state := "cold"
+		if running, _ := w["running"].(bool); running {
+			state = fmt.Sprintf("warm, %.0f MB, up %.0fs", toFloat(w["rss_mb"]), toFloat(w["uptime_sec"]))
+		}
+		line := fmt.Sprintf("warm:     %-8v %s", w["name"], state)
+		if restarts := toFloat(w["restarts"]); restarts > 0 {
+			line += fmt.Sprintf(", %.0f restarts", restarts)
+		}
+		fmt.Println(line)
+	}
+}
+
+// toFloat reads a JSON number whichever way it decoded.
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	return 0
 }
 
 // cmdConfirm answers a pending tool confirmation: the keyed counterpart to

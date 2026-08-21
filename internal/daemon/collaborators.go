@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai/openaicompat"
@@ -12,39 +13,126 @@ import (
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
+	"github.com/rpickz/jarvix/internal/warm"
 )
+
+// warmWorkers are the supervised engine processes one configuration built.
+//
+// They are tracked separately from the adapters that own them because their
+// lifetime is the daemon's, not a session's: something has to kill them when
+// jarvixd exits and when a config reload replaces the adapters, or the first
+// reload of the day leaves a whisper-server and a Python interpreter running
+// with nobody holding their handles (ADR 0018).
+type warmWorkers struct {
+	// engines are the adapters that keep a warm child; each can report its
+	// status and shut its child down.
+	engines []warmEngine
+}
+
+// warmEngine is the surface a warm adapter exposes to the daemon: report, and
+// shut down.
+type warmEngine interface {
+	WarmStatus() warm.Status
+	Close() error
+}
+
+// Close kills every warm child this configuration started. Safe on the zero
+// value, which is what a fully injected (test) daemon has.
+func (w warmWorkers) Close() {
+	for _, e := range w.engines {
+		_ = e.Close()
+	}
+}
+
+// Status reports every warm worker, in build order, for doctor and status.get.
+func (w warmWorkers) Status() []warm.Status {
+	out := make([]warm.Status, 0, len(w.engines))
+	for _, e := range w.engines {
+		out = append(out, e.WarmStatus())
+	}
+	return out
+}
 
 // fillDeps builds every engine collaborator the caller did not inject,
 // straight from configuration. It is shared by construction (New) and by
 // config reloads (settings.go): a reload rebuilds exactly what New would
 // have built, while injected collaborators — test fakes — survive reloads
 // untouched, because a fake cannot be rebuilt from config.
-func fillDeps(cfg config.Config, paths config.Paths, deps Deps) (Deps, error) {
+//
+// It also returns the warm workers it created, so the caller can shut them
+// down when this configuration stops being the running one. Nothing is spawned
+// here: a supervisor starts its child on first use, so building deps stays
+// free and a daemon that is never spoken to never loads a model.
+func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger) (Deps, warmWorkers, error) {
+	var workers warmWorkers
+	if log == nil {
+		log = slog.Default()
+	}
+	memCap := uint64(cfg.Performance.WarmMemoryCapMB) << 20
+	idle := time.Duration(cfg.Performance.WarmIdleReapSec) * time.Second
+
 	if deps.Provider == nil {
 		ep, ok := cfg.Endpoint()
 		if !ok {
-			return deps, fmt.Errorf("no endpoint for ai.provider %q", cfg.AI.Provider)
+			return deps, workers, fmt.Errorf("no endpoint for ai.provider %q", cfg.AI.Provider)
 		}
 		deps.Provider = openaicompat.New(cfg.AI.Provider, ep.BaseURL, ep.Key())
 	}
 	if deps.Transcriber == nil {
-		deps.Transcriber = &whispercpp.Transcriber{
+		cold := &whispercpp.Transcriber{
 			Binary:    cfg.STT.Whisper.Binary,
 			ModelPath: whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
 			Language:  cfg.STT.Whisper.Language,
+		}
+		if cfg.Performance.WarmEngines {
+			server := &whispercpp.ServerTranscriber{
+				// whisper.cpp ships the server next to the CLI; the config
+				// names the CLI, so the server is derived from it rather than
+				// adding a second binary path nobody would set.
+				Binary:    whispercpp.ServerBinaryFor(cfg.STT.Whisper.Binary),
+				ModelPath: cold.ModelPath,
+				Language:  cold.Language,
+				Cold:      cold,
+				MemoryCap: memCap,
+				IdleAfter: idle,
+				Log:       log,
+			}
+			deps.Transcriber = server
+			workers.engines = append(workers.engines, server)
+		} else {
+			deps.Transcriber = cold
 		}
 	}
 	if deps.Synthesizer == nil {
 		switch cfg.TTS.Provider {
 		case "kokoro":
-			deps.Synthesizer = &kokoro.Synthesizer{
+			cold := &kokoro.Synthesizer{
 				Voice: cfg.TTS.Kokoro.Voice,
 				Speed: cfg.TTS.Kokoro.Speed,
 			}
+			if cfg.Performance.WarmEngines {
+				w := &kokoro.WarmSynthesizer{
+					Cold: cold, MemoryCap: memCap, IdleAfter: idle, Log: log,
+				}
+				deps.Synthesizer = w
+				workers.engines = append(workers.engines, w)
+			} else {
+				deps.Synthesizer = cold
+			}
 		default:
-			deps.Synthesizer = &piper.Synthesizer{
+			cold := &piper.Synthesizer{
 				Binary: cfg.TTS.Piper.Binary,
 				Voice:  cfg.TTS.Piper.Voice,
+			}
+			if cfg.Performance.WarmEngines {
+				w := &piper.WarmSynthesizer{
+					Cold: cold, Dir: paths.Runtime,
+					MemoryCap: memCap, IdleAfter: idle, Log: log,
+				}
+				deps.Synthesizer = w
+				workers.engines = append(workers.engines, w)
+			} else {
+				deps.Synthesizer = cold
 			}
 		}
 	}
@@ -58,7 +146,7 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps) (Deps, error) {
 	if deps.Player == nil {
 		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
 	}
-	return deps, nil
+	return deps, workers, nil
 }
 
 // assistantSystemPrompt is the system prompt the engine runs with: the
