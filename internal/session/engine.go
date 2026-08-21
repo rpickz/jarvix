@@ -79,6 +79,12 @@ type Engine struct {
 	// releases the underlying timer.
 	timer func(d time.Duration) (<-chan time.Time, func())
 
+	// active tracks the session goroutines (transcribe, think) that read the
+	// swappable collaborators and options without holding mu. Reconfigure
+	// waits on it so a swap never races a draining goroutine — a cancelled
+	// session's think() can still be executing briefly after current is nil.
+	active sync.WaitGroup
+
 	mu      sync.Mutex
 	state   State
 	current *sess
@@ -90,6 +96,9 @@ type Engine struct {
 	// (remember_for_conversation). Cleared with the conversation; guarded
 	// by mu.
 	approvals map[string]bool
+	// reconfiguring blocks new sessions for the brief window in which
+	// Reconfigure drains e.active before swapping collaborators.
+	reconfiguring bool
 
 	// Conversation memory: prior exchanges carried across sessions so
 	// follow-up questions have context. Guarded by mu.
@@ -202,6 +211,10 @@ func (e *Engine) State() (State, string) {
 func (e *Engine) StartSession() (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.reconfiguring {
+		// Milliseconds at most: Reconfigure only drains goroutine tails.
+		return "", fmt.Errorf("new settings are being applied; try again in a moment")
+	}
 	if e.current != nil {
 		e.cancelLocked("interrupted by new session")
 	}
@@ -278,7 +291,8 @@ func (e *Engine) StopVoice() (discarded bool, err error) {
 	rec := s.recording
 	s.recording = nil
 	e.publish(Event{Type: "recording.stopped", Data: map[string]any{"session_id": s.id}})
-	go e.transcribe(s, rec)
+	e.active.Add(1)
+	go func() { defer e.active.Done(); e.transcribe(s, rec) }()
 	return false, nil
 }
 
@@ -464,7 +478,8 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		e.failLocked(s, "session", err)
 		return
 	}
-	go e.think(s)
+	e.active.Add(1)
+	go func() { defer e.active.Done(); e.think(s) }()
 }
 
 // transcribe runs STT on a finished recording, then hands over to the
@@ -779,4 +794,62 @@ func (e *Engine) ResetConversation() {
 		return
 	}
 	e.log.Debug("conversation history cleared", "component", "session")
+}
+
+// Reconfigure swaps the engine's collaborators and options for a new
+// configuration without a daemon restart. It refuses while a session is
+// active: adapters are only ever swapped between sessions, never under one —
+// a reload that cannot apply keeps the running configuration untouched.
+//
+// Idle state alone is not enough to swap safely: session goroutines read the
+// swapped fields without holding mu, and a finished or cancelled session's
+// think()/transcribe() may still be draining after current went nil. So
+// Reconfigure briefly blocks new sessions, waits for every tracked session
+// goroutine to exit, and only then swaps — making the swap invisible both to
+// running code and to the race detector.
+func (e *Engine) Reconfigure(provider ai.Provider, transcriber stt.Transcriber,
+	synthesizer tts.Synthesizer, recorder audio.Recorder, player audio.Player,
+	opts Options) error {
+	e.mu.Lock()
+	if e.reconfiguring {
+		e.mu.Unlock()
+		return fmt.Errorf("new settings are already being applied")
+	}
+	if e.current != nil || e.state != StateIdle {
+		e.mu.Unlock()
+		return fmt.Errorf("a session is active; the new settings apply once it finishes (run config.reload)")
+	}
+	e.reconfiguring = true
+	e.mu.Unlock()
+
+	// No new session can start now; drain the tails of past sessions.
+	e.active.Wait()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.reconfiguring = false
+	e.provider = provider
+	e.stt = transcriber
+	e.tts = synthesizer
+	e.recorder = recorder
+	e.player = player
+	e.opts = opts
+
+	// Conversation memory follows the new limits immediately, mirroring what
+	// loadHistory enforces at construction.
+	if opts.HistoryTurns <= 0 {
+		e.history = nil
+		e.lastTurn = time.Time{}
+		if e.store != nil {
+			if err := e.store.Clear(); err != nil {
+				e.log.Warn("could not remove persisted conversation history",
+					"component", "session", "error", err.Error())
+			}
+		}
+	} else if max := opts.HistoryTurns * 2; len(e.history) > max {
+		e.history = append([]ai.Message(nil), e.history[len(e.history)-max:]...)
+	}
+	e.log.Info("engine reconfigured", "component", "session",
+		"provider", provider.Name(), "tts", synthesizer.Name(), "model", opts.Model)
+	return nil
 }
