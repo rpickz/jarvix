@@ -13,24 +13,49 @@ import (
 // shell scripts injected onto PATH. They record their argv, produce/consume
 // data like the real tools, and honour SIGINT the way pw-record does.
 
-// pwRecordStub writes its argv, produces a WAV-sized file at the last
-// argument, then waits for SIGINT/SIGTERM like the real recorder. exec makes
-// the sleeper *be* the recorded process: the recorder's SIGINT/kill reaches
-// it directly, so no child outlives the test (a backgrounded sleep would be
+// pwRecordStub produces a WAV-sized file at the last argument, publishes its
+// argv, then waits for SIGINT/SIGTERM like the real recorder. exec makes the
+// sleeper *be* the recorded process: the recorder's SIGINT/kill reaches it
+// directly, so no child outlives the test (a backgrounded sleep would be
 // orphaned — the shell dies, the sleeper lingers for a minute).
+//
+// Two rules make the stub race-free under arbitrary load (#69):
+//
+//   - Every published file is written to a .tmp sibling and renamed into
+//     place. A shell redirect creates its target empty *before* the writer
+//     runs, so a polling test could observe a partial file — an empty argv
+//     capture, or a wav still short of Stop's 1024-byte empty-recording
+//     floor. rename(2) is atomic: once the final name exists, the content
+//     is complete.
+//   - The argv capture is published last. Tests gate on it before stopping
+//     or cancelling, so its existence proves the stub has finished every
+//     write — an interrupt can then only land on the sleeper, never orphan
+//     a mid-write child to race the test's TempDir cleanup.
 const pwRecordStub = `#!/bin/sh
-printf '%s\n' "$@" > "$JARVIX_STUB_DIR/pw-record.args"
 for last in "$@"; do :; done
-head -c "${JARVIX_STUB_WAV_BYTES:-4096}" /dev/zero > "$last"
+head -c "${JARVIX_STUB_WAV_BYTES:-4096}" /dev/zero > "$last.tmp"
+mv "$last.tmp" "$last"
+printf '%s\n' "$@" > "$JARVIX_STUB_DIR/pw-record.args.tmp"
+mv "$JARVIX_STUB_DIR/pw-record.args.tmp" "$JARVIX_STUB_DIR/pw-record.args"
 exec sleep 60
 `
 
-// pwPlayStub writes its argv, consumes stdin to a file, then exits with the
-// scripted status.
+// pwPlayStub publishes its argv (by rename, for the same reason as
+// pwRecordStub's), consumes stdin to a file, then exits with the scripted
+// status. Unless a failure status is scripted, the shell execs cat so the
+// stdin consumer *is* the recorded process: cancellation's kill then cannot
+// leave an orphaned cat behind to create the capture file while t.TempDir
+// cleanup is deleting the directory (seen under load as "TempDir RemoveAll
+// cleanup: … directory not empty"). The stdin capture itself needs no
+// rename: tests only read it after Play returns, i.e. after the stub exited.
 const pwPlayStub = `#!/bin/sh
-printf '%s\n' "$@" > "$JARVIX_STUB_DIR/pw-play.args"
+printf '%s\n' "$@" > "$JARVIX_STUB_DIR/pw-play.args.tmp"
+mv "$JARVIX_STUB_DIR/pw-play.args.tmp" "$JARVIX_STUB_DIR/pw-play.args"
+if [ "${JARVIX_STUB_EXIT:-0}" = 0 ]; then
+	exec cat > "$JARVIX_STUB_DIR/pw-play.stdin"
+fi
 cat > "$JARVIX_STUB_DIR/pw-play.stdin"
-exit "${JARVIX_STUB_EXIT:-0}"
+exit "$JARVIX_STUB_EXIT"
 `
 
 // installStubs puts fake pw-record/pw-play first on PATH and returns the
@@ -48,7 +73,10 @@ func installStubs(t *testing.T) string {
 	return dir
 }
 
-// waitForFile blocks until the stub has produced path.
+// waitForFile blocks until the stub has produced path. Stubs publish files by
+// atomic rename, so existence implies the content is complete; this poll is
+// therefore an event wait on the stub's readiness, not a race against its
+// writes. The deadline only bounds a genuinely broken stub.
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
