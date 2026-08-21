@@ -1,0 +1,68 @@
+# Test-depth jobs (issue #8): short fuzz regression pass and benchmarks.
+#
+# Kept separate from ci.yml (the CI-gate ticket owns that file) so the two
+# tickets do not collide. fuzz-short is a required gate: it replays the
+# committed corpora and fuzzes each parser briefly, catching regressions on
+# known crashers. Benchmarks are informational — they record the numbers as
+# an artifact per run on main so latency regressions are visible in review,
+# but they never block a merge.
+name: test-depth
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # weekly mutation run, Monday 03:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-short:
+    name: fuzz (30s per target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Replay committed corpora
+        run: go test -run 'Fuzz' ./...
+      - name: Short fuzz pass
+        run: make fuzz FUZZTIME=30s
+
+  bench:
+    name: benchmarks (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run benchmarks
+        # -count=5 gives benchstat-able samples; CI hardware is noisy, so
+        # treat these as trend data, not a gate.
+        run: go test -run='^$' -bench=. -benchmem -count=5 ./internal/session | tee bench.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: bench.txt
+
+  mutation:
+    name: mutation testing (manual / weekly)
+    # Mutation is minutes-long by design; never on the PR critical path.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make mutate

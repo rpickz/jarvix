@@ -46,3 +46,27 @@ uninstall:
 
 clean:
 	rm -rf bin
+
+# --- Test-depth targets (issue #8) -----------------------------------------
+# Local and CI invocations are identical: CI calls these same targets.
+
+.PHONY: fuzz bench mutate
+
+# Fuzz every parser that eats external input. Each target runs briefly; the
+# committed seed corpora under testdata/fuzz regression-check known inputs on
+# every plain `go test` run as well.
+FUZZTIME ?= 30s
+fuzz:
+	$(GO) test -run='^$$' -fuzz='^FuzzSentencer$$' -fuzztime=$(FUZZTIME) ./internal/session
+	$(GO) test -run='^$$' -fuzz='^FuzzSpeechText$$' -fuzztime=$(FUZZTIME) ./internal/session
+	$(GO) test -run='^$$' -fuzz='^FuzzConfigParse$$' -fuzztime=$(FUZZTIME) ./internal/config
+	$(GO) test -run='^$$' -fuzz='^FuzzWireDecode$$' -fuzztime=$(FUZZTIME) ./internal/ipc
+	$(GO) test -run='^$$' -fuzz='^FuzzReadStream$$' -fuzztime=$(FUZZTIME) ./internal/ai/openaicompat
+
+# Latency/throughput benchmarks over our own pipeline (fakes, not engines).
+bench:
+	$(GO) test -run='^$$' -bench=. -benchmem ./internal/session
+
+# Mutation testing over the session engine (the core state machine).
+mutate:
+	$(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@latest unleash ./internal/session
