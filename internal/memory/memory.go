@@ -1,0 +1,89 @@
+// Package memory is Jarvix's curated knowledge base (ADR 0025): the small,
+// structured set of facts the user explicitly asked Jarvix to keep —
+// "remember that the staging server is called atlas" — consulted on every
+// turn that reaches the model.
+//
+// It is deliberately not conversation history. History (internal/history) is
+// a record of what was *said*, rolled forward and eventually dropped; this is
+// what Jarvix has distilled as *true and worth keeping* — current, corrected
+// when the user corrects it, and deleted when the user says forget.
+//
+// Three properties shape everything here, each a requirement rather than a
+// nicety:
+//
+//   - The user owns the store. It is one human-editable TOML file under the
+//     XDG state dir (0600 in a 0700 directory), documented in its own header,
+//     and a hand-edit is picked up without a restart. A file Jarvix cannot
+//     parse degrades to a warning and an empty memory, never a crash — and is
+//     moved aside, never overwritten, so a typo cannot cost the user their
+//     facts.
+//   - Bounded. Injection into the model is token-capped, with the facts that
+//     do not fit dropped from *injection only* (never from storage) and the
+//     trim disclosed to the model. Storage itself is capped with an
+//     actionable warning as it fills.
+//   - Content is private. Fact contents never reach the log at any level;
+//     what was injected is retained for the audit surfaces (`jarvix status
+//     --last`, the memory.last IPC method) instead.
+package memory
+
+import "time"
+
+// Fact is one remembered statement. Content is a short, self-contained
+// sentence — the model is steered to phrase it that way — because each fact
+// must make sense injected on its own, months after the conversation that
+// stored it.
+type Fact struct {
+	// ID is the short handle ("m3") the tools and the CLI address the fact
+	// by. Stable for the fact's lifetime; hand-added facts without one are
+	// assigned the next free id.
+	ID string
+	// Content is the fact itself, in words.
+	Content string
+	// Stored is when the fact was first remembered.
+	Stored time.Time
+	// Updated is when the content last changed — equal to Stored until the
+	// fact is superseded. It is also the injection-trim priority: the facts
+	// confirmed least recently are the first left out when the token cap
+	// bites.
+	Updated time.Time
+	// Source references the turn that stored or last updated the fact (a
+	// session id such as "s12"), so "where did that come from" is
+	// answerable. Empty when unknown — a hand-edit, or a store operation
+	// outside any session.
+	Source string
+	// Previous is the supersede trail, oldest first: every content this fact
+	// held before, with when it was stored and when it was replaced — so
+	// "when did that change" is answerable long after the correction.
+	Previous []Revision
+}
+
+// Revision is one superseded value of a fact.
+type Revision struct {
+	// Content is the old value.
+	Content string
+	// Stored is when the old value was written.
+	Stored time.Time
+	// Superseded is when it was replaced.
+	Superseded time.Time
+}
+
+// Injection is what one turn's memory consultation produced: the message
+// block handed to the model, and the accounting the audit surfaces disclose.
+type Injection struct {
+	// Message is the delimited block injected as a system message, carrying
+	// its provenance ("things the user asked you to remember"). Empty when
+	// there is nothing to inject — an empty memory must not cost a message.
+	Message string
+	// Facts are the facts the block carries, in injection order (most
+	// recently confirmed first). Retained so the user can see exactly what
+	// the model was given, mirroring desktop context (ADR 0019).
+	Facts []Fact
+	// Trimmed counts facts that exist in the store but were left out of the
+	// block by the token cap. The trim is disclosed to the model inside
+	// Message; this field discloses it to the user.
+	Trimmed int
+	// Total is how many facts the store held at injection time.
+	Total int
+	// EstTokens is the estimated token cost of Message (see EstimateTokens).
+	EstTokens int
+}
