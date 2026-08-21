@@ -749,6 +749,55 @@ window shows each routine with a Run button. Like `[[intents.custom]]`, the
 tables are hand-edited TOML — outside `jarvix config set` — and land on the
 next `config.reload` or restart.
 
+### Capturing a routine from the live desktop ("save this as …")
+
+You never have to write these tables yourself. Arrange the desktop the way
+you want it, then say:
+
+> "Jarvix, save this as my morning setup"
+
+(also "save this layout as …", "save this setup as …", "save this desktop
+as …", "remember this layout as …" — the words after "as", up to six, become
+the routine's name and its trigger phrase). Jarvix reads the window
+inventory once, derives one step per window — app, workspace, floating
+geometry or tiled split — and writes the `[[routines]]` entry through the
+same comment-preserving rewrite `jarvix config set` uses, with a provenance
+comment (`# captured 2026-08-21`) above it. Your hand-written comments and
+formatting elsewhere in the file are untouched, and a failed write leaves
+the file exactly as it was. The confirmation counts what was kept: "Seven
+windows across three workspaces, saved as morning setup."
+
+What capture **excludes**, by rule:
+
+- the Jarvix/Omarchy-shell surfaces themselves;
+- windows that accept no input (splash screens and other transient
+  surfaces), and windows with no class at all;
+- windows on special (scratchpad) workspaces — routine steps place numbered
+  workspaces 1–99 only.
+
+Unmapped windows never appear in the inventory to begin with. Capture is
+read-only against the desktop: it can never move a window.
+
+The launch command is derived from the window class (collapsing reverse-DNS
+classes like `md.obsidian.Obsidian` to `obsidian`, and trying the
+`-desktop` packaging convention), and only a command that actually resolves
+on your PATH is written; when class and command differ, `match` is recorded
+so re-runs dedupe onto the running window. A window whose command cannot be
+derived — a browser web-app profile, say — is still saved: its step gets the
+placeholder `app = "CHANGE-ME"` with a `# TODO:` comment naming the class,
+the spoken confirmation says which app needs a hand, and `jarvix routines`
+(and `routines.list`) mark the routine **incomplete** until you edit the
+real command in. Tiled windows are captured as `tile = "split"`; promoting
+one to `"master"` is a one-word hand edit, because the inventory cannot say
+which window owns the layout.
+
+If the name already exists, Jarvix asks before replacing ("A routine called
+morning setup already exists. Should I replace it with this layout?") —
+declining leaves the file untouched, and replacing keeps the entry's curated
+trigger phrases while the steps are replaced wholesale. A captured routine
+is immediately runnable: the daemon reloads its intent table as soon as the
+capture's own session finishes.
+
 ## Desktop context (`[context]`)
 
 Ask "what does this error mean?" with a stack trace selected and Jarvix

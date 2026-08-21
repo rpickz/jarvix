@@ -106,3 +106,70 @@ identically however a routine is invoked. Routines are listed read-only
   the schema is flat, `config.RoutineDefinitions` + `routine.Problems` are
   the reusable parser/validator, and validation messages name tables by
   index.
+
+## Addendum: capture by demonstration (issue #62)
+
+Capture closes the authoring loop this ADR left open: arrange the desktop,
+say "save this as my morning setup", and the `[[routines]]` entry above is
+written rather than typed. The decisions that shaped it, each an extension
+of a decision already on this page rather than a new direction:
+
+**The trigger is the router's one free-text slot, and literal phrases always
+beat it.** "save this as {name}" compiles into the grammar table with a
+trailing name slot (one to six words) — the only free text the router will
+ever carry, trailing-only so where the name stops is never ambiguous. The
+capture rules compile last, and rules are tried in insertion order, so a
+built-in, custom-intent, or routine phrase that happens to begin with the
+same words keeps its meaning; the slot claims only utterances no literal
+phrase owns. `{name}` stays unusable in `[[intents.custom]]` and routine
+phrases, where free text would reach a shell or parameterise fixed steps.
+
+**Derivation shares the dedupe matcher's identity logic; it never guesses.**
+The launch command is the class collapsed the way spoken summaries collapse
+it (`desktop.AppName`, plus the one widespread `-desktop` packaging
+convention), and a candidate is only written if it actually resolves on
+PATH. When class ≠ command, the step records `match` so this ADR's dedupe
+finds the running window on every re-run. An underivable command is a saved
+partial capture, never a drop: placeholder `app = "CHANGE-ME"` with `match`
+on the class and a `# TODO:` naming it, one spoken line saying which app
+needs a hand, and an `incomplete` mark on every listing surface until a
+human resolves it.
+
+**Exclusion is a documented rule set, counted honestly.** The Jarvix/shell
+surfaces, windows that accept no input (transients), classless windows, and
+special workspaces are excluded; the spoken confirmation counts only what
+was kept. Tiled windows are captured as `tile = "split"` — the inventory
+cannot say which window is the master, and promoting the wrong one every
+morning is worse than a one-word hand edit.
+
+**Writes go through ADR 0015's contract, extended to array-of-tables.** The
+settings editor addresses dotted keys, which every `[[routines]]` block
+shares, so capture gets its own surgical writer: blocks addressed by
+position (the parser decides which block is which), a provenance comment
+("captured 2026-08-21") above the entry that a replace refreshes rather than
+stacks, per-step TODO comments, and the same guard — the result must parse
+and the whole routines list must read back as exactly the intended edit, or
+nothing is written. Writes are atomic; a failure leaves the file
+byte-identical. Hand-written comments elsewhere survive both this write and
+every later `config.set`.
+
+**Replacing an existing name goes through the ADR 0014 exchange, and the
+approval is never remembered.** A misheard phrase must not clobber a curated
+routine; each replace is its own question. Commit re-reads the file after
+the question — an entry that appeared during the thirty-second window is
+refused, because nobody was asked about it. Replacing keeps the old entry's
+curated phrases; the steps are replaced wholesale (diffing is out of scope).
+
+**The captured routine is immediately runnable via a deferred reload.** The
+engine cannot swap its router under the session that spoke the capture, so
+the daemon's config catches up at commit (routines.list, routines.run name
+lookup) and the session watcher rebuilds the engine on that session's
+`session.finished` — announced as `config.changed`. This also fixed a
+latent gap: a reload after a *hand-edit* to `[[routines]]` or
+`[[intents.custom]]` now rebuilds the router too (the structured tables are
+compared directly, since they have no settings-registry entry).
+
+**Capture is read-only against the desktop by construction.** The snapshot
+is a pure function of one inventory read; the service calls no compositor
+verb but `Windows`. The inventory grew geometry (`at`/`size`) for it — the
+one addition to the seam.
