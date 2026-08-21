@@ -87,8 +87,9 @@ Every event's params include `session_id` where a session is involved.
 | `assistant.started` | `{provider}` | Provider request opened |
 | `assistant.delta` | `{content}` | One streamed response fragment |
 | `assistant.finished` | `{content}` | Full response text |
-| `tool.started` / `tool.finished` | `{tool, arguments}` / `{tool}` | Bounds of one real tool execution — never published for denied or declined calls |
-| `tool.confirmation_required` | `{tool, command, summary, rule, timeout_sec}` | The permission gate paused a tool call (state `awaiting_confirmation`). `command` is the exact command, verbatim; `summary` is the spoken question, generated daemon-side from the command; the overlay should display `command` |
+| `tool.started` / `tool.finished` | `{tool, arguments, detail?}` / `{tool}` | Bounds of one real tool execution — never published for denied or declined calls. `detail` is present only for tools that can run long (an advisor consultation) and is a short label to show for the duration, e.g. `Consulting claude…` |
+| `tool.progress` | `{tool, message, elapsed_sec}` | A tool has been running for `elapsed_sec` seconds and is still going. Published **at most once** per call, and only for tools that carry a `detail` label; `message` is also spoken aloud. Reassurance, not a countdown — clients should show it and expect nothing further until `tool.finished` |
+| `tool.confirmation_required` | `{tool, command, summary, rule, timeout_sec}` | The permission gate paused a tool call (state `awaiting_confirmation`). `command` is the exact command, verbatim; `summary` is the spoken question, generated daemon-side from the command; the overlay should display `command`. For `advisor.ask`, `command` is the advisor's name — what the user is actually approving, and what a remembered approval is keyed on |
 | `tool.confirmed` | `{tool, command, source}` | The user approved; the call executes. `source`: `cli`, `text`, or `voice` |
 | `tool.declined` | `{tool, command, source}` | The call will not run. `source`: `cli`, `text`, `voice`, `timeout`, `interrupted`, or `error` |
 | `tool.denied` | `{tool, command, rule}` | A deny rule blocked the call outright; no confirmation is possible |

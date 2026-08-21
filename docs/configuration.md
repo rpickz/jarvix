@@ -180,12 +180,18 @@ notification_preview = true      # show the start of the answer in the
 [log]
 level = "info"                   # debug | info | warn | error
 
-# Assistant CLIs Jarvix can delegate heavyweight questions to. `jarvix setup`
-# detects installed CLIs (claude, codex, gemini, aider, goose, opencode) and
-# records them here; delegation itself ships separately (issue #3) and will
-# consume these tables — recording them now costs nothing.
+# Assistant CLIs Jarvix delegates heavyweight questions to. `jarvix setup`
+# detects installed CLIs (aider, claude, codex, gemini, goose, opencode) and
+# records them here. A table naming nothing but a binary is complete: the
+# shipped preset supplies the rest.
 [advisors.claude]
 binary = "/usr/bin/claude"       # absolute path found on PATH at setup time
+# args = ["-p"]                  # argv template; preset per known CLI.
+                                 # One element may be "{question}" (passed as
+                                 # a single argument); with none, the question
+                                 # goes to the CLI's stdin. Never shell-parsed.
+# timeout_sec = 120              # the process group is killed past this
+# description = "..."            # what the model is told this advisor is for
 ```
 
 ## Secrets
@@ -204,6 +210,12 @@ systemctl --user restart jarvixd
 
 Keyring/Secret Service integration is planned (see the implementation plan).
 Keys are never logged; diagnostics redact credentials.
+
+Advisor CLIs (below) run with a **scrubbed environment**: every variable
+named like a credential (`*_API_KEY`, `*_TOKEN`, `*SECRET*`, `*PASSWORD*`, …)
+and every `api_key_env` Jarvix itself reads are withheld from the child. An
+advisor authenticates itself — that is the premise of delegating to it — and
+Jarvix's keys are not its to spend.
 
 ## Whisper models
 
@@ -269,6 +281,64 @@ without asking again — scoped strictly to the current conversation:
 approvals.
 
 `jarvix status` prints the effective policy.
+
+## Advisors (asking a stronger assistant)
+
+Jarvix runs a small local model — right for instant answers, wrong for
+"review this architecture". When a request exceeds it (or you say "ask Claude
+about…"), it hands the question to an assistant CLI you already have
+installed and speaks the answer back
+([ADR 0016](adr/0016-advisor-delegation.md)). Each CLI keeps its own auth and
+billing; Jarvix never passes its own API keys on.
+
+`jarvix setup` detects the known CLIs on PATH and writes a table per advisor
+you accept. That table is all it takes — the shipped preset supplies the
+non-interactive command line, a description for the model, and a 120-second
+timeout:
+
+```toml
+[advisors.claude]
+binary = "/usr/bin/claude"
+```
+
+Override anything you like. `args` is an argv template, passed straight to
+the program — **no shell is involved at any point**, so nothing in a question
+can be interpreted as syntax. The question reaches the CLI on stdin unless
+exactly one argument is the literal `{question}`, which is replaced with it
+as a single argument:
+
+```toml
+[advisors.house]
+binary = "/home/me/bin/house-llm"
+args = ["--ask", "{question}"]
+timeout_sec = 300
+description = "the research box in the basement, good at maths"
+```
+
+How much it asks first:
+
+- An advisor running an **unmodified read-only preset** (`claude`, `codex`,
+  `gemini` — one-shot answering modes) is consulted **silently**: it reads and
+  replies, which is no more authority than the local model already has.
+- Everything else **asks first**: the coding agents that edit files and run
+  commands (`aider`, `goose`, `opencode`), and any advisor whose `args` you
+  wrote yourself — Jarvix has not audited that command line, so it will not
+  claim it only answers. You hear "I'd like to ask aider about this. Should I
+  go ahead?" and answer as with any other confirmation.
+- `[tools.policy.tool]` overrides both: `"advisor.ask" = "ask"` confirms every
+  consultation, `"allow"` confirms none, `"deny"` turns delegation off.
+
+What a consultation is bounded by: the configured timeout (the whole process
+group is killed, so helper processes die too), a 64 KB cap on the answer, and
+the session context — Escape or `jarvix cancel` kills the CLI immediately. If
+it is missing, fails, or takes too long, Jarvix says so in one sentence and
+moves on; the CLI's error output is logged, never read aloud. After about ten
+seconds it says once that it is still working, and the overlay shows
+"Consulting claude…" for the duration.
+
+`jarvix doctor` lists each configured advisor and whether its binary is still
+there (a `LookPath`, nothing more — no network, no invocation, nothing
+billed).
 
 ## Artifacts (work you keep)
 
