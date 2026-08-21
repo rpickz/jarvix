@@ -57,12 +57,14 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 	if m.Control == intent.ControlStopSpeech {
 		// "Stop" is answered with silence: an acknowledgement would be the
 		// one thing the user just asked for less of. Speech is halted through
-		// the existing CancelSpeech path — a no-op unless a session really is
-		// speaking, which is the case once a transcript can arrive without a
-		// new session interrupting the old one (wake word, Phase 6). Today
-		// the interrupting session.start has usually stopped it already, and
-		// the outcome the user hears is identical either way.
-		_ = e.CancelSpeech()
+		// the one stop mechanism, CancelSpeech, which asks the speaker itself
+		// whether audio is live rather than reading the session state — so it
+		// works whatever the turn happens to be doing internally (issue #54).
+		// On a push-to-talk "stop" the interrupting session.start has usually
+		// silenced the old session already and this reports a no-op; a
+		// wake-word "stop" (ADR 0024) can arrive with the speaking session
+		// still current, and then this is the call that does the stopping.
+		e.CancelSpeech()
 		e.publishIntent(s, m, "", nil, started)
 		e.mu.Lock()
 		e.finishLocked(s)

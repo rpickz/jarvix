@@ -623,10 +623,9 @@ func (d *Daemon) registerMethods() {
 		return map[string]bool{"discarded": discarded}, nil
 	})
 	d.server.Handle("speech.cancel", func(json.RawMessage) (any, error) {
-		if err := d.engine.CancelSpeech(); err != nil {
-			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
-		}
-		return nil, nil
+		// stopped: false is a no-op, not an error — there was nothing playing
+		// to stop, and the caller deserves to know which happened (issue #54).
+		return map[string]bool{"stopped": d.engine.CancelSpeech()}, nil
 	})
 	d.server.Handle("conversation.reset", func(json.RawMessage) (any, error) {
 		d.engine.ResetConversation()
