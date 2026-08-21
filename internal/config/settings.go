@@ -239,6 +239,15 @@ func Settings() []Setting {
 		{Key: "tools.artifacts", Label: "Assistant may create artifacts", Type: TypeBool, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Tools.Artifacts },
 			set: func(c *Config, v any) { c.Tools.Artifacts = v.(bool) }},
+		{Key: "tools.desktop", Label: "Assistant may move windows", Type: TypeBool, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Tools.Desktop },
+			set: func(c *Config, v any) { c.Tools.Desktop = v.(bool) }},
+		// A list, not a string: each entry is one program, launched directly
+		// rather than through a shell. The CLI's comma form
+		// ("firefox,alacritty") is how that is spelled from a shell.
+		{Key: "tools.desktop_apps", Label: "Applications the assistant may start", Type: TypeStringList, Reload: ReloadRestart,
+			Get: func(c Config) any { return append([]string(nil), c.Tools.DesktopApps...) },
+			set: func(c *Config, v any) { c.Tools.DesktopApps = v.([]string) }},
 
 		{Key: "artifacts.dir", Label: "Artifact directory", Type: TypeString, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Artifacts.Dir },

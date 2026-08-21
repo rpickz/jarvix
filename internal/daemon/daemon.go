@@ -138,6 +138,29 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		})
 		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
 	}
+	// The window tools (ADR 0022). Registered as five verbs sharing one
+	// compositor and one inventory cache, so the gate can allow the reads and
+	// ask about the changes without either being a special case.
+	if cfg.Tools.Desktop {
+		windows := tools.NewDesktop(tools.DesktopOptions{
+			Compositor: &desktop.Hyprland{},
+			Apps:       cfg.Tools.DesktopApps,
+			ScrubEnv:   providerKeyEnvNames(cfg),
+			// The event carries what was done to which window so the overlay
+			// can show it; addresses stay daemon-side, and spoken summaries
+			// never mention either.
+			OnAction: func(verb, target string) {
+				bus.Publish(session.Event{Type: "desktop.action",
+					Data: map[string]any{"verb": verb, "target": target}})
+			},
+			Log: logger,
+		})
+		for _, t := range windows.Tools() {
+			registry.Register(t)
+		}
+		logger.Info("tool enabled", "component", "tools",
+			"tools", strings.Join(windows.Names(), ","), "apps", cfg.Tools.DesktopApps)
+	}
 	// Advisor delegation is enabled by configuring an advisor and nothing
 	// else: `jarvix setup` writes the tables, and each advisor carries its
 	// own authentication (ADR 0016).

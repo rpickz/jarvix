@@ -45,6 +45,10 @@ func SettingsChecks(cfg config.Config, paths config.Paths) []ReadinessResult {
 		{checkTTS, "tts.provider"},
 		{checkArtifactRenderer, "tools.artifacts"},
 		{checkContextSources, "context.window"},
+		// Two local hyprctl calls, both bounded and neither on the network —
+		// fast enough for a settings screen, and the one place the answer to
+		// "why does nothing happen when I ask it to focus something?" lives.
+		{checkWindowControl, "tools.desktop"},
 		{checkPushToTalk, "activation.ptt_chord"},
 	}
 	results := make([]ReadinessResult, 0, len(checks))

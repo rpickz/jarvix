@@ -54,6 +54,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkArtifactRenderer,
 		checkIntentBinaries,
 		checkContextSources,
+		checkWindowControl,
 		checkDaemon,
 		checkWarmEngines,
 		checkProviderConfigured,

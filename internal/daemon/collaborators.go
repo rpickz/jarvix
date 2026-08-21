@@ -162,6 +162,9 @@ func assistantSystemPrompt(cfg config.Config) string {
 	if cfg.Tools.Artifacts {
 		prompt += config.ArtifactSystemPrompt
 	}
+	if cfg.Tools.Desktop {
+		prompt += config.DesktopSystemPrompt
+	}
 	if len(cfg.Advisors) > 0 {
 		prompt += config.AdvisorSystemPrompt
 	}

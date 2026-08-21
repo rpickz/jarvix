@@ -26,7 +26,10 @@ with no model call at all, because an explicit intent table sits in front of
 the AI ([ADR 0017](docs/adr/0017-deterministic-intent-router.md)). Ask
 something its small local model has no business answering and it hands the
 question to a stronger assistant CLI you already have installed — "ask Claude
-to review my publish pipeline" — and speaks the answer back. The long-term
+to review my publish pipeline" — and speaks the answer back. Say "put me back
+in my browser" and it finds the window and switches to it; ask what you have
+open and it tells you
+([ADR 0022](docs/adr/0022-desktop-window-control.md)). The long-term
 goal is a system that routes natural intent to the right mechanism:
 deterministic local commands, desktop context, AI reasoning, tools, or
 speech — see [docs/roadmap.md](docs/roadmap.md).
