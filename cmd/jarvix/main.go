@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
@@ -14,14 +15,16 @@ const usage = `jarvix — voice-native computer interaction for Omarchy
 
 Usage:
   jarvix status                 Show daemon state and warm-engine workers
-  jarvix status --last          ...plus the last interaction's stage latencies
-                                and the desktop context Jarvix was given
+  jarvix status --last          ...plus the last interaction's stage latencies,
+                                the desktop context and remembered facts it was given
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
   jarvix confirm                Approve the pending tool confirmation
   jarvix deny                   Decline the pending tool confirmation
   jarvix new                    Start a fresh conversation (forget context)
+  jarvix memory list [query]    List remembered facts (the knowledge base)
+  jarvix memory forget <what>   Delete a remembered fact, by id or by words
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix mute                   Close the microphone: kill background capture
@@ -93,6 +96,21 @@ func run(args []string) int {
 		err = cmdConfirm(paths, false)
 	case "new":
 		err = cmdNewConversation(paths)
+	case "memory":
+		switch {
+		case len(rest) >= 1 && rest[0] == "list":
+			query := ""
+			if len(rest) > 1 {
+				// Join so `jarvix memory list staging server` needs no quotes
+				// — a query is words, and words arrive as arguments.
+				query = strings.Join(rest[1:], " ")
+			}
+			err = cmdMemoryList(paths, query)
+		case len(rest) >= 2 && rest[0] == "forget":
+			err = cmdMemoryForget(paths, strings.Join(rest[1:], " "))
+		default:
+			return fail(fmt.Errorf("usage: jarvix memory list [query] | jarvix memory forget <id-or-words>"))
+		}
 	case "ptt":
 		if len(rest) < 1 || (rest[0] != "start" && rest[0] != "stop" && rest[0] != "toggle") {
 			return fail(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))

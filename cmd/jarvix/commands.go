@@ -54,6 +54,11 @@ func cmdStatus(paths config.Paths, last bool) error {
 		}
 		// ...and "what did it do with my keyboard?" is the third (ADR 0023).
 		printLastTyping(status["last_typing"])
+		// ...and "which remembered facts was it given?" is the fourth
+		// (ADR 0025).
+		if err := printLastMemory(client); err != nil {
+			return err
+		}
 	}
 	if pol, ok := status["policy"].(map[string]any); ok {
 		fmt.Printf("policy:   default=%v confirm_timeout=%vs remember_for_conversation=%v\n",

@@ -19,6 +19,7 @@ import (
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
@@ -55,6 +56,12 @@ type Daemon struct {
 	policy   config.ToolsPolicy // effective gate config, reported by status.get
 	pttChord []uint16           // daemon-side hold-to-talk chord; empty = disabled
 	pttLive  bool               // watcher running (chord set + input devices readable)
+
+	// memory is the knowledge base (ADR 0025), nil when memory.enabled is
+	// false. One instance for the daemon's life: the memory tools write
+	// through it, the engine injects from it, and the memory.* IPC methods
+	// read it — so every surface always agrees on what is remembered.
+	memory *memory.Book
 
 	// Background wake-word listening (ADR 0024), nil unless activation.mode
 	// is "wake_word" and its detector is installed. wakeSession is the
@@ -352,6 +359,23 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("desktop context disabled", "component", "context")
 	}
 
+	// The knowledge base (ADR 0025): facts the user explicitly asked Jarvix
+	// to keep, in one hand-editable file under the XDG state dir. Disabled
+	// means absent — no store consulted, no tools registered — but never
+	// deleted: unlike conversation history, the store holds facts the user
+	// deliberately curated, and only an explicit forget removes them.
+	var book *memory.Book
+	if cfg.Memory.Enabled {
+		book = memory.NewBook(paths.MemoryFile(), memory.BookOptions{
+			MaxFacts:          cfg.Memory.MaxFacts,
+			MaxInjectedTokens: cfg.Memory.MaxInjectedTokens,
+		}, logger)
+		logger.Info("memory enabled", "component", "memory", "path", paths.MemoryFile(),
+			"max_facts", cfg.Memory.MaxFacts, "max_injected_tokens", cfg.Memory.MaxInjectedTokens)
+	} else {
+		logger.Info("memory disabled", "component", "memory")
+	}
+
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
 	var store history.Store = &history.File{Path: paths.HistoryFile()}
@@ -360,7 +384,27 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger,
-		engineOptions(cfg, compositor, logger))
+		engineOptions(cfg, compositor, book, logger))
+
+	// The memory tools are registered after the engine exists because a
+	// stored fact carries its source turn, and only the engine knows which
+	// session is asking. Registration still precedes serving — the registry
+	// is only read once sessions run.
+	if book != nil {
+		mem := tools.NewMemory(tools.MemoryOptions{
+			Book: book,
+			Source: func() string {
+				_, id := engine.State()
+				return id
+			},
+			Log: logger,
+		})
+		for _, t := range mem.Tools() {
+			registry.Register(t)
+		}
+		logger.Info("tool enabled", "component", "tools",
+			"tools", strings.Join(mem.Names(), ","))
+	}
 
 	if deps.Notifier == nil {
 		deps.Notifier = &desktop.NotifySend{}
@@ -373,7 +417,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	server := ipc.NewServer(paths.Socket, bus, logger)
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
-		registry: registry, policy: cfg.Tools.Policy,
+		registry: registry, policy: cfg.Tools.Policy, memory: book,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor,
 		paths:      paths, injected: injected, cfg: cfg, warm: workers,
@@ -697,6 +741,7 @@ func (d *Daemon) registerMethods() {
 	})
 	d.registerConfigMethods()
 	d.registerContextMethods()
+	d.registerMemoryMethods()
 	d.registerTextMethods()
 	d.registerWakeMethods()
 }

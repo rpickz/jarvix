@@ -237,6 +237,21 @@ func Settings() []Setting {
 			Get: func(c Config) any { return c.Context.TimeoutMs },
 			set: func(c *Config, v any) { c.Context.TimeoutMs = v.(int) }},
 
+		// The knowledge base (ADR 0025) is restart-class like the rest of
+		// the tool registry: the store and the memory tools are wired at
+		// daemon construction, and a half-applied toggle — injection off but
+		// tools still registered — would be worse than an honest "restart to
+		// finish".
+		{Key: "memory.enabled", Label: "Remember facts the user asks Jarvix to keep", Type: TypeBool, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Memory.Enabled },
+			set: func(c *Config, v any) { c.Memory.Enabled = v.(bool) }},
+		{Key: "memory.max_facts", Label: "Remembered facts the store may hold", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Memory.MaxFacts },
+			set: func(c *Config, v any) { c.Memory.MaxFacts = v.(int) }},
+		{Key: "memory.max_injected_tokens", Label: "Token budget for remembered facts per turn", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Memory.MaxInjectedTokens },
+			set: func(c *Config, v any) { c.Memory.MaxInjectedTokens = v.(int) }},
+
 		{Key: "audio.input_device", Label: "Microphone device", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Audio.InputDevice },
 			set: func(c *Config, v any) { c.Audio.InputDevice = v.(string) }},

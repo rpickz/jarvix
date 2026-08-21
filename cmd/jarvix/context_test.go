@@ -43,6 +43,9 @@ func TestRunStatusLastShowsWhatWasCaptured(t *testing.T) {
 				},
 			}, nil
 		},
+		"memory.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"enabled": false}, nil
+		},
 	})
 	var code int
 	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
@@ -71,6 +74,9 @@ func TestRunStatusLastWithNothingCaptured(t *testing.T) {
 		"context.last": func(json.RawMessage) (any, error) {
 			return map[string]any{"captured": false}, nil
 		},
+		"memory.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"enabled": false}, nil
+		},
 	})
 	var code int
 	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
@@ -90,6 +96,9 @@ func TestRunStatusWithoutLastSkipsTheContextCall(t *testing.T) {
 		"status.get": idleStatus,
 		"context.last": func(json.RawMessage) (any, error) {
 			return map[string]any{"captured": false}, nil
+		},
+		"memory.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"enabled": false}, nil
 		},
 	})
 	var code int
@@ -135,6 +144,9 @@ func TestRunStatusLastShowsTheTypingAudit(t *testing.T) {
 		"context.last": func(json.RawMessage) (any, error) {
 			return map[string]any{"captured": false}, nil
 		},
+		"memory.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"enabled": false}, nil
+		},
 	})
 	var code int
 	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
@@ -171,6 +183,9 @@ func TestRunStatusLastReportsAFocusChange(t *testing.T) {
 		"context.last": func(json.RawMessage) (any, error) {
 			return map[string]any{"captured": false}, nil
 		},
+		"memory.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"enabled": false}, nil
+		},
 	})
 	var code int
 	stdout, stderr := capture(t, func() { code = run([]string{"status", "--last"}) })
@@ -192,6 +207,9 @@ func TestRunStatusLastWithNoTypingSaysNothing(t *testing.T) {
 		"status.get": idleStatus,
 		"context.last": func(json.RawMessage) (any, error) {
 			return map[string]any{"captured": false}, nil
+		},
+		"memory.last": func(json.RawMessage) (any, error) {
+			return map[string]any{"enabled": false}, nil
 		},
 	})
 	var code int

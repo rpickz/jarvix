@@ -161,10 +161,21 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // state changes, so they take the policy default (ask), and
 // `[tools.policy.tool]."desktop.move_window" = "allow"` is how a user who
 // disagrees says so.
+// The two memory verbs here are remember and recall (ADR 0025). Recall is a
+// read. Remember mutates state, but its blast radius is bounded by
+// construction the way artifact.create's is: it writes only into the user's
+// own 0600 memory file, the engine speaks a one-sentence confirmation of
+// what was stored, and a wrong fact is undone with "forget that". Asking
+// would turn every "remember X" — an instruction the user just gave out
+// loud — into a question about itself. memory.forget is absent on purpose:
+// deletion is the one memory operation that cannot be undone, so it takes
+// the policy default (ask) and confirms the exact fact about to go.
 var builtinToolDefaults = map[string]PolicyDecision{
-	"artifact.create":   PolicyAllow,
-	ListWindowsToolName: PolicyAllow,
-	FocusWindowToolName: PolicyAllow,
+	"artifact.create":      PolicyAllow,
+	ListWindowsToolName:    PolicyAllow,
+	FocusWindowToolName:    PolicyAllow,
+	MemoryRememberToolName: PolicyAllow,
+	MemoryRecallToolName:   PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
