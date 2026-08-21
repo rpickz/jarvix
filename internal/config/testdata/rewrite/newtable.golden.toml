@@ -1,0 +1,5 @@
+[ai]
+provider = "ollama"
+
+[log]
+level = "debug"

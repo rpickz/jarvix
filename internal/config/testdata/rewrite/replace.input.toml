@@ -1,0 +1,16 @@
+# Jarvix configuration — hand-tuned, do not lose these notes.
+
+[ai]
+provider = "ollama"   # local first
+model = "llama3.2:3b"
+
+# my private endpoint
+[ai.myserver]
+base_url = "http://10.0.0.5:8080/v1"
+api_key_env = "MYSERVER_KEY"
+
+[tts]
+provider = "piper"
+
+[tts.piper]
+voice = "en_US-amy-medium" # robotic but instant

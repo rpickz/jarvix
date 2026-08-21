@@ -39,6 +39,14 @@ type Options struct {
 	// the last exchange, so an old thread does not bleed into a new one. Zero
 	// keeps history until an explicit reset.
 	FollowUpWindow time.Duration
+	// ConfirmTimeout is how long a pending tool confirmation waits for the
+	// user before declining. Zero means DefaultConfirmTimeout.
+	ConfirmTimeout time.Duration
+	// RememberApprovals re-runs a user-approved command without asking again
+	// for the rest of the conversation. Approvals live in memory only and
+	// are cleared with the conversation — they never survive `jarvix new`,
+	// the follow-up window, or a daemon restart.
+	RememberApprovals bool
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -66,11 +74,31 @@ type Engine struct {
 	// now is the follow-up-window clock, injectable so tests can lapse the
 	// window deterministically — including across a simulated restart.
 	now func() time.Time
+	// timer is the confirmation-timeout clock, injectable so tests can fire
+	// (or withhold) the timeout deterministically. The returned stop func
+	// releases the underlying timer.
+	timer func(d time.Duration) (<-chan time.Time, func())
+
+	// active tracks the session goroutines (transcribe, think) that read the
+	// swappable collaborators and options without holding mu. Reconfigure
+	// waits on it so a swap never races a draining goroutine — a cancelled
+	// session's think() can still be executing briefly after current is nil.
+	active sync.WaitGroup
 
 	mu      sync.Mutex
 	state   State
 	current *sess
 	counter int
+	// pending is the tool confirmation the session is waiting on, if any
+	// (ADR 0014). Guarded by mu.
+	pending *pendingConfirmation
+	// approvals are commands the user already confirmed this conversation
+	// (remember_for_conversation). Cleared with the conversation; guarded
+	// by mu.
+	approvals map[string]bool
+	// reconfiguring blocks new sessions for the brief window in which
+	// Reconfigure drains e.active before swapping collaborators.
+	reconfiguring bool
 
 	// Conversation memory: prior exchanges carried across sessions so
 	// follow-up questions have context. Guarded by mu.
@@ -92,6 +120,12 @@ type sess struct {
 	transcript      string
 	transcriptReady bool
 	submitted       bool
+
+	// replyCapture marks a voice capture that answers a pending tool
+	// confirmation rather than asking a new question: its transcript is
+	// interpreted as yes/no and resolves the confirmation instead of
+	// starting a think round.
+	replyCapture bool
 }
 
 // NewEngine wires the engine. logger, registry, and store may be nil (no
@@ -115,7 +149,12 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 		opts:     opts,
 		store:    store,
 		now:      time.Now,
-		state:    StateIdle,
+		timer: func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTimer(d)
+			return t.C, func() { t.Stop() }
+		},
+		approvals: make(map[string]bool),
+		state:     StateIdle,
 	}
 	e.loadHistory()
 	return e
@@ -172,6 +211,10 @@ func (e *Engine) State() (State, string) {
 func (e *Engine) StartSession() (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.reconfiguring {
+		// Milliseconds at most: Reconfigure only drains goroutine tails.
+		return "", fmt.Errorf("new settings are being applied; try again in a moment")
+	}
 	if e.current != nil {
 		e.cancelLocked("interrupted by new session")
 	}
@@ -187,7 +230,10 @@ func (e *Engine) StartSession() (string, error) {
 	return e.current.id, nil
 }
 
-// StartVoice begins microphone capture for the active session.
+// StartVoice begins microphone capture for the active session. While a tool
+// confirmation is pending it captures the user's answer instead: the same
+// Listening → Transcribing path runs, but the transcript resolves the
+// confirmation (yes/no) rather than starting a new question.
 func (e *Engine) StartVoice() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -195,8 +241,19 @@ func (e *Engine) StartVoice() error {
 	if s == nil {
 		return fmt.Errorf("no active session; call session.start first")
 	}
+	replyCapture := e.state == StateAwaitingConfirmation && e.pending != nil
 	if err := e.setStateLocked(StateListening); err != nil {
 		return err
+	}
+	if replyCapture {
+		// The user is engaging: the confirmation timeout no longer applies,
+		// and the transcript gates below must wait for the reply, not reuse
+		// the original question's.
+		e.pending.engaged = true
+		s.replyCapture = true
+		s.transcript = ""
+		s.transcriptReady = false
+		s.submitted = false
 	}
 	rec, err := e.recorder.Start(s.ctx)
 	if err != nil {
@@ -234,19 +291,27 @@ func (e *Engine) StopVoice() (discarded bool, err error) {
 	rec := s.recording
 	s.recording = nil
 	e.publish(Event{Type: "recording.stopped", Data: map[string]any{"session_id": s.id}})
-	go e.transcribe(s, rec)
+	e.active.Add(1)
+	go func() { defer e.active.Done(); e.transcribe(s, rec) }()
 	return false, nil
 }
 
 // Submit marks the session ready to proceed to the assistant. With text, the
 // transcript step is skipped entirely (the `jarvix ask` path); without text
-// the session proceeds once transcription finishes.
+// the session proceeds once transcription finishes. While a tool
+// confirmation is pending, submitted text is the user's answer to it —
+// affirmative approves, anything else declines.
 func (e *Engine) Submit(text string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := e.current
 	if s == nil {
 		return fmt.Errorf("no active session; call session.start first")
+	}
+	if text != "" && e.state == StateAwaitingConfirmation && e.pending != nil {
+		e.publish(Event{Type: "transcript.final", Data: map[string]any{"session_id": s.id, "text": text}})
+		e.resolveConfirmationLocked(isAffirmative(text), "text")
+		return nil
 	}
 	if text != "" {
 		s.transcript = text
@@ -326,6 +391,7 @@ func (e *Engine) cancelLocked(reason string) {
 		return
 	}
 	s.cancel()
+	e.clearPendingLocked("interrupted")
 	if s.recording != nil {
 		rec := s.recording
 		s.recording = nil
@@ -370,6 +436,7 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 	if e.current != s || s.ctx.Err() != nil {
 		return
 	}
+	e.clearPendingLocked("error")
 	e.log.Error("session failed", "component", stage, "session_id", s.id, "error", err.Error())
 	if CanTransition(e.state, StateError) {
 		_ = e.setStateLocked(StateError)
@@ -389,6 +456,20 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 	if !s.transcriptReady || !s.submitted || e.current != s {
 		return
 	}
+	if s.replyCapture {
+		// The transcript answers a pending tool confirmation, not a new
+		// question. An empty or unrecognised reply declines: the safe
+		// reading of anything that is not a clear yes.
+		s.replyCapture = false
+		e.resolveConfirmationLocked(isAffirmative(s.transcript), "voice")
+		return
+	}
+	if e.state != StateIdle && e.state != StateTranscribing {
+		// A duplicate submission (e.g. a stray session.submit while the
+		// session is already thinking or awaiting confirmation) must not
+		// start a second think round.
+		return
+	}
 	if strings.TrimSpace(s.transcript) == "" {
 		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))
 		return
@@ -397,7 +478,8 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		e.failLocked(s, "session", err)
 		return
 	}
-	go e.think(s)
+	e.active.Add(1)
+	go func() { defer e.active.Done(); e.think(s) }()
 }
 
 // transcribe runs STT on a finished recording, then hands over to the
@@ -491,19 +573,22 @@ func (e *Engine) think(s *sess) {
 			return
 		}
 
-		// The model wants tools. Record its request, run each call, append
-		// results, and loop.
+		// The model wants tools. Record its request, gate and run each call,
+		// append results, and loop. The permission gate (ADR 0014) sits in
+		// front of every execution: denied and declined calls still produce
+		// a result message, so the model can answer gracefully instead of
+		// the session dying.
 		messages = append(messages, ai.Message{Role: ai.RoleAssistant, Content: text, ToolCalls: calls})
 		for _, call := range calls {
 			if s.ctx.Err() != nil {
 				e.abortSpeaker(speaker)
 				return
 			}
-			e.publish(Event{Type: "tool.started", Data: map[string]any{
-				"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}})
-			result := e.tools.Execute(s.ctx, call)
-			e.publish(Event{Type: "tool.finished", Data: map[string]any{
-				"session_id": s.id, "tool": call.Name}})
+			result, ok := e.gateAndExecute(s, call)
+			if !ok {
+				e.abortSpeaker(speaker)
+				return
+			}
 			messages = append(messages, ai.Message{Role: ai.RoleTool, ToolCallID: call.ID, Content: result})
 		}
 	}
@@ -607,6 +692,9 @@ func (e *Engine) conversationMessages(userText string) []ai.Message {
 			"turns", len(e.history)/2)
 		e.history = nil
 		e.lastTurn = time.Time{}
+		// Remembered tool approvals are conversation-scoped: a new thread
+		// must ask again.
+		e.approvals = make(map[string]bool)
 	}
 	msgs := make([]ai.Message, 0, len(e.history)+2)
 	if e.opts.SystemPrompt != "" {
@@ -689,11 +777,13 @@ func (e *Engine) Conversation() []Turn {
 
 // ResetConversation clears the carried-over context — in memory and on disk —
 // so the next turn starts a fresh thread and a later restart resurrects
-// nothing.
+// nothing. Remembered tool approvals die with the conversation too: they are
+// scoped to it by design and never persist.
 func (e *Engine) ResetConversation() {
 	e.mu.Lock()
 	e.history = nil
 	e.lastTurn = time.Time{}
+	e.approvals = make(map[string]bool)
 	e.mu.Unlock()
 	if e.store == nil {
 		return
@@ -704,4 +794,62 @@ func (e *Engine) ResetConversation() {
 		return
 	}
 	e.log.Debug("conversation history cleared", "component", "session")
+}
+
+// Reconfigure swaps the engine's collaborators and options for a new
+// configuration without a daemon restart. It refuses while a session is
+// active: adapters are only ever swapped between sessions, never under one —
+// a reload that cannot apply keeps the running configuration untouched.
+//
+// Idle state alone is not enough to swap safely: session goroutines read the
+// swapped fields without holding mu, and a finished or cancelled session's
+// think()/transcribe() may still be draining after current went nil. So
+// Reconfigure briefly blocks new sessions, waits for every tracked session
+// goroutine to exit, and only then swaps — making the swap invisible both to
+// running code and to the race detector.
+func (e *Engine) Reconfigure(provider ai.Provider, transcriber stt.Transcriber,
+	synthesizer tts.Synthesizer, recorder audio.Recorder, player audio.Player,
+	opts Options) error {
+	e.mu.Lock()
+	if e.reconfiguring {
+		e.mu.Unlock()
+		return fmt.Errorf("new settings are already being applied")
+	}
+	if e.current != nil || e.state != StateIdle {
+		e.mu.Unlock()
+		return fmt.Errorf("a session is active; the new settings apply once it finishes (run config.reload)")
+	}
+	e.reconfiguring = true
+	e.mu.Unlock()
+
+	// No new session can start now; drain the tails of past sessions.
+	e.active.Wait()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.reconfiguring = false
+	e.provider = provider
+	e.stt = transcriber
+	e.tts = synthesizer
+	e.recorder = recorder
+	e.player = player
+	e.opts = opts
+
+	// Conversation memory follows the new limits immediately, mirroring what
+	// loadHistory enforces at construction.
+	if opts.HistoryTurns <= 0 {
+		e.history = nil
+		e.lastTurn = time.Time{}
+		if e.store != nil {
+			if err := e.store.Clear(); err != nil {
+				e.log.Warn("could not remove persisted conversation history",
+					"component", "session", "error", err.Error())
+			}
+		}
+	} else if max := opts.HistoryTurns * 2; len(e.history) > max {
+		e.history = append([]ai.Message(nil), e.history[len(e.history)-max:]...)
+	}
+	e.log.Info("engine reconfigured", "component", "session",
+		"provider", provider.Name(), "tts", synthesizer.Name(), "model", opts.Model)
+	return nil
 }

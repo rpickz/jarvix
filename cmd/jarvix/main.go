@@ -16,6 +16,8 @@ Usage:
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
+  jarvix confirm                Approve the pending tool confirmation
+  jarvix deny                   Decline the pending tool confirmation
   jarvix new                    Start a fresh conversation (forget context)
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
@@ -25,7 +27,11 @@ Usage:
   jarvix setup                  First-run wizard: voice, activation, AI, advisors
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
   jarvix setup input            Grant keyboard access for real hold-to-talk
-  jarvix config                 Show effective configuration
+  jarvix config                 Show effective configuration (offline)
+  jarvix config get [key]       Show the daemon's settings (or one value)
+  jarvix config set k=v [...]   Change settings: validated, written to
+                                config.toml, applied without a restart
+  jarvix config reload          Re-read config.toml into the running daemon
   jarvix version                Show version
 
 The daemon must be running for session commands:
@@ -61,6 +67,10 @@ func run(args []string) int {
 		err = cmdListen(paths)
 	case "cancel":
 		err = cmdCancel(paths)
+	case "confirm":
+		err = cmdConfirm(paths, true)
+	case "deny":
+		err = cmdConfirm(paths, false)
 	case "new":
 		err = cmdNewConversation(paths)
 	case "ptt":
@@ -90,7 +100,25 @@ func run(args []string) int {
 			return fail(fmt.Errorf("usage: jarvix setup | jarvix setup whisper [model] | jarvix setup input"))
 		}
 	case "config":
-		err = cmdConfig(cfg, paths)
+		switch {
+		case len(args) == 0:
+			err = cmdConfig(cfg, paths)
+		case args[0] == "get":
+			key := ""
+			if len(args) > 1 {
+				key = args[1]
+			}
+			err = cmdConfigGet(paths, key)
+		case args[0] == "set":
+			if len(args) < 2 {
+				fatal(fmt.Errorf("usage: jarvix config set key=value [key=value ...]"))
+			}
+			err = cmdConfigSet(paths, args[1:])
+		case args[0] == "reload":
+			err = cmdConfigReload(paths)
+		default:
+			fatal(fmt.Errorf("usage: jarvix config [get [key] | set key=value ... | reload]"))
+		}
 	case "version", "--version", "-v":
 		fmt.Println("jarvix", build.Version)
 	case "help", "--help", "-h":

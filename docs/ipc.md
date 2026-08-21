@@ -28,13 +28,25 @@ clients must ignore unknown events and fields.
 | `voice.stop` | — | `{discarded}` | Listening → Transcribing; transcription runs async. `discarded: true` means the capture was shorter than `audio.min_recording_ms` and the session ended quietly (`session.cancelled`) — skip the follow-up `session.submit` |
 | `session.submit` | `{text?}` | `{}` | With `text`: skip audio, go think. Without: proceed when the transcript lands |
 | `session.cancel` | — | `{}` | Stops everything; no-op when idle |
+| `session.confirm` | `{approved?}` | `{approved}` | Answers a pending tool confirmation (`approved` defaults to `true`); errors when nothing is pending or a voice reply is already being captured |
 | `speech.cancel` | — | `{}` | Stops spoken output only; no-op unless speaking |
-| `conversation.reset` | — | `{}` | Forget carried-over context; the next turn starts a fresh thread |
+| `conversation.reset` | — | `{}` | Forget carried-over context (and any remembered tool approvals); the next turn starts a fresh thread |
 | `conversation.get` | — | `{turns, state, session_id}` | Snapshot of the current conversation for display: `turns` is an array of `{role, text}` (`user`/`assistant`, oldest first, including the in-flight user question once transcribed). Render it on open, then live-append from `assistant.delta` / `transcript.final` / `state.changed` / `error` events |
-| `status.get` | — | `{state, session_id, version, protocol, ptt}` | `ptt` is `"daemon"` when jarvixd watches the hold-to-talk chord itself (keybinding toggles must then no-op) or `"external"` when keybindings drive activation |
+| `status.get` | — | `{state, session_id, version, protocol, ptt, policy}` | `ptt` is `"daemon"` when jarvixd watches the hold-to-talk chord itself (keybinding toggles must then no-op) or `"external"` when keybindings drive activation. `policy` is the effective tool permission policy: `{default, confirm_timeout_sec, remember_for_conversation, tools: {name: decision}}` |
+| `config.get` | — | `{path, fingerprint, fields, secrets}` | The editable settings with their **running** values: each field carries `key` (dotted TOML path), `label`, `type` (`string`/`int`/`float`/`bool`/`string_list`), `reload` class (`live`/`idle`/`restart` — see docs/configuration.md), `value`, and `enum` for closed sets. `fingerprint` identifies the file content on disk (`sha256:…`, or `missing`) for external-edit detection. `secrets` reports API-key **presence** only (`{endpoint, env, env_set, inline_key}`) — key values never travel over IPC in either direction |
+| `config.set` | `{changes, fingerprint?}` | `{fingerprint, applied, reason?, needs_restart}` | Validates and writes field changes into config.toml (surgical rewrite preserving comments/unknown keys; atomic temp+rename, mode 0600), then applies them to the running daemon per reload class. `changes` maps dotted keys to values — native JSON types or strings (`"true"`, `"leftmeta,space"`), both accepted. Pass the `fingerprint` from your `config.get`: if the file changed on disk meanwhile the set fails with `-32002` instead of clobbering the hand edit. `applied: false` + `reason` means the file was written but a session was in flight — retry with `config.reload` once idle. `needs_restart` lists restart-class keys whose file value now differs from the running one |
+| `config.reload` | — | `{fingerprint, needs_restart}` | Re-reads config.toml into the running daemon (the recovery path after a hand edit, and the retry after a busy `config.set`). A file that fails parsing or validation is refused with `-32001` and the running configuration is untouched; a session in flight refuses with `-32003` |
+| `doctor.get` | — | `{checks}` | The settings-relevant readiness subset of `jarvix doctor` — offline and fast (no provider probe, no audio round trips). Each check: `status` (`ok`/`warn`/`fail`), `name`, `detail`, `fix`, and `related` — the config key the check informs, so a settings screen can show readiness inline |
 
 Errors use JSON-RPC error objects. Application errors (wrong state, no active
 session) use code `-32000`; standard codes cover parse/method/params issues.
+The config surface adds three codes, each with structured `data`:
+
+| Code | Meaning | `data` |
+|---|---|---|
+| `-32001` | config.set/reload rejected by validation; nothing written/applied | `{problems: [...]}` — `config.Validate` messages, each prefixed with the offending key |
+| `-32002` | config.toml changed on disk since the client's `config.get`; nothing written | `{fingerprint}` — the file as it is now; re-read and reapply |
+| `-32003` | config.reload could not apply because a session is active; running config unchanged | — |
 
 ### Example
 
@@ -75,10 +87,16 @@ Every event's params include `session_id` where a session is involved.
 | `assistant.started` | `{provider}` | Provider request opened |
 | `assistant.delta` | `{content}` | One streamed response fragment |
 | `assistant.finished` | `{content}` | Full response text |
+| `tool.started` / `tool.finished` | `{tool, arguments}` / `{tool}` | Bounds of one real tool execution — never published for denied or declined calls |
+| `tool.confirmation_required` | `{tool, command, summary, rule, timeout_sec}` | The permission gate paused a tool call (state `awaiting_confirmation`). `command` is the exact command, verbatim; `summary` is the spoken question, generated daemon-side from the command; the overlay should display `command` |
+| `tool.confirmed` | `{tool, command, source}` | The user approved; the call executes. `source`: `cli`, `text`, or `voice` |
+| `tool.declined` | `{tool, command, source}` | The call will not run. `source`: `cli`, `text`, `voice`, `timeout`, `interrupted`, or `error` |
+| `tool.denied` | `{tool, command, rule}` | A deny rule blocked the call outright; no confirmation is possible |
 | `tts.started` / `tts.finished` | `{}`; finished may carry `{interrupted:true}` | Speech bounds |
 | `session.finished` | `{}` | Session completed (also after an error) |
 | `session.cancelled` | `{reason}` | Session cancelled or interrupted |
 | `error` | `{stage, message}` | A stage failed: `audio`, `stt`, `assistant`, `tts`, `session` |
+| `config.changed` | `{fingerprint}` | Configuration was saved (`config.set`) or reloaded; open settings views should refresh via `config.get` |
 
 Ordering guarantees: `state.changed` precedes the stage events it enables;
 `session.finished`/`session.cancelled` is always the last event of a session.

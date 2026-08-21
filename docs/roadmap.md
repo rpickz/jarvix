@@ -37,10 +37,12 @@ as an explicit grammar/pattern table — not a machine-learning system.
 
 The model can act, not just answer. `shell.run` ships now
 ([ADR 0009](adr/0009-tool-calling.md)): the assistant runs commands itself
-and summarises the result. Remaining: the permission gate (allow / ask / deny
-with spoken confirmation), then structured tools — `desktop.*`,
-`clipboard.*`, `apps.*`, `system.*`, `hyprland.*`, `files.*` — each behind
-that gate. The engine's tool loop already generalises to all of them.
+and summarises the result. The permission gate ships too
+([ADR 0014](adr/0014-tool-permission-gate.md)): allow / ask / deny per tool,
+with spoken confirmation for the ask tier. Remaining: structured tools —
+`desktop.*`, `clipboard.*`, `apps.*`, `system.*`, `hyprland.*`, `files.*` —
+each behind that gate (unknown tools default to ask). The engine's tool loop
+already generalises to all of them.
 
 ## Phase 5 — Conversational mode (persistence: done; threads: next)
 

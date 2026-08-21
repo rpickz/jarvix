@@ -39,10 +39,13 @@ type Notification struct {
 	Params  any    `json:"params,omitempty"`
 }
 
-// Error is a JSON-RPC 2.0 error object.
+// Error is a JSON-RPC 2.0 error object. Data carries structured detail for
+// errors a client acts on programmatically (validation problems per field,
+// the current config fingerprint on a conflict); most errors leave it nil.
 type Error struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // Error implements the error interface.
@@ -59,6 +62,18 @@ const (
 	// CodeSessionError covers session-level failures (no active session,
 	// invalid state for the operation).
 	CodeSessionError = -32000
+	// CodeConfigInvalid means a config.set/config.reload was rejected by
+	// validation; Data carries {"problems": [...]} using Config.Validate's
+	// messages, each prefixed with the offending key. Nothing was written.
+	CodeConfigInvalid = -32001
+	// CodeConfigConflict means the config file changed on disk since the
+	// client's config.get (external edit); Data carries {"fingerprint": ...}
+	// for the file as it is now. The client should re-read and reapply —
+	// the daemon never silently clobbers a hand edit.
+	CodeConfigConflict = -32002
+	// CodeConfigBusy means a reload could not apply because a session is in
+	// flight; the running configuration is unchanged. Retry when idle.
+	CodeConfigBusy = -32003
 )
 
 // Errorf builds an *Error.

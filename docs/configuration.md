@@ -18,6 +18,52 @@ CLIs, and records the choices. It edits only the keys it owns, preserves
 your comments and layout, and asks before changing any value you set by
 hand — safe to re-run at any time.
 
+## Changing settings without a restart
+
+The common options are editable from the **settings screen** in the Jarvix
+window (`jarvix window` → Settings, or `Super+Alt+C`) and from the CLI —
+both are thin clients of the same daemon IPC methods (`config.get` /
+`config.set` / `config.reload`, docs/ipc.md):
+
+```bash
+jarvix config get                     # every editable setting, with its reload class
+jarvix config get tts.provider       # one value
+jarvix config set tts.provider=kokoro ai.model=qwen2.5:7b
+jarvix config set activation.ptt_chord=leftmeta,space
+jarvix config reload                  # re-read a hand-edited config.toml, no restart
+```
+
+A change is validated first — invalid values are rejected with the same
+messages startup validation produces, and **nothing is written**. Valid
+changes are written into `config.toml` with a surgical rewrite: only the
+changed key's value is touched, so your comments, custom `[ai.<name>]`
+tables, and formatting survive every save. Writes are atomic
+(temp file + rename, mode 0600). If the file was edited externally between
+reading and saving, the save is refused and the screen/CLI tells you to
+re-read and reapply — a hand edit is never silently clobbered.
+
+### When changes take effect (reload classes)
+
+Every setting has a **reload class**, shown by `jarvix config get` and next
+to each field in the settings screen:
+
+| Class | Options | When it takes effect |
+|---|---|---|
+| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
+| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `audio.*` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
+
+A reload that fails validation keeps the running configuration and reports
+why — the daemon never hot-swaps into a broken state. Secrets never pass
+through the settings surface: API keys are shown as presence only
+("OPENAI_API_KEY: set") and cannot be entered there; manage them via the
+environment as described below. Endpoint tables (`[ai.<name>]`) also stay
+hand-edited — the file remains authoritative for everything.
+
+The settings screen shows each option's external readiness inline (Kokoro
+not set up, Whisper model missing, input access not granted), reusing
+`jarvix doctor`'s checks with the fix command attached.
+
 ## Full reference
 
 ```toml
@@ -87,6 +133,24 @@ render_timeout_sec = 10          # renderer killed past this
 # spreadsheet = "libreoffice"    # .csv tables in a spreadsheet app
 # excalidraw = "none"            # "" or "none" = no viewer: the file is
                                  # saved and announced by name, not opened
+
+[tools.policy]                   # the permission gate (see the Tools section)
+default = "ask"                  # decision for tools with no [tools.policy.tool] entry
+confirm_timeout_sec = 30         # unanswered confirmations decline after this
+remember_for_conversation = false # re-run an approved command without asking again
+                                 # for the rest of this conversation only
+shell_allow = []                 # extra command prefixes that run silently,
+                                 # e.g. ["docker compose ps", "kubectl get"]
+shell_deny = []                  # extra command prefixes that never run,
+                                 # e.g. ["git push"] — deny beats everything
+
+[tools.policy.tool]              # per-tool decisions: allow | ask | deny
+# "shell.run" = "ask"            # ask (default): classify commands; allow:
+                                 # trust everything except deny patterns;
+                                 # deny: disable the tool entirely
+# "artifact.create" = "allow"    # built-in default: it only writes into the
+                                 # artifact directory. Unknown tools default
+                                 # to "ask".
 
 [conversation]
 speak_responses = true           # false = text-only sessions
@@ -165,19 +229,46 @@ docker?" makes it run `docker ps` and summarise the result, rather than
 telling you the command. This is **opt-in** because it gives the assistant
 the same authority as your own shell:
 
-- Every command is logged (`journalctl --user -u jarvixd`).
+- Every command is logged (`journalctl --user -u jarvixd`), and every
+  ask/deny decision is logged and published as IPC events.
 - Each command has a timeout (`shell_timeout_sec`) and an output cap.
-- The default system prompt tells the model to prefer read-only commands and
-  to ask before anything destructive — but a capable model with shell access
-  can still do real things. Enable it deliberately.
 - Commands run under the session context: cancelling a session (Escape /
   `jarvix cancel`) kills any command in flight.
 
 Use a tool-capable model — `qwen2.5:7b` (local) or any OpenAI/Anthropic model
 with tool support. Small models without tool training will not call tools.
 
-A per-tool permission gate (allow / ask / deny, with spoken confirmation) is
-the next step on the roadmap; today `shell` is a single on/off switch.
+### The permission gate (`[tools.policy]`)
+
+Every tool call is classified **allow / ask / deny** before it executes
+([ADR 0014](adr/0014-tool-permission-gate.md)):
+
+- **allow** — a shipped read-only allow list (`docker ps`, `df -h`,
+  `git status`, `journalctl`, pipelines of those, …) runs silently, exactly
+  as before the gate existed. `shell_allow` extends it with your own
+  command prefixes.
+- **ask** — everything else: Jarvix speaks a one-sentence summary generated
+  from the command itself ("I want to run 'rm -rf ./build'…"), the overlay
+  shows the exact command, and nothing runs until you say **yes / go ahead**
+  (push-to-talk while it waits), type an answer, or run `jarvix confirm`
+  (`jarvix deny` declines). No answer within `confirm_timeout_sec` declines.
+  Risky command words (`rm`, `dd`, `mkfs`, `sudo`, output redirection `>`)
+  always ask, even inside an otherwise-allowed pipeline — a compound command
+  is judged by its riskiest part.
+- **deny** — catastrophic patterns (`rm -rf /`, `dd` onto a device, fork
+  bombs) and anything in `shell_deny` never run, with or without
+  confirmation. Deny beats allow, always.
+
+Classification happens in the daemon on the parsed command; the model's own
+description of what it is doing is never trusted, so a model cannot describe
+`rm -rf ~` as "tidying up". Unknown tools default to `ask`.
+
+`remember_for_conversation = true` re-runs a command you already approved
+without asking again — scoped strictly to the current conversation:
+`jarvix new`, the follow-up window, and daemon restarts all forget the
+approvals.
+
+`jarvix status` prints the effective policy.
 
 ## Artifacts (work you keep)
 
