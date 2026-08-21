@@ -12,6 +12,12 @@ Inspect the effective configuration (defaults + your file, secrets redacted):
 jarvix config
 ```
 
+The first-run wizard (`jarvix setup`) writes this file for you: it detects
+the voice engine, activation access, AI provider, and installed advisor
+CLIs, and records the choices. It edits only the keys it owns, preserves
+your comments and layout, and asks before changing any value you set by
+hand — safe to re-run at any time.
+
 ## Full reference
 
 ```toml
@@ -101,6 +107,13 @@ notification_preview = true      # show the start of the answer in the
 
 [log]
 level = "info"                   # debug | info | warn | error
+
+# Assistant CLIs Jarvix can delegate heavyweight questions to. `jarvix setup`
+# detects installed CLIs (claude, codex, gemini, aider, goose, opencode) and
+# records them here; delegation itself ships separately (issue #3) and will
+# consume these tables — recording them now costs nothing.
+[advisors.claude]
+binary = "/usr/bin/claude"       # absolute path found on PATH at setup time
 ```
 
 ## Secrets
