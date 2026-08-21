@@ -52,8 +52,11 @@ func run() error {
 		return err
 	}
 
-	// SIGINT/SIGTERM shut down cleanly: the socket is removed and any active
-	// session's subprocesses die with the process group.
+	// SIGINT/SIGTERM shut down cleanly: the socket is removed, any active
+	// session is cancelled, and Run does not return until the work the daemon
+	// still owes — the conversation-history write above all — has finished or
+	// the shutdown grace period has run out. Restarting the service therefore
+	// cannot lose the last exchange.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

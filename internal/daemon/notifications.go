@@ -61,7 +61,10 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 					// Send blocks until the notification is clicked, dismissed,
 					// or expires; dispatch from its own goroutine so back-to-back
 					// sessions never queue behind an unclicked notification.
-					go d.deliver(ctx, n)
+					// Tracked so shutdown can wait for it: delivery outlives the
+					// session that produced it, and it is holding a child process
+					// (notify-send --wait) that a bare exit would orphan.
+					d.post.Go(func() { d.deliver(ctx, n) })
 				}
 				answer, errStage, errMessage = "", "", ""
 			case "session.cancelled":

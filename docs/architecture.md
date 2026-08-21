@@ -47,6 +47,7 @@ Package layout (all internal — Jarvix exposes no Go API yet):
 | `internal/tts` | `Synthesizer` interface + fake; `tts/piper` adapter |
 | `internal/audio` | `Recorder`/`Player` interfaces + fakes; PipeWire impl |
 | `internal/intent` | Deterministic intent router: grammar table, slot parsing, command runner |
+| `internal/quiesce` | Bounded goroutine draining — the shutdown/reload counter |
 | `internal/daemon` | Wires config → engines → IPC methods |
 | `internal/doctor` | Environment checks with actionable fixes |
 
@@ -181,6 +182,32 @@ Every stage runs under one `context.Context` per session. Cancelling it:
 `session.start` while a session is active **cancels the running session
 first** — invoking Jarvix while it is speaking interrupts it and starts
 listening. This is the engine's contract, not UI behaviour.
+
+### Shutdown
+
+A session is not over when the user thinks it is. The exchange is committed,
+`session.finished` goes out, and only *then* — off the engine's lock, on the
+tail of the think goroutine — is the conversation written to disk, so that
+disk I/O never delays a spoken answer
+([ADR 0011](adr/0011-persistent-conversation-history.md)). Desktop
+notifications dispatch the same way.
+
+`Daemon.Run` therefore does not return when the socket stops accepting: it
+drains that tail work first, in dependency order — session goroutines
+(cancelling anything in flight), IPC connections, notification delivery — and
+kills the warm workers last, because a draining session may still be speaking
+through one ([ADR 0018](adr/0018-supervised-persistent-engine-workers.md)).
+Without this a `systemctl --user restart jarvixd` could land in the gap and
+lose the last exchange from the persisted conversation.
+
+The drain is bounded by `daemon.DefaultShutdownGrace` (5s). A stage that does
+not settle within it is logged with the stage name and how much work was
+outstanding, and shutdown continues: a wedged disk must never be able to keep
+the daemon alive. `internal/quiesce` is the shared counter this is built on —
+a `sync.WaitGroup` whose `Wait` takes a context, so every drain in the
+codebase is bounded by construction. The push-to-talk watcher is deliberately
+*not* drained: its goroutines sit in a blocking read on an evdev device that
+only a keystroke returns from, and they hold nothing a restart could lose.
 
 ### Failure isolation
 
