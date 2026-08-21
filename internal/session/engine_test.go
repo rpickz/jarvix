@@ -53,6 +53,19 @@ func newHarnessWithStore(t *testing.T, opts Options, store history.Store) *harne
 	h.events, h.cancel = bus.Subscribe()
 	t.Cleanup(h.cancel)
 	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, store, bus, nil, opts)
+	// Stop the engine when the test ends, and wait for it. A session's history
+	// write runs *after* session.finished and off the engine's lock (ADR 0011),
+	// so without this a write can land in the t.TempDir the harness handed out
+	// while testing is removing it — the "directory not empty" flake this drain
+	// exists to kill (#29). Registered after t.TempDir, so it runs before the
+	// removal.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.engine.Shutdown(ctx); err != nil {
+			t.Errorf("engine had not quiesced by the end of the test: %v", err)
+		}
+	})
 	return h
 }
 

@@ -19,7 +19,7 @@ import (
 // engines faked: the complete integration surface minus hardware.
 func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 	t.Helper()
-	dir := daemonTempDir(t)
+	dir := t.TempDir()
 	paths := config.Paths{
 		Config:  dir,
 		Data:    dir,
@@ -31,10 +31,6 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 	// Fake voice flows start and stop capture instantly; the accidental-tap
 	// guard has its own tests in internal/session.
 	cfg.Audio.MinRecordingMs = 0
-	// Persistence runs async after session.finished and would race t.TempDir
-	// cleanup ("directory not empty"); it has its own tests in
-	// internal/session, so daemon tests run memory-only.
-	cfg.Conversation.HistoryTurns = 0
 	provider := &ai.Fake{Response: "Streaming works."}
 	d, err := New(cfg, paths, nil, Deps{
 		Provider:    provider,
@@ -50,25 +46,8 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = d.Run(ctx) }()
-
-	// Wait for the socket to come up.
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		client, err = ipc.Dial(paths.Socket)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("daemon socket never came up: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client, provider
+	serveDaemon(t, d)
+	return dialDaemon(t, paths.Socket), provider
 }
 
 func TestStatusOverSocket(t *testing.T) {
@@ -213,17 +192,13 @@ func TestStatusReportsEffectivePolicy(t *testing.T) {
 // declines it, and the daemon never runs anything — the fake provider then
 // answers from the declined result.
 func TestConfirmOverSocket(t *testing.T) {
-	dir := daemonTempDir(t)
+	dir := t.TempDir()
 	paths := config.Paths{
 		Config: dir, Data: dir, State: dir, Runtime: dir,
 		Socket: filepath.Join(dir, "j.sock"),
 	}
 	cfg := testConfig()
 	cfg.Audio.MinRecordingMs = 0
-	// Persistence runs async after session.finished and would race t.TempDir
-	// cleanup ("directory not empty"); it has its own tests in
-	// internal/session, so daemon tests run memory-only.
-	cfg.Conversation.HistoryTurns = 0
 	cfg.Tools.Shell = true // real shell.run behind the gate; nothing may run
 	provider := &ai.Fake{Response: "Understood, nothing was deleted."}
 	provider.ToolCallsByRound = [][]ai.ToolCall{
@@ -239,22 +214,8 @@ func TestConfirmOverSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = d.Run(ctx) }()
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		client, err = ipc.Dial(paths.Socket)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("daemon socket never came up: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
+	serveDaemon(t, d)
+	client := dialDaemon(t, paths.Socket)
 
 	if err := client.Call("session.start", nil, nil); err != nil {
 		t.Fatal(err)
