@@ -291,13 +291,11 @@ func TestWarmCloseKillsTheWorkerAndRemovesItsScratchDirectory(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) != nil {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// Asserted the instant Close returns, with no grace loop: Close waits for
+	// the teardown it started, so "closed" is a fact on return rather than
+	// something that becomes true shortly afterwards. A retry loop here would
+	// have hidden the defect this test exists for — the scratch check below
+	// never had one, which is why it was the half that flaked under load.
 	if syscall.Kill(pid, 0) == nil {
 		t.Fatalf("worker (pid %d) survived Close — jarvixd would leave an orphan", pid)
 	}
