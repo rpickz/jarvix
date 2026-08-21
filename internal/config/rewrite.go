@@ -17,7 +17,7 @@ import (
 // unknown keys, ordering, and formatting elsewhere are preserved
 // byte-for-byte. A managed section was rejected because TOML forbids
 // defining the same table twice, and a full re-serialisation was rejected
-// because it destroys the user's comments (ADR 0014).
+// because it destroys the user's comments (ADR 0015).
 //
 // Safety over cleverness: after editing, the result must re-parse and every
 // changed key must read back with its new value, otherwise the rewrite fails

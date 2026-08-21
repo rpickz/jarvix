@@ -3,7 +3,7 @@ package daemon
 // This file is the settings IPC surface: config.get / config.set /
 // config.reload / doctor.get. All settings intelligence lives here in the
 // daemon — the settings screen and the CLI are thin clients of these
-// methods, so the whole feature is testable without a GUI (ADR 0014).
+// methods, so the whole feature is testable without a GUI (ADR 0015).
 
 import (
 	"encoding/json"

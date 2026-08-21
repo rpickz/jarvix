@@ -8,7 +8,7 @@ import qs.Ui
 // other surface it is display-only: it renders the daemon's config.get /
 // doctor.get answers and submits changes through config.set / config.reload —
 // validation, file rewriting, and hot-reload all happen daemon-side
-// (docs/ipc.md, ADR 0014). Secrets arrive as presence booleans; key values
+// (docs/ipc.md, ADR 0015). Secrets arrive as presence booleans; key values
 // never reach this file.
 //
 // Accessibility: every control is reachable with Tab and operable with
