@@ -35,12 +35,21 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 				return
 			}
 			switch ev.Type {
+			case "state.changed":
+				// A session becoming active makes any previous failure
+				// history — the same rule the window applies to its banner.
+				if s, _ := ev.Data["state"].(string); s != "" && s != "idle" {
+					d.setLastError("", "")
+				}
 			case "assistant.finished":
 				answer, _ = ev.Data["content"].(string)
 			case "error":
 				errStage, _ = ev.Data["stage"].(string)
 				errMessage, _ = ev.Data["message"].(string)
 			case "session.finished":
+				// Retain the failure past the session so a window opened by
+				// clicking the error notification can still render it.
+				d.setLastError(errStage, errMessage)
 				// ui.notifications is a live setting: checked per session so
 				// the switch acts immediately, no restart (settings.go).
 				if d.notificationsEnabled() {
@@ -56,6 +65,21 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 			}
 		}
 	}
+}
+
+// setLastError records (or clears, with empty arguments) the failure the
+// conversation window should show until the next session starts.
+func (d *Daemon) setLastError(stage, message string) {
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	d.lastErrStage, d.lastErrMessage = stage, message
+}
+
+// lastError reports the retained failure for conversation.get.
+func (d *Daemon) lastError() (stage, message string) {
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	return d.lastErrStage, d.lastErrMessage
 }
 
 // buildNotification decides what a finished session's notification says,

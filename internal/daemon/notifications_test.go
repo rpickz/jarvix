@@ -299,6 +299,61 @@ func TestConversationGetReturnsTurns(t *testing.T) {
 	}
 }
 
+// A window is opened by clicking the notification, which happens after the
+// session — and its `error` event — is over. The snapshot must therefore
+// carry the failure, or an error notification opens onto a blameless idle
+// conversation and the user never learns what went wrong.
+func TestConversationGetReportsTheLastFailure(t *testing.T) {
+	fake := &desktop.FakeNotifier{}
+	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open,
+		&ai.Fake{Fail: errors.New("model exploded")})
+
+	runSession(t, client, "explain recursion")
+	waitForNotifications(t, fake, 1)
+
+	var out struct {
+		State        string `json:"state"`
+		ErrorStage   string `json:"error_stage"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := client.Call("conversation.get", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.ErrorStage != "assistant" {
+		t.Errorf("error_stage = %q, want the failing stage", out.ErrorStage)
+	}
+	if !strings.Contains(out.ErrorMessage, "model exploded") {
+		t.Errorf("error_message = %q, want the failure reason", out.ErrorMessage)
+	}
+}
+
+// The banner must not outlive the failure: once a new session is under way
+// the previous error is history.
+func TestConversationGetClearsTheFailureOnTheNextSession(t *testing.T) {
+	fake := &desktop.FakeNotifier{}
+	provider := &ai.Fake{Fail: errors.New("model exploded")}
+	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open, provider)
+
+	runSession(t, client, "first")
+	waitForNotifications(t, fake, 1)
+
+	provider.Fail = nil
+	provider.Response = "All better."
+	runSession(t, client, "second")
+	waitForNotifications(t, fake, 2)
+
+	var out struct {
+		ErrorStage   string `json:"error_stage"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := client.Call("conversation.get", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.ErrorStage != "" || out.ErrorMessage != "" {
+		t.Errorf("stale failure reported: stage=%q message=%q", out.ErrorStage, out.ErrorMessage)
+	}
+}
+
 func TestConversationGetEmptyIsAnArray(t *testing.T) {
 	client, _ := startDaemon(t)
 	var out map[string]any
