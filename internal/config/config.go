@@ -200,6 +200,14 @@ type Artifacts struct {
 	OpenCommands map[string]Command `toml:"open_commands"`
 	// RenderTimeoutSec bounds one render; the renderer is killed past it.
 	RenderTimeoutSec int `toml:"render_timeout_sec"`
+	// DiagramFormat is what a Mermaid diagram renders to: "png" (the
+	// default) or "svg". PNG is the default because mermaid's SVG carries
+	// its labels as HTML in <foreignObject>, which image viewers do not
+	// render — the diagram opens as boxes with no text (#56). "svg" is for
+	// users who want markup to edit or embed; that path renders with
+	// htmlLabels disabled so labels become real <text>, though some shapes
+	// still emit foreignObject.
+	DiagramFormat string `toml:"diagram_format"`
 }
 
 // ToolsPolicy is the tool permission gate (ADR 0014). Every tool call is
@@ -468,6 +476,7 @@ func Default() Config {
 			Dir:              filepath.Join(home, "Documents", "Jarvix"),
 			OpenCommand:      Command{"xdg-open"},
 			RenderTimeoutSec: 10,
+			DiagramFormat:    "png",
 		},
 		// Window and selection are on: a title bar is already on screen, and a
 		// selection is what the user is pointing at as they speak. The
@@ -664,6 +673,11 @@ func (c Config) Validate() error {
 	}
 	if c.Artifacts.RenderTimeoutSec <= 0 {
 		problems = append(problems, "artifacts.render_timeout_sec must be positive")
+	}
+	if c.Artifacts.DiagramFormat != "png" && c.Artifacts.DiagramFormat != "svg" {
+		problems = append(problems, fmt.Sprintf(
+			"artifacts.diagram_format %q is invalid; use \"png\" (opens correctly in image viewers) or \"svg\"",
+			c.Artifacts.DiagramFormat))
 	}
 	validDecision := func(s string) bool { return s == "allow" || s == "ask" || s == "deny" }
 	if !validDecision(c.Tools.Policy.Default) {

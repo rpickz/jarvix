@@ -331,6 +331,10 @@ func Settings() []Setting {
 		{Key: "artifacts.render_timeout_sec", Label: "Artifact render timeout (seconds)", Type: TypeInt, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Artifacts.RenderTimeoutSec },
 			set: func(c *Config, v any) { c.Artifacts.RenderTimeoutSec = v.(int) }},
+		{Key: "artifacts.diagram_format", Label: "Diagram output format", Type: TypeString, Reload: ReloadRestart,
+			Enum: []string{"png", "svg"},
+			Get:  func(c Config) any { return c.Artifacts.DiagramFormat },
+			set:  func(c *Config, v any) { c.Artifacts.DiagramFormat = v.(string) }},
 
 		{Key: "log.level", Label: "Log level", Type: TypeString, Reload: ReloadRestart,
 			Enum: []string{"debug", "info", "warn", "error"},

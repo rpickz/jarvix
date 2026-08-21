@@ -186,6 +186,11 @@ open_command = "xdg-open"        # how an artifact is shown (all formats).
                                  # array when a path or argument contains a
                                  # space: ["/opt/my viewer/bin/view", "--new"]
 render_timeout_sec = 10          # renderer killed past this
+diagram_format = "png"           # what a diagram renders to: "png" (default,
+                                 # 2x scale — opens with its text in any image
+                                 # viewer) or "svg" (markup for editing or
+                                 # embedding; see the Artifacts section for
+                                 # the caveat before choosing it)
 
 [artifacts.open_commands]        # optional per-format viewer overrides;
                                  # formats without an entry use open_command
@@ -950,7 +955,7 @@ Ask for something better seen than heard and the assistant calls
 
 | You say | Format | File | Opens via |
 |---|---|---|---|
-| "diagram my publish pipeline" | `mermaid` | `.mmd` + rendered `.svg` | `open_command` |
+| "diagram my publish pipeline" | `mermaid` | `.mmd` + rendered `.png` (2×) | `open_command` |
 | "draft a one-page brief" | `document` | `.md`, saved verbatim | `open_commands.document` |
 | "put those numbers in a spreadsheet" | `spreadsheet` | `.csv`, validated before write | `open_commands.spreadsheet` |
 | "sketch this out on a canvas" | `excalidraw` | `.excalidraw` scene JSON, validated | `open_commands.excalidraw` |
@@ -987,6 +992,19 @@ Without it the assistant simply answers in prose, and `jarvix doctor` names
 the missing piece. Renders run as a local subprocess (no network), bounded by
 `render_timeout_sec`. Documents, spreadsheets, and sketches have no external
 dependency at all. See ADR 0012 for the design.
+
+Diagrams render to **PNG at 2× scale by default**. Mermaid's SVG output
+carries its labels as HTML inside `<foreignObject>`, which only a browser
+engine renders — opened in an image viewer, the diagram is boxes with no
+text. The PNG is the pixels the renderer's embedded browser already drew, so
+it shows its text in whatever viewer the desktop picks. If you want markup to
+edit or embed, set `diagram_format = "svg"`: that path renders with
+`htmlLabels` disabled so labels become real `<text>` elements, **but some
+shapes still emit `foreignObject`** and will lose their text outside a
+browser — it is an opt-in for people who know they want SVG, not a better
+default. Either way the `.mmd` source is saved beside the render, and
+`jarvix artifacts` lists the pair as one diagram (an orphan `.mmd` with no
+render still lists on its own).
 
 ## Notifications and the conversation window
 

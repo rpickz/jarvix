@@ -22,7 +22,7 @@ type Renderer interface {
 	// e.g. "mermaid".
 	Format() string
 	// SourceExt and OutputExt are the file extensions (dot included) for
-	// the saved source and the rendered output, e.g. ".mmd" and ".svg".
+	// the saved source and the rendered output, e.g. ".mmd" and ".png".
 	SourceExt() string
 	OutputExt() string
 	// Available reports whether the renderer can run on this machine; the

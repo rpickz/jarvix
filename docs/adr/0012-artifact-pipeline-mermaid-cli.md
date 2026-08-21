@@ -91,3 +91,29 @@ silently corrupt — and `[artifacts.open_commands]` overrides the viewer per
 format (an entry of `""`/`"none"` means "no viewer": the tool saves the file
 and names it, by base name only, in the result). `TestArtifactFormatsShareOneSeam`
 pins the property that adding a format is registration-only.
+
+## Addendum — diagrams open as PNG, not SVG (issue #56)
+
+The original decision rendered SVG ("crisp at any zoom"). In practice the
+artifact that opened was **textless**: mermaid emits labels as HTML inside
+`<foreignObject>`, which only a browser engine renders, and `xdg-open` sends
+`image/svg+xml` to whatever the desktop associates — on the reporting
+machine an image editor. The user's file had 27 foreignObjects and zero
+`<text>` elements; every non-browser viewer showed empty boxes.
+
+So the default output is now **PNG at 2× scale** (`mmdc … -s 2`): the
+embedded browser that mermaid-cli already runs rasterises its own drawing,
+and the file that opens means the same thing in every viewer. The crispness
+trade was judged wrong the first time — a raster that shows its words beats
+markup that needs a second browser to mean anything.
+
+`[artifacts] diagram_format = "svg"` opts back in for users who want markup
+to edit or embed. That path renders under a mermaid config with
+`htmlLabels: false`, so labels become real `<text>` — but some shapes still
+emit foreignObject regardless, which is why SVG is the opt-in rather than
+the default. The `.mmd` source is still saved beside the render either way,
+and `jarvix artifacts` folds the pair into one listed diagram.
+
+Verification note for this class of bug: mmdc exits 0 while producing an
+artifact no image viewer can show, so the real-renderer test decodes the
+output (PNG header, sane dimensions) instead of trusting the exit code.

@@ -147,6 +147,11 @@ func TestArtifactDefaults(t *testing.T) {
 	if !slices.Equal(cfg.Artifacts.OpenCommand, []string{"xdg-open"}) || cfg.Artifacts.RenderTimeoutSec != 10 {
 		t.Errorf("artifacts defaults = %+v", cfg.Artifacts)
 	}
+	// PNG, not SVG: the default artifact must show its text in an image
+	// viewer, and mermaid's SVG labels only render in a browser (#56).
+	if cfg.Artifacts.DiagramFormat != "png" {
+		t.Errorf("artifacts.diagram_format default = %q, want png", cfg.Artifacts.DiagramFormat)
+	}
 	if !cfg.Tools.Artifacts {
 		t.Error("tools.artifacts should default on: the tool degrades safely without its renderer")
 	}
@@ -161,6 +166,7 @@ artifacts = false
 dir = "/tmp/my-artifacts"
 open_command = "imv"
 render_timeout_sec = 30
+diagram_format = "svg"
 
 [artifacts.open_commands]
 document = "obsidian"
@@ -170,7 +176,7 @@ excalidraw = ""
 		t.Error("tools.artifacts should be off")
 	}
 	if cfg.Artifacts.Dir != "/tmp/my-artifacts" || !slices.Equal(cfg.Artifacts.OpenCommand, []string{"imv"}) ||
-		cfg.Artifacts.RenderTimeoutSec != 30 {
+		cfg.Artifacts.RenderTimeoutSec != 30 || cfg.Artifacts.DiagramFormat != "svg" {
 		t.Errorf("artifacts = %+v", cfg.Artifacts)
 	}
 	if !slices.Equal(cfg.Artifacts.OpenCommands["document"], []string{"obsidian"}) {
@@ -192,12 +198,13 @@ func TestArtifactValidationRejectsBadValues(t *testing.T) {
 dir = "~/Documents/Jarvix"
 open_command = " "
 render_timeout_sec = 0
+diagram_format = "jpg"
 `)
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	for _, want := range []string{"artifacts.dir", "artifacts.open_command", "artifacts.render_timeout_sec"} {
+	for _, want := range []string{"artifacts.dir", "artifacts.open_command", "artifacts.render_timeout_sec", "artifacts.diagram_format"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing mention of %q: %v", want, err)
 		}
