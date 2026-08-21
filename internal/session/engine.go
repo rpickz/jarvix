@@ -699,6 +699,10 @@ func (e *Engine) think(s *sess) {
 	if e.opts.SpeakResponses && e.tts != nil {
 		speaker = newStreamingSpeaker(e, s)
 	}
+	// What this turn has committed to saying out loud, carried through the tool
+	// loop so a call that does not run can be reported to the model alongside
+	// the preamble it has to take back (issue #52).
+	turn := spokenTurn{speaker: speaker}
 
 	e.publish(Event{Type: "assistant.started", Data: map[string]any{"session_id": s.id, "provider": e.provider.Name()}})
 
@@ -731,12 +735,16 @@ func (e *Engine) think(s *sess) {
 		// a result message, so the model can answer gracefully instead of
 		// the session dying.
 		messages = append(messages, ai.Message{Role: ai.RoleAssistant, Content: text, ToolCalls: calls})
+		// streamOnce has already flushed this round's text to the speaker, so
+		// by now every word of it is committed to the one playback queue: from
+		// the gate's point of view it has been said.
+		turn = turn.add(text)
 		for _, call := range calls {
 			if s.ctx.Err() != nil {
 				e.abortSpeaker(speaker)
 				return
 			}
-			result, ok := e.gateAndExecute(s, call)
+			result, ok := e.gateAndExecute(s, call, turn)
 			if !ok {
 				e.abortSpeaker(speaker)
 				return

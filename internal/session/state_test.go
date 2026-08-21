@@ -18,8 +18,12 @@ func TestConfirmationTransitions(t *testing.T) {
 	legal := [][2]State{
 		// A tool call that needs confirmation pauses the model's turn…
 		{StateThinking, StateAwaitingConfirmation},
-		// …including when the model streamed text before calling the tool.
+		// …including when the model streamed text before calling the tool…
 		{StateResponding, StateAwaitingConfirmation},
+		// …and when that text has already been spoken. Streaming speech begins
+		// on the first complete sentence, so this is not an edge case: it is
+		// what happens whenever the model narrates before it acts (issue #52).
+		{StateSpeaking, StateAwaitingConfirmation},
 		// Approved, declined, and timed out all resume the tool loop: a
 		// decline is a result for the model, not an error.
 		{StateAwaitingConfirmation, StateThinking},
@@ -38,10 +42,9 @@ func TestConfirmationTransitions(t *testing.T) {
 		}
 	}
 	illegal := [][2]State{
-		{StateIdle, StateAwaitingConfirmation},      // only a tool round can ask
-		{StateListening, StateAwaitingConfirmation}, // capture resolves via Transcribing
-		{StateSpeaking, StateAwaitingConfirmation},
-		{StateAwaitingConfirmation, StateSpeaking},   // the prompt is spoken without a state change
+		{StateIdle, StateAwaitingConfirmation},       // only a tool round can ask
+		{StateListening, StateAwaitingConfirmation},  // capture resolves via Transcribing
+		{StateAwaitingConfirmation, StateSpeaking},   // the question is spoken without a state change
 		{StateAwaitingConfirmation, StateResponding}, // resolution passes through Thinking
 		{StateAwaitingConfirmation, StateIdle},       // teardown goes via Cancelling/Error
 		{StateError, StateAwaitingConfirmation},
@@ -109,6 +112,117 @@ func TestActingTransitions(t *testing.T) {
 	}
 	if !StateActing.Valid() {
 		t.Error("acting must validate")
+	}
+}
+
+// TestEveryToolRequestStateReachesTheGateAndComesBack is the enumeration issue
+// #52 asked for by name, and the reason it is a table rather than a case: the
+// bug was not one missing entry, it was that no one had ever listed the states
+// a tool call can arrive in. Speaking became such a state when streaming speech
+// landed, and nothing anywhere said so — the gap was found in production.
+//
+// Both directions matter. A state that cannot reach AwaitingConfirmation kills
+// the turn at the question; a state whose resume is not reachable kills it at
+// the answer, which is the harder half to notice because the user has already
+// been asked and has already said yes.
+func TestEveryToolRequestStateReachesTheGateAndComesBack(t *testing.T) {
+	// Where a confirmation raised from each state puts the session once it is
+	// answered. A model tool round always resumes at Thinking — the tool loop
+	// continues from there whatever the answer was, and going back to
+	// Responding instead would need a self-transition the table refuses. A
+	// user-defined intent resumes at Acting, which never reaches the model.
+	resume := map[State]State{
+		StateThinking:   StateThinking,
+		StateResponding: StateThinking,
+		StateSpeaking:   StateThinking,
+		StateActing:     StateActing,
+	}
+	for _, from := range toolRequestStates {
+		if !CanTransition(from, StateAwaitingConfirmation) {
+			t.Errorf("a tool call can be requested from %s, so %s → awaiting_confirmation must be legal", from, from)
+		}
+		to, ok := resume[from]
+		if !ok {
+			t.Errorf("no resume state declared for %s; decide what answering a question from there means", from)
+			continue
+		}
+		if !CanTransition(StateAwaitingConfirmation, to) {
+			t.Errorf("a confirmation raised from %s resumes at %s, so awaiting_confirmation → %s must be legal", from, to, to)
+		}
+	}
+}
+
+// TestToolRequestStatesCoverEveryState is the guard that stops this class of
+// defect coming back. Every state in the table has to be classified as one a
+// tool call can arrive in or one it cannot, so adding a state to the machine
+// forces the same question that was never asked about Speaking. A new state
+// left out of both lists fails here rather than in someone's living room.
+func TestToolRequestStatesCoverEveryState(t *testing.T) {
+	// The states no tool call can arrive in, each with the reason it cannot.
+	// The reason is the point: "it has never happened" is not one of them.
+	noToolCalls := map[State]string{
+		StateIdle:                 "no turn is in flight",
+		StateListening:            "the microphone is open; nothing has been said yet",
+		StateTranscribing:         "the words are still being recognised; neither the model nor the router has seen them",
+		StateAwaitingConfirmation: "already at the gate — tool calls are gated one at a time",
+		StateCancelling:           "the session is being torn down",
+		StateError:                "the session has already failed",
+	}
+	inToolStates := map[State]bool{}
+	for _, s := range toolRequestStates {
+		if inToolStates[s] {
+			t.Errorf("%s is listed twice in toolRequestStates", s)
+		}
+		inToolStates[s] = true
+		if !s.Valid() {
+			t.Errorf("toolRequestStates names %s, which is not a state", s)
+		}
+		if why, both := noToolCalls[s]; both {
+			t.Errorf("%s is classified both ways (%q); it can only be one", s, why)
+		}
+	}
+	for s := range transitions {
+		if !inToolStates[s] && noToolCalls[s] == "" {
+			t.Errorf("%s is classified neither way: decide whether a tool call can be "+
+				"requested from it, add it to toolRequestStates or to this test's list, "+
+				"and give it a legal path to awaiting_confirmation if it needs one", s)
+		}
+	}
+	for s := range noToolCalls {
+		if !s.Valid() {
+			t.Errorf("this test names %s, which is not a state", s)
+		}
+	}
+}
+
+// TestSpeakingIsNotTheEndOfATurn pins the other half of #52: speech starts
+// before generation finishes, so the tool loop has to be able to carry on
+// underneath it. Without Speaking → Responding a tool call that needed no
+// confirmation at all left the session wedged in Speaking forever — no error,
+// no session.finished, nothing for the user to see except an assistant that
+// stopped mid-answer.
+func TestSpeakingIsNotTheEndOfATurn(t *testing.T) {
+	legal := [][2]State{
+		// The next round's first token, after a tool ran under the speech.
+		{StateSpeaking, StateResponding},
+		// The answer really is over.
+		{StateSpeaking, StateIdle},
+	}
+	for _, pair := range legal {
+		if !CanTransition(pair[0], pair[1]) {
+			t.Errorf("expected %s → %s to be legal", pair[0], pair[1])
+		}
+	}
+	illegal := [][2]State{
+		{StateSpeaking, StateListening},    // speech never opens the microphone
+		{StateSpeaking, StateTranscribing}, //
+		{StateSpeaking, StateActing},       // a matched intent never follows a model answer
+		{StateSpeaking, StateSpeaking},     // one continuous stream per turn
+	}
+	for _, pair := range illegal {
+		if CanTransition(pair[0], pair[1]) {
+			t.Errorf("expected %s → %s to be illegal", pair[0], pair[1])
+		}
 	}
 }
 

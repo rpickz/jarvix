@@ -25,7 +25,8 @@ const DefaultToolProgressAfter = 10 * time.Second
 // overtakes it into the speaker and no goroutine outlives the call.
 //
 // It fires at most once: the point is reassurance, not a countdown.
-func (e *Engine) startToolProgress(s *sess, call ai.ToolCall, waiting string) (stop func()) {
+func (e *Engine) startToolProgress(s *sess, call ai.ToolCall, waiting string,
+	speaker *streamingSpeaker) (stop func()) {
 	after := e.progressAfter
 	if after <= 0 {
 		after = DefaultToolProgressAfter
@@ -46,10 +47,13 @@ func (e *Engine) startToolProgress(s *sess, call ai.ToolCall, waiting string) (s
 			}})
 			e.log.Info("tool still running", "component", "tools",
 				"tool", call.Name, "session_id", s.id, "elapsed_sec", int(after.Seconds()))
-			// Spoken outside the streaming speaker, like a confirmation
-			// question: the session is Thinking, not Speaking, and this
-			// sentence must not become part of the answer being assembled.
-			e.speakPrompt(s, waiting)
+			// An aside, like a confirmation question: the session is
+			// Thinking, not Speaking, and this sentence must not become part
+			// of the answer being assembled. It still goes through the turn's
+			// speaker when there is one, because a slow tool can be running
+			// while an earlier sentence is still playing and reassurance that
+			// talks over the answer is worse than no reassurance.
+			e.speakPrompt(s, waiting, speaker)
 		}
 	}()
 	return func() {
