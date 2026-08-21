@@ -238,7 +238,7 @@ func TestSpeakCallErrorFailsSessionBeforeAnyAudio(t *testing.T) {
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
 	h.engine = NewEngine(h.provider, h.stt, &erroringSynth{err: errors.New("no voice model")},
-		h.recorder, h.player, nil, bus, nil, Options{Model: "m", SpeakResponses: true})
+		h.recorder, h.player, nil, nil, bus, nil, Options{Model: "m", SpeakResponses: true})
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	seen := h.collectUntil(t, "session.finished")

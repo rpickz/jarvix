@@ -20,6 +20,37 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	}
 }
 
+func TestNotificationDefaultsOn(t *testing.T) {
+	cfg := Default()
+	if !cfg.UI.Notifications {
+		t.Error("ui.notifications should default to true")
+	}
+	if !cfg.UI.NotificationPreview {
+		t.Error("ui.notification_preview should default to true")
+	}
+}
+
+func TestNotificationKeysOverride(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[ui]
+notifications = false
+notification_preview = false
+`)
+	if cfg.UI.Notifications {
+		t.Error("notifications should be off")
+	}
+	if cfg.UI.NotificationPreview {
+		t.Error("notification_preview should be off")
+	}
+	// Untouched [ui] defaults survive a partial table.
+	if !cfg.UI.ShowTranscript {
+		t.Error("show_transcript default lost")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
 func TestLoadOverridesDefaults(t *testing.T) {
 	cfg := writeAndLoad(t, `
 [ai]
@@ -100,6 +131,71 @@ level = "loud"
 		t.Fatal("expected validation error")
 	}
 	for _, want := range []string{"telepathy", "nonexistent", "ai.model", "log.level"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing mention of %q: %v", want, err)
+		}
+	}
+}
+
+func TestArtifactDefaults(t *testing.T) {
+	cfg := Default()
+	if !strings.HasSuffix(cfg.Artifacts.Dir, filepath.Join("Documents", "Jarvix")) {
+		t.Errorf("artifacts.dir default = %q", cfg.Artifacts.Dir)
+	}
+	if cfg.Artifacts.OpenCommand != "xdg-open" || cfg.Artifacts.RenderTimeoutSec != 10 {
+		t.Errorf("artifacts defaults = %+v", cfg.Artifacts)
+	}
+	if !cfg.Tools.Artifacts {
+		t.Error("tools.artifacts should default on: the tool degrades safely without its renderer")
+	}
+}
+
+func TestArtifactOverridesAndValidation(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tools]
+artifacts = false
+
+[artifacts]
+dir = "/tmp/my-artifacts"
+open_command = "imv"
+render_timeout_sec = 30
+
+[artifacts.open_commands]
+document = "obsidian"
+excalidraw = ""
+`)
+	if cfg.Tools.Artifacts {
+		t.Error("tools.artifacts should be off")
+	}
+	if cfg.Artifacts.Dir != "/tmp/my-artifacts" || cfg.Artifacts.OpenCommand != "imv" ||
+		cfg.Artifacts.RenderTimeoutSec != 30 {
+		t.Errorf("artifacts = %+v", cfg.Artifacts)
+	}
+	if cfg.Artifacts.OpenCommands["document"] != "obsidian" {
+		t.Errorf("open_commands = %+v", cfg.Artifacts.OpenCommands)
+	}
+	// An explicitly empty override is meaningful ("no viewer for this
+	// format"), so it must survive the parse as a present-but-empty entry.
+	if v, ok := cfg.Artifacts.OpenCommands["excalidraw"]; !ok || v != "" {
+		t.Errorf("empty override lost: %+v", cfg.Artifacts.OpenCommands)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestArtifactValidationRejectsBadValues(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[artifacts]
+dir = "~/Documents/Jarvix"
+open_command = " "
+render_timeout_sec = 0
+`)
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	for _, want := range []string{"artifacts.dir", "artifacts.open_command", "artifacts.render_timeout_sec"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing mention of %q: %v", want, err)
 		}

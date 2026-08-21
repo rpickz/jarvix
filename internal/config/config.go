@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -23,17 +24,39 @@ type Config struct {
 	TTS          TTS          `toml:"tts"`
 	Conversation Conversation `toml:"conversation"`
 	Tools        Tools        `toml:"tools"`
+	Artifacts    Artifacts    `toml:"artifacts"`
 	Audio        Audio        `toml:"audio"`
 	UI           UI           `toml:"ui"`
 	Log          Log          `toml:"log"`
 }
 
-// Tools configures the assistant's tool access. Tools are opt-in: enabling
-// shell.run gives the assistant the same authority as the user's shell.
+// Tools configures the assistant's tool access. shell.run is opt-in: it
+// gives the assistant the same authority as the user's shell. artifact.create
+// only writes into the artifact directory and opens a viewer, so it defaults
+// on — with the renderer missing it degrades to a prose answer.
 type Tools struct {
-	Shell            bool `toml:"shell"`              // enable shell.run
-	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`  // per-command timeout
+	Shell            bool `toml:"shell"`               // enable shell.run
+	ShellTimeoutSec  int  `toml:"shell_timeout_sec"`   // per-command timeout
 	ShellMaxOutputKB int  `toml:"shell_max_output_kb"` // captured output cap
+	Artifacts        bool `toml:"artifacts"`           // enable artifact.create
+}
+
+// Artifacts configures where rendered artifacts (diagrams, later documents)
+// land and how they are shown.
+type Artifacts struct {
+	// Dir is where artifacts are saved. Created 0700 on first use; must be
+	// absolute ("~" is not expanded).
+	Dir string `toml:"dir"`
+	// OpenCommand launches a rendered artifact in a viewer.
+	OpenCommand string `toml:"open_command"`
+	// OpenCommands overrides OpenCommand per artifact format, e.g. under
+	// [artifacts.open_commands]: document = "obsidian". An entry set to ""
+	// or "none" declares the format has no viewer — the artifact is saved
+	// and announced by name, nothing is launched. Formats without an entry
+	// fall back to OpenCommand.
+	OpenCommands map[string]string `toml:"open_commands"`
+	// RenderTimeoutSec bounds one render; the renderer is killed past it.
+	RenderTimeoutSec int `toml:"render_timeout_sec"`
 }
 
 // Activation configures how sessions are initiated.
@@ -128,18 +151,28 @@ type Conversation struct {
 
 // Audio configures capture and playback.
 type Audio struct {
-	InputDevice     string `toml:"input_device"`     // PipeWire target, empty = default
-	OutputDevice    string `toml:"output_device"`    // PipeWire target, empty = default
+	InputDevice     string `toml:"input_device"`      // PipeWire target, empty = default
+	OutputDevice    string `toml:"output_device"`     // PipeWire target, empty = default
 	MaxRecordingSec int    `toml:"max_recording_sec"` // safety cap on recording length
 	// MinRecordingMs discards recordings shorter than this as accidental
 	// activations (a stray tap) instead of transcribing them.
 	MinRecordingMs int `toml:"min_recording_ms"`
 }
 
-// UI configures what the overlay is told to display.
+// UI configures the desktop surfaces: what the overlay displays, and how a
+// finished session is announced.
 type UI struct {
 	ShowTranscript bool `toml:"show_transcript"`
 	ShowResponse   bool `toml:"show_response"`
+	// Notifications sends a desktop notification when a session finishes;
+	// clicking it opens the conversation window. false disables notifications
+	// entirely — the window stays reachable via `jarvix window`.
+	Notifications bool `toml:"notifications"`
+	// NotificationPreview puts the start of the assistant's answer (or the
+	// error detail) in the notification body. false shows a generic
+	// "Jarvix answered" instead, keeping answer content away from the
+	// notification daemon and its logs.
+	NotificationPreview bool `toml:"notification_preview"`
 }
 
 // Log configures daemon logging.
@@ -150,6 +183,7 @@ type Log struct {
 // Default returns the configuration used when no file exists. Jarvix must
 // work with an empty config file on a machine with Ollama and Piper present.
 func Default() Config {
+	home, _ := os.UserHomeDir()
 	return Config{
 		Activation: Activation{
 			Mode:     "push_to_talk",
@@ -178,10 +212,15 @@ func Default() Config {
 			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
 		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900},
-		Tools:        Tools{Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16},
-		Audio:        Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
-		UI:           UI{ShowTranscript: true, ShowResponse: true},
-		Log:          Log{Level: "info"},
+		Tools:        Tools{Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true},
+		Artifacts: Artifacts{
+			Dir:              filepath.Join(home, "Documents", "Jarvix"),
+			OpenCommand:      "xdg-open",
+			RenderTimeoutSec: 10,
+		},
+		Audio: Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
+		UI:    UI{ShowTranscript: true, ShowResponse: true, Notifications: true, NotificationPreview: true},
+		Log:   Log{Level: "info"},
 	}
 }
 
@@ -198,6 +237,20 @@ const ToolSystemPrompt = " You can run shell commands yourself with the shell.ru
 	"and summarise the result — do not tell the user which command to run, run it. Prefer read-only " +
 	"commands; before anything destructive or irreversible, ask for confirmation first. Summarise " +
 	"command output for speech: report what matters, not raw tables."
+
+// ArtifactSystemPrompt is appended to the system prompt when the artifact
+// tool is enabled. The spoken-summary rules live here because they are model
+// behaviour: the tool result repeats them, and speech normalisation cannot
+// save an answer that reads a path aloud on purpose.
+const ArtifactSystemPrompt = " When the user asks for output better seen than heard, use the " +
+	"artifact.create tool instead of describing the content in speech: Mermaid source (format " +
+	"\"mermaid\") to diagram or chart how something works or connects, Markdown (format \"document\") " +
+	"to draft a document or brief, CSV (format \"spreadsheet\") to put data in a table, and an " +
+	"Excalidraw scene (format \"excalidraw\") to sketch on a free-form canvas. After the tool " +
+	"succeeds, answer with at most two sentences about what the artifact shows — never recite its " +
+	"source, file names, or paths, because your answer is read aloud. If the tool rejects your " +
+	"source, fix exactly what the error names and retry once; if it fails again, or rendering is " +
+	"unavailable, apologise briefly and answer in prose."
 
 // Load reads the config file at path, applying defaults for anything unset.
 // A missing file is not an error; defaults are returned.
@@ -296,6 +349,18 @@ func (c Config) Validate() error {
 		problems = append(problems, "audio.min_recording_ms must not be negative")
 	} else if c.Audio.MinRecordingMs >= c.Audio.MaxRecordingSec*1000 {
 		problems = append(problems, "audio.min_recording_ms must be smaller than audio.max_recording_sec")
+	}
+	if c.Artifacts.Dir == "" {
+		problems = append(problems, "artifacts.dir is empty; set the directory rendered artifacts are saved in")
+	} else if !filepath.IsAbs(c.Artifacts.Dir) {
+		problems = append(problems, fmt.Sprintf(
+			"artifacts.dir %q must be an absolute path (\"~\" is not expanded)", c.Artifacts.Dir))
+	}
+	if strings.TrimSpace(c.Artifacts.OpenCommand) == "" {
+		problems = append(problems, "artifacts.open_command is empty; \"xdg-open\" opens the default viewer")
+	}
+	if c.Artifacts.RenderTimeoutSec <= 0 {
+		problems = append(problems, "artifacts.render_timeout_sec must be positive")
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

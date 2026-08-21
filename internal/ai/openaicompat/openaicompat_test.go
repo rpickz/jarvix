@@ -45,9 +45,9 @@ func TestChatStreamsDeltas(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, tok := range []string{"Hello", " ", "world"} {
-			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", tok)
+			_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", tok)
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	})
 
 	c := New("test", srv.URL+"/v1", "test-key")
@@ -72,20 +72,20 @@ func TestChatNoAuthHeaderWithoutKey(t *testing.T) {
 		if _, ok := r.Header["Authorization"]; ok {
 			t.Error("Authorization header sent for keyless endpoint")
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	})
 	c := New("ollama", srv.URL+"/v1", "")
 	ch, err := c.Chat(context.Background(), ai.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
-	collect(t, ch)
+	_, _, _ = collect(t, ch)
 }
 
 func TestChatHTTPErrorSurfacesMessage(t *testing.T) {
 	srv := sseServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, `{"error":{"message":"Incorrect API key provided"}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"Incorrect API key provided"}}`)
 	})
 	c := New("openai", srv.URL+"/v1", "bad")
 	_, err := c.Chat(context.Background(), ai.ChatRequest{Model: "m"})
@@ -101,7 +101,7 @@ func TestChatMidStreamCancellation(t *testing.T) {
 	streaming := make(chan struct{})
 	srv := sseServer(t, func(w http.ResponseWriter, r *http.Request) {
 		fl := w.(http.Flusher)
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n")
 		fl.Flush()
 		close(streaming)
 		// Stall; the client should give up when its context is cancelled.
@@ -139,7 +139,7 @@ func TestChatMidStreamCancellation(t *testing.T) {
 
 func TestChatEOFWithoutDoneIsClean(t *testing.T) {
 	srv := sseServer(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
 		// Connection closes without [DONE].
 	})
 	c := New("test", srv.URL+"/v1", "")
@@ -156,7 +156,7 @@ func TestChatEOFWithoutDoneIsClean(t *testing.T) {
 func TestProbe(t *testing.T) {
 	srv := sseServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
-			fmt.Fprint(w, `{"data":[]}`)
+			_, _ = fmt.Fprint(w, `{"data":[]}`)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

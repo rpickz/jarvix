@@ -1,0 +1,112 @@
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/session"
+)
+
+// notificationPreviewLimit caps how much of an answer the notification body
+// shows. Roughly one line of a desktop notification; the full text lives in
+// the conversation window the click opens.
+const notificationPreviewLimit = 80
+
+// watchSessions turns completed sessions into desktop notifications. It is
+// just another bus subscriber — the same feed the overlay and CLI follow —
+// so the engine neither knows nor waits for notification delivery, and a
+// stalled notifier can at worst drop events like any slow client.
+//
+// It accumulates the outcome of the session in flight (final answer, or
+// failing stage + message) and dispatches on session.finished, which the bus
+// guarantees is a session's last event. Cancellations notify nothing: the
+// user cancelled it themself.
+func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event, unsubscribe func()) {
+	defer unsubscribe()
+	var answer, errStage, errMessage string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			switch ev.Type {
+			case "assistant.finished":
+				answer, _ = ev.Data["content"].(string)
+			case "error":
+				errStage, _ = ev.Data["stage"].(string)
+				errMessage, _ = ev.Data["message"].(string)
+			case "session.finished":
+				n := d.buildNotification(answer, errStage, errMessage)
+				// Send blocks until the notification is clicked, dismissed,
+				// or expires; dispatch from its own goroutine so back-to-back
+				// sessions never queue behind an unclicked notification.
+				go d.deliver(ctx, n)
+				answer, errStage, errMessage = "", "", ""
+			case "session.cancelled":
+				answer, errStage, errMessage = "", "", ""
+			}
+		}
+	}
+}
+
+// buildNotification decides what a finished session's notification says,
+// honouring the privacy switch: with ui.notification_preview = false, answer
+// content never reaches the notification daemon — only the generic outcome
+// (and, for failures, the failing stage, which is operational rather than
+// conversational).
+func (d *Daemon) buildNotification(answer, errStage, errMessage string) desktop.Notification {
+	n := desktop.Notification{
+		// The reserved "default" action makes the notification body itself
+		// the click target: click anywhere → open the window.
+		Actions: []desktop.Action{{ID: desktop.DefaultActionID, Label: "Open"}},
+	}
+	if errStage != "" || errMessage != "" {
+		n.Summary = "Jarvix hit a problem"
+		if d.preview {
+			n.Body = fmt.Sprintf("Failed at %s: %s", errStage, errMessage)
+		} else {
+			n.Body = "Failed at " + errStage
+		}
+		return n
+	}
+	n.Summary = "Jarvix answered"
+	if d.preview {
+		n.Body = previewText(answer, notificationPreviewLimit)
+	}
+	return n
+}
+
+// deliver sends one notification and opens the conversation window when it
+// is clicked. Delivery failure (no notification daemon, notify-send absent)
+// degrades to a log line — and never one that contains the body, because the
+// body is the assistant's answer.
+func (d *Daemon) deliver(ctx context.Context, n desktop.Notification) {
+	invoked, err := d.notifier.Send(ctx, n)
+	if err != nil {
+		d.log.Debug("notification not delivered", "component", "notify", "error", err.Error())
+		return
+	}
+	if invoked != desktop.DefaultActionID {
+		return
+	}
+	if err := d.openWindow(ctx); err != nil {
+		d.log.Warn("notification clicked but the window did not open",
+			"component", "notify", "error", err.Error())
+	}
+}
+
+// previewText returns the first limit runes of s, ellipsised. Runes, not
+// bytes: an answer must never be cut mid-character.
+func previewText(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return strings.TrimSpace(string(r[:limit])) + "…"
+}

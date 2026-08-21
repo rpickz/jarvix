@@ -63,8 +63,8 @@ func TestResolveVoiceMissingIsActionable(t *testing.T) {
 func TestResolveVoiceBadSidecar(t *testing.T) {
 	root := t.TempDir()
 	model := filepath.Join(root, "v.onnx")
-	os.WriteFile(model, []byte("onnx"), 0o644)
-	os.WriteFile(model+".json", []byte("not json"), 0o644)
+	_ = os.WriteFile(model, []byte("onnx"), 0o644)
+	_ = os.WriteFile(model+".json", []byte("not json"), 0o644)
 	s := &Synthesizer{Binary: "piper-tts", Voice: model}
 	if err := s.ResolveVoice(); err == nil {
 		t.Error("expected error for unreadable voice config")

@@ -142,6 +142,17 @@ top-centre card on the Wayland overlay layer. It is input-transparent (empty
 input region) — Escape-to-cancel is a Hyprland binding, not window focus
 ([ADR 0004](adr/0004-keyboard-activation.md)).
 
+The same plugin also owns the **conversation window** (`JarvixWindow.qml`):
+a normal toplevel showing the full current conversation, opened by clicking
+the desktop notification the daemon sends when a session finishes, or by
+`jarvix window` / `Super+Alt+C`. It renders the `conversation.get` snapshot
+and live-appends from the same event stream as the overlay; its socket is
+connected only while it is open. Notifications go out via `notify-send`
+(`org.freedesktop.Notifications`) from a bus subscriber inside the daemon —
+`ui.notifications` / `ui.notification_preview` control them (see
+[configuration.md](configuration.md)). Window technology choice:
+[ADR 0013](adr/0013-conversation-window-in-shell-plugin.md).
+
 Assumptions about the installed Omarchy version are recorded in
 [ADR 0005](adr/0005-omarchy-plugin-integration.md).
 

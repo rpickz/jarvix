@@ -1,0 +1,80 @@
+# Release pipeline (issue #14): a v* tag builds versioned, reproducible
+# artifacts — jarvix/jarvixd for linux/amd64 + linux/arm64, the Omarchy
+# plugin, the Kokoro helper, the systemd unit, install notes, and a
+# SHA256SUMS manifest — and attaches them to the GitHub release.
+#
+# The same package job runs as a dry run on PRs touching the release
+# machinery, so a broken workflow or packaging script is caught before a tag
+# depends on it. Builds happen only in CI from tags; nothing is signed or
+# uploaded from developer machines.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'Makefile'
+      - 'scripts/package-release.sh'
+      - 'packaging/**'
+
+permissions:
+  contents: read
+
+jobs:
+  # Build + package for both arches. On PRs this is the dry run: everything
+  # except the release upload.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git describe` names snapshot versions on PRs.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Package (linux/amd64 + linux/arm64)
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            export VERSION="$GITHUB_REF_NAME"
+          fi
+          scripts/package-release.sh
+      - name: Verify version stamping
+        # The amd64 binary must report the tag (or snapshot version) —
+        # the first thing a bug report asks for.
+        if: github.ref_type == 'tag'
+        run: |
+          tar -xzf "dist/jarvix_${GITHUB_REF_NAME}_linux_amd64.tar.gz" -C /tmp
+          got=$(/tmp/jarvix_${GITHUB_REF_NAME}_linux_amd64/bin/jarvix --version)
+          echo "$got"
+          [ "$got" = "jarvix $GITHUB_REF_NAME" ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true

@@ -12,6 +12,12 @@ Inspect the effective configuration (defaults + your file, secrets redacted):
 jarvix config
 ```
 
+The first-run wizard (`jarvix setup`) writes this file for you: it detects
+the voice engine, activation access, AI provider, and installed advisor
+CLIs, and records the choices. It edits only the keys it owns, preserves
+your comments and layout, and asks before changing any value you set by
+hand — safe to re-run at any time.
+
 ## Full reference
 
 ```toml
@@ -66,6 +72,21 @@ speed = 1.0                      # speech rate multiplier
 shell = false                    # enable shell.run — see the Tools section below
 shell_timeout_sec = 30           # per-command timeout
 shell_max_output_kb = 16         # captured output cap fed back to the model
+artifacts = true                 # enable artifact.create (diagrams, documents,
+                                 # spreadsheets, sketches on screen)
+
+[artifacts]                      # where the assistant's files land and open
+dir = "~/Documents/Jarvix"       # default is your real home path; must be
+                                 # absolute in the file ("~" is not expanded)
+open_command = "xdg-open"        # how an artifact is shown (all formats)
+render_timeout_sec = 10          # renderer killed past this
+
+[artifacts.open_commands]        # optional per-format viewer overrides;
+                                 # formats without an entry use open_command
+# document = "obsidian"          # .md drafts in your editor of choice
+# spreadsheet = "libreoffice"    # .csv tables in a spreadsheet app
+# excalidraw = "none"            # "" or "none" = no viewer: the file is
+                                 # saved and announced by name, not opened
 
 [conversation]
 speak_responses = true           # false = text-only sessions
@@ -81,12 +102,26 @@ max_recording_sec = 60           # safety cap on capture length
 min_recording_ms = 300           # discard shorter captures as accidental taps
                                  # (no transcription, no error; session ends quietly)
 
-[ui]                             # hints for the overlay
+[ui]                             # desktop surfaces: overlay hints + notifications
 show_transcript = true
 show_response = true
+notifications = true             # desktop notification when a session finishes;
+                                 # clicking it opens the conversation window.
+                                 # false = no notifications (the window stays
+                                 # reachable via `jarvix window`)
+notification_preview = true      # show the start of the answer in the
+                                 # notification body; false = a generic
+                                 # "Jarvix answered" with no content
 
 [log]
 level = "info"                   # debug | info | warn | error
+
+# Assistant CLIs Jarvix can delegate heavyweight questions to. `jarvix setup`
+# detects installed CLIs (claude, codex, gemini, aider, goose, opencode) and
+# records them here; delegation itself ships separately (issue #3) and will
+# consume these tables — recording them now costs nothing.
+[advisors.claude]
+binary = "/usr/bin/claude"       # absolute path found on PATH at setup time
 ```
 
 ## Secrets
@@ -144,6 +179,69 @@ with tool support. Small models without tool training will not call tools.
 A per-tool permission gate (allow / ask / deny, with spoken confirmation) is
 the next step on the roadmap; today `shell` is a single on/off switch.
 
+## Artifacts (work you keep)
+
+Ask for something better seen than heard and the assistant calls
+`artifact.create` with the right format instead of reading structure aloud:
+
+| You say | Format | File | Opens via |
+|---|---|---|---|
+| "diagram my publish pipeline" | `mermaid` | `.mmd` + rendered `.svg` | `open_command` |
+| "draft a one-page brief" | `document` | `.md`, saved verbatim | `open_commands.document` |
+| "put those numbers in a spreadsheet" | `spreadsheet` | `.csv`, validated before write | `open_commands.spreadsheet` |
+| "sketch this out on a canvas" | `excalidraw` | `.excalidraw` scene JSON, validated | `open_commands.excalidraw` |
+
+Every format rides the same seam: files land under `[artifacts] dir`
+(default `~/Documents/Jarvix`, created private, 0700) as `<date>-<slug>.<ext>`,
+the daemon publishes an `artifact.created` IPC event (type, path) for the
+overlay/notifications, and `jarvix artifacts` lists the most recent ones
+with type and age. The spoken answer stays a short summary; file paths are
+never read aloud. Structured formats (CSV, scene JSON) are validated before
+anything is written — broken quoting or malformed scene JSON goes back to
+the model with the specific error for one retry, and an invalid file is
+never saved. Artifact source is capped at 1 MB; oversized content is
+refused, never truncated.
+
+Per-format viewers come from `[artifacts.open_commands]` (falling back to
+`open_command`, default `xdg-open`). Setting a format's entry to `""` or
+`"none"` means "no viewer": the assistant saves the file and tells you its
+name instead of opening anything — useful for `.excalidraw`, which usually
+wants dragging into [excalidraw.com](https://excalidraw.com) rather than a
+local handler.
+
+Only diagrams need an external renderer,
+[mermaid-cli](https://github.com/mermaid-js/mermaid-cli):
+
+```bash
+npm install -g @mermaid-js/mermaid-cli   # or from the AUR: mermaid-cli
+```
+
+Without it the assistant simply answers in prose, and `jarvix doctor` names
+the missing piece. Renders run as a local subprocess (no network), bounded by
+`render_timeout_sec`. Documents, spreadsheets, and sketches have no external
+dependency at all. See ADR 0012 for the design.
+
+## Notifications and the conversation window
+
+When a session finishes, the daemon sends a desktop notification
+(`org.freedesktop.Notifications`, via `notify-send`): the first ~80
+characters of the answer on success, or the failing stage and message on
+error. Clicking the notification opens the **conversation window** — the
+full current exchange, streaming live — which is also reachable any time
+with `jarvix window` (bound to `Super+Alt+C` by the Hyprland bindings).
+
+- `ui.notifications = false` turns notifications off entirely.
+- `ui.notification_preview = false` keeps answer content out of
+  notifications: successes say just "Jarvix answered", failures name only
+  the failing stage. Use this when the notification daemon logs or mirrors
+  notification bodies somewhere you don't want answers to land.
+- No notification daemon running? Delivery degrades to a debug log line;
+  sessions are unaffected. Answer content is never written to the journal.
+
+The window is rendered by the Omarchy shell plugin and works without the
+daemon: if jarvixd is down it says so and points at
+`systemctl --user start jarvixd`.
+
 ## Natural voice (Kokoro)
 
 Piper (the default) needs no setup but sounds robotic. Kokoro is markedly
@@ -167,3 +265,4 @@ fences, and list bullets are stripped so nothing reads "asterisk" or
 | State | `~/.local/state/jarvix/` |
 | Socket | `$XDG_RUNTIME_DIR/jarvix.sock` |
 | Recordings (transient) | `$XDG_RUNTIME_DIR/jarvix/` (tmpfs, deleted after use) |
+| Artifacts (diagrams, documents, spreadsheets, sketches) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |

@@ -144,11 +144,12 @@ func TestRunVersionAndHelp(t *testing.T) {
 
 func TestRunUsageErrors(t *testing.T) {
 	hermeticEnv(t)
+	// Bare "jarvix setup" is not here: it launches the interactive first-run
+	// wizard, which needs a terminal.
 	cases := map[string][]string{
 		"ask without question": {"ask"},
 		"ptt without phase":    {"ptt"},
 		"ptt bad phase":        {"ptt", "sideways"},
-		"setup without target": {"setup"},
 		"setup unknown target": {"setup", "bogus"},
 	}
 	for name, args := range cases {

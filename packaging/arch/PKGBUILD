@@ -1,0 +1,68 @@
+# Maintainer: Richard Pickering <mr.rich.pickering@gmail.com>
+#
+# AUR SEED — this PKGBUILD is the starting point for the AUR package and is
+# NOT built or tested in CI. Before publishing to the AUR: set pkgver to the
+# release tag (without the leading v), run `updpkgsums` to pin the tarball
+# checksum, and test with `makepkg -si` on a clean Arch machine.
+#
+# Sources are pinned to the release tag's GitHub archive; the version is
+# stamped into the binaries via internal/build (same ldflags as the Makefile
+# and the release workflow).
+pkgname=jarvix
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Voice-native computer interaction for Omarchy: push-to-talk, local STT/TTS, streaming AI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/rpickz/jarvix"
+license=('MIT')
+depends=('pipewire' 'whisper-cpp')
+optdepends=(
+  'piper-tts-bin: text-to-speech (zero-setup default)'
+  'piper-voices-en-us: Piper English voices'
+  'ollama: local AI provider (default)'
+  'python: Kokoro natural-voice TTS (opt-in, via setup script)'
+  'mermaid-cli: diagram artifacts'
+)
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # pin with `updpkgsums` before publishing to the AUR
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CGO_ENABLED=0
+  export GOFLAGS="-trimpath -mod=readonly -modcacherw -buildvcs=false"
+  local ldflags="-X github.com/rpickz/jarvix/internal/build.Version=v$pkgver"
+  go build -ldflags "$ldflags" -o bin/jarvix ./cmd/jarvix
+  go build -ldflags "$ldflags" -o bin/jarvixd ./cmd/jarvixd
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  go test ./...
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 bin/jarvix "$pkgdir/usr/bin/jarvix"
+  install -Dm755 bin/jarvixd "$pkgdir/usr/bin/jarvixd"
+
+  # The repo unit points at ~/.local/bin for manual installs; the package
+  # installs system-wide, so point the user unit at /usr/bin.
+  sed 's|%h/.local/bin/jarvixd|/usr/bin/jarvixd|' systemd/jarvixd.service \
+    >"$srcdir/jarvixd.service"
+  install -Dm644 "$srcdir/jarvixd.service" \
+    "$pkgdir/usr/lib/systemd/user/jarvixd.service"
+
+  # Shared data: the Omarchy overlay plugin, Hyprland bindings snippet, the
+  # Kokoro streaming helper, and the setup scripts `jarvix setup` delegates
+  # to (it looks under /usr/share/jarvix/scripts first).
+  install -dm755 "$pkgdir/usr/share/jarvix"
+  cp -r plugin "$pkgdir/usr/share/jarvix/plugin"
+  install -Dm755 tts/kokoro/kokoro_stream.py \
+    "$pkgdir/usr/share/jarvix/tts/kokoro/kokoro_stream.py"
+  for script in setup-kokoro.sh install-plugin.sh install-hyprland-bindings.sh; do
+    install -Dm755 "scripts/$script" "$pkgdir/usr/share/jarvix/scripts/$script"
+  done
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

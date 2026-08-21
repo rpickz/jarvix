@@ -53,6 +53,23 @@ func TestSpeechTextStripsMarkdown(t *testing.T) {
 	}
 }
 
+// A model that ignores the artifact prompt and pastes its diagram source into
+// the answer must not have the source read aloud: fenced blocks are dropped
+// entirely from the spoken form (the overlay still shows them).
+func TestSpeechTextDropsFencedDiagramSource(t *testing.T) {
+	got := speechText("Here is the pipeline.\n```mermaid\ngraph TD\n  A[Build] --> B[Deploy]\n```\nIt has two stages.")
+	for _, bad := range []string{"graph TD", "-->", "A[Build]", "`"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("diagram source leaked into speech: %q in %q", bad, got)
+		}
+	}
+	for _, want := range []string{"Here is the pipeline", "two stages"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q missing from %q", want, got)
+		}
+	}
+}
+
 func TestSpeechTextListItemsBecomeSentences(t *testing.T) {
 	got := speechText("- web\n- db\n- cache")
 	// Each item should be period-terminated so TTS pauses between them.

@@ -2,14 +2,21 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/doctor"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
@@ -18,7 +25,7 @@ func cmdStatus(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	var status map[string]any
 	if err := client.Call("status.get", nil, &status); err != nil {
 		return err
@@ -37,16 +44,23 @@ func cmdCancel(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	return client.Call("session.cancel", nil, nil)
 }
 
 func cmdNewConversation(paths config.Paths) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
-		return err
+		// No daemon means no in-memory thread to reset — but a persisted
+		// conversation may still sit on disk, and it would resurrect when the
+		// daemon next starts. Clear it directly so "new" always means new.
+		if clearErr := (&history.File{Path: paths.HistoryFile()}).Clear(); clearErr != nil {
+			return clearErr
+		}
+		fmt.Println("started a fresh conversation (daemon not running; cleared saved history)")
+		return nil
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("conversation.reset", nil, nil); err != nil {
 		return err
 	}
@@ -66,7 +80,7 @@ func cmdPTT(paths config.Paths, phase string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	beginListening := func() error {
 		if err := client.Call("session.start", nil, nil); err != nil {
@@ -112,12 +126,23 @@ func cmdPTT(paths config.Paths, phase string) error {
 	}
 }
 
+// cmdWindow toggles the conversation window. The window is rendered by the
+// Omarchy shell plugin and shows its own "daemon is not running" state, so
+// this deliberately never touches the daemon socket — the window must open
+// even when jarvixd is down (see ADR 0013).
+func cmdWindow() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	windows := &desktop.WindowClient{}
+	return windows.Toggle(ctx)
+}
+
 func cmdAsk(paths config.Paths, question string) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("session.start", nil, nil); err != nil {
 		return err
 	}
@@ -132,7 +157,7 @@ func cmdListen(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("session.start", nil, nil); err != nil {
 		return err
 	}
@@ -147,7 +172,7 @@ func cmdListen(paths config.Paths) error {
 	defer signal.Stop(interrupt)
 	enter := make(chan struct{})
 	go func() {
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		close(enter)
 	}()
 	select {
@@ -258,6 +283,92 @@ func splitLines(s string) []string {
 		}
 	}
 	return append(out, s[start:])
+}
+
+// artifactsListLimit keeps the listing to what "recent" means at a glance.
+const artifactsListLimit = 20
+
+// cmdArtifacts lists recent artifacts straight off the filesystem: the
+// artifact directory is the source of truth, so this works with the daemon
+// stopped — same spirit as `jarvix config` and `jarvix doctor`.
+func cmdArtifacts(cfg config.Config) error {
+	dir := cfg.Artifacts.Dir
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		fmt.Printf("no artifacts yet (they will land in %s)\n", dir)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	type artifact struct {
+		name    string
+		kind    string
+		modTime time.Time
+	}
+	var list []artifact
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue // deleted between ReadDir and Info; not worth failing over
+		}
+		list = append(list, artifact{
+			name:    entry.Name(),
+			kind:    artifactKind(entry.Name()),
+			modTime: info.ModTime(),
+		})
+	}
+	if len(list) == 0 {
+		fmt.Printf("no artifacts yet (they will land in %s)\n", dir)
+		return nil
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].modTime.After(list[j].modTime) })
+	if len(list) > artifactsListLimit {
+		list = list[:artifactsListLimit]
+	}
+
+	fmt.Printf("recent artifacts in %s:\n", dir)
+	for _, a := range list {
+		fmt.Printf("  %-10s %-9s %s\n", humanAge(time.Since(a.modTime)), a.kind, filepath.Join(dir, a.name))
+	}
+	return nil
+}
+
+// artifactKind labels a file for the listing by its extension.
+func artifactKind(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mmd":
+		return "source"
+	case ".svg", ".png":
+		return "diagram"
+	case ".md":
+		return "document"
+	case ".csv":
+		return "spreadsheet"
+	case ".excalidraw":
+		return "sketch"
+	default:
+		return strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
+	}
+}
+
+// humanAge renders a duration the way a person scanning a list thinks about
+// it — coarse buckets, most recent first is already the sort order.
+func humanAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 func cmdConfig(cfg config.Config, paths config.Paths) error {

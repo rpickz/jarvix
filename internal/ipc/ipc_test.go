@@ -22,7 +22,7 @@ func startServer(t *testing.T, bus *session.Bus) (*Server, string) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go srv.Serve(ctx)
+	go func() { _ = srv.Serve(ctx) }()
 	t.Cleanup(srv.Close)
 	return srv, sock
 }
@@ -41,7 +41,7 @@ func TestCallRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	var out map[string]string
 	if err := c.Call("echo", map[string]string{"text": "hello"}, &out); err != nil {
@@ -58,7 +58,7 @@ func TestUnknownMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	err = c.Call("nope", nil, nil)
 	var rpcErr *Error
@@ -73,7 +73,7 @@ func TestHandlerErrorCodePreserved(t *testing.T) {
 		return nil, Errorf(CodeSessionError, "no active session")
 	})
 	c, _ := Dial(sock)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	err := c.Call("fail", nil, nil)
 	var rpcErr *Error
@@ -90,7 +90,7 @@ func TestEventsPushedToClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	// Give the connection's event forwarder a moment to subscribe.
 	time.Sleep(50 * time.Millisecond)
 
@@ -115,7 +115,7 @@ func TestEventsReachMultipleClients(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		clients = append(clients, c)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -138,12 +138,12 @@ func TestMalformedJSONGetsParseError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("this is not json\n")); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	n, err := conn.Read(buf)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func TestStaleSocketIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.mu.Lock()
-	first.listener.Close() // simulate crash: listener gone, socket file left behind
+	_ = first.listener.Close() // simulate crash: listener gone, socket file left behind
 	first.listener = nil
 	first.mu.Unlock()
 
@@ -198,14 +198,14 @@ func TestNotificationRequestGetsNoResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	conn.Write([]byte(`{"jsonrpc":"2.0","method":"fire"}` + "\n"))
+	defer func() { _ = conn.Close() }()
+	_, _ = conn.Write([]byte(`{"jsonrpc":"2.0","method":"fire"}` + "\n"))
 	select {
 	case <-called:
 	case <-time.After(2 * time.Second):
 		t.Fatal("notification not dispatched")
 	}
-	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	buf := make([]byte, 64)
 	if n, _ := conn.Read(buf); n > 0 {
 		t.Errorf("unexpected response to notification: %s", buf[:n])

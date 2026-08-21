@@ -88,7 +88,7 @@ func BenchmarkFirstDeltaToFirstPCM(b *testing.B) {
 	events, unsub := bus.Subscribe()
 	defer unsub()
 	engine := NewEngine(provider, &stt.Fake{}, &tts.Fake{}, &audio.FakeRecorder{}, player,
-		nil, bus, discardLogger(), Options{Model: "bench", SpeakResponses: true})
+		nil, nil, bus, discardLogger(), Options{Model: "bench", SpeakResponses: true})
 
 	b.ReportAllocs()
 	var total time.Duration

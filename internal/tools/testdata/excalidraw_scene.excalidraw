@@ -1,0 +1,39 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "jarvix",
+  "elements": [
+    {
+      "id": "rect-1",
+      "type": "rectangle",
+      "x": 100,
+      "y": 100,
+      "width": 200,
+      "height": 90,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent"
+    },
+    {
+      "id": "text-1",
+      "type": "text",
+      "x": 130,
+      "y": 130,
+      "width": 140,
+      "height": 25,
+      "text": "publish pipeline"
+    },
+    {
+      "id": "arrow-1",
+      "type": "arrow",
+      "x": 300,
+      "y": 145,
+      "width": 120,
+      "height": 0,
+      "points": [[0, 0], [120, 0]]
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -30,6 +31,13 @@ type harness struct {
 }
 
 func newHarness(t *testing.T, opts Options) *harness {
+	return newHarnessWithStore(t, opts, nil)
+}
+
+// newHarnessWithStore wires the engine to a history store. The persistence
+// tests build two harnesses over the same store: the store survives between
+// them the way the disk survives a daemon restart.
+func newHarnessWithStore(t *testing.T, opts Options, store history.Store) *harness {
 	t.Helper()
 	h := &harness{
 		provider: &ai.Fake{Response: "Recursion is a function calling itself."},
@@ -44,8 +52,21 @@ func newHarness(t *testing.T, opts Options) *harness {
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
 	t.Cleanup(h.cancel)
-	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, bus, nil, opts)
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, store, bus, nil, opts)
 	return h
+}
+
+// ask drives one complete text exchange through the engine.
+func (h *harness) ask(t *testing.T, text string) {
+	t.Helper()
+	if _, err := h.engine.StartSession(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.Submit(text); err != nil {
+		t.Fatal(err)
+	}
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
 }
 
 // waitFor consumes events until one of the wanted type arrives.
@@ -234,9 +255,11 @@ func TestCancelWhileListening(t *testing.T) {
 
 func TestCancelWhileSpeaking(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	// Speech takes measurable time so there is a window to cancel within it.
-	h.tts.Delay = 100 * time.Millisecond
-	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
+	// Hold speech in progress deterministically: no chunk is delivered until
+	// the gate opens, so the cancel always lands mid-speech.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
@@ -256,9 +279,11 @@ func TestCancelWithNoSessionIsNoop(t *testing.T) {
 
 func TestInterruptionStartsNewSessionImmediately(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	// Keep the first session speaking so the interrupt lands mid-utterance.
-	h.tts.Delay = 100 * time.Millisecond
-	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
+	// Keep the first session speaking so the interrupt lands mid-utterance:
+	// the gate is never opened for it, only cancellation releases it.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 	first, _ := h.engine.StartSession()
 	_ = h.engine.Submit("first question")
 	h.waitFor(t, "tts.started")
@@ -275,6 +300,8 @@ func TestInterruptionStartsNewSessionImmediately(t *testing.T) {
 	if ev.Data["session_id"] != first {
 		t.Errorf("cancelled session = %v, want %s", ev.Data["session_id"], first)
 	}
+	// The second session's speech must run to completion: remove the gate.
+	h.tts.SetHold(nil)
 	if err := h.engine.Submit("second question"); err != nil {
 		t.Fatal(err)
 	}
@@ -360,8 +387,11 @@ func TestEmptyTranscriptIsFriendlyError(t *testing.T) {
 
 func TestCancelSpeechStopsOnlySpeech(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
-	h.tts.Delay = 100 * time.Millisecond
-	h.tts.Chunks = [][]byte{make([]byte, 32), make([]byte, 32), make([]byte, 32)}
+	// Deterministic: speech cannot complete before the cancel — no chunk is
+	// delivered until the gate opens, and only cancellation opens it here.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
@@ -437,7 +467,7 @@ func TestToolCallLoop(t *testing.T) {
 	h.tools.Register(rec)
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
-	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, bus, nil,
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, nil, bus, nil,
 		Options{Model: "m", SpeakResponses: true})
 
 	// Round 0: model asks to run the tool. Round 1: final spoken answer.
@@ -484,7 +514,7 @@ func TestToolLoopRunawayIsBounded(t *testing.T) {
 	h.tools.Register(rec)
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
-	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, bus, nil,
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, nil, bus, nil,
 		Options{Model: "m", SpeakResponses: true})
 
 	// Model always asks for a tool, never answers.
@@ -525,9 +555,9 @@ type recordingTool struct {
 	calls  int
 }
 
-func (r *recordingTool) Name() string                { return "run" }
-func (r *recordingTool) Description() string          { return "run something" }
-func (r *recordingTool) Schema() json.RawMessage      { return json.RawMessage(`{"type":"object"}`) }
+func (r *recordingTool) Name() string            { return "run" }
+func (r *recordingTool) Description() string     { return "run something" }
+func (r *recordingTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (r *recordingTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
 	r.calls++
 	return r.result, nil
@@ -650,5 +680,71 @@ func TestVoiceWithoutSessionFails(t *testing.T) {
 	}
 	if _, err := h.engine.StopVoice(); err == nil {
 		t.Error("StopVoice without recording should fail")
+	}
+}
+
+func TestConversationReturnsCommittedTurns(t *testing.T) {
+	h := newHarness(t, Options{HistoryTurns: 8, FollowUpWindow: time.Hour})
+	if turns := h.engine.Conversation(); turns == nil || len(turns) != 0 {
+		t.Fatalf("fresh engine conversation = %#v, want an empty non-nil slice", turns)
+	}
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("explain recursion")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	turns := h.engine.Conversation()
+	if len(turns) != 2 {
+		t.Fatalf("turns = %+v, want user+assistant", turns)
+	}
+	if turns[0].Role != "user" || turns[0].Text != "explain recursion" {
+		t.Errorf("turn 0 = %+v", turns[0])
+	}
+	if turns[1].Role != "assistant" || turns[1].Text != "Recursion is a function calling itself." {
+		t.Errorf("turn 1 = %+v", turns[1])
+	}
+}
+
+func TestConversationIncludesInFlightQuestion(t *testing.T) {
+	h := newHarness(t, Options{HistoryTurns: 8})
+	h.provider.Delay = 30 * time.Millisecond
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what is streaming?")
+	// While the provider is still answering, a window opening mid-session
+	// must already see the question being answered.
+	h.waitFor(t, "assistant.started")
+	turns := h.engine.Conversation()
+	if len(turns) != 1 || turns[0].Role != "user" || turns[0].Text != "what is streaming?" {
+		t.Errorf("mid-session turns = %+v, want just the in-flight question", turns)
+	}
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+}
+
+func TestConversationExcludesToolTraffic(t *testing.T) {
+	h := newHarness(t, Options{HistoryTurns: 8})
+	h.tools = tools.NewRegistry(nil)
+	h.tools.Register(&recordingTool{result: "ok"})
+	// Rebuild the engine with the registry attached (newHarness wires nil).
+	bus := NewBus(nil)
+	h.events, h.cancel = bus.Subscribe()
+	h.engine = NewEngine(h.provider, h.stt, h.tts, h.recorder, h.player, h.tools, nil, bus, nil, Options{
+		Model: "test-model", HistoryTurns: 8,
+	})
+	h.provider.ToolCallsByRound = [][]ai.ToolCall{
+		{{ID: "c1", Name: "run", Arguments: `{"command":"true"}`}},
+	}
+
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("run something")
+	h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	for _, turn := range h.engine.Conversation() {
+		if turn.Role != "user" && turn.Role != "assistant" {
+			t.Errorf("conversation leaked a %q turn: %+v", turn.Role, turn)
+		}
 	}
 }

@@ -1,3 +1,7 @@
+// Package session owns the conversational core of jarvixd: the authoritative
+// session state machine, the event bus, and the engine that drives one
+// interaction from captured speech through transcription, the assistant
+// (including tool rounds), and streamed spoken output.
 package session
 
 import (
@@ -7,10 +11,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -49,6 +55,18 @@ type Engine struct {
 	log      *slog.Logger
 	opts     Options
 
+	// store persists conversation memory across daemon restarts (ADR 0011);
+	// nil disables persistence. Immutable after construction, so it is read
+	// without the lock.
+	store history.Store
+	// persistFailed latches after the first failed save: the engine degrades
+	// to in-memory-only for its lifetime and warns exactly once, instead of
+	// spamming a warning per exchange on a persistently broken disk.
+	persistFailed atomic.Bool
+	// now is the follow-up-window clock, injectable so tests can lapse the
+	// window deterministically — including across a simulated restart.
+	now func() time.Time
+
 	mu      sync.Mutex
 	state   State
 	current *sess
@@ -76,14 +94,16 @@ type sess struct {
 	submitted       bool
 }
 
-// NewEngine wires the engine. logger and registry may be nil (no tools).
+// NewEngine wires the engine. logger, registry, and store may be nil (no
+// tools, no persistence). Construction restores any persisted conversation
+// so a follow-up asked after a daemon restart still has its context.
 func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tts.Synthesizer,
 	recorder audio.Recorder, player audio.Player, registry *tools.Registry,
-	bus *Bus, logger *slog.Logger, opts Options) *Engine {
+	store history.Store, bus *Bus, logger *slog.Logger, opts Options) *Engine {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Engine{
+	e := &Engine{
 		provider: provider,
 		stt:      transcriber,
 		tts:      synthesizer,
@@ -93,8 +113,46 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 		bus:      bus,
 		log:      logger,
 		opts:     opts,
+		store:    store,
+		now:      time.Now,
 		state:    StateIdle,
 	}
+	e.loadHistory()
+	return e
+}
+
+// loadHistory restores persisted conversation memory at construction, before
+// any session can run. Persistence must never stop the daemon from booting:
+// a corrupt or unreadable file downgrades to a warning and an empty history.
+// With memory disabled the on-disk history is removed instead, so nothing
+// from an earlier configuration lingers on disk.
+func (e *Engine) loadHistory() {
+	if e.store == nil {
+		return
+	}
+	if e.opts.HistoryTurns <= 0 {
+		if err := e.store.Clear(); err != nil {
+			e.log.Warn("could not remove persisted conversation history",
+				"component", "session", "error", err.Error())
+		}
+		return
+	}
+	msgs, lastTurn, err := e.store.Load()
+	if err != nil {
+		e.log.Warn("conversation history could not be loaded; starting fresh",
+			"component", "session", "error", err.Error())
+		return
+	}
+	if len(msgs) == 0 {
+		return
+	}
+	// The configured turn cap may have shrunk since the history was written.
+	if max := e.opts.HistoryTurns * 2; len(msgs) > max {
+		msgs = msgs[len(msgs)-max:]
+	}
+	e.history = msgs
+	e.lastTurn = lastTurn
+	e.log.Debug("conversation history loaded", "component", "session", "turns", len(msgs)/2)
 }
 
 // State returns the current state and active session id ("" when idle).
@@ -350,7 +408,7 @@ func (e *Engine) transcribe(s *sess, rec audio.Recording) {
 		e.fail(s, "audio", err)
 		return
 	}
-	defer os.Remove(clip.WAVPath)
+	defer func() { _ = os.Remove(clip.WAVPath) }()
 
 	start := time.Now()
 	events, err := e.stt.Transcribe(s.ctx, stt.AudioInput{
@@ -472,6 +530,10 @@ func (e *Engine) think(s *sess) {
 	e.mu.Lock()
 	e.finishLocked(s)
 	e.mu.Unlock()
+
+	// Persist only after the session has fully finished, off the lock path:
+	// disk I/O adds zero latency to the spoken exchange.
+	e.persistHistory()
 }
 
 // streamOnce runs one provider turn, forwarding text deltas to the overlay
@@ -540,8 +602,11 @@ func (e *Engine) conversationMessages(userText string) []ai.Message {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.opts.FollowUpWindow > 0 && !e.lastTurn.IsZero() &&
-		time.Since(e.lastTurn) > e.opts.FollowUpWindow {
+		e.now().Sub(e.lastTurn) > e.opts.FollowUpWindow {
+		e.log.Debug("conversation history expired", "component", "session",
+			"turns", len(e.history)/2)
 		e.history = nil
+		e.lastTurn = time.Time{}
 	}
 	msgs := make([]ai.Message, 0, len(e.history)+2)
 	if e.opts.SystemPrompt != "" {
@@ -567,14 +632,76 @@ func (e *Engine) commitTurn(userText, assistantText string) {
 	if max := e.opts.HistoryTurns * 2; len(e.history) > max {
 		e.history = append([]ai.Message(nil), e.history[len(e.history)-max:]...)
 	}
-	e.lastTurn = time.Now()
+	e.lastTurn = e.now()
 }
 
-// ResetConversation clears the carried-over context so the next turn starts a
-// fresh thread.
+// persistHistory writes the conversation to disk so it survives a daemon
+// restart. It runs after session.finished, never under mu (beyond a brief
+// snapshot), and treats failure as degradation: the engine keeps working in
+// memory and warns exactly once. Turn contents are never logged.
+func (e *Engine) persistHistory() {
+	if e.store == nil || e.opts.HistoryTurns <= 0 || e.persistFailed.Load() {
+		return
+	}
+	e.mu.Lock()
+	msgs := append([]ai.Message(nil), e.history...)
+	lastTurn := e.lastTurn
+	e.mu.Unlock()
+	if err := e.store.Save(msgs, lastTurn); err != nil {
+		if e.persistFailed.CompareAndSwap(false, true) {
+			e.log.Warn("conversation history could not be saved; continuing in memory only",
+				"component", "session", "error", err.Error())
+		}
+		return
+	}
+	e.log.Debug("conversation history saved", "component", "session", "turns", len(msgs)/2)
+}
+
+// Turn is one utterance of the current conversation as a client should
+// display it. Only what carries meaning for a reader is included: committed
+// user/assistant exchanges plus the in-flight user question — no system
+// prompt, no tool traffic.
+type Turn struct {
+	Role string `json:"role"` // "user" or "assistant"
+	Text string `json:"text"`
+}
+
+// Conversation returns the turns of the current conversation, oldest first,
+// for the conversation window (the `conversation.get` IPC method). The
+// active session's transcript is included as soon as it is known, so a
+// window opened mid-session shows the question being answered; the streamed
+// answer itself reaches clients via assistant.delta events. The lazy
+// follow-up-window reset is deliberately not applied here: this reports what
+// happened, not what the next turn will remember. Never nil — an empty
+// conversation is an empty slice, so clients always see a JSON array.
+func (e *Engine) Conversation() []Turn {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	turns := make([]Turn, 0, len(e.history)+1)
+	for _, m := range e.history {
+		turns = append(turns, Turn{Role: string(m.Role), Text: m.Content})
+	}
+	if s := e.current; s != nil && s.transcriptReady && strings.TrimSpace(s.transcript) != "" {
+		turns = append(turns, Turn{Role: string(ai.RoleUser), Text: s.transcript})
+	}
+	return turns
+}
+
+// ResetConversation clears the carried-over context — in memory and on disk —
+// so the next turn starts a fresh thread and a later restart resurrects
+// nothing.
 func (e *Engine) ResetConversation() {
 	e.mu.Lock()
 	e.history = nil
 	e.lastTurn = time.Time{}
 	e.mu.Unlock()
+	if e.store == nil {
+		return
+	}
+	if err := e.store.Clear(); err != nil {
+		e.log.Warn("could not remove persisted conversation history",
+			"component", "session", "error", err.Error())
+		return
+	}
+	e.log.Debug("conversation history cleared", "component", "session")
 }

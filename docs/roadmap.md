@@ -42,13 +42,14 @@ with spoken confirmation), then structured tools — `desktop.*`,
 `clipboard.*`, `apps.*`, `system.*`, `hyprland.*`, `files.*` — each behind
 that gate. The engine's tool loop already generalises to all of them.
 
-## Phase 5 — Conversational mode (in-memory: done; persistence: next)
+## Phase 5 — Conversational mode (persistence: done; threads: next)
 
 Multi-turn follow-ups work now ([ADR 0010](adr/0010-streaming-speech-and-memory.md)):
 the engine keeps a rolling history, so "why is my build failing?" → "what
 should I change?" retains context, bounded by a turn cap and an idle window,
-clearable with `jarvix new`. Remaining: persist history across daemon
-restarts, and per-conversation threads.
+clearable with `jarvix new`. History also persists across daemon restarts
+([ADR 0011](adr/0011-persistent-conversation-history.md)), honouring the
+same idle window. Remaining: per-conversation threads.
 
 ## Phase 6 — Wake word and realtime interaction
 
