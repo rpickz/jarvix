@@ -5,12 +5,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
-	"github.com/rpickz/jarvix/internal/ai/openaicompat"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
@@ -20,11 +19,8 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
-	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
-	"github.com/rpickz/jarvix/internal/tts/kokoro"
-	"github.com/rpickz/jarvix/internal/tts/piper"
 )
 
 // Daemon is a fully wired jarvixd instance.
@@ -41,8 +37,16 @@ type Daemon struct {
 	// Desktop notification dispatch (ui.notifications); see notifications.go.
 	notifier   desktop.Notifier
 	openWindow func(context.Context) error
-	notify     bool // ui.notifications: announce finished sessions at all
-	preview    bool // ui.notification_preview: include answer content
+
+	// Running configuration plus what a reload needs to rebuild collaborators
+	// (settings.go). cfg holds the values the daemon is actually operating
+	// with: restart-class settings keep their booted values even after the
+	// file changes. injected preserves caller-provided collaborators (test
+	// fakes) across reloads.
+	paths    config.Paths
+	injected Deps
+	cfgMu    sync.Mutex
+	cfg      config.Config
 }
 
 // Deps are the engine's collaborators, injectable for tests. Zero-value
@@ -66,55 +70,22 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger = slog.Default()
 	}
 
-	if deps.Provider == nil {
-		ep, ok := cfg.Endpoint()
-		if !ok {
-			return nil, fmt.Errorf("no endpoint for ai.provider %q", cfg.AI.Provider)
-		}
-		deps.Provider = openaicompat.New(cfg.AI.Provider, ep.BaseURL, ep.Key())
-	}
-	if deps.Transcriber == nil {
-		deps.Transcriber = &whispercpp.Transcriber{
-			Binary:    cfg.STT.Whisper.Binary,
-			ModelPath: whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
-			Language:  cfg.STT.Whisper.Language,
-		}
-	}
-	if deps.Synthesizer == nil {
-		switch cfg.TTS.Provider {
-		case "kokoro":
-			deps.Synthesizer = &kokoro.Synthesizer{
-				Voice: cfg.TTS.Kokoro.Voice,
-				Speed: cfg.TTS.Kokoro.Speed,
-			}
-		default:
-			deps.Synthesizer = &piper.Synthesizer{
-				Binary: cfg.TTS.Piper.Binary,
-				Voice:  cfg.TTS.Piper.Voice,
-			}
-		}
-	}
-	if deps.Recorder == nil {
-		deps.Recorder = &audio.PipeWireRecorder{
-			Dir:         paths.Runtime,
-			Device:      cfg.Audio.InputDevice,
-			MaxDuration: time.Duration(cfg.Audio.MaxRecordingSec) * time.Second,
-		}
-	}
-	if deps.Player == nil {
-		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
+	// Remember what the caller injected before filling from config, so a
+	// later config reload rebuilds only what came from config (settings.go).
+	injected := deps
+	deps, err := fillDeps(cfg, paths, deps)
+	if err != nil {
+		return nil, err
 	}
 
 	bus := session.NewBus(logger)
 	registry := tools.NewRegistry(logger)
-	systemPrompt := cfg.AI.SystemPrompt
 	if cfg.Tools.Shell {
 		registry.Register(&tools.Shell{
 			Timeout:   time.Duration(cfg.Tools.ShellTimeoutSec) * time.Second,
 			MaxOutput: cfg.Tools.ShellMaxOutputKB * 1024,
 			Log:       logger,
 		})
-		systemPrompt += config.ToolSystemPrompt
 		logger.Info("tool enabled", "component", "tools", "tool", "shell.run")
 	}
 	if cfg.Tools.Artifacts {
@@ -140,7 +111,6 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			},
 			Log: logger,
 		})
-		systemPrompt += config.ArtifactSystemPrompt
 		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
 	}
 	// The permission gate is always installed — even with no tools enabled,
@@ -164,18 +134,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// still has its context after a daemon restart (ADR 0011).
 	store := &history.File{Path: paths.HistoryFile()}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, registry, store, bus, logger, session.Options{
-			Model:             cfg.AI.Model,
-			SystemPrompt:      systemPrompt,
-			MaxTokens:         cfg.AI.MaxTokens,
-			Temperature:       cfg.AI.Temperature,
-			SpeakResponses:    cfg.Conversation.SpeakResponses,
-			MinRecording:      time.Duration(cfg.Audio.MinRecordingMs) * time.Millisecond,
-			HistoryTurns:      cfg.Conversation.HistoryTurns,
-			FollowUpWindow:    time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
-			ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
-			RememberApprovals: cfg.Tools.Policy.RememberForConversation,
-		})
+		deps.Recorder, deps.Player, registry, store, bus, logger, engineOptions(cfg))
 
 	if deps.Notifier == nil {
 		deps.Notifier = &desktop.NotifySend{}
@@ -190,7 +149,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
-		notify: cfg.UI.Notifications, preview: cfg.UI.NotificationPreview,
+		paths: paths, injected: injected, cfg: cfg,
 	}
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
@@ -208,12 +167,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.server.Listen(); err != nil {
 		return err
 	}
-	if d.notify {
-		// Subscribe before serving so no session that a client starts can
-		// finish unobserved.
-		events, unsubscribe := d.bus.Subscribe()
-		go d.watchSessions(ctx, events, unsubscribe)
-	}
+	// Subscribe before serving so no session that a client starts can finish
+	// unobserved. The watcher checks the live ui.notifications switch per
+	// session, so toggling notifications needs no restart (settings.go).
+	events, unsubscribe := d.bus.Subscribe()
+	go d.watchSessions(ctx, events, unsubscribe)
 	d.startPTT(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
 	return d.server.Serve(ctx)
@@ -372,6 +330,7 @@ func (d *Daemon) registerMethods() {
 			"policy":     d.effectivePolicy(),
 		}, nil
 	})
+	d.registerConfigMethods()
 }
 
 // effectivePolicy reports the permission gate as it actually applies: the

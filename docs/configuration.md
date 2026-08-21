@@ -18,6 +18,52 @@ CLIs, and records the choices. It edits only the keys it owns, preserves
 your comments and layout, and asks before changing any value you set by
 hand — safe to re-run at any time.
 
+## Changing settings without a restart
+
+The common options are editable from the **settings screen** in the Jarvix
+window (`jarvix window` → Settings, or `Super+Alt+C`) and from the CLI —
+both are thin clients of the same daemon IPC methods (`config.get` /
+`config.set` / `config.reload`, docs/ipc.md):
+
+```bash
+jarvix config get                     # every editable setting, with its reload class
+jarvix config get tts.provider       # one value
+jarvix config set tts.provider=kokoro ai.model=qwen2.5:7b
+jarvix config set activation.ptt_chord=leftmeta,space
+jarvix config reload                  # re-read a hand-edited config.toml, no restart
+```
+
+A change is validated first — invalid values are rejected with the same
+messages startup validation produces, and **nothing is written**. Valid
+changes are written into `config.toml` with a surgical rewrite: only the
+changed key's value is touched, so your comments, custom `[ai.<name>]`
+tables, and formatting survive every save. Writes are atomic
+(temp file + rename, mode 0600). If the file was edited externally between
+reading and saving, the save is refused and the screen/CLI tells you to
+re-read and reapply — a hand edit is never silently clobbered.
+
+### When changes take effect (reload classes)
+
+Every setting has a **reload class**, shown by `jarvix config get` and next
+to each field in the settings screen:
+
+| Class | Options | When it takes effect |
+|---|---|---|
+| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
+| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `audio.*` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
+
+A reload that fails validation keeps the running configuration and reports
+why — the daemon never hot-swaps into a broken state. Secrets never pass
+through the settings surface: API keys are shown as presence only
+("OPENAI_API_KEY: set") and cannot be entered there; manage them via the
+environment as described below. Endpoint tables (`[ai.<name>]`) also stay
+hand-edited — the file remains authoritative for everything.
+
+The settings screen shows each option's external readiness inline (Kokoro
+not set up, Whisper model missing, input access not granted), reusing
+`jarvix doctor`'s checks with the fix command attached.
+
 ## Full reference
 
 ```toml

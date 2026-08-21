@@ -1,0 +1,364 @@
+package daemon
+
+// This file is the settings IPC surface: config.get / config.set /
+// config.reload / doctor.get. All settings intelligence lives here in the
+// daemon — the settings screen and the CLI are thin clients of these
+// methods, so the whole feature is testable without a GUI (ADR 0015).
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"reflect"
+	"sort"
+	"strings"
+
+	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/doctor"
+	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/session"
+)
+
+// runningConfig snapshots the configuration the daemon is operating with.
+// Restart-class settings keep their booted values here even after the file
+// changes, so config.get always reports what the daemon actually does.
+func (d *Daemon) runningConfig() config.Config {
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	return d.cfg
+}
+
+// notificationsEnabled reads the live ui.notifications switch.
+func (d *Daemon) notificationsEnabled() bool {
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	return d.cfg.UI.Notifications
+}
+
+// previewEnabled reads the live ui.notification_preview switch.
+func (d *Daemon) previewEnabled() bool {
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	return d.cfg.UI.NotificationPreview
+}
+
+func (d *Daemon) registerConfigMethods() {
+	d.server.Handle("config.get", d.handleConfigGet)
+	d.server.Handle("config.set", d.handleConfigSet)
+	d.server.Handle("config.reload", d.handleConfigReload)
+	d.server.Handle("doctor.get", d.handleDoctorGet)
+}
+
+// handleConfigGet reports the editable settings with their running values and
+// reload classes, the config file's fingerprint (for external-edit detection
+// at config.set time), and secret *presence* — key values never travel over
+// IPC, in either direction.
+func (d *Daemon) handleConfigGet(json.RawMessage) (any, error) {
+	// Redact defensively: the field list only ever reads registry settings,
+	// but the running config that feeds it must not hold usable secrets.
+	running := d.runningConfig().Redact()
+	path := d.paths.ConfigFile()
+	fp, err := config.FingerprintFile(path)
+	if err != nil {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+
+	fields := make([]map[string]any, 0, len(config.Settings()))
+	for _, s := range config.Settings() {
+		f := map[string]any{
+			"key":    s.Key,
+			"label":  s.Label,
+			"type":   string(s.Type),
+			"reload": string(s.Reload),
+			"value":  s.Get(running),
+		}
+		switch {
+		case s.Key == "ai.provider":
+			f["enum"] = endpointNames(running)
+		case len(s.Enum) > 0:
+			f["enum"] = s.Enum
+		}
+		fields = append(fields, f)
+	}
+
+	secrets := make([]map[string]any, 0, len(running.AI.Endpoints))
+	for _, name := range endpointNames(running) {
+		ep := running.AI.Endpoints[name]
+		secrets = append(secrets, map[string]any{
+			"endpoint":   name,
+			"env":        ep.APIKeyEnv,
+			"env_set":    ep.APIKeyEnv != "" && os.Getenv(ep.APIKeyEnv) != "",
+			"inline_key": ep.APIKey != "",
+		})
+	}
+
+	return map[string]any{
+		"path":        path,
+		"fingerprint": fp,
+		"fields":      fields,
+		"secrets":     secrets,
+	}, nil
+}
+
+type configSetParams struct {
+	// Changes maps dotted setting keys to new values (native JSON types or
+	// strings; Setting.Coerce accepts both).
+	Changes map[string]any `json:"changes"`
+	// Fingerprint is the file fingerprint from the client's config.get.
+	// When present, a mismatch with the file on disk fails the set — the
+	// file was edited externally, and hand edits are never clobbered.
+	Fingerprint string `json:"fingerprint"`
+}
+
+// handleConfigSet validates and writes field changes into config.toml —
+// preserving hand-edited content — then applies them to the running daemon
+// per each setting's reload class. Nothing is written unless the whole
+// resulting configuration validates.
+func (d *Daemon) handleConfigSet(params json.RawMessage) (any, error) {
+	var p configSetParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.set params: %v", err)
+		}
+	}
+	if len(p.Changes) == 0 {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.set: no changes given")
+	}
+
+	path := d.paths.ConfigFile()
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	fp := config.FingerprintMissing
+	if raw != nil {
+		fp = config.Fingerprint(raw)
+	}
+	if p.Fingerprint != "" && p.Fingerprint != fp {
+		return nil, &ipc.Error{
+			Code: ipc.CodeConfigConflict,
+			Message: "config.toml changed on disk since it was read; " +
+				"reload the settings and reapply your change",
+			Data: map[string]any{"fingerprint": fp},
+		}
+	}
+
+	// Rebase onto the file, not the running config: keys this change does
+	// not touch keep whatever the user hand-edited, even if the daemon has
+	// not picked those edits up yet.
+	fileCfg, err := config.ParseBytes(raw)
+	if err != nil {
+		return nil, &ipc.Error{
+			Code:    ipc.CodeConfigInvalid,
+			Message: fmt.Sprintf("config.toml does not parse; fix it by hand first: %v", err),
+		}
+	}
+
+	native := make(map[string]any, len(p.Changes))
+	for key, value := range p.Changes {
+		s, ok := config.SettingFor(key)
+		if !ok {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "unknown setting %q", key)
+		}
+		nv, err := s.Coerce(value)
+		if err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%s: %v", key, err)
+		}
+		native[key] = nv
+		if err := s.Apply(&fileCfg, nv); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%s: %v", key, err)
+		}
+	}
+
+	if err := fileCfg.Validate(); err != nil {
+		return nil, &ipc.Error{
+			Code:    ipc.CodeConfigInvalid,
+			Message: "the change was rejected by validation; nothing was written",
+			Data:    map[string]any{"problems": validationProblems(err)},
+		}
+	}
+
+	newRaw, err := config.RewriteTOML(raw, native)
+	if err != nil {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "rewrite config: %v", err)
+	}
+	if err := config.WriteFileAtomic(path, newRaw); err != nil {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "write config: %v", err)
+	}
+
+	applied, reason := d.applyRuntime(fileCfg)
+	newFP := config.Fingerprint(newRaw)
+	d.publishConfigChanged(newFP)
+
+	result := map[string]any{
+		"fingerprint":   newFP,
+		"applied":       applied,
+		"needs_restart": d.restartPending(fileCfg),
+	}
+	if reason != "" {
+		result["reason"] = reason
+	}
+	return result, nil
+}
+
+// handleConfigReload re-reads config.toml into the running daemon — the
+// recovery path after an external edit, and the retry path after a set that
+// could not apply mid-session. A file that fails validation changes nothing:
+// the daemon never hot-swaps into a broken configuration.
+func (d *Daemon) handleConfigReload(json.RawMessage) (any, error) {
+	path := d.paths.ConfigFile()
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	fileCfg, err := config.ParseBytes(raw)
+	if err != nil {
+		return nil, &ipc.Error{
+			Code:    ipc.CodeConfigInvalid,
+			Message: fmt.Sprintf("config.toml does not parse; the running configuration is unchanged: %v", err),
+		}
+	}
+	if err := fileCfg.Validate(); err != nil {
+		return nil, &ipc.Error{
+			Code:    ipc.CodeConfigInvalid,
+			Message: "config.toml failed validation; the running configuration is unchanged",
+			Data:    map[string]any{"problems": validationProblems(err)},
+		}
+	}
+	applied, reason := d.applyRuntime(fileCfg)
+	if !applied {
+		return nil, ipc.Errorf(ipc.CodeConfigBusy, "%s", reason)
+	}
+	fp := config.FingerprintMissing
+	if raw != nil {
+		fp = config.Fingerprint(raw)
+	}
+	d.publishConfigChanged(fp)
+	return map[string]any{
+		"fingerprint":   fp,
+		"needs_restart": d.restartPending(fileCfg),
+	}, nil
+}
+
+// handleDoctorGet runs the settings-relevant readiness checks (offline and
+// fast — no provider probe, no audio round trips) so the settings screen can
+// show per-option readiness inline with the fix command.
+func (d *Daemon) handleDoctorGet(json.RawMessage) (any, error) {
+	results := doctor.SettingsChecks(d.runningConfig(), d.paths)
+	checks := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		checks = append(checks, map[string]any{
+			"status":  r.Status.String(),
+			"name":    r.Name,
+			"detail":  r.Detail,
+			"fix":     r.Fix,
+			"related": r.Related,
+		})
+	}
+	return map[string]any{"checks": checks}, nil
+}
+
+// applyRuntime moves the daemon onto next, honouring reload classes:
+// restart-class sections keep their running values (they were wired at
+// construction), live-class settings always land, and idle-class settings
+// swap the engine's collaborators — refused while a session is active, in
+// which case the running configuration stays as it was, minus the live
+// settings which are safe regardless.
+func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) {
+	d.cfgMu.Lock()
+	running := d.cfg
+	d.cfgMu.Unlock()
+
+	merged := next
+	merged.Activation = running.Activation
+	merged.Tools = running.Tools
+	merged.Artifacts = running.Artifacts
+	merged.Log = running.Log
+
+	if !idleClassChanged(running, merged) {
+		// Only live-class settings moved; nothing to rebuild.
+		d.cfgMu.Lock()
+		d.cfg = merged
+		d.cfgMu.Unlock()
+		return true, ""
+	}
+
+	deps, err := fillDeps(merged, d.paths, d.injected)
+	if err != nil {
+		return false, err.Error()
+	}
+	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
+		deps.Recorder, deps.Player, engineOptions(merged)); err != nil {
+		// The engine kept its old collaborators. Live settings still land, so
+		// the notification switches never wait on an idle engine.
+		d.cfgMu.Lock()
+		d.cfg.UI = merged.UI
+		d.cfgMu.Unlock()
+		return false, err.Error()
+	}
+	d.cfgMu.Lock()
+	d.cfg = merged
+	d.cfgMu.Unlock()
+	d.log.Info("configuration applied", "component", "daemon",
+		"provider", merged.AI.Provider, "model", merged.AI.Model, "tts", merged.TTS.Provider)
+	return true, ""
+}
+
+// restartPending lists the restart-class settings whose file value differs
+// from what the daemon booted with — the "restart jarvixd to finish" list.
+func (d *Daemon) restartPending(next config.Config) []string {
+	running := d.runningConfig()
+	keys := []string{}
+	for _, s := range config.Settings() {
+		if s.Reload != config.ReloadRestart {
+			continue
+		}
+		if !reflect.DeepEqual(s.Get(running), s.Get(next)) {
+			keys = append(keys, s.Key)
+		}
+	}
+	return keys
+}
+
+// idleClassChanged reports whether any idle-class setting differs between the
+// running and candidate configurations.
+func idleClassChanged(running, next config.Config) bool {
+	for _, s := range config.Settings() {
+		if s.Reload != config.ReloadIdle {
+			continue
+		}
+		if !reflect.DeepEqual(s.Get(running), s.Get(next)) {
+			return true
+		}
+	}
+	return false
+}
+
+// publishConfigChanged tells every connected client (overlay, windows, CLIs)
+// that configuration moved, so open settings screens can refresh.
+func (d *Daemon) publishConfigChanged(fingerprint string) {
+	d.bus.Publish(session.Event{Type: "config.changed",
+		Data: map[string]any{"fingerprint": fingerprint}})
+}
+
+// endpointNames lists the configured AI endpoints in stable order — the
+// dynamic enum for ai.provider.
+func endpointNames(cfg config.Config) []string {
+	names := make([]string, 0, len(cfg.AI.Endpoints))
+	for name := range cfg.AI.Endpoints {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validationProblems splits Config.Validate's aggregate error back into its
+// per-key messages, so clients can place each next to the field it names.
+func validationProblems(err error) []string {
+	msg := err.Error()
+	marker := "\n  - "
+	if i := strings.Index(msg, marker); i >= 0 {
+		return strings.Split(msg[i+len(marker):], marker)
+	}
+	return []string{msg}
+}
