@@ -43,6 +43,11 @@ func SettingsChecks(cfg config.Config, paths config.Paths) []ReadinessResult {
 		{checkWhisperBinary, "stt.whisper.binary"},
 		{checkWhisperModel, "stt.whisper.model"},
 		{checkTTS, "tts.provider"},
+		// The settings screen is where a voice is chosen, so it is where the
+		// consequences of choosing one must appear: which language it speaks,
+		// and whether speech recognition can serve that language.
+		{checkVoiceLanguage, "tts.kokoro.voice"},
+		{checkSpeechLanguage, "stt.whisper.language"},
 		{checkArtifactRenderer, "tools.artifacts"},
 		{checkContextSources, "context.window"},
 		{checkPushToTalk, "activation.ptt_chord"},

@@ -14,6 +14,7 @@ import (
 	"github.com/rpickz/jarvix/internal/setup"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
+	"github.com/rpickz/jarvix/internal/voice"
 )
 
 // cmdSetupWizard runs the first-run wizard: idempotent steps for the voice
@@ -63,6 +64,24 @@ func cmdSetupWizard(cfg config.Config, paths config.Paths) error {
 				KokoroSetupScript: findScript("setup-kokoro.sh"),
 				RunScript:         runScript,
 			}),
+			// Language and voice come straight after the engine step because
+			// they are only meaningful once an engine is chosen: the catalog
+			// consulted, the config key written, and the install hint for a
+			// missing language all depend on which one it is.
+			setup.VoiceStep(setup.VoiceDeps{
+				File: file, Out: out, Prompt: prompt,
+				// Read through the file the previous step just wrote, so
+				// installing Kokoro and then choosing a British voice works
+				// in one run of the wizard.
+				Provider: func() string { return effectiveProvider(file, cfg) },
+				Catalog: func(provider string) voice.Catalog {
+					return withProvider(cfg, provider).InstalledVoices(paths)
+				},
+				Current:       func(provider string) string { return activeVoice(withProvider(cfg, provider)) },
+				WhisperModel:  cfg.STT.Whisper.Model,
+				Preview:       func(id string) error { return previewVoice(withProvider(cfg, effectiveProvider(file, cfg)), id) },
+				DownloadModel: func(model string) error { return cmdSetupWhisper(paths, model) },
+			}),
 			setup.ActivationStep(setup.ActivationDeps{
 				Out: out, Prompt: prompt,
 				InputAccessible:   hotkey.Accessible,
@@ -98,6 +117,26 @@ func cmdSetupWizard(cfg config.Config, paths config.Paths) error {
 	err = w.Run()
 	fmt.Println("\nSetup finished. Re-run `jarvix setup` any time; `jarvix doctor` re-checks.")
 	return err
+}
+
+// effectiveProvider reports the TTS engine the wizard is configuring right
+// now: what the run has already written to config.toml if anything, otherwise
+// what the loaded configuration says. The wizard's steps are built up front
+// but run in sequence, so a step must never read a value an earlier step has
+// since changed.
+func effectiveProvider(file *setup.File, cfg config.Config) string {
+	if provider, ok := file.Get("tts", "provider"); ok && provider != "" {
+		return provider
+	}
+	return cfg.TTS.Provider
+}
+
+// withProvider returns cfg as if that engine were selected, so provider-keyed
+// helpers (catalog, active voice, preview) answer for the engine being
+// configured rather than the one that was configured at start-up.
+func withProvider(cfg config.Config, provider string) config.Config {
+	cfg.TTS.Provider = provider
+	return cfg
 }
 
 // findScript locates one of the repo's helper scripts on this installation.

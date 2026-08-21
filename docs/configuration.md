@@ -102,19 +102,25 @@ provider = "whisper"             # the only supported STT in V1
 
 [stt.whisper]
 model = "base.en"                # known name, or absolute path to a ggml file
+                                 # ".en" models transcribe English only — a
+                                 # non-English voice needs a multilingual one
 binary = "whisper-cli"           # found on PATH, or absolute path
-language = "en"                  # "auto" to detect
+language = "en"                  # "auto" to detect; must match the voice's
+                                 # language (see "Language and accent")
 
 [tts]
 provider = "piper"               # "piper" (zero-setup default) or "kokoro" (more natural)
 
 [tts.piper]
 voice = "en_US-amy-medium"       # voice name searched under /usr/share/piper-voices,
-                                 # or absolute path to a .onnx model
+                                 # or absolute path to a .onnx model; the
+                                 # locale prefix (en_GB-…) sets the language
 binary = "piper-tts"
 
 [tts.kokoro]                     # requires scripts/setup-kokoro.sh first
-voice = "af_heart"               # Kokoro voice id
+voice = "af_heart"               # Kokoro voice id; its first letter is the
+                                 # language (a=en-us, b=en-gb, …) — see
+                                 # `jarvix voices`
 speed = 1.0                      # speech rate multiplier
 
 [tools]                          # the assistant can act on your computer
@@ -338,6 +344,80 @@ Voice names resolve by searching `/usr/share/piper-voices` (the Arch
 [Piper voices collection](https://huggingface.co/rhasspy/piper-voices) works:
 download the `.onnx` + `.onnx.json` pair and point `tts.piper.voice` at the
 `.onnx` path.
+
+Piper voice names begin with their locale — `en_GB-alba-medium`,
+`fr_FR-siwis-medium` — and that prefix is what Jarvix reads to know which
+language the voice speaks. A British Piper voice is one package away:
+
+```bash
+sudo pacman -S piper-voices-en-gb            # AUR
+jarvix voices                                # confirm it is there
+jarvix config set tts.piper.voice=en_GB-alba-medium
+```
+
+## Language and accent
+
+Jarvix ships speaking American English and can speak eight other languages,
+plus British English, out of files that are already on disk once
+`scripts/setup-kokoro.sh` has run. `jarvix voices` lists them grouped by
+language with each voice's gender, marks the one in use, and prints the
+command to change it. `jarvix setup` walks the same choice interactively —
+language first, then accent, with a spoken preview before committing.
+
+```bash
+jarvix voices                                # what this machine can say
+jarvix config set tts.kokoro.voice=bf_emma   # British female, applies to the
+                                             # next answer — no restart
+```
+
+**The language is derived from the voice, never configured beside it.** A
+Kokoro voice id begins with its language family and its gender:
+
+| Prefix | Language | Phonemiser | Whisper | Example voices |
+|---|---|---|---|---|
+| `a` | English (American) | `en-us` | `en` | `af_heart`, `am_adam` |
+| `b` | English (British) | `en-gb` | `en` | `bf_emma`, `bm_george` |
+| `e` | Spanish | `es` | `es` | `ef_dora`, `em_alex` |
+| `f` | French | `fr-fr` | `fr` | `ff_siwis` |
+| `h` | Hindi | `hi` | `hi` | `hf_alpha`, `hm_omega` |
+| `i` | Italian | `it` | `it` | `if_sara`, `im_nicola` |
+| `j` | Japanese | `ja` | `ja` | `jf_alpha`, `jm_kumo` |
+| `p` | Portuguese (Brazilian) | `pt-br` | `pt` | `pf_dora`, `pm_alex` |
+| `z` | Chinese (Mandarin) | `zh` | `zh` | `zf_xiaoni`, `zm_yunxi` |
+
+The second letter is the gender (`f`/`m`). The **phonemiser** column is what
+drives letter-to-sound conversion; it used to be hardcoded to `en-us`, which
+is why a British voice previously sounded British-*ish* while pronouncing
+words American-style. `jarvix doctor` now reports the phonemiser in use, so
+the accent can be confirmed without listening for it.
+
+A voice id that is not in the installed voices file is rejected when the
+configuration is validated, with installed alternatives named — rather than
+being accepted and failing in the middle of an answer.
+
+### Non-English languages need a multilingual speech model
+
+whisper.cpp's `.en` models (`base.en`, `tiny.en`, `small.en`) transcribe
+English and nothing else, so selecting a French voice while leaving
+`stt.whisper.model = "base.en"` would leave Jarvix speaking French and
+listening in English — which looks like a broken assistant, not a
+misconfiguration. Jarvix refuses that combination. Change both together:
+
+```bash
+jarvix setup whisper base                    # multilingual, ~148 MB
+jarvix config set tts.kokoro.voice=ff_siwis \
+                 stt.whisper.model=base \
+                 stt.whisper.language=fr     # or "auto" to detect
+```
+
+Both English accents share the `en` whisper code — whisper.cpp has no notion
+of accent — so switching between American and British voices needs no speech
+model change at all.
+
+> **Upgrading:** `--lang` is passed to the Kokoro helper on the command line,
+> so an installed `~/.local/share/jarvix/kokoro_stream.py` from before this
+> change will reject it. Re-run `scripts/setup-kokoro.sh` after upgrading;
+> `jarvix doctor` checks the installed helper and says so if it is stale.
 
 ## Deterministic intents (`[intents]`)
 
@@ -667,6 +747,10 @@ more natural:
 scripts/setup-kokoro.sh          # Python venv + kokoro-onnx + models (~340 MB)
 # then set tts.provider = "kokoro" and: systemctl --user restart jarvixd
 ```
+
+The download includes **54 voices across nine languages** — four British
+female and four British male among them. See "Language and accent" above, or
+run `jarvix voices`.
 
 Assistant answers are normalised before they are spoken — markdown, code
 fences, and list bullets are stripped so nothing reads "asterisk" or
