@@ -18,7 +18,7 @@ func cmdStatus(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	var status map[string]any
 	if err := client.Call("status.get", nil, &status); err != nil {
 		return err
@@ -37,7 +37,7 @@ func cmdCancel(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	return client.Call("session.cancel", nil, nil)
 }
 
@@ -46,7 +46,7 @@ func cmdNewConversation(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("conversation.reset", nil, nil); err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func cmdPTT(paths config.Paths, phase string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	beginListening := func() error {
 		if err := client.Call("session.start", nil, nil); err != nil {
@@ -117,7 +117,7 @@ func cmdAsk(paths config.Paths, question string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("session.start", nil, nil); err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func cmdListen(paths config.Paths) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.Call("session.start", nil, nil); err != nil {
 		return err
 	}
@@ -147,7 +147,7 @@ func cmdListen(paths config.Paths) error {
 	defer signal.Stop(interrupt)
 	enter := make(chan struct{})
 	go func() {
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 		close(enter)
 	}()
 	select {

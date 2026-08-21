@@ -18,10 +18,10 @@ const ProtocolVersion = 1
 
 // Request is a JSON-RPC 2.0 request. A nil ID marks a notification.
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
+	JSONRPC string           `json:"jsonrpc"`
 	ID      *json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
+	Method  string           `json:"method"`
+	Params  json.RawMessage  `json:"params,omitempty"`
 }
 
 // Response is a JSON-RPC 2.0 response.

@@ -173,14 +173,14 @@ func (c *Client) Chat(ctx context.Context, req ai.ChatRequest) (<-chan ai.Event,
 		return nil, fmt.Errorf("%s: request failed: %w", c.name, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, c.statusError(resp)
 	}
 
 	ch := make(chan ai.Event)
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		calls, err := c.readStream(ctx, resp.Body, ch)
 		if err != nil {
 			// Cancellation surfaces as ctx.Err() so callers can tell an
@@ -301,7 +301,7 @@ func (c *Client) Probe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%s unreachable at %s: %w", c.name, c.baseURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return c.statusError(resp)
 	}

@@ -43,7 +43,7 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go d.Run(ctx)
+	go func() { _ = d.Run(ctx) }()
 
 	// Wait for the socket to come up.
 	var client *ipc.Client
@@ -58,7 +58,7 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 	return client, provider
 }
 
@@ -151,8 +151,8 @@ func TestVoiceFlowOverSocket(t *testing.T) {
 func TestCancelOverSocket(t *testing.T) {
 	client, provider := startDaemon(t)
 	provider.Delay = 20 * time.Millisecond
-	client.Call("session.start", nil, nil)
-	client.Call("session.submit", map[string]string{"text": "hi"}, nil)
+	_ = client.Call("session.start", nil, nil)
+	_ = client.Call("session.submit", map[string]string{"text": "hi"}, nil)
 	if err := client.Call("session.cancel", nil, nil); err != nil {
 		t.Fatal(err)
 	}

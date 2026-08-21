@@ -3,7 +3,6 @@ package tts
 import (
 	"context"
 	"sync"
-	"time"
 )
 
 // Fake is a scripted Synthesizer for tests.
@@ -13,14 +12,22 @@ type Fake struct {
 	Chunks [][]byte
 	// Fail, when set, ends the stream with an error chunk.
 	Fail error
-	// Delay simulates synthesis/playback duration by pausing before each
-	// chunk, giving tests a window to cancel while speech is in progress.
-	Delay time.Duration
 	// LastRequest records the most recent request for assertions.
 	LastRequest Request
 
 	mu     sync.Mutex
 	speaks int
+	hold   chan struct{}
+}
+
+// SetHold installs a gate that blocks chunk delivery until the channel is
+// closed (or the speak context is cancelled). Tests use it to hold speech
+// "in progress" deterministically — never with timers, which race on loaded
+// machines. SetHold(nil) removes the gate for subsequent Speak calls.
+func (f *Fake) SetHold(ch chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hold = ch
 }
 
 // Name implements Synthesizer.
@@ -38,13 +45,13 @@ func (f *Fake) Speaks() int {
 func (f *Fake) Speak(ctx context.Context, req Request) (Format, <-chan Chunk, error) {
 	f.mu.Lock()
 	f.speaks++
+	hold := f.hold
 	f.mu.Unlock()
 	f.LastRequest = req
 	chunks := f.Chunks
 	if len(chunks) == 0 {
 		chunks = [][]byte{make([]byte, 32)}
 	}
-	delay := f.Delay
 	ch := make(chan Chunk)
 	go func() {
 		defer close(ch)
@@ -52,15 +59,15 @@ func (f *Fake) Speak(ctx context.Context, req Request) (Format, <-chan Chunk, er
 			ch <- Chunk{Err: f.Fail}
 			return
 		}
-		for _, c := range chunks {
-			if delay > 0 {
-				select {
-				case <-time.After(delay):
-				case <-ctx.Done():
-					ch <- Chunk{Err: ctx.Err()}
-					return
-				}
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+				ch <- Chunk{Err: ctx.Err()}
+				return
 			}
+		}
+		for _, c := range chunks {
 			select {
 			case ch <- Chunk{PCM: c}:
 			case <-ctx.Done():

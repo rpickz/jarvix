@@ -30,9 +30,9 @@ var transitions = map[State][]State{
 	// Responding → Thinking happens when the model streamed some text and
 	// then asked to call a tool: it goes back to working before answering.
 	StateResponding: {StateSpeaking, StateThinking, StateIdle, StateCancelling, StateError},
-	StateSpeaking:     {StateIdle, StateCancelling, StateError},
-	StateCancelling:   {StateIdle},
-	StateError:        {StateIdle},
+	StateSpeaking:   {StateIdle, StateCancelling, StateError},
+	StateCancelling: {StateIdle},
+	StateError:      {StateIdle},
 }
 
 // CanTransition reports whether from → to is a legal state change.

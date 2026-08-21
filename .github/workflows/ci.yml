@@ -1,0 +1,64 @@
+# CI gate: every push and PR gets a verdict on a clean runner with none of
+# the external engines installed (no PipeWire, whisper, piper, kokoro) —
+# proving the hermetic-test discipline holds. See issue #7.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+      - name: Test (race, twice to surface order dependence)
+        run: go test -race -count=2 ./... 2>&1 | tee test.log
+        shell: bash
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: test.log
+      - name: Coverage baseline (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          go test -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+      - name: Upload coverage
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest

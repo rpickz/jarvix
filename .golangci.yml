@@ -1,0 +1,14 @@
+# Lint gate configuration (issue #7). Defaults are kept — errcheck, govet,
+# staticcheck, ineffassign, unused — with one deliberate exception:
+#
+#   ST1005 (error strings should not be capitalized) is disabled because
+#   Jarvix error strings are frequently *spoken aloud* to the user
+#   ("I didn't catch that — no speech was recognised") and are written as
+#   natural sentences on purpose.
+version: "2"
+linters:
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -ST1005
