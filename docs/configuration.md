@@ -66,13 +66,21 @@ speed = 1.0                      # speech rate multiplier
 shell = false                    # enable shell.run — see the Tools section below
 shell_timeout_sec = 30           # per-command timeout
 shell_max_output_kb = 16         # captured output cap fed back to the model
-artifacts = true                 # enable artifact.create (diagrams on screen)
+artifacts = true                 # enable artifact.create (diagrams, documents,
+                                 # spreadsheets, sketches on screen)
 
-[artifacts]                      # rendered diagrams and future documents
+[artifacts]                      # where the assistant's files land and open
 dir = "~/Documents/Jarvix"       # default is your real home path; must be
                                  # absolute in the file ("~" is not expanded)
-open_command = "xdg-open"        # how a rendered artifact is shown
+open_command = "xdg-open"        # how an artifact is shown (all formats)
 render_timeout_sec = 10          # renderer killed past this
+
+[artifacts.open_commands]        # optional per-format viewer overrides;
+                                 # formats without an entry use open_command
+# document = "obsidian"          # .md drafts in your editor of choice
+# spreadsheet = "libreoffice"    # .csv tables in a spreadsheet app
+# excalidraw = "none"            # "" or "none" = no viewer: the file is
+                                 # saved and announced by name, not opened
 
 [conversation]
 speak_responses = true           # false = text-only sessions
@@ -151,18 +159,38 @@ with tool support. Small models without tool training will not call tools.
 A per-tool permission gate (allow / ask / deny, with spoken confirmation) is
 the next step on the roadmap; today `shell` is a single on/off switch.
 
-## Artifacts (diagrams on screen)
+## Artifacts (work you keep)
 
-"Jarvix, diagram how my publish pipeline works" makes the assistant write
-Mermaid source and call `artifact.create`: the diagram is rendered to SVG,
-opened in your default viewer, and saved — source and image side by side —
-under `[artifacts] dir` (default `~/Documents/Jarvix`, created private,
-0700) as `<date>-<slug>.mmd` / `.svg`. The spoken answer stays a short
-summary; file paths are never read aloud. `jarvix artifacts` lists the most
-recent ones with paths, and the daemon publishes an `artifact.created` IPC
-event (type, path) for the overlay/notifications.
+Ask for something better seen than heard and the assistant calls
+`artifact.create` with the right format instead of reading structure aloud:
 
-Rendering needs [mermaid-cli](https://github.com/mermaid-js/mermaid-cli):
+| You say | Format | File | Opens via |
+|---|---|---|---|
+| "diagram my publish pipeline" | `mermaid` | `.mmd` + rendered `.svg` | `open_command` |
+| "draft a one-page brief" | `document` | `.md`, saved verbatim | `open_commands.document` |
+| "put those numbers in a spreadsheet" | `spreadsheet` | `.csv`, validated before write | `open_commands.spreadsheet` |
+| "sketch this out on a canvas" | `excalidraw` | `.excalidraw` scene JSON, validated | `open_commands.excalidraw` |
+
+Every format rides the same seam: files land under `[artifacts] dir`
+(default `~/Documents/Jarvix`, created private, 0700) as `<date>-<slug>.<ext>`,
+the daemon publishes an `artifact.created` IPC event (type, path) for the
+overlay/notifications, and `jarvix artifacts` lists the most recent ones
+with type and age. The spoken answer stays a short summary; file paths are
+never read aloud. Structured formats (CSV, scene JSON) are validated before
+anything is written — broken quoting or malformed scene JSON goes back to
+the model with the specific error for one retry, and an invalid file is
+never saved. Artifact source is capped at 1 MB; oversized content is
+refused, never truncated.
+
+Per-format viewers come from `[artifacts.open_commands]` (falling back to
+`open_command`, default `xdg-open`). Setting a format's entry to `""` or
+`"none"` means "no viewer": the assistant saves the file and tells you its
+name instead of opening anything — useful for `.excalidraw`, which usually
+wants dragging into [excalidraw.com](https://excalidraw.com) rather than a
+local handler.
+
+Only diagrams need an external renderer,
+[mermaid-cli](https://github.com/mermaid-js/mermaid-cli):
 
 ```bash
 npm install -g @mermaid-js/mermaid-cli   # or from the AUR: mermaid-cli
@@ -170,7 +198,8 @@ npm install -g @mermaid-js/mermaid-cli   # or from the AUR: mermaid-cli
 
 Without it the assistant simply answers in prose, and `jarvix doctor` names
 the missing piece. Renders run as a local subprocess (no network), bounded by
-`render_timeout_sec`. See ADR 0011 for the design.
+`render_timeout_sec`. Documents, spreadsheets, and sketches have no external
+dependency at all. See ADR 0012 for the design.
 
 ## Natural voice (Kokoro)
 
@@ -195,4 +224,4 @@ fences, and list bullets are stripped so nothing reads "asterisk" or
 | State | `~/.local/state/jarvix/` |
 | Socket | `$XDG_RUNTIME_DIR/jarvix.sock` |
 | Recordings (transient) | `$XDG_RUNTIME_DIR/jarvix/` (tmpfs, deleted after use) |
-| Artifacts (diagrams) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |
+| Artifacts (diagrams, documents, spreadsheets, sketches) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |

@@ -49,6 +49,12 @@ type Artifacts struct {
 	Dir string `toml:"dir"`
 	// OpenCommand launches a rendered artifact in a viewer.
 	OpenCommand string `toml:"open_command"`
+	// OpenCommands overrides OpenCommand per artifact format, e.g. under
+	// [artifacts.open_commands]: document = "obsidian". An entry set to ""
+	// or "none" declares the format has no viewer — the artifact is saved
+	// and announced by name, nothing is launched. Formats without an entry
+	// fall back to OpenCommand.
+	OpenCommands map[string]string `toml:"open_commands"`
 	// RenderTimeoutSec bounds one render; the renderer is killed past it.
 	RenderTimeoutSec int `toml:"render_timeout_sec"`
 }
@@ -226,11 +232,15 @@ const ToolSystemPrompt = " You can run shell commands yourself with the shell.ru
 // tool is enabled. The spoken-summary rules live here because they are model
 // behaviour: the tool result repeats them, and speech normalisation cannot
 // save an answer that reads a path aloud on purpose.
-const ArtifactSystemPrompt = " When the user asks you to diagram, sketch, chart, or map out how something " +
-	"works or connects, use the artifact.create tool: write the source (Mermaid for diagrams) and call the " +
-	"tool instead of describing the structure in speech. After the tool succeeds, answer with at most two " +
-	"sentences about what the artifact shows — never recite its source, file names, or paths, because your " +
-	"answer is read aloud. If the tool reports rendering is unavailable or keeps failing, answer in prose."
+const ArtifactSystemPrompt = " When the user asks for output better seen than heard, use the " +
+	"artifact.create tool instead of describing the content in speech: Mermaid source (format " +
+	"\"mermaid\") to diagram or chart how something works or connects, Markdown (format \"document\") " +
+	"to draft a document or brief, CSV (format \"spreadsheet\") to put data in a table, and an " +
+	"Excalidraw scene (format \"excalidraw\") to sketch on a free-form canvas. After the tool " +
+	"succeeds, answer with at most two sentences about what the artifact shows — never recite its " +
+	"source, file names, or paths, because your answer is read aloud. If the tool rejects your " +
+	"source, fix exactly what the error names and retry once; if it fails again, or rendering is " +
+	"unavailable, apologise briefly and answer in prose."
 
 // Load reads the config file at path, applying defaults for anything unset.
 // A missing file is not an error; defaults are returned.

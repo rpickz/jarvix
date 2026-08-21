@@ -62,3 +62,32 @@ render server**, or a **network service** (kroki.io / mermaid.ink).
   long-lived process behind the same interface — the ADR 0002 escape hatch.
 - Renderer output (SVG) opens in whatever `xdg-open` resolves; rendering
   inside the Jarvix window is a future ticket, not this seam's concern.
+
+## Addendum — documents, spreadsheets, sketches (issue #6)
+
+The second wave of formats (`document`/.md, `spreadsheet`/.csv,
+`excalidraw`/.excalidraw) plugged into the seam as predicted, with two small
+generalisations of the tool — no per-format branch anywhere in the engine or
+daemon beyond appending to the renderer list:
+
+- **Passthrough formats.** For these formats the saved source *is* the
+  artifact, so a renderer with `SourceExt() == OutputExt()` makes the tool
+  skip the render step entirely; one file is written, not two. A shared
+  `passthrough` embed supplies the no-op `Available`/`Render` halves.
+- **Pre-write validation.** Renderers may implement `SourceValidator`
+  (`ValidateSource(source) error`), checked before anything touches disk.
+  Structured formats must fail *before* the write — an invalid CSV or scene
+  file must never exist even transiently — and the specific error (line
+  numbers, field names) goes back to the model for its retry round, the
+  same contract render failures already had. CSV validates via a strict
+  `encoding/csv` parse (ragged rows and broken quoting fail with line
+  numbers); Excalidraw scenes validate structurally (`type: "excalidraw"`,
+  positive numeric `version`, `elements` array of objects with `type` and
+  `x`/`y`) without pinning per-element schemas that churn between releases.
+
+Two seam-level guardrails came with them: artifact source is capped at 1 MB
+and refused — never truncated, because a truncated structured file is
+silently corrupt — and `[artifacts.open_commands]` overrides the viewer per
+format (an entry of `""`/`"none"` means "no viewer": the tool saves the file
+and names it, by base name only, in the result). `TestArtifactFormatsShareOneSeam`
+pins the property that adding a format is registration-only.

@@ -1,0 +1,6 @@
+name,notes,amount
+plain,simple cell,10
+"comma, inside","says ""hello"" twice",20
+"multi
+line cell","trailing spaces  ",30
+empty,,40

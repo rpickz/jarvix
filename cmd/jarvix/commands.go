@@ -332,6 +332,12 @@ func artifactKind(name string) string {
 		return "source"
 	case ".svg", ".png":
 		return "diagram"
+	case ".md":
+		return "document"
+	case ".csv":
+		return "spreadsheet"
+	case ".excalidraw":
+		return "sketch"
 	default:
 		return strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
 	}

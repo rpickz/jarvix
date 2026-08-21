@@ -105,10 +105,19 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	}
 	if cfg.Tools.Artifacts {
 		registry.Register(&tools.Artifact{
-			Dir:         cfg.Artifacts.Dir,
-			OpenCommand: cfg.Artifacts.OpenCommand,
-			Timeout:     time.Duration(cfg.Artifacts.RenderTimeoutSec) * time.Second,
-			Renderers:   []tools.Renderer{&tools.MermaidRenderer{}},
+			Dir:          cfg.Artifacts.Dir,
+			OpenCommand:  cfg.Artifacts.OpenCommand,
+			OpenCommands: cfg.Artifacts.OpenCommands,
+			Timeout:      time.Duration(cfg.Artifacts.RenderTimeoutSec) * time.Second,
+			// Adding a format is exactly this: implement Renderer (plus
+			// SourceValidator for structured formats) and append it here.
+			// The tool's schema, naming, events, and listing pick it up.
+			Renderers: []tools.Renderer{
+				&tools.MermaidRenderer{},
+				&tools.DocumentRenderer{},
+				&tools.SpreadsheetRenderer{},
+				&tools.ExcalidrawRenderer{},
+			},
 			// The event carries the path so the window/notification can link
 			// to the file; spoken summaries deliberately never do.
 			OnCreated: func(format, path string) {

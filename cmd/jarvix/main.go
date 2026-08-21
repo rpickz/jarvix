@@ -19,7 +19,7 @@ Usage:
   jarvix new                    Start a fresh conversation (forget context)
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
-  jarvix artifacts              List recent artifacts (diagrams) with paths
+  jarvix artifacts              List recent artifacts (diagrams, documents, sheets, sketches)
   jarvix doctor                 Check every dependency and explain failures
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
   jarvix setup input            Grant keyboard access for real hold-to-talk

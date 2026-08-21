@@ -128,6 +128,10 @@ artifacts = false
 dir = "/tmp/my-artifacts"
 open_command = "imv"
 render_timeout_sec = 30
+
+[artifacts.open_commands]
+document = "obsidian"
+excalidraw = ""
 `)
 	if cfg.Tools.Artifacts {
 		t.Error("tools.artifacts should be off")
@@ -135,6 +139,14 @@ render_timeout_sec = 30
 	if cfg.Artifacts.Dir != "/tmp/my-artifacts" || cfg.Artifacts.OpenCommand != "imv" ||
 		cfg.Artifacts.RenderTimeoutSec != 30 {
 		t.Errorf("artifacts = %+v", cfg.Artifacts)
+	}
+	if cfg.Artifacts.OpenCommands["document"] != "obsidian" {
+		t.Errorf("open_commands = %+v", cfg.Artifacts.OpenCommands)
+	}
+	// An explicitly empty override is meaningful ("no viewer for this
+	// format"), so it must survive the parse as a present-but-empty entry.
+	if v, ok := cfg.Artifacts.OpenCommands["excalidraw"]; !ok || v != "" {
+		t.Errorf("empty override lost: %+v", cfg.Artifacts.OpenCommands)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)

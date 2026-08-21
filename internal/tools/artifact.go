@@ -30,9 +30,38 @@ type Renderer interface {
 	Available() error
 	// Render converts srcPath into outPath. The returned error carries the
 	// renderer's own diagnostics (stderr) so the model can fix its source
-	// and retry within the tool loop.
+	// and retry within the tool loop. Not called for passthrough formats
+	// (SourceExt == OutputExt), where the saved source is the artifact.
 	Render(ctx context.Context, srcPath, outPath string) error
 }
+
+// SourceValidator is optionally implemented by renderers of structured
+// formats (CSV, scene JSON). Validation runs before anything is written:
+// an invalid artifact must never exist on disk even transiently, and the
+// specific error goes back to the model for its retry round — the same
+// contract render failures already have. Formats without failure modes
+// (Markdown) simply do not implement it.
+type SourceValidator interface {
+	// ValidateSource checks the complete artifact source, returning an
+	// error precise enough for the model to fix (line numbers, field
+	// names), never a bare "invalid".
+	ValidateSource(source string) error
+}
+
+// passthrough is the Renderer half shared by formats whose saved source is
+// the finished artifact (Markdown documents, CSV spreadsheets, Excalidraw
+// scenes): always available, because nothing external runs, and never
+// rendered, because SourceExt == OutputExt makes the tool skip the render
+// step entirely.
+type passthrough struct{}
+
+// Available implements Renderer. Passthrough formats need no external
+// binary, so they can never be missing.
+func (passthrough) Available() error { return nil }
+
+// Render implements Renderer but is never called: the artifact tool skips
+// rendering when source and output share a path.
+func (passthrough) Render(context.Context, string, string) error { return nil }
 
 // Artifact is the generic artifact tool: the model hands it source in a
 // supported format, and it saves the source, renders it, opens the result in
@@ -47,6 +76,13 @@ type Artifact struct {
 	// OpenCommand launches the rendered file in a viewer. Empty means
 	// DefaultOpenCommand.
 	OpenCommand string
+	// OpenCommands overrides OpenCommand per format (keyed by
+	// Renderer.Format()), so documents can open in an editor while
+	// spreadsheets open in a spreadsheet app. An entry explicitly set to ""
+	// or "none" declares the format has no viewer: the artifact is saved
+	// and announced by base name, and nothing is launched. Formats without
+	// an entry fall back to OpenCommand.
+	OpenCommands map[string]string
 	// Timeout bounds one render. Zero means DefaultRenderTimeout.
 	Timeout time.Duration
 	// Renderers are the enabled per-format renderers.
@@ -60,7 +96,7 @@ type Artifact struct {
 	Log *slog.Logger
 
 	// openFn overrides viewer launch in tests.
-	openFn func(path string) error
+	openFn func(command, path string) error
 }
 
 // Artifact tool defaults.
@@ -69,16 +105,24 @@ const (
 	DefaultOpenCommand   = "xdg-open"
 )
 
+// MaxArtifactSourceBytes caps one artifact's source at 1 MB. Oversized
+// content is refused outright rather than truncated: a truncated CSV or
+// scene JSON is silently corrupt, which is worse than no file at all, and
+// 1 MB is far beyond any spoken-request artifact (a 500-row table is tens
+// of KB).
+const MaxArtifactSourceBytes = 1 << 20
+
 // Name implements Tool.
 func (a *Artifact) Name() string { return "artifact.create" }
 
 // Description implements Tool.
 func (a *Artifact) Description() string {
-	return "Create a visual artifact from source you write and open it on the user's screen. " +
-		"Use this whenever the user asks for a diagram, chart of a flow, or a sketch of how " +
-		"something works or connects: write the source (for example Mermaid for diagrams) and " +
-		"call this tool instead of describing the structure in speech. The rendered file opens " +
-		"automatically and is saved for the user."
+	return "Create an artifact from source you write and open it on the user's screen. " +
+		"Use this whenever the user asks for a diagram or chart of a flow (Mermaid source), " +
+		"a drafted document or brief (Markdown), a table of data (CSV), or a free-form sketch " +
+		"(an Excalidraw scene): write the complete source and call this tool instead of " +
+		"describing the content in speech. The file opens automatically and is saved for " +
+		"the user."
 }
 
 // Schema implements Tool. The format enum is built from the registered
@@ -124,6 +168,15 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 	if strings.TrimSpace(args.Source) == "" {
 		return "", fmt.Errorf("artifact.create: empty source")
 	}
+	// Refuse, never truncate: cutting a structured format mid-record would
+	// write a silently corrupt file. The message goes back as a tool result
+	// so the model can produce something smaller on its retry round.
+	if len(args.Source) > MaxArtifactSourceBytes {
+		return fmt.Sprintf("artifact source is %d bytes, over the %d byte (1 MB) limit. "+
+			"Nothing was saved, and the source was not truncated because a truncated artifact "+
+			"would be corrupt. Produce a smaller artifact or answer in prose.",
+			len(args.Source), MaxArtifactSourceBytes), nil
+	}
 	renderer, err := a.renderer(args.Format)
 	if err != nil {
 		return "", err
@@ -136,7 +189,18 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 	}
 
 	if err := renderer.Available(); err != nil {
-		return fmt.Sprintf("diagram rendering unavailable: %v. Answer the user's request in prose instead.", err), nil
+		return fmt.Sprintf("%s rendering unavailable: %v. Answer the user's request in prose instead.",
+			renderer.Format(), err), nil
+	}
+
+	// Structured formats are checked before anything touches disk, so an
+	// invalid artifact never exists even transiently — and the specific
+	// error (line numbers, field names) is the model's retry material.
+	if v, ok := renderer.(SourceValidator); ok {
+		if validateErr := v.ValidateSource(args.Source); validateErr != nil {
+			return fmt.Sprintf("invalid %s source: %v\nFix the source and call the tool again.",
+				renderer.Format(), validateErr), nil
+		}
 	}
 
 	logger := a.Log
@@ -160,27 +224,32 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 		return "", fmt.Errorf("artifact.create: write source: %w", err)
 	}
 
-	logger.Info("rendering artifact", "component", "tools", "tool", a.Name(),
-		"format", renderer.Format(), "name", filepath.Base(outPath))
 	start := time.Now()
-	renderCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	renderErr := renderer.Render(renderCtx, srcPath, outPath)
-	if renderErr == nil {
-		if _, statErr := os.Stat(outPath); statErr != nil {
-			renderErr = fmt.Errorf("renderer reported success but produced no output")
+	// srcPath == outPath marks a passthrough format: the validated source
+	// file IS the artifact (documents, spreadsheets, scenes), so there is
+	// no render step and no second file.
+	if srcPath != outPath {
+		logger.Info("rendering artifact", "component", "tools", "tool", a.Name(),
+			"format", renderer.Format(), "name", filepath.Base(outPath))
+		renderCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		renderErr := renderer.Render(renderCtx, srcPath, outPath)
+		if renderErr == nil {
+			if _, statErr := os.Stat(outPath); statErr != nil {
+				renderErr = fmt.Errorf("renderer reported success but produced no output")
+			}
+		}
+		if renderErr != nil {
+			// Leave no half-made files behind; a retry claims fresh names.
+			_ = os.Remove(srcPath)
+			_ = os.Remove(outPath)
+			if errors.Is(renderCtx.Err(), context.DeadlineExceeded) {
+				return fmt.Sprintf("rendering timed out after %s. Simplify the source and try once more, or answer in prose.", timeout), nil
+			}
+			return fmt.Sprintf("rendering failed:\n%v\nFix the source and call the tool again.", renderErr), nil
 		}
 	}
-	if renderErr != nil {
-		// Leave no half-made files behind; a retry claims fresh names.
-		_ = os.Remove(srcPath)
-		_ = os.Remove(outPath)
-		if errors.Is(renderCtx.Err(), context.DeadlineExceeded) {
-			return fmt.Sprintf("rendering timed out after %s. Simplify the source and try once more, or answer in prose.", timeout), nil
-		}
-		return fmt.Sprintf("rendering failed:\n%v\nFix the source and call the tool again.", renderErr), nil
-	}
-	logger.Info("artifact rendered", "component", "tools", "tool", a.Name(),
+	logger.Info("artifact created", "component", "tools", "tool", a.Name(),
 		"format", renderer.Format(), "name", filepath.Base(outPath),
 		"duration_ms", time.Since(start).Milliseconds())
 
@@ -191,17 +260,27 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 	// The result deliberately contains no path and no source: whatever is in
 	// it may end up spoken aloud, and paths read verbatim are the failure
 	// mode this tool exists to avoid. The artifact.created event carries the
-	// path for machines; `jarvix artifacts` shows it to humans.
-	if err := a.open(outPath); err != nil {
+	// path for machines; `jarvix artifacts` shows it to humans. The one
+	// deliberate exception is the no-viewer case below, which names the file
+	// by base name only — with nothing opening on screen, the name is the
+	// user's only handle on their new file.
+	command, hasViewer := a.openCommandFor(renderer.Format())
+	if !hasViewer {
+		return fmt.Sprintf("The artifact was saved as %q in the user's Jarvix artifacts folder, "+
+			"and no viewer is configured for %s artifacts, so it was not opened. Tell the user it "+
+			"is saved under that name, in a summary of at most two sentences. Do not recite the "+
+			"artifact source or any directory paths.", filepath.Base(outPath), renderer.Format()), nil
+	}
+	if err := a.open(command, outPath); err != nil {
 		logger.Warn("artifact viewer failed to open", "component", "tools",
 			"tool", a.Name(), "error", err.Error())
 		return "The artifact was rendered and saved, but the viewer could not be opened automatically. " +
 			"Tell the user it is in their Jarvix artifacts folder (the `jarvix artifacts` command lists it), " +
 			"in a summary of at most two sentences. Do not recite the artifact source, file names, or paths.", nil
 	}
-	return "The rendered artifact is now open on the user's screen, and the source is saved in " +
-		"their Jarvix artifacts folder. Answer with a summary of at most two sentences describing " +
-		"what it shows. Do not recite the artifact source, file names, or paths.", nil
+	return "The artifact is now open on the user's screen and saved in their Jarvix artifacts " +
+		"folder. Answer with a summary of at most two sentences describing what it shows. " +
+		"Do not recite the artifact source, file names, or paths.", nil
 }
 
 // renderer resolves the renderer for a model-named format.
@@ -247,16 +326,30 @@ func (a *Artifact) claimPaths(slug string, r Renderer) (srcPath, outPath string,
 	return "", "", fmt.Errorf("artifact.create: could not find a free filename for %q", base)
 }
 
+// openCommandFor resolves the viewer command for a format: a per-format
+// override wins, the shared OpenCommand is the fallback, and an override
+// explicitly set to "" or "none" means the format has no viewer at all —
+// the caller announces the saved file instead of launching anything.
+func (a *Artifact) openCommandFor(format string) (command string, hasViewer bool) {
+	if override, ok := a.OpenCommands[format]; ok {
+		override = strings.TrimSpace(override)
+		if override == "" || override == "none" {
+			return "", false
+		}
+		return override, true
+	}
+	if a.OpenCommand != "" {
+		return a.OpenCommand, true
+	}
+	return DefaultOpenCommand, true
+}
+
 // open launches the viewer and does not wait for it: xdg-open hands off and
 // exits, but a direct viewer (eog, imv) would block until closed — and it
 // must outlive the session, so it runs outside the session context.
-func (a *Artifact) open(path string) error {
+func (a *Artifact) open(command, path string) error {
 	if a.openFn != nil {
-		return a.openFn(path)
-	}
-	command := a.OpenCommand
-	if command == "" {
-		command = DefaultOpenCommand
+		return a.openFn(command, path)
 	}
 	parts := strings.Fields(command)
 	cmd := exec.Command(parts[0], append(parts[1:], path)...) //nolint:gosec // command comes from validated config, path from claimPaths
