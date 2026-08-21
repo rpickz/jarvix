@@ -203,7 +203,7 @@ func TestCoalesceSystemPassesThroughTheCommonShape(t *testing.T) {
 		{Role: ai.RoleUser, Content: "hi"},
 	}
 	out := coalesceSystem(in)
-	if len(out) != 2 || &in[0] == nil || out[0].Content != "prompt" || out[1].Content != "hi" {
+	if len(out) != 2 || out[0].Content != "prompt" || out[1].Content != "hi" {
 		t.Errorf("passthrough changed the request: %+v", out)
 	}
 	if none := coalesceSystem([]ai.Message{{Role: ai.RoleUser, Content: "hi"}}); len(none) != 1 {
