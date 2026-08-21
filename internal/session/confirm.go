@@ -162,11 +162,24 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	if slow {
 		stopProgress = e.startToolProgress(s, call, waiting, speaker)
 	}
+	start := time.Now()
 	result := e.tools.Execute(s.ctx, call)
 	stopProgress()
 
+	// The finish event carries how long the call took and whether the
+	// registry could run it at all, for the activity feed (issue #70).
+	// "error" means the registry's own failure encoding — an unknown tool or
+	// an infrastructure err — the one failure shape this layer can attest to.
+	// A tool that ran and *refused* reports that in its result text to the
+	// model, and on the bus through its own audit events (typing.audit,
+	// desktop.refusal), where the reason travels with it.
+	outcome := "ok"
+	if strings.HasPrefix(result, "error: ") {
+		outcome = "error"
+	}
 	e.publish(Event{Type: "tool.finished", Data: map[string]any{
-		"session_id": s.id, "tool": call.Name}})
+		"session_id": s.id, "tool": call.Name,
+		"duration_ms": time.Since(start).Milliseconds(), "outcome": outcome}})
 	return result
 }
 

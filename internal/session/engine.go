@@ -892,6 +892,12 @@ func (e *Engine) think(s *sess) {
 	e.publish(Event{Type: "assistant.started", Data: map[string]any{"session_id": s.id, "provider": e.provider.Name()}})
 
 	finalText := ""
+	// How many tool calls the model requested this turn — attempts, not
+	// successes, because a denied or declined call is still the model trying
+	// to act. Zero on the final answer is the fact the activity feed's
+	// text-only marker states (issue #70): an answer that claims action while
+	// this stayed at zero is the model narrating work it never asked to do.
+	toolCalls := 0
 	for round := 0; round < maxToolRounds; round++ {
 		text, calls, ok := e.streamOnce(s, ai.ChatRequest{
 			Model:       e.opts.Model,
@@ -932,6 +938,7 @@ func (e *Engine) think(s *sess) {
 				e.abortSpeaker(speaker)
 				return
 			}
+			toolCalls++
 			result, ok := e.gateAndExecute(s, call, turn)
 			if !ok {
 				e.abortSpeaker(speaker)
@@ -941,7 +948,8 @@ func (e *Engine) think(s *sess) {
 		}
 	}
 
-	e.publish(Event{Type: "assistant.finished", Data: map[string]any{"session_id": s.id, "content": finalText}})
+	e.publish(Event{Type: "assistant.finished", Data: map[string]any{
+		"session_id": s.id, "content": finalText, "tool_calls": toolCalls}})
 	if finalText == "" {
 		e.abortSpeaker(speaker)
 		e.fail(s, "assistant", fmt.Errorf("the assistant returned an empty response"))
