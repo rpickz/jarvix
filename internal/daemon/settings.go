@@ -170,6 +170,12 @@ func (d *Daemon) handleConfigSet(params json.RawMessage) (any, error) {
 		}
 	}
 
+	// Attached after the changes are applied, so the catalog belongs to the
+	// engine the *candidate* selects: comparing a new Kokoro voice id against
+	// the running Piper catalog would reject a perfectly good engine switch.
+	// Rebuilt per call rather than cached on the daemon for the same reason —
+	// config.set is a deliberate user action, not a hot path.
+	fileCfg.Voices = fileCfg.InstalledVoices(d.paths)
 	if err := fileCfg.Validate(); err != nil {
 		return nil, &ipc.Error{
 			Code:    ipc.CodeConfigInvalid,
@@ -218,6 +224,7 @@ func (d *Daemon) handleConfigReload(json.RawMessage) (any, error) {
 			Message: fmt.Sprintf("config.toml does not parse; the running configuration is unchanged: %v", err),
 		}
 	}
+	fileCfg.Voices = fileCfg.InstalledVoices(d.paths)
 	if err := fileCfg.Validate(); err != nil {
 		return nil, &ipc.Error{
 			Code:    ipc.CodeConfigInvalid,
