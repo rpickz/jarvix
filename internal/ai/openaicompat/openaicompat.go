@@ -120,6 +120,44 @@ type apiError struct {
 
 // Chat implements ai.Provider. It opens an SSE stream and forwards deltas as
 // events. The returned channel is closed after a final done or error event.
+// coalesceSystem folds every system message into the first one, in order,
+// separated by blank lines. The engine deliberately layers system-role
+// content through a turn — the prompt first, remembered facts after it
+// (ADR 0025), desktop context after history (ADR 0019) — and the OpenAI
+// wire format is fine with that, but many models' chat templates are not:
+// Qwen3-family templates hard-error with "System message must be at the
+// beginning", and others silently misread mid-conversation system text.
+// Folding at the wire boundary keeps the engine's layering (each block is
+// self-labelling prose) while sending the one shape every template accepts.
+// Non-system messages keep their relative order; a request with no system
+// message, or one already leading, passes through byte-identical.
+func coalesceSystem(msgs []ai.Message) []ai.Message {
+	systems := 0
+	for _, m := range msgs {
+		if m.Role == ai.RoleSystem {
+			systems++
+		}
+	}
+	if systems <= 1 && (systems == 0 || msgs[0].Role == ai.RoleSystem) {
+		return msgs
+	}
+	var prompt strings.Builder
+	out := make([]ai.Message, 0, len(msgs)-systems+1)
+	out = append(out, ai.Message{Role: ai.RoleSystem})
+	for _, m := range msgs {
+		if m.Role != ai.RoleSystem {
+			out = append(out, m)
+			continue
+		}
+		if prompt.Len() > 0 {
+			prompt.WriteString("\n\n")
+		}
+		prompt.WriteString(m.Content)
+	}
+	out[0].Content = prompt.String()
+	return out
+}
+
 func (c *Client) Chat(ctx context.Context, req ai.ChatRequest) (<-chan ai.Event, error) {
 	body := chatBody{
 		Model:  req.Model,
@@ -132,7 +170,7 @@ func (c *Client) Chat(ctx context.Context, req ai.ChatRequest) (<-chan ai.Event,
 		t := req.Temperature
 		body.Temperature = &t
 	}
-	for _, m := range req.Messages {
+	for _, m := range coalesceSystem(req.Messages) {
 		wm := wireMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}
 		for _, tc := range m.ToolCalls {
 			var wtc wireToolCall
