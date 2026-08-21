@@ -294,6 +294,37 @@ func normaliseTokensKeepAll(s string) []string {
 	return out
 }
 
+// FindWindow resolves an app reference from a routine step against an
+// inventory with the same identity logic desktop.focus_window uses, adapted
+// to a caller that cannot ask a question. Two adaptations, both deliberate:
+//
+//   - Ties are broken by focus recency (the inventory's order) instead of
+//     being surfaced. A routine runs unattended — "which Firefox did you
+//     mean?" has no one to answer it — and the most recently used window is
+//     the one the user thinks of as "the" Firefox.
+//   - The category-alias tier does not apply. A model resolving "my editor"
+//     wants "editor" to reach IntelliJ; a routine step that says `app =
+//     "code"` names a program, and letting the editor alias claim an open
+//     GoLand window would move the wrong application and then never launch
+//     the right one — the exact duplicate-window annoyance dedupe exists to
+//     prevent, inverted.
+//
+// ok is false when nothing matches, which is the caller's cue to launch.
+func FindWindow(query string, windows []desktop.Window) (desktop.Window, bool) {
+	tokens := normaliseTokens(query)
+	normalised := strings.Join(tokens, " ")
+	best := tierAlias // exclusive floor: only tiers above it count
+	var winner desktop.Window
+	var found bool
+	for _, w := range windows {
+		tier := scoreWindow(normalised, tokens, w)
+		if tier > best {
+			best, winner, found = tier, w, true
+		}
+	}
+	return winner, found
+}
+
 // maxNamedCandidates bounds how many windows an ambiguity question names.
 // Past a handful, reading the list aloud is worse than the ambiguity.
 const maxNamedCandidates = 5

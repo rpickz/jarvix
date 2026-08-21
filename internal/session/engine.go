@@ -67,6 +67,12 @@ type Options struct {
 	// the honest answer off a Wayland session and the reason no test in this
 	// package can accidentally move the developer's workspace.
 	Compositor desktop.Compositor
+	// Routines executes the named routines the intent router matches
+	// (ADR 0026). Nil — a daemon with no [[routines]] configured — makes a
+	// matched routine phrase an honest spoken refusal, though validated
+	// configuration cannot produce that combination: the router only knows
+	// phrases the same config that builds the runner declared.
+	Routines RoutineRunner
 	// Context gathers opt-in desktop context — active window, selection,
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.

@@ -21,10 +21,16 @@ type FakeCompositor struct {
 	Name string
 	// Err, when set, fails every call — the "no compositor here" case.
 	Err error
-	// FailAction, when set, fails Focus/Close/MoveToWorkspace only: the
-	// inventory reads fine and the compositor refuses to act, which is what a
-	// window closing underneath the user looks like.
+	// FailAction, when set, fails the window verbs only (focus, close, move,
+	// float, resize, position, master): the inventory reads fine and the
+	// compositor refuses to act, which is what a window closing underneath
+	// the user looks like.
 	FailAction error
+	// FailSpawn fails Spawn for exactly the named programs — the routine
+	// tests' "one dead app must not strand the other six" case. The attempt
+	// is still recorded, because "it was asked for and refused" and "it was
+	// never asked for" are different assertions.
+	FailSpawn map[string]error
 
 	// BeforeAction runs at the start of every action, before the recorded
 	// call, with the address that was asked for. A test uses it to swap the
@@ -43,12 +49,19 @@ type FakeCompositor struct {
 
 // FakeAction is one recorded dispatch.
 type FakeAction struct {
-	Verb      string // "focus", "close", "move", "workspace", "spawn"
+	// Verb is one of "focus", "close", "move", "workspace", "spawn",
+	// "float", "resize", "position", "master".
+	Verb      string
 	Address   string
 	Workspace int
 	// Program is the executable a "spawn" was asked to start, empty for the
 	// window verbs.
 	Program string
+	// Floating is what a "float" set the state to.
+	Floating bool
+	// Width and Height are a "resize"'s pixels; X and Y a "position"'s.
+	Width, Height int
+	X, Y          int
 }
 
 // NewFakeCompositor builds a fake holding the given inventory.
@@ -116,7 +129,35 @@ func (f *FakeCompositor) Spawn(ctx context.Context, program string) error {
 	if !spawnPattern.MatchString(program) {
 		return fmt.Errorf("refusing to start %q", program)
 	}
-	return f.record(ctx, FakeAction{Verb: "spawn", Program: program})
+	if err := f.record(ctx, FakeAction{Verb: "spawn", Program: program}); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.FailSpawn[program]
+}
+
+// SetFloating implements Compositor.
+func (f *FakeCompositor) SetFloating(ctx context.Context, address string, floating bool) error {
+	return f.actOn(ctx, FakeAction{Verb: "float", Address: address, Floating: floating})
+}
+
+// ResizeWindow implements Compositor.
+func (f *FakeCompositor) ResizeWindow(ctx context.Context, address string, width, height int) error {
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("refusing to resize a window to %d by %d pixels", width, height)
+	}
+	return f.actOn(ctx, FakeAction{Verb: "resize", Address: address, Width: width, Height: height})
+}
+
+// PositionWindow implements Compositor.
+func (f *FakeCompositor) PositionWindow(ctx context.Context, address string, x, y int) error {
+	return f.actOn(ctx, FakeAction{Verb: "position", Address: address, X: x, Y: y})
+}
+
+// PromoteMaster implements Compositor.
+func (f *FakeCompositor) PromoteMaster(ctx context.Context, address string) error {
+	return f.actOn(ctx, FakeAction{Verb: "master", Address: address})
 }
 
 // record notes a dispatch that names no window. The window verbs cannot use
@@ -137,29 +178,37 @@ func (f *FakeCompositor) record(ctx context.Context, action FakeAction) error {
 }
 
 func (f *FakeCompositor) act(ctx context.Context, verb, address string, workspace int) error {
+	return f.actOn(ctx, FakeAction{Verb: verb, Address: address, Workspace: workspace})
+}
+
+// actOn records one window-addressed dispatch, whatever its payload. The
+// original three verbs and the placement verbs (ADR 0026) share it so all of
+// them get the same discipline: the BeforeAction hook, and the refusal to
+// "succeed" against an address the inventory never reported.
+func (f *FakeCompositor) actOn(ctx context.Context, action FakeAction) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if f.BeforeAction != nil {
-		f.BeforeAction(address)
+		f.BeforeAction(action.Address)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.Err != nil {
 		return f.Err
 	}
-	f.actions = append(f.actions, FakeAction{Verb: verb, Address: address, Workspace: workspace})
+	f.actions = append(f.actions, action)
 	if f.FailAction != nil {
 		return f.FailAction
 	}
 	// A fake that dispatched to an address it has never reported would let a
 	// test pass while the real compositor did nothing, so it says so.
 	for _, w := range f.windows {
-		if w.Address == address {
+		if w.Address == action.Address {
 			return nil
 		}
 	}
-	return fmt.Errorf("no window at address %s", address)
+	return fmt.Errorf("no window at address %s", action.Address)
 }
 
 // Actions returns the recorded dispatches, in order.

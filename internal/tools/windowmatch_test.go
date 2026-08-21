@@ -135,3 +135,30 @@ func TestSummariseWindowsGroupsAndNeverLeaksIdentifiers(t *testing.T) {
 		t.Errorf("summary %q contains a window address; nothing spoken may", got)
 	}
 }
+
+// TestFindWindowDedupeSemantics pins the two ways routine dedupe (ADR 0026)
+// deliberately differs from the model-facing resolver: ties fall to the most
+// recently focused window, and the category-alias tier never claims one.
+func TestFindWindowDedupeSemantics(t *testing.T) {
+	recent := desktop.Window{Address: "0x1", Class: "firefox", Title: "GitHub"}
+	older := desktop.Window{Address: "0x2", Class: "firefox", Title: "Docs"}
+	goland := desktop.Window{Address: "0x3", Class: "jetbrains-goland", Title: "jarvix"}
+
+	if w, ok := FindWindow("firefox", []desktop.Window{recent, older}); !ok || w.Address != "0x1" {
+		t.Errorf("tie resolved to %+v, want the most recently focused (0x1)", w)
+	}
+	// "code" is an editor-category synonym; with no code window open it must
+	// NOT claim GoLand — the step should launch code instead.
+	if w, ok := FindWindow("code", []desktop.Window{goland}); ok {
+		t.Errorf("the category alias claimed %+v; a routine step names a program, not a category", w)
+	}
+	if _, ok := FindWindow("slack", nil); ok {
+		t.Error("an empty inventory matched something")
+	}
+	// Reverse-DNS classes match by their spoken app name, the way the
+	// focus tool matches them.
+	obsidian := desktop.Window{Address: "0x4", Class: "md.obsidian.Obsidian", Title: "Vault"}
+	if w, ok := FindWindow("obsidian", []desktop.Window{goland, obsidian}); !ok || w.Address != "0x4" {
+		t.Errorf("obsidian resolved to %+v", w)
+	}
+}

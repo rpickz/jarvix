@@ -27,8 +27,12 @@ type Config struct {
 	TTS          TTS          `toml:"tts"`
 	Conversation Conversation `toml:"conversation"`
 	Intents      Intents      `toml:"intents"`
-	Tools        Tools        `toml:"tools"`
-	Artifacts    Artifacts    `toml:"artifacts"`
+	// Routines are the named app-placement sequences ([[routines]], ADR
+	// 0026), triggered through the intent router and executed by
+	// internal/routine.
+	Routines  []Routine `toml:"routines"`
+	Tools     Tools     `toml:"tools"`
+	Artifacts Artifacts `toml:"artifacts"`
 	// Context is what Jarvix may look at on the desktop before answering
 	// (see context.go). Every source is opt-in; the clipboard defaults off.
 	Context Context `toml:"context"`
@@ -755,6 +759,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.typingProblems()...)
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
+	problems = append(problems, c.routineProblems()...)
 	problems = append(problems, c.contextProblems()...)
 	problems = append(problems, c.memoryProblems()...)
 	problems = append(problems, c.voiceProblems()...)

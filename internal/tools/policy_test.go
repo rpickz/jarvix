@@ -386,3 +386,70 @@ func TestRegistryCheckCommandWithoutPolicy(t *testing.T) {
 		t.Errorf("verdict = %+v", v)
 	}
 }
+
+// TestRoutinePolicyDefaultsToAllowAndIsOverridable pins the routine.run
+// identity (ADR 0026): allow with nothing configured — the user authored
+// every step — while a [tools.policy.tool] entry can demand a confirmation
+// or disable routines outright, without touching intent.run or shell.run.
+func TestRoutinePolicyDefaultsToAllowAndIsOverridable(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     PolicyConfig
+		want    PolicyDecision
+		rule    string
+		summary bool
+	}{
+		{"default allow", PolicyConfig{}, PolicyAllow, "defaults to allow", false},
+		{"ask default does not reach it", PolicyConfig{Default: PolicyAsk}, PolicyAllow, "defaults to allow", false},
+		{"explicit ask", PolicyConfig{Tools: map[string]PolicyDecision{RoutineToolName: PolicyAsk}},
+			PolicyAsk, "is set to ask", true},
+		{"explicit deny", PolicyConfig{Tools: map[string]PolicyDecision{RoutineToolName: PolicyDeny}},
+			PolicyDeny, "is set to deny", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := NewPolicy(tt.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := p.DecideRoutine("morning setup")
+			if v.Decision != tt.want {
+				t.Fatalf("decision = %q, want %q", v.Decision, tt.want)
+			}
+			if v.Tool != RoutineToolName || v.Command != "morning setup" {
+				t.Errorf("verdict identity = %q/%q", v.Tool, v.Command)
+			}
+			if !strings.Contains(v.Rule, tt.rule) {
+				t.Errorf("rule = %q, want it to contain %q", v.Rule, tt.rule)
+			}
+			if tt.summary && !strings.Contains(v.Summary, "morning setup") {
+				t.Errorf("summary %q does not name the routine", v.Summary)
+			}
+			if !tt.summary && v.Summary != "" {
+				t.Errorf("summary = %q for a decision that asks no question", v.Summary)
+			}
+		})
+	}
+}
+
+// TestRoutinePolicyIsItsOwnIdentity: tightening intent.run or shell.run must
+// not drag routines with it, and vice versa.
+func TestRoutinePolicyIsItsOwnIdentity(t *testing.T) {
+	p, err := NewPolicy(PolicyConfig{Tools: map[string]PolicyDecision{
+		IntentToolName: PolicyDeny,
+		"shell.run":    PolicyDeny,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := p.DecideRoutine("morning setup"); v.Decision != PolicyAllow {
+		t.Errorf("denying intent.run and shell.run also decided routine.run: %q (%s)", v.Decision, v.Rule)
+	}
+	p2, err := NewPolicy(PolicyConfig{Tools: map[string]PolicyDecision{RoutineToolName: PolicyDeny}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := p2.DecideCommand(IntentToolName, "loginctl lock-session"); v.Decision == PolicyDeny {
+		t.Errorf("denying routine.run also denied intent.run: %s", v.Rule)
+	}
+}

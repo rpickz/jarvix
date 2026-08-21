@@ -25,6 +25,17 @@ import (
 // acknowledgement says so plainly rather than apologising for a bug.
 var errIntentDeclined = errors.New("declined")
 
+// RoutineRunner executes one named routine (ADR 0026). It is the engine's
+// view of internal/routine's Runner, declared as an interface here so session
+// tests substitute a fake and never place a window. The contract mirrors the
+// runner's: the returned string is the one spoken summary, partial failure is
+// *in* the summary rather than an error, and err is reserved for a run that
+// could not happen at all (already running, unknown name, no compositor) or
+// was cancelled — in which case the engine's cancel path owns the silence.
+type RoutineRunner interface {
+	Run(ctx context.Context, name string) (string, error)
+}
+
 // routeIntentLocked offers the transcript to the intent table. It reports
 // whether the router claimed the utterance; false means the caller proceeds
 // to the model exactly as it did before this feature existed.
@@ -80,6 +91,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 	case m.UserDefined:
 		var alive bool
 		runErr, alive = e.runUserIntent(s, m)
+		if !alive {
+			return // cancelled or superseded; that path owns the events
+		}
+	case m.Routine != "":
+		var alive bool
+		ack, runErr, alive = e.runRoutine(s, m)
 		if !alive {
 			return // cancelled or superseded; that path owns the events
 		}
@@ -202,6 +219,68 @@ func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive boo
 	return e.intentRunner().RunShell(s.ctx, m.Command), true
 }
 
+// runRoutine carries out a matched routine phrase (ADR 0026) through the
+// routine runner, behind its own gate identity. The routine's summary is the
+// acknowledgement — the whole run speaks exactly once, at the end — which is
+// why this returns ack where the other intent paths return only an error.
+//
+// The gate mirrors runUserIntent's shape deliberately: same confirmation
+// mechanism, same events, same audit trail. Only the identity (routine.run,
+// default allow — the user authored every step) and the absence of a shell
+// classifier differ.
+func (e *Engine) runRoutine(s *sess, m intent.Match) (ack string, runErr error, alive bool) {
+	if e.opts.Routines == nil {
+		return "", fmt.Errorf("routines are not available on this daemon"), true
+	}
+	verdict := e.routineVerdict(m.Routine)
+	switch verdict.Decision {
+	case tools.PolicyDeny:
+		e.log.Info("routine denied", "component", "tools", "tool", tools.RoutineToolName,
+			"routine", m.Routine, "rule", verdict.Rule, "source", "policy")
+		e.publish(Event{Type: "tool.denied", Data: map[string]any{
+			"session_id": s.id, "tool": tools.RoutineToolName,
+			"command": verdict.Command, "rule": verdict.Rule}})
+		return "", fmt.Errorf("that routine is not permitted (%s)", verdict.Rule), true
+	case tools.PolicyAsk:
+		outcome, ok := e.awaitConfirmation(s, confirmRequest{
+			tool:    tools.RoutineToolName,
+			command: verdict.Command,
+			summary: verdict.Summary,
+			rule:    verdict.Rule,
+			key:     tools.RoutineToolName + "\x00" + verdict.Command,
+			// A routine is entirely the user's own configuration, so a
+			// remembered approval reproduces exactly what was approved.
+			rememberable: tools.RememberableApproval(tools.RoutineToolName),
+			resume:       StateActing,
+		})
+		if !ok {
+			return "", nil, false
+		}
+		if outcome == confirmUnavailable {
+			return "", errors.New("I could not ask you to confirm that, so I have not run it"), true
+		}
+		if outcome != confirmApproved {
+			return "", errIntentDeclined, true
+		}
+	default:
+		e.log.Debug("routine allowed", "component", "tools", "tool", tools.RoutineToolName,
+			"routine", m.Routine, "rule", verdict.Rule, "source", "policy")
+	}
+	summary, err := e.opts.Routines.Run(s.ctx, m.Routine)
+	return summary, err, true
+}
+
+// routineVerdict classifies a routine by name. With no registry wired (tests)
+// the shipped default applies — allow — because unlike a bare shell command,
+// a routine's steps were validated at load and authored by the user.
+func (e *Engine) routineVerdict(name string) tools.Verdict {
+	if e.tools == nil {
+		return tools.Verdict{Decision: tools.PolicyAllow, Tool: tools.RoutineToolName,
+			Command: name, Rule: "no permission gate installed"}
+	}
+	return e.tools.CheckRoutine(name)
+}
+
 // intentVerdict classifies a user-defined command. With no registry wired
 // (tests) there is no gate to consult, and an ungated shell command must not
 // run silently — so the safe reading is "ask".
@@ -256,8 +335,11 @@ func intentFailureAck(err error) string {
 // is about.
 func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error, started time.Time) {
 	source := "builtin"
-	if m.UserDefined {
+	switch {
+	case m.UserDefined:
 		source = "user"
+	case m.Routine != "":
+		source = "routine"
 	}
 	elapsed := time.Since(started)
 	data := map[string]any{
@@ -273,6 +355,10 @@ func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error
 	if m.HasSlot {
 		data["slot"] = m.Slot
 		attrs = append(attrs, "slot", m.Slot)
+	}
+	if m.Routine != "" {
+		data["routine"] = m.Routine
+		attrs = append(attrs, "routine", m.Routine)
 	}
 	if runErr != nil {
 		data["status"] = "failed"
