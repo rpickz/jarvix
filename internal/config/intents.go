@@ -35,26 +35,31 @@ type CustomIntent struct {
 
 // intentProblems validates the intent table, naming any offending entry.
 // Compiling the real router is the check: there is no second, weaker set of
-// rules that configuration could pass and the daemon then reject.
+// rules that configuration could pass and the daemon then reject. Routine
+// phrases compile here too, so a routine phrase colliding with a built-in or
+// custom intent is caught by the same rules that would route it.
 func (c Config) intentProblems() []string {
 	if !c.Intents.Enabled {
 		return nil
 	}
-	custom := make([]intent.Custom, 0, len(c.Intents.Custom))
-	for _, e := range c.Intents.Custom {
-		custom = append(custom, intent.Custom{Match: e.Match, Run: e.Run, Say: e.Say})
-	}
-	if _, err := intent.New(intent.Options{Terminal: c.Intents.Terminal, Custom: custom}); err != nil {
+	if _, err := intent.New(c.IntentOptions()); err != nil {
 		return []string{err.Error()}
 	}
 	return nil
 }
 
-// IntentOptions builds the router options from configuration.
+// IntentOptions builds the router options from configuration: the terminal,
+// the custom intents, and the routines' trigger phrases (ADR 0025).
 func (c Config) IntentOptions() intent.Options {
 	custom := make([]intent.Custom, 0, len(c.Intents.Custom))
 	for _, e := range c.Intents.Custom {
 		custom = append(custom, intent.Custom{Match: e.Match, Run: e.Run, Say: e.Say})
 	}
-	return intent.Options{Terminal: c.Intents.Terminal, Custom: custom}
+	routines := make([]intent.RoutinePhrases, 0, len(c.Routines))
+	for _, r := range c.Routines {
+		routines = append(routines, intent.RoutinePhrases{
+			Name: r.Name, Phrases: append([]string(nil), r.Phrases...),
+		})
+	}
+	return intent.Options{Terminal: c.Intents.Terminal, Custom: custom, Routines: routines}
 }
