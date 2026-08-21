@@ -130,6 +130,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Talk to Jarvix | **Hold `Super+Alt+V`, speak, release** |
 | Cancel / stop speech | `Super+Alt+Escape` (or `jarvix cancel`) |
 | Interrupt mid-speech | Hold the chord again — it stops talking and listens |
+| Type instead of speaking | **Type in the conversation window and press Enter** — same conversation, same tools, same spoken answer |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
 | Review the conversation | **Click the Jarvix icon in the bar**, click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |
@@ -168,6 +169,21 @@ Everything the widget shows is decided in Go (`internal/desktop/barstatus.go`)
 and compiled into `plugin/omarchy/BarState.js` by `go generate
 ./internal/desktop`; the QML only draws it. Change a label or a glyph there,
 regenerate, and the tests keep the two in step.
+
+### Typing to Jarvix
+
+The conversation window has a text field at the bottom. Type a question,
+press Enter, and it joins the same conversation — same history, same tools,
+the answer spoken the same way — as if you had said it. Use it for the things
+speech is bad at (`summarise https://example.com/some/long/path`), for the
+times speaking is not an option, and to correct a bad transcription by
+retyping instead of repeating yourself louder.
+
+Typing while Jarvix is answering interrupts it and starts the new turn, just
+like speaking over it. If Jarvix is waiting on a tool confirmation, typing
+"yes" or "no" answers *that* rather than asking something new. Shift+Enter is
+reserved for multi-line composition and deliberately does not send.
+`scripts/verify-typed-input.sh` walks the whole thing on a live session.
 
 Jarvix remembers the conversation: ask a follow-up ("what should I change?")
 and it keeps the prior context, until the thread goes idle (configurable) or
