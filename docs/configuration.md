@@ -236,6 +236,15 @@ match = "lock the screen"        # literal phrase, matched whole and exactly
 run = "hyprlock"                 # shell command, subject to [tools.policy]
 say = "Locking."                 # spoken acknowledgement (default: "Done.")
 
+[[routines]]                     # named app-placement sequences; see "Routines"
+name = "morning setup"           # what summaries open with; unique
+phrases = ["morning setup"]      # literal trigger phrases (intent grammar)
+[[routines.steps]]               # repeat per step, run in order
+app = "firefox"                  # program to launch if not already running
+workspace = 2                    # where its window goes (1-99)
+tile = "master"                  # optional: "master" or "split"; or float =
+                                 # true with size = [w, h], position = [x, y]
+
 [context]                        # what Jarvix may look at before it answers
 window = true                    # the focused window's app and title
 selection = true                 # text you have highlighted (primary selection)
@@ -634,6 +643,95 @@ running. To make your own intents instant, either allow that identity —
 
 A malformed entry fails validation at startup, naming the entry:
 `intents.custom[1]: match "…" has no run command`.
+
+## Routines (`[[routines]]`)
+
+One sentence sets up your desktop: a routine is a named sequence of "launch
+this app on that workspace" steps with optional placement, triggered by a
+phrase the intent router recognises — so it runs deterministically, in
+milliseconds, with **no model call**. "Jarvix, morning setup" and the day's
+windows land where you always put them.
+
+The worked example, matching that scenario — terminal on one, browser and
+editor split on two, chat floated on nine:
+
+```toml
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup", "start my usual apps"]
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 1
+
+  [[routines.steps]]
+  app = "firefox"
+  workspace = 2
+  tile = "master"                # the big pane of the master/stack layout
+
+  [[routines.steps]]
+  app = "code"
+  workspace = 2
+  tile = "split"                 # tiled into the workspace's split
+
+  [[routines.steps]]
+  app = "signal-desktop"
+  match = "signal"               # how the *window* is recognised, when its
+                                 # class differs from the binary's name
+  workspace = 9
+  float = true
+  size = [1200, 800]             # pixels; floating only
+  position = [100, 100]          # pixels; floating only
+```
+
+How a run behaves:
+
+- **Already running beats launching.** Each step first looks for an existing
+  window (matched the way `desktop.focus_window` matches, on `match` or the
+  app name) and places that window instead of starting a second copy. Re-run
+  the routine and it converges on the same layout rather than opening a
+  second browser.
+- **Launches go through the compositor**, exactly like "open a terminal":
+  `app` must be one bare executable name or absolute path — never a command
+  line, never a shell — and the window inherits your graphical session's
+  environment.
+- **One failure doesn't strand the rest.** An app that will not start, or
+  whose window never appears within the bounded wait, is skipped and named in
+  the single spoken summary at the end: "Morning setup: three apps placed;
+  slack did not start." There is no per-step monologue; the bar and the
+  conversation window show progress via `routine.*` events instead.
+- **"Jarvix, stop" aborts a run mid-placement**, and speaking the phrase
+  again while a run is still placing windows is refused with one line rather
+  than interleaving two sequences.
+- The run ends with your view on the **first step's workspace**.
+
+Placement notes: `float`, `size`, and `position` go together (a tiled
+window's geometry belongs to the layout); `tile` and `float` are mutually
+exclusive; `tile = "master"` briefly focuses the window to promote it, which
+is why a routine's master steps pull your view along until the final switch.
+
+Routines run under their own permission identity, **`routine.run`, default
+"allow"** — every step is something you wrote in your own configuration, and
+the phrase is itself the instruction. On a shared machine you can still
+demand a confirmation, or disable routines outright:
+
+```toml
+[tools.policy.tool]
+"routine.run" = "ask"            # or "deny"
+```
+
+Phrases are validated at load against the built-in intents, your
+`[[intents.custom]]` phrases, and each other — a collision is a startup
+message naming both owners, never a coin toss at match time. Because the
+router is the trigger, `intents.enabled = false` with routines configured is
+a validation error.
+
+`jarvix routines` lists what is configured (offline, from the file);
+`jarvix routines run "morning setup"` triggers one from a script or
+keybinding through the same gate the spoken phrase uses, and the conversation
+window shows each routine with a Run button. Like `[[intents.custom]]`, the
+tables are hand-edited TOML — outside `jarvix config set` — and land on the
+next `config.reload` or restart.
 
 ## Desktop context (`[context]`)
 
