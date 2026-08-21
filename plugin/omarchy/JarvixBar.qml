@@ -48,6 +48,18 @@ Panel {
   // states describe a turn, this describes the microphone between turns.
   property string wakeState: "off"
 
+  // Live detail for the tooltip (issue #70): which tool is running (and its
+  // long-form label for a slow one, e.g. "Consulting claude…"), the question
+  // a pending confirmation is asking, and when the current phase began. All
+  // straight off the event stream — no polling; the elapsed counter is a
+  // local clock over a locally observed start. What the tooltip *says* with
+  // these is decided in Go (desktop.LiveTooltip → BarState.liveTooltip).
+  property string currentTool: ""
+  property string toolDetail: ""
+  property string confirmQuestion: ""
+  property double phaseStart: Date.now()
+  property int elapsedSec: 0
+
   readonly property var status: BarState.statusFor(socketReady, sessionState, errorMessage, wakeState)
   readonly property var menuActions: BarState.actions(socketReady, wakeState)
 
@@ -160,6 +172,12 @@ Panel {
         root.sessionState = "idle"
         root.errorMessage = ""
         root.wakeState = "off"
+        // Live detail died with the connection that reported it: with no
+        // daemon there is no tool in flight and no question pending.
+        root.currentTool = ""
+        root.toolDetail = ""
+        root.confirmQuestion = ""
+        root.elapsedSec = 0
         reconnect.start()
       }
     }
@@ -178,7 +196,32 @@ Panel {
       var next = String(params.state || "idle")
       // A new session begins: the previous failure is history now.
       if (sessionState === "idle" && next !== "idle") errorMessage = ""
+      // "Elapsed in the phase", so the clock restarts on every transition.
+      if (next !== sessionState) { phaseStart = Date.now(); elapsedSec = 0 }
+      if (next === "idle" || next === "error") {
+        currentTool = ""
+        toolDetail = ""
+        confirmQuestion = ""
+      }
       sessionState = next
+      break
+    case "tool.started":
+      currentTool = String(params.tool || "")
+      toolDetail = String(params.detail || "")
+      break
+    case "tool.finished":
+      currentTool = ""
+      toolDetail = ""
+      break
+    case "tool.confirmation_required":
+      // The spoken question, which is what the user is being asked; the
+      // exact command stays the window's and overlay's job to display.
+      confirmQuestion = String(params.summary || "")
+      break
+    case "tool.confirmed":
+    case "tool.declined":
+    case "tool.denied":
+      confirmQuestion = ""
       break
     case "error":
       errorMessage = String(params.message || "something went wrong")
@@ -187,6 +230,16 @@ Panel {
       wakeState = String(params.state || "off")
       break
     }
+  }
+
+  // One tick a second while a session runs, so the tooltip's "Thinking — 12s"
+  // stays honest. Not polling: nothing is asked of the daemon, this only
+  // advances a counter between the events that reset it.
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.socketReady && root.sessionState !== "idle"
+    onTriggered: root.elapsedSec = Math.round((Date.now() - root.phaseStart) / 1000)
   }
 
   IpcHandler {
@@ -281,7 +334,8 @@ Panel {
     // A stopped daemon reads as present-but-inert. It must never disappear —
     // an absent icon cannot be told apart from a plugin that is not installed.
     dimmed: root.status.dim
-    tooltipText: BarState.tooltip(root.status)
+    tooltipText: BarState.liveTooltip(root.status, root.elapsedSec,
+      root.currentTool, root.toolDetail, root.confirmQuestion)
     onPressed: function(buttonCode) {
       // Left click is the headline gesture: toggle the conversation window
       // through the plugin's existing IpcHandler — the same route `jarvix

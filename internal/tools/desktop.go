@@ -104,6 +104,13 @@ type Desktop struct {
 	// onAction is told about each completed action so the overlay can show
 	// what Jarvix did. Nil in tests.
 	onAction func(verb, target string)
+	// onRefusal is told about each action that did NOT happen and why — a
+	// launch the resolver refused, a dispatch the compositor rejected — so
+	// the activity feed can show the reason (issue #70). Until it existed,
+	// "launch refused: firefox is not installed" lived only in the journal
+	// and the model's tool result; the user's surfaces heard nothing. Nil in
+	// tests.
+	onRefusal func(verb, target, reason string)
 
 	mu sync.Mutex
 	// inventory is the last capture and when it was taken.
@@ -138,6 +145,10 @@ type DesktopOptions struct {
 	// OnAction is called after each completed action with the verb and the
 	// window (or application) it acted on, for the overlay and the event bus.
 	OnAction func(verb, target string)
+	// OnRefusal is called when an action was refused or failed, with the verb,
+	// the target as a person would name it, and the reason — never a window
+	// address, never compositor diagnostics.
+	OnRefusal func(verb, target, reason string)
 	// Log records each action. Nil uses slog.Default().
 	Log *slog.Logger
 
@@ -152,15 +163,16 @@ type DesktopOptions struct {
 // NewDesktop builds the window tools' shared state.
 func NewDesktop(opts DesktopOptions) *Desktop {
 	d := &Desktop{
-		comp:     opts.Compositor,
-		launcher: opts.launcher,
-		lookPath: opts.lookPath,
-		apps:     append([]string(nil), opts.Apps...),
-		ttl:      opts.InventoryTTL,
-		timeout:  opts.Timeout,
-		log:      opts.Log,
-		onAction: opts.OnAction,
-		pending:  make(map[string]pendingTarget),
+		comp:      opts.Compositor,
+		launcher:  opts.launcher,
+		lookPath:  opts.lookPath,
+		apps:      append([]string(nil), opts.Apps...),
+		ttl:       opts.InventoryTTL,
+		timeout:   opts.Timeout,
+		log:       opts.Log,
+		onAction:  opts.OnAction,
+		onRefusal: opts.OnRefusal,
+		pending:   make(map[string]pendingTarget),
 	}
 	if d.launcher == nil {
 		d.launcher = &execLauncher{scrubEnv: opts.ScrubEnv}
@@ -421,6 +433,9 @@ func (d *Desktop) act(ctx context.Context, verb desktopVerb, w desktop.Window, w
 		// operator's material, and anything returned here may be read aloud.
 		d.log.Warn("window action failed", "component", "tools", "verb", verbName,
 			"class", w.Class, "address", w.Address, "error", err.Error())
+		// Same rule on the bus: the window as a person would name it and the
+		// fact of the refusal — never the address, never the diagnostics.
+		d.publishRefusal(verbName, w.Describe(), "the window manager refused")
 		return fmt.Sprintf("The window manager would not %s that window. Tell the user in one "+
 			"short sentence that it did not work, and do not retry.", verbName)
 	}
@@ -477,6 +492,11 @@ func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 			d.log.Info("launch refused", "component", "tools", "tool", LaunchAppToolName,
 				"app", name, "reason", err.Error(),
 				"near_matches", strings.Join(alternatives, ","))
+			// Still a refusal — nothing launched — so the activity feed gets
+			// its row (issue #70), reason and suggestion together: the same
+			// facts the model is being told, in one clause.
+			d.publishRefusal("launch", name,
+				fmt.Sprintf("it is not installed, but %s", spokenInstalled(alternatives)))
 			return fmt.Sprintf("%q is not installed, but %s. Ask the user in one short sentence "+
 				"whether to open %s instead; only if they say yes, call this tool again with that "+
 				"name. Do not describe anything as opened.", name, spokenInstalled(alternatives),
@@ -484,6 +504,10 @@ func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 		}
 		d.log.Info("launch refused", "component", "tools", "tool", LaunchAppToolName,
 			"app", name, "reason", err.Error())
+		// The resolver's sentence is the reason the user needs ("it is not
+		// installed", "it is not on the allowed list"), and it never contains
+		// paths or diagnostics — resolveApp writes it to be spoken.
+		d.publishRefusal("launch", name, err.Error())
 		return fmt.Sprintf("%q cannot be started on this computer: %v. Tell the user in one short "+
 			"sentence, and do not retry.", name, err), nil
 	}
@@ -491,6 +515,9 @@ func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 	if err := d.launcher.Launch(ctx, binary); err != nil {
 		d.log.Warn("launch failed", "component", "tools", "tool", LaunchAppToolName,
 			"app", name, "binary", binary, "error", err.Error())
+		// The launcher's error can carry paths and exec detail — operator
+		// material, already in the journal above. The bus gets the fact.
+		d.publishRefusal("launch", name, "it would not start")
 		return fmt.Sprintf("%s would not start. Tell the user in one short sentence that it failed, "+
 			"and do not retry.", filepath.Base(binary)), nil
 	}
@@ -816,6 +843,16 @@ func (d *Desktop) unavailable(err error) string {
 func (d *Desktop) publish(verb, target string) {
 	if d.onAction != nil {
 		d.onAction(verb, target)
+	}
+}
+
+// publishRefusal reports an action that did not happen. reason is chosen at
+// each call site to be safe on the bus: the resolver's own sentence for a
+// refused launch, a generic clause where the underlying error is operator
+// material (compositor diagnostics, launcher errors with paths).
+func (d *Desktop) publishRefusal(verb, target, reason string) {
+	if d.onRefusal != nil {
+		d.onRefusal(verb, target, reason)
 	}
 }
 

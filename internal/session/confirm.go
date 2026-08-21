@@ -164,13 +164,28 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	}
 	// Execution time is the user's command running, not Jarvix latency: an
 	// excluded span, reported as tool_ms and kept out of jarvix_ms (#72).
+	// start clocks the same span for this one call: tool_ms totals the
+	// session's tool time, tool.finished's duration_ms belongs to this call.
 	s.timings.beginExcluded(StageToolRuns)
+	start := time.Now()
 	result := e.tools.Execute(s.ctx, call)
 	s.timings.endExcluded()
 	stopProgress()
 
+	// The finish event carries how long the call took and whether the
+	// registry could run it at all, for the activity feed (issue #70).
+	// "error" means the registry's own failure encoding — an unknown tool or
+	// an infrastructure err — the one failure shape this layer can attest to.
+	// A tool that ran and *refused* reports that in its result text to the
+	// model, and on the bus through its own audit events (typing.audit,
+	// desktop.refusal), where the reason travels with it.
+	outcome := "ok"
+	if strings.HasPrefix(result, "error: ") {
+		outcome = "error"
+	}
 	e.publish(Event{Type: "tool.finished", Data: map[string]any{
-		"session_id": s.id, "tool": call.Name}})
+		"session_id": s.id, "tool": call.Name,
+		"duration_ms": time.Since(start).Milliseconds(), "outcome": outcome}})
 	return result
 }
 

@@ -429,6 +429,15 @@ type UI struct {
 	// "Jarvix answered" instead, keeping answer content away from the
 	// notification daemon and its logs.
 	NotificationPreview bool `toml:"notification_preview"`
+	// ActivityRows bounds the daemon-side activity ring (issue #70): how many
+	// rendered rows of recent activity `activity.get` can return. In-memory
+	// only — activity never touches disk; conversations are the durable
+	// record.
+	ActivityRows int `toml:"activity_rows"`
+	// ActivityClearOnNew empties the activity feed when the conversation is
+	// reset (`jarvix new`). Off by default: activity is operational history,
+	// and "what did it just do?" is usually asked *after* starting fresh.
+	ActivityClearOnNew bool `toml:"activity_clear_on_new"`
 }
 
 // Log configures daemon logging.
@@ -517,8 +526,12 @@ func Default() Config {
 		// reclaimed after ten idle minutes. The cap is a leak detector, not a
 		// working budget — whisper base.en plus Kokoro sit well under it.
 		Performance: Performance{WarmEngines: true, WarmMemoryCapMB: 2048, WarmIdleReapSec: 600},
-		UI:          UI{ShowTranscript: true, ShowResponse: true, Notifications: true, NotificationPreview: true},
-		Log:         Log{Level: "info"},
+		UI: UI{ShowTranscript: true, ShowResponse: true, Notifications: true, NotificationPreview: true,
+			// 400 rows is several sessions of tool-heavy work at a few
+			// kilobytes total: enough to answer "what happened earlier?",
+			// small enough to never matter.
+			ActivityRows: 400},
+		Log: Log{Level: "info"},
 	}
 }
 
@@ -629,6 +642,12 @@ func AssistantSystemPrompt(cfg Config) string {
 // restart loop — so it is rejected rather than silently obeyed.
 const minWarmMemoryCapMB = 256
 
+// maxActivityRows caps ui.activity_rows. The feed is bounded in rows *and*
+// per row (internal/desktop caps label and detail), so this ceiling is what
+// keeps the worst-case ring at a few megabytes rather than a memory setting
+// the user has to reason about.
+const maxActivityRows = 10000
+
 // Load reads the config file at path, applying defaults for anything unset.
 // A missing file is not an error; defaults are returned.
 func Load(path string) (Config, error) {
@@ -736,6 +755,14 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"conversation.retention %q is invalid; use %q (archive conversations until deleted) or %q",
 			c.Conversation.Retention, RetentionOn, RetentionOff))
+	}
+	if c.UI.ActivityRows <= 0 {
+		problems = append(problems,
+			"ui.activity_rows must be positive (rows of recent activity the daemon keeps in memory)")
+	} else if c.UI.ActivityRows > maxActivityRows {
+		problems = append(problems, fmt.Sprintf(
+			"ui.activity_rows is %d; the activity feed is a glanceable ring, not a log — use at most %d",
+			c.UI.ActivityRows, maxActivityRows))
 	}
 	if c.Performance.WarmMemoryCapMB < 0 {
 		problems = append(problems,

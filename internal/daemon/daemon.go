@@ -149,6 +149,14 @@ type Daemon struct {
 	// from does not carry it. Guarded by errMu.
 	lastTyping map[string]any
 
+	// The activity feed's ring (issue #70, activity.go): recent bus events
+	// rendered into rows, bounded by ui.activity_rows, in memory only.
+	// activitySeq only ever counts up — it is what lets a window reconcile
+	// the activity.get snapshot with rows pushed live. Guarded by actMu.
+	actMu       sync.Mutex
+	activity    []activityEntry
+	activitySeq uint64
+
 	// captureReload is set when a layout capture (#62) has written new
 	// [[routines]] tables that the engine's router does not know yet. The
 	// engine cannot be reconfigured under the very session that spoke the
@@ -275,6 +283,13 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			OnAction: func(verb, target string) {
 				bus.Publish(session.Event{Type: "desktop.action",
 					Data: map[string]any{"verb": verb, "target": target}})
+			},
+			// Refusals travel too (issue #70): "launch refused: firefox is
+			// not installed" was journal-only until the activity feed needed
+			// it. Reasons are composed by the tool to be safe on the bus.
+			OnRefusal: func(verb, target, reason string) {
+				bus.Publish(session.Event{Type: "desktop.refusal",
+					Data: map[string]any{"verb": verb, "target": target, "reason": reason}})
 			},
 			Log: logger,
 		})
@@ -537,6 +552,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// session, so toggling notifications needs no restart (settings.go).
 	events, unsubscribe := d.bus.Subscribe()
 	d.post.Go(func() { d.watchSessions(ctx, events, unsubscribe) })
+	// The activity feed's assembler (activity.go): a second subscriber on the
+	// same terms — subscribed before serving so no observable event predates
+	// it, dropped for like any slow client rather than ever wedging a session.
+	activityEvents, unsubscribeActivity := d.bus.Subscribe()
+	d.post.Go(func() { d.watchActivity(ctx, activityEvents, unsubscribeActivity) })
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -822,6 +842,7 @@ func (d *Daemon) registerMethods() {
 			"prompt_budget": d.promptBudgetReport(),
 		}, nil
 	})
+	d.registerActivityMethods()
 	d.registerConfigMethods()
 	d.registerContextMethods()
 	d.registerConversationMethods()
