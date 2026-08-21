@@ -47,7 +47,7 @@ func newArtifact(t *testing.T, r Renderer) (*Artifact, *[]string) {
 	a := &Artifact{
 		Dir:       filepath.Join(t.TempDir(), "artifacts"),
 		Renderers: []Renderer{r},
-		openFn: func(path string) error {
+		openFn: func(_, path string) error {
 			opened = append(opened, path)
 			return nil
 		},
@@ -143,7 +143,7 @@ func TestArtifactRejectsPathTraversal(t *testing.T) {
 func TestArtifactMissingRendererDegradesToProse(t *testing.T) {
 	a, opened := newArtifact(t, &fakeRenderer{availableErr: fmt.Errorf("mmdc is not installed")})
 	out := runArtifact(t, a, "diagram", "graph TD")
-	if !strings.Contains(out, "diagram rendering unavailable") || !strings.Contains(out, "prose") {
+	if !strings.Contains(out, "fake rendering unavailable") || !strings.Contains(out, "prose") {
 		t.Errorf("result = %q", out)
 	}
 	if entries, _ := os.ReadDir(a.Dir); len(entries) != 0 {
@@ -218,7 +218,7 @@ func TestArtifactViewerFailureStillSaves(t *testing.T) {
 	a := &Artifact{
 		Dir:       filepath.Join(t.TempDir(), "artifacts"),
 		Renderers: []Renderer{fake},
-		openFn:    func(string) error { return fmt.Errorf("no display") },
+		openFn:    func(string, string) error { return fmt.Errorf("no display") },
 	}
 	out := runArtifact(t, a, "headless", "graph TD")
 	if !strings.Contains(out, "could not be opened") || !strings.Contains(out, "jarvix artifacts") {
@@ -248,6 +248,150 @@ func TestSlugify(t *testing.T) {
 	}
 }
 
+// fakePassthrough is a validate-and-save format like the real document /
+// spreadsheet / excalidraw renderers: same extension both sides, optional
+// validation, no render step. renderCalled proves the tool really skips
+// Render for passthrough formats.
+type fakePassthrough struct {
+	passthrough
+	validateErr  error
+	renderCalled bool
+}
+
+func (f *fakePassthrough) Format() string    { return "fakedoc" }
+func (f *fakePassthrough) SourceExt() string { return ".txt" }
+func (f *fakePassthrough) OutputExt() string { return ".txt" }
+
+func (f *fakePassthrough) ValidateSource(string) error { return f.validateErr }
+
+func (f *fakePassthrough) Render(context.Context, string, string) error {
+	f.renderCalled = true
+	return nil
+}
+
+func runFormat(t *testing.T, a *Artifact, format, title, source string) string {
+	t.Helper()
+	input, _ := json.Marshal(map[string]string{"format": format, "title": title, "source": source})
+	out, err := a.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	return out
+}
+
+func TestArtifactPassthroughSavesSourceVerbatimWithoutRendering(t *testing.T) {
+	fake := &fakePassthrough{}
+	a, opened := newArtifact(t, fake)
+	source := "line one\nline two\n"
+
+	out := runFormat(t, a, "fakedoc", "notes", source)
+
+	path := filepath.Join(a.Dir, time.Now().Format("2006-01-02")+"-notes.txt")
+	if got, err := os.ReadFile(path); err != nil || string(got) != source {
+		t.Errorf("artifact file: %v, %q", err, got)
+	}
+	if fake.renderCalled {
+		t.Error("Render must not be called for a passthrough format")
+	}
+	if entries, _ := os.ReadDir(a.Dir); len(entries) != 1 {
+		t.Errorf("dir entries = %v, want exactly the artifact (no separate source)", entries)
+	}
+	if len(*opened) != 1 || (*opened)[0] != path {
+		t.Errorf("opened = %v, want [%s]", *opened, path)
+	}
+	if !strings.Contains(out, "open on the user's screen") {
+		t.Errorf("result = %q", out)
+	}
+}
+
+// Validation failures must reach the model as a retry-able result before
+// anything is written: an invalid structured artifact must never exist on
+// disk, even briefly.
+func TestArtifactValidationFailureWritesNothing(t *testing.T) {
+	fake := &fakePassthrough{validateErr: fmt.Errorf("record on line 3: wrong number of fields")}
+	a, opened := newArtifact(t, fake)
+	out := runFormat(t, a, "fakedoc", "bad table", "x")
+	if !strings.Contains(out, "invalid fakedoc source") ||
+		!strings.Contains(out, "record on line 3") ||
+		!strings.Contains(out, "call the tool again") {
+		t.Errorf("result = %q", out)
+	}
+	if entries, _ := os.ReadDir(a.Dir); len(entries) != 0 {
+		t.Errorf("validation failure left files behind: %v", entries)
+	}
+	if len(*opened) != 0 {
+		t.Error("nothing must be opened")
+	}
+}
+
+// Oversized content is refused, never truncated: a cut-off CSV or scene
+// JSON is a silently corrupt file.
+func TestArtifactOversizedSourceRefusedNotTruncated(t *testing.T) {
+	a, opened := newArtifact(t, &fakePassthrough{})
+	big := strings.Repeat("x", MaxArtifactSourceBytes+1)
+	out := runFormat(t, a, "fakedoc", "huge", big)
+	if !strings.Contains(out, "over the") || !strings.Contains(out, "Nothing was saved") {
+		t.Errorf("result = %q", out)
+	}
+	if entries, _ := os.ReadDir(a.Dir); len(entries) != 0 {
+		t.Errorf("oversized source left files behind: %v", entries)
+	}
+	if len(*opened) != 0 {
+		t.Error("nothing must be opened")
+	}
+}
+
+func TestArtifactPerFormatOpenCommandOverride(t *testing.T) {
+	var commands []string
+	a := &Artifact{
+		Dir:          filepath.Join(t.TempDir(), "artifacts"),
+		OpenCommand:  "xdg-open",
+		OpenCommands: map[string]string{"fakedoc": "obsidian"},
+		Renderers:    []Renderer{&fakePassthrough{}, &fakeRenderer{}},
+		openFn: func(command, _ string) error {
+			commands = append(commands, command)
+			return nil
+		},
+	}
+	runFormat(t, a, "fakedoc", "with override", "x")
+	runFormat(t, a, "fake", "without override", "x")
+	if len(commands) != 2 || commands[0] != "obsidian" || commands[1] != "xdg-open" {
+		t.Errorf("open commands = %v, want [obsidian xdg-open]", commands)
+	}
+}
+
+// An override of "" or "none" means the format has no viewer: the artifact
+// is still saved and the result names it — by base name only, never a
+// directory path, because the name is the user's only handle on the file.
+func TestArtifactNoViewerConfiguredSavesAndNamesTheFile(t *testing.T) {
+	for _, override := range []string{"", "none"} {
+		var opened []string
+		a := &Artifact{
+			Dir:          filepath.Join(t.TempDir(), "artifacts"),
+			OpenCommands: map[string]string{"fakedoc": override},
+			Renderers:    []Renderer{&fakePassthrough{}},
+			openFn: func(_, path string) error {
+				opened = append(opened, path)
+				return nil
+			},
+		}
+		out := runFormat(t, a, "fakedoc", "orphan", "x")
+		base := time.Now().Format("2006-01-02") + "-orphan.txt"
+		if _, err := os.Stat(filepath.Join(a.Dir, base)); err != nil {
+			t.Errorf("override %q: artifact not saved: %v", override, err)
+		}
+		if len(opened) != 0 {
+			t.Errorf("override %q: nothing must be opened, got %v", override, opened)
+		}
+		if !strings.Contains(out, base) || !strings.Contains(out, "no viewer is configured") {
+			t.Errorf("override %q: result = %q, want the base name and an explanation", override, out)
+		}
+		if strings.Contains(out, a.Dir) {
+			t.Errorf("override %q: result leaks the directory: %q", override, out)
+		}
+	}
+}
+
 func TestArtifactSchemaListsRendererFormats(t *testing.T) {
 	a, _ := newArtifact(t, &fakeRenderer{})
 	var schema struct {
@@ -262,5 +406,73 @@ func TestArtifactSchemaListsRendererFormats(t *testing.T) {
 	}
 	if len(schema.Properties.Format.Enum) != 1 || schema.Properties.Format.Enum[0] != "fake" {
 		t.Errorf("format enum = %v", schema.Properties.Format.Enum)
+	}
+}
+
+// One seam, no special cases: every registered format — the three real
+// passthrough formats and a renderer invented inside this test — goes
+// through the identical path (same directory, same <date>-<slug> naming,
+// same artifact.created event, same schema enum) with registration as the
+// only per-format act. If adding a format ever needs an engine or daemon
+// change, this test is where that regression surfaces.
+func TestArtifactFormatsShareOneSeam(t *testing.T) {
+	renderers := []Renderer{
+		&DocumentRenderer{},
+		&SpreadsheetRenderer{},
+		&ExcalidrawRenderer{},
+		&fakePassthrough{}, // stands in for "the next format someone adds"
+	}
+	sources := map[string]string{
+		"document":    "# Title\n\nBody.\n",
+		"spreadsheet": "a,b\n1,2\n",
+		"excalidraw":  `{"type":"excalidraw","version":2,"elements":[]}`,
+		"fakedoc":     "anything\n",
+	}
+	var opened []string
+	created := make(map[string]string)
+	a := &Artifact{
+		Dir:       filepath.Join(t.TempDir(), "artifacts"),
+		Renderers: renderers,
+		OnCreated: func(format, path string) { created[format] = path },
+		openFn: func(_, path string) error {
+			opened = append(opened, path)
+			return nil
+		},
+	}
+
+	var schema struct {
+		Properties struct {
+			Format struct {
+				Enum []string `json:"enum"`
+			} `json:"format"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(a.Schema(), &schema); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	for _, r := range renderers {
+		format := r.Format()
+		found := false
+		for _, f := range schema.Properties.Format.Enum {
+			found = found || f == format
+		}
+		if !found {
+			t.Errorf("format %q missing from schema enum %v", format, schema.Properties.Format.Enum)
+		}
+
+		runFormat(t, a, format, "seam check "+format, sources[format])
+
+		wantPath := filepath.Join(a.Dir,
+			time.Now().Format("2006-01-02")+"-seam-check-"+format+r.OutputExt())
+		if got, err := os.ReadFile(wantPath); err != nil || string(got) != sources[format] {
+			t.Errorf("format %q: artifact at %s: %v, %q", format, wantPath, err, got)
+		}
+		if created[format] != wantPath {
+			t.Errorf("format %q: artifact.created path = %q, want %q", format, created[format], wantPath)
+		}
+	}
+	if len(opened) != len(renderers) {
+		t.Errorf("opened %d artifacts, want %d", len(opened), len(renderers))
 	}
 }
