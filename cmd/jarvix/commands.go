@@ -21,6 +21,7 @@ import (
 	"github.com/rpickz/jarvix/internal/doctor"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/session"
 )
 
@@ -784,10 +785,14 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 		Name    string   `json:"name"`
 		Phrases []string `json:"phrases"`
 		Steps   []string `json:"steps"`
+		// Incomplete marks a captured routine (#62) still carrying a launch
+		// placeholder; it stays marked until a human edits the app in.
+		Incomplete bool `json:"incomplete"`
 	}
 	listing := make([]routineListing, 0, len(cfg.Routines))
 	for _, r := range cfg.Routines {
-		entry := routineListing{Name: r.Name, Phrases: r.Phrases, Steps: []string{}}
+		entry := routineListing{Name: r.Name, Phrases: r.Phrases, Steps: []string{},
+			Incomplete: r.Incomplete()}
 		for _, s := range r.Steps {
 			entry.Steps = append(entry.Steps, describeRoutineStep(s))
 		}
@@ -809,7 +814,11 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 		if i > 0 {
 			fmt.Println()
 		}
-		fmt.Printf("%s — say \"%s\"\n", r.Name, strings.Join(r.Phrases, `" or "`))
+		marker := ""
+		if r.Incomplete {
+			marker = " — incomplete: a step still needs its launch command (edit config.toml)"
+		}
+		fmt.Printf("%s — say \"%s\"%s\n", r.Name, strings.Join(r.Phrases, `" or "`), marker)
 		for _, step := range r.Steps {
 			fmt.Printf("  %s\n", step)
 		}
@@ -820,6 +829,9 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 // describeRoutineStep renders one step the way it will execute.
 func describeRoutineStep(s config.RoutineStep) string {
 	desc := fmt.Sprintf("%s → workspace %d", s.App, s.Workspace)
+	if s.App == routine.PlaceholderApp {
+		desc = fmt.Sprintf("%s → workspace %d (set the app that launches this window)", s.App, s.Workspace)
+	}
 	switch {
 	case s.Float:
 		desc += " (floating"

@@ -515,6 +515,49 @@ size = [1200, 800]
 	}
 }
 
+// TestRunRoutinesMarksIncompleteCaptures: a captured entry still carrying
+// the launch placeholder (#62) is flagged in both output shapes, so "which
+// routine needs my hand?" is answerable from the listing.
+func TestRunRoutinesMarksIncompleteCaptures(t *testing.T) {
+	hermeticEnv(t)
+	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "jarvix")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := `
+# captured 2026-08-21
+[[routines]]
+name = "chat setup"
+phrases = ["chat setup"]
+[[routines.steps]]
+app = "CHANGE-ME"
+match = "chrome-web.whatsapp.com__-Default"
+workspace = 3
+tile = "split"
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	stdout, _ := capture(t, func() { code = run([]string{"routines"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, output %q", code, stdout)
+	}
+	for _, want := range []string{
+		"incomplete: a step still needs its launch command",
+		"CHANGE-ME → workspace 3 (set the app that launches this window)",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output %q missing %q", stdout, want)
+		}
+	}
+	stdout, _ = capture(t, func() { code = run([]string{"routines", "--json"}) })
+	if code != 0 || !strings.Contains(stdout, `"incomplete":true`) {
+		t.Errorf("json output = %q (exit %d)", stdout, code)
+	}
+}
+
 // TestRunRoutinesEmptyPointsAtTheDocs: no routines is a hint, not an error.
 func TestRunRoutinesEmptyPointsAtTheDocs(t *testing.T) {
 	hermeticEnv(t)
