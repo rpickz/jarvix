@@ -123,6 +123,19 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		})
 		logger.Info("tool enabled", "component", "tools", "tool", "artifact.create")
 	}
+	// Advisor delegation is enabled by configuring an advisor and nothing
+	// else: `jarvix setup` writes the tables, and each advisor carries its
+	// own authentication (ADR 0016).
+	advisorTiers := advisorPolicyTiers(cfg)
+	if len(cfg.Advisors) > 0 {
+		registry.Register(&tools.Advisor{
+			Advisors: advisorSpecs(cfg),
+			ScrubEnv: providerKeyEnvNames(cfg),
+			Log:      logger,
+		})
+		logger.Info("tool enabled", "component", "tools", "tool", tools.AdvisorToolName,
+			"advisors", cfg.AdvisorNames())
+	}
 	// The permission gate is always installed — even with no tools enabled,
 	// so a tool added later can never ship ungated (ADR 0014).
 	perTool := make(map[string]tools.PolicyDecision, len(cfg.Tools.Policy.Tool))
@@ -134,6 +147,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		Tools:      perTool,
 		ShellAllow: cfg.Tools.Policy.ShellAllow,
 		ShellDeny:  cfg.Tools.Policy.ShellDeny,
+		Advisors:   advisorTiers,
 	})
 	if err != nil {
 		return nil, err // Validate catches this first; belt and braces

@@ -274,6 +274,14 @@ func followSession(client *ipc.Client, showTranscript bool) error {
 				fmt.Println()
 			case "tts.started":
 				fmt.Println("🔊 speaking (jarvix cancel to stop)")
+			case "tool.started":
+				// Only slow tools carry a label; the rest finish before
+				// anyone would read a line about them.
+				if detail, ok := ev.Data["detail"].(string); ok && detail != "" {
+					fmt.Println("… " + detail)
+				}
+			case "tool.progress":
+				fmt.Printf("… %v\n", ev.Data["message"])
 			case "tool.confirmation_required":
 				fmt.Printf("? %v\n  command: %v\n  answer with: jarvix confirm | jarvix deny (auto-declines in %vs)\n",
 					ev.Data["summary"], ev.Data["command"], ev.Data["timeout_sec"])
