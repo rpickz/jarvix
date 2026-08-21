@@ -34,12 +34,14 @@ for arch in $ARCHES; do
     go build -trimpath -ldflags "$LDFLAGS" -o "$stage/bin/jarvixd" ./cmd/jarvixd
 
   echo "  staging plugin, helpers, unit..."
-  mkdir -p "$stage/plugin" "$stage/tts/kokoro" "$stage/systemd" "$stage/scripts"
+  mkdir -p "$stage/plugin" "$stage/tts/kokoro" "$stage/wake" "$stage/systemd" "$stage/scripts"
   cp -r plugin/omarchy "$stage/plugin/omarchy"
   cp -r plugin/hyprland "$stage/plugin/hyprland"
   cp tts/kokoro/kokoro_stream.py "$stage/tts/kokoro/"
+  cp wake/wake_detect.py "$stage/wake/"
   cp systemd/jarvixd.service "$stage/systemd/"
-  cp scripts/setup-kokoro.sh scripts/install-plugin.sh scripts/install-hyprland-bindings.sh "$stage/scripts/"
+  cp scripts/setup-kokoro.sh scripts/setup-wake.sh scripts/install-plugin.sh \
+    scripts/install-hyprland-bindings.sh "$stage/scripts/"
   cp LICENSE "$stage/"
 
   cat >"$stage/INSTALL.md" <<EOF

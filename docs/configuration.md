@@ -51,7 +51,7 @@ to each field in the settings screen:
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
 | **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
-| **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
+| **restart** | `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
 
 A reload that fails validation keeps the running configuration and reports
 why — the daemon never hot-swaps into a broken state. `[[intents.custom]]`
@@ -71,13 +71,33 @@ not set up, Whisper model missing, input access not granted), reusing
 
 ```toml
 [activation]
-mode = "push_to_talk"            # the only supported mode in V1
+mode = "push_to_talk"            # "push_to_talk" (default) or "wake_word".
+                                 # "wake_word" *adds* background listening;
+                                 # the chord keeps working either way.
 # Hold-to-talk chord, watched by the daemon via evdev (needs keyboard read
 # access: jarvix setup input). Key names are evdev names: letters, digits,
 # f1-f12, leftmeta/rightmeta, leftalt/rightalt, leftctrl/rightctrl,
 # leftshift/rightshift, space, esc (aliases: super, alt, ctrl, shift).
 # Empty list disables the watcher; keybindings then drive activation.
 ptt_chord = ["leftmeta", "leftalt", "v"]
+
+# Background listening (only used when mode = "wake_word").
+# See "Background listening" below before turning it on.
+wake_word = "jarvix"             # passed to the detector; Jarvix does not
+                                 # match it itself. May also be a path to a
+                                 # model you trained yourself.
+wake_command = ["jarvix-wake"]   # the detector helper, run directly (not
+                                 # through a shell): one argument per entry.
+                                 # Installed by scripts/setup-wake.sh.
+wake_sensitivity = 0.5           # 0..1, higher is more eager. Maps onto the
+                                 # model's score threshold (0.5 → 0.5).
+endpoint_silence_ms = 800        # silence that submits a hands-free request
+wake_ring_ms = 1200              # audio kept from *before* the wake word, so
+                                 # the first syllables are not lost. Maximum
+                                 # 3000; this is the only ambient audio that
+                                 # can ever reach a transcript, so keep it
+                                 # short. 0 keeps none.
+max_utterance_sec = 15           # longest hands-free request
 
 [ai]
 provider = "ollama"              # endpoint name: a preset or your own [ai.<name>]
@@ -450,6 +470,92 @@ model change at all.
 > so an installed `~/.local/share/jarvix/kokoro_stream.py` from before this
 > change will reject it. Re-run `scripts/setup-kokoro.sh` after upgrading;
 > `jarvix doctor` checks the installed helper and says so if it is stale.
+
+## Background listening (`activation.mode = "wake_word"`)
+
+Say "Jarvix, what's my disk usage?" and it answers — no keyboard, no chord.
+The rest of the sentence after the wake word is the request, and the silence
+after it submits ([ADR 0024](adr/0024-background-wake-word-listening.md)).
+Push-to-talk keeps working; the two coexist.
+
+It is **off by default**, and turning it on means leaving a microphone open.
+What that does and does not mean is set out below, because it should be a
+decision rather than a default.
+
+### Installing it
+
+```bash
+scripts/setup-wake.sh                        # openWakeWord in its own venv
+jarvix config set activation.mode=wake_word
+systemctl --user restart jarvixd             # restart class: see the table above
+jarvix doctor                                # confirms the detector and the capture pid
+```
+
+The detector is a separate process (`jarvix-wake`) that scores 80 ms frames
+of audio and answers with a number. Nothing else about it is special: point
+`activation.wake_command` at anything that speaks the same protocol
+(`wake/wake_detect.py` is the reference implementation).
+
+> **"hey Jarvis", not "Jarvix".** openWakeWord ships no model for Jarvix's own
+> name, so the installer uses the nearest pretrained one, `hey_jarvis`.
+> `jarvix status` reports the model that is actually loaded. It responds to
+> "hey Jarvis" far more reliably than to "Jarvix"; train your own model if you
+> want the real word, and point `activation.wake_word` at the `.onnx` file.
+
+### What happens to your audio
+
+| | |
+|---|---|
+| Where detection runs | A process on this machine. There is no network path in the wake code |
+| Audio from *before* the wake word | A fixed-size RAM ring — `wake_ring_ms`, 1200 ms by default, **hard-capped at 3000 ms**. Never written to disk, never logged |
+| Audio from *after* the wake word | Written to `$XDG_RUNTIME_DIR/jarvix` (tmpfs, mode 0600) so whisper can read it, and **deleted as soon as it is transcribed** — exactly what a push-to-talk capture does |
+| A false activation with nothing said | Abandoned after 2.5 s. No file, no transcription, no provider call |
+| What is logged | A timestamp and a confidence per wake word. Never audio, never text |
+| While it is running | The Omarchy bar widget shows a hollow microphone; muted, a struck-through one |
+
+The pre-roll exists because people do not pause between "Jarvix" and the rest
+of the sentence — without it the first syllables of every request would be
+lost. It is also the only ambient audio that can ever reach a transcript,
+which is why the default is well under the ceiling. `wake_ring_ms = 0` keeps
+none of it, at the cost of a clipped first word.
+
+### Muting
+
+```bash
+jarvix mute      # kills the capture process
+jarvix unmute    # opens it again
+jarvix status    # prints the pid, so `ps -p <pid>` either finds it or does not
+```
+
+`jarvix mute` does not set a flag that makes Jarvix ignore what it hears: it
+kills `pw-record` and returns only once the process has been reaped, wiping
+every audio buffer on the way. "Nothing is listening" is checkable in the
+process table rather than promised in a document.
+
+Muting is runtime state and does not survive a restart —
+`activation.mode = "push_to_talk"` is the durable off switch. The bar widget's
+panel offers mute and unmute as one click whenever background listening is on.
+
+### Tuning
+
+| Setting | What it changes |
+|---|---|
+| `wake_sensitivity` | Higher activates more readily and misfires more. The default 0.5 is the score threshold openWakeWord's own examples use |
+| `endpoint_silence_ms` | How long a lull ends a request. Below ~500 ms a pause mid-sentence submits half of it; above ~1200 ms every request ends in a wait |
+| `wake_ring_ms` | See above. Shorter is more private and clips more |
+| `max_utterance_sec` | Bounds one request, and with it how much audio exists at once |
+
+To measure false activations for yourself, leave the daemon running for a
+working day without saying the wake word and divide `activations` (from
+`jarvix status`) by the uptime. Jarvix does not publish a figure for this,
+because it depends on your model, your microphone, and your room — the ADR
+explains what *is* measured.
+
+Two known limits, both stated in the ADR: there is no echo cancellation, so
+Jarvix saying "Jarvix" in an answer can retrigger it (PipeWire's
+`module-echo-cancel` is the fix, and it belongs to your audio setup); and a
+wake word heard while the push-to-talk chord is held is ignored, because the
+deliberate gesture wins.
 
 ## Deterministic intents (`[intents]`)
 

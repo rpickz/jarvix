@@ -47,6 +47,7 @@ Package layout (all internal — Jarvix exposes no Go API yet):
 | `internal/tts` | `Synthesizer` interface + fake; `tts/piper` adapter |
 | `internal/audio` | `Recorder`/`Player` interfaces + fakes; PipeWire impl |
 | `internal/intent` | Deterministic intent router: grammar table, slot parsing, command runner |
+| `internal/wake` | Background wake-word listening: ring buffer, detector seam, endpointing, supervision |
 | `internal/quiesce` | Bounded goroutine draining — the shutdown/reload counter |
 | `internal/daemon` | Wires config → engines → IPC methods |
 | `internal/doctor` | Environment checks with actionable fixes |
@@ -284,6 +285,12 @@ PipeWire only, by design ([ADR 0003](adr/0003-pipewire-direct.md)):
 - **Playback** — Piper emits raw s16le PCM which is piped straight into
   `pw-play --raw` at the voice's native rate. Chunks flow as they are
   synthesized, so playback starts before synthesis finishes.
+- **Background capture** (only with `activation.mode = "wake_word"`) —
+  `pw-record --raw` writing to *stdout*, read frame by frame into a
+  fixed-size RAM ring. It never touches the filesystem: a wake listener that
+  wrote WAV files would be writing everything it ever heard to disk. Only
+  audio following a wake word is materialised, by the same route a
+  push-to-talk capture takes ([ADR 0024](adr/0024-background-wake-word-listening.md)).
 
 ## Event flow (streaming)
 
@@ -358,3 +365,26 @@ o.bind("F10", "Submit to Jarvix", "jarvix ptt stop", { release = true })
 chord (`ptt: "daemon"`) it no-ops so the two paths never fight; otherwise
 idle → listen, listening → submit, other active states → interrupt and
 listen. All are thin socket calls returning in milliseconds.
+
+## Hands-free activation
+
+**Background wake-word listening**, off by default
+([ADR 0024](adr/0024-background-wake-word-listening.md)). `internal/wake`
+holds two supervised children — a `pw-record` streaming PCM and a detector
+helper scoring it — and one state machine between them:
+
+```text
+pw-record ──frames──► ring (≤3s, RAM) ──► detector ──► policy ──► StartWake
+                        │                                            │
+                        └──── pre-roll ──► utterance ──► endpoint ──► FinishWake
+```
+
+`StartWake` runs on the wake word, before the request has been spoken, which
+is what makes interruption instant; `FinishWake` runs when the endpointer
+finds silence, and submits in the same lock — with no key to release, the
+silence *is* the submission. Both reach the same engine code a held chord
+does, so hands-free activation is not a second pipeline.
+
+`jarvix mute` kills the capture process and returns only once it is reaped;
+the bar widget shows a hollow microphone whenever one is open. The audio-data
+lifecycle — what is kept, for how long, and where — is the ADR's second half.
