@@ -657,6 +657,36 @@ func (e *Engine) persistHistory() {
 	e.log.Debug("conversation history saved", "component", "session", "turns", len(msgs)/2)
 }
 
+// Turn is one utterance of the current conversation as a client should
+// display it. Only what carries meaning for a reader is included: committed
+// user/assistant exchanges plus the in-flight user question — no system
+// prompt, no tool traffic.
+type Turn struct {
+	Role string `json:"role"` // "user" or "assistant"
+	Text string `json:"text"`
+}
+
+// Conversation returns the turns of the current conversation, oldest first,
+// for the conversation window (the `conversation.get` IPC method). The
+// active session's transcript is included as soon as it is known, so a
+// window opened mid-session shows the question being answered; the streamed
+// answer itself reaches clients via assistant.delta events. The lazy
+// follow-up-window reset is deliberately not applied here: this reports what
+// happened, not what the next turn will remember. Never nil — an empty
+// conversation is an empty slice, so clients always see a JSON array.
+func (e *Engine) Conversation() []Turn {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	turns := make([]Turn, 0, len(e.history)+1)
+	for _, m := range e.history {
+		turns = append(turns, Turn{Role: string(m.Role), Text: m.Content})
+	}
+	if s := e.current; s != nil && s.transcriptReady && strings.TrimSpace(s.transcript) != "" {
+		turns = append(turns, Turn{Role: string(ai.RoleUser), Text: s.transcript})
+	}
+	return turns
+}
+
 // ResetConversation clears the carried-over context — in memory and on disk —
 // so the next turn starts a fresh thread and a later restart resurrects
 // nothing.

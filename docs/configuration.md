@@ -88,9 +88,16 @@ max_recording_sec = 60           # safety cap on capture length
 min_recording_ms = 300           # discard shorter captures as accidental taps
                                  # (no transcription, no error; session ends quietly)
 
-[ui]                             # hints for the overlay
+[ui]                             # desktop surfaces: overlay hints + notifications
 show_transcript = true
 show_response = true
+notifications = true             # desktop notification when a session finishes;
+                                 # clicking it opens the conversation window.
+                                 # false = no notifications (the window stays
+                                 # reachable via `jarvix window`)
+notification_preview = true      # show the start of the answer in the
+                                 # notification body; false = a generic
+                                 # "Jarvix answered" with no content
 
 [log]
 level = "info"                   # debug | info | warn | error
@@ -171,6 +178,27 @@ npm install -g @mermaid-js/mermaid-cli   # or from the AUR: mermaid-cli
 Without it the assistant simply answers in prose, and `jarvix doctor` names
 the missing piece. Renders run as a local subprocess (no network), bounded by
 `render_timeout_sec`. See ADR 0011 for the design.
+
+## Notifications and the conversation window
+
+When a session finishes, the daemon sends a desktop notification
+(`org.freedesktop.Notifications`, via `notify-send`): the first ~80
+characters of the answer on success, or the failing stage and message on
+error. Clicking the notification opens the **conversation window** — the
+full current exchange, streaming live — which is also reachable any time
+with `jarvix window` (bound to `Super+Alt+C` by the Hyprland bindings).
+
+- `ui.notifications = false` turns notifications off entirely.
+- `ui.notification_preview = false` keeps answer content out of
+  notifications: successes say just "Jarvix answered", failures name only
+  the failing stage. Use this when the notification daemon logs or mirrors
+  notification bodies somewhere you don't want answers to land.
+- No notification daemon running? Delivery degrades to a debug log line;
+  sessions are unaffected. Answer content is never written to the journal.
+
+The window is rendered by the Omarchy shell plugin and works without the
+daemon: if jarvixd is down it says so and points at
+`systemctl --user start jarvixd`.
 
 ## Natural voice (Kokoro)
 

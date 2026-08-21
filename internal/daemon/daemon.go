@@ -14,6 +14,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
@@ -34,6 +35,12 @@ type Daemon struct {
 	log      *slog.Logger
 	pttChord []uint16 // daemon-side hold-to-talk chord; empty = disabled
 	pttLive  bool     // watcher running (chord set + input devices readable)
+
+	// Desktop notification dispatch (ui.notifications); see notifications.go.
+	notifier   desktop.Notifier
+	openWindow func(context.Context) error
+	notify     bool // ui.notifications: announce finished sessions at all
+	preview    bool // ui.notification_preview: include answer content
 }
 
 // Deps are the engine's collaborators, injectable for tests. Zero-value
@@ -44,6 +51,11 @@ type Deps struct {
 	Synthesizer tts.Synthesizer
 	Recorder    audio.Recorder
 	Player      audio.Player
+	// Notifier delivers desktop notifications; nil uses notify-send.
+	Notifier desktop.Notifier
+	// OpenWindow opens the conversation window after a notification click;
+	// nil asks the Omarchy shell plugin.
+	OpenWindow func(context.Context) error
 }
 
 // New builds a daemon from configuration. cfg must already be validated.
@@ -136,8 +148,20 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			FollowUpWindow: time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
 		})
 
+	if deps.Notifier == nil {
+		deps.Notifier = &desktop.NotifySend{}
+	}
+	if deps.OpenWindow == nil {
+		windows := &desktop.WindowClient{}
+		deps.OpenWindow = windows.Open
+	}
+
 	server := ipc.NewServer(paths.Socket, bus, logger)
-	d := &Daemon{engine: engine, server: server, bus: bus, log: logger}
+	d := &Daemon{
+		engine: engine, server: server, bus: bus, log: logger,
+		notifier: deps.Notifier, openWindow: deps.OpenWindow,
+		notify: cfg.UI.Notifications, preview: cfg.UI.NotificationPreview,
+	}
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
 		if err != nil {
@@ -153,6 +177,12 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.server.Listen(); err != nil {
 		return err
+	}
+	if d.notify {
+		// Subscribe before serving so no session that a client starts can
+		// finish unobserved.
+		events, unsubscribe := d.bus.Subscribe()
+		go d.watchSessions(ctx, events, unsubscribe)
 	}
 	d.startPTT(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -257,6 +287,19 @@ func (d *Daemon) registerMethods() {
 	d.server.Handle("conversation.reset", func(json.RawMessage) (any, error) {
 		d.engine.ResetConversation()
 		return nil, nil
+	})
+	// conversation.get gives the conversation window its opening snapshot:
+	// the current turns straight from the engine's in-memory history (this
+	// method's shape is deliberately independent of any storage), plus the
+	// state so one call is enough to render. Clients live-append from
+	// assistant.delta / transcript.final / state.changed / error events.
+	d.server.Handle("conversation.get", func(json.RawMessage) (any, error) {
+		state, id := d.engine.State()
+		return map[string]any{
+			"turns":      d.engine.Conversation(),
+			"state":      string(state),
+			"session_id": id,
+		}, nil
 	})
 	d.server.Handle("status.get", func(json.RawMessage) (any, error) {
 		state, id := d.engine.State()

@@ -9,6 +9,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -37,6 +38,10 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 		Synthesizer: &tts.Fake{},
 		Recorder:    &audio.FakeRecorder{Clip: audio.Clip{WAVPath: dir + "/r.wav"}},
 		Player:      &audio.FakePlayer{},
+		// Notifications default on, so keep the tests hermetic: no real
+		// notify-send, no window opening on the machine running the suite.
+		Notifier:   &desktop.FakeNotifier{},
+		OpenWindow: func(context.Context) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)

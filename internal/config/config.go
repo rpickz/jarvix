@@ -153,10 +153,20 @@ type Audio struct {
 	MinRecordingMs int `toml:"min_recording_ms"`
 }
 
-// UI configures what the overlay is told to display.
+// UI configures the desktop surfaces: what the overlay displays, and how a
+// finished session is announced.
 type UI struct {
 	ShowTranscript bool `toml:"show_transcript"`
 	ShowResponse   bool `toml:"show_response"`
+	// Notifications sends a desktop notification when a session finishes;
+	// clicking it opens the conversation window. false disables notifications
+	// entirely — the window stays reachable via `jarvix window`.
+	Notifications bool `toml:"notifications"`
+	// NotificationPreview puts the start of the assistant's answer (or the
+	// error detail) in the notification body. false shows a generic
+	// "Jarvix answered" instead, keeping answer content away from the
+	// notification daemon and its logs.
+	NotificationPreview bool `toml:"notification_preview"`
 }
 
 // Log configures daemon logging.
@@ -203,7 +213,7 @@ func Default() Config {
 			RenderTimeoutSec: 10,
 		},
 		Audio: Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
-		UI:    UI{ShowTranscript: true, ShowResponse: true},
+		UI:    UI{ShowTranscript: true, ShowResponse: true, Notifications: true, NotificationPreview: true},
 		Log:   Log{Level: "info"},
 	}
 }

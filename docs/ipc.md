@@ -30,6 +30,7 @@ clients must ignore unknown events and fields.
 | `session.cancel` | — | `{}` | Stops everything; no-op when idle |
 | `speech.cancel` | — | `{}` | Stops spoken output only; no-op unless speaking |
 | `conversation.reset` | — | `{}` | Forget carried-over context; the next turn starts a fresh thread |
+| `conversation.get` | — | `{turns, state, session_id}` | Snapshot of the current conversation for display: `turns` is an array of `{role, text}` (`user`/`assistant`, oldest first, including the in-flight user question once transcribed). Render it on open, then live-append from `assistant.delta` / `transcript.final` / `state.changed` / `error` events |
 | `status.get` | — | `{state, session_id, version, protocol, ptt}` | `ptt` is `"daemon"` when jarvixd watches the hold-to-talk chord itself (keybinding toggles must then no-op) or `"external"` when keybindings drive activation |
 
 Errors use JSON-RPC error objects. Application errors (wrong state, no active
