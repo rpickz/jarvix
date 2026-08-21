@@ -41,12 +41,25 @@ func TestConfirmationTransitions(t *testing.T) {
 			t.Errorf("expected %s → %s to be legal", pair[0], pair[1])
 		}
 	}
+	// Each illegal row records *why* it is illegal, and the reason is the
+	// load-bearing part: this very test once pinned the #52 bug as correct
+	// behaviour, because a row's assumption ("Speaking means the answer is
+	// finished") had been invalidated by a later feature and nothing recorded
+	// what the row was assuming. A row whose reason no longer holds is a row
+	// to delete, not to satisfy. Audited against the streaming-speech asides
+	// (#53) and speech cancel from any state (#54) — the reasons below still
+	// hold.
 	illegal := [][2]State{
-		{StateIdle, StateAwaitingConfirmation},       // only a tool round can ask
-		{StateListening, StateAwaitingConfirmation},  // capture resolves via Transcribing
-		{StateAwaitingConfirmation, StateSpeaking},   // the question is spoken without a state change
+		{StateIdle, StateAwaitingConfirmation},      // only a tool round can ask
+		{StateListening, StateAwaitingConfirmation}, // capture resolves via Transcribing
+		// The question travels the answer's own playback queue as an aside
+		// (#52/#53) precisely so it needs no state of its own.
+		{StateAwaitingConfirmation, StateSpeaking},
 		{StateAwaitingConfirmation, StateResponding}, // resolution passes through Thinking
-		{StateAwaitingConfirmation, StateIdle},       // teardown goes via Cancelling/Error
+		// Teardown goes via Cancelling/Error — including a speech cancel that
+		// abandons the pending question (#54), which unwinds through
+		// Cancelling like an interruption.
+		{StateAwaitingConfirmation, StateIdle},
 		{StateError, StateAwaitingConfirmation},
 	}
 	for _, pair := range illegal {
@@ -213,6 +226,10 @@ func TestSpeakingIsNotTheEndOfATurn(t *testing.T) {
 			t.Errorf("expected %s → %s to be legal", pair[0], pair[1])
 		}
 	}
+	// Audited against background wake listening (ADR 0024): a wake word — or
+	// a spoken "stop" — heard while Speaking starts a *new* session, which
+	// interrupts this one; no same-session path from Speaking to Listening or
+	// Acting exists, so these reasons still hold.
 	illegal := [][2]State{
 		{StateSpeaking, StateListening},    // speech never opens the microphone
 		{StateSpeaking, StateTranscribing}, //

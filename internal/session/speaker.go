@@ -2,6 +2,7 @@ package session
 
 import (
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/rpickz/jarvix/internal/audio"
@@ -173,12 +174,74 @@ type streamingSpeaker struct {
 	s   *sess
 	in  chan utterance
 	res chan error
+
+	// The speaker is the one component that owns the playback stream, so it is
+	// the one component that can answer "is audio playing?" — the question
+	// CancelSpeech used to answer by reading the session state, which describes
+	// what the turn is doing, not whether the device is busy. The two diverge
+	// routinely: a mid-answer tool round puts the session back in Thinking or
+	// Responding while sentences already queued here are still draining, which
+	// is exactly when "stop" used to do nothing (issue #54).
+	//
+	// mu guards the three flags below and nothing else; it is only ever taken
+	// as a leaf, so it can never deadlock against Engine.mu.
+	mu sync.Mutex
+	// accepted is set once the first utterance is queued: from that moment
+	// there is audio in flight or committed to be, even while synthesis is
+	// still working — killing playback must not wait on synthesis.
+	accepted bool
+	// announced is set once the answer has claimed Speaking and published
+	// tts.started. Tracked here (not only in run's locals) so a cancel knows
+	// whether a tts.finished bookend is owed.
+	announced bool
+	// drained is set once run() has finished: nothing is playing and nothing
+	// ever will be again on this speaker.
+	drained bool
 }
 
 func newStreamingSpeaker(e *Engine, s *sess) *streamingSpeaker {
 	sp := &streamingSpeaker{e: e, s: s, in: make(chan utterance, 64), res: make(chan error, 1)}
+	// Register with the session so CancelSpeech can find the turn's voice.
+	// Registration replaces any previous speaker: a session has at most one
+	// live speaker at a time (one per think() call, or the prompt and ack
+	// speakers of an intent turn in sequence), so the newest is the only one
+	// that can still have audio.
+	e.mu.Lock()
+	s.speaker = sp
+	e.mu.Unlock()
 	go sp.run()
 	return sp
+}
+
+// speaking reports whether this speaker still has speech in flight — an
+// utterance has been accepted and playback has not fully drained — and whether
+// the answer announced itself (claimed Speaking / published tts.started).
+//
+// "Accepted" rather than "audible" is deliberate: an utterance still inside
+// the synthesizer is about to be heard, and a stop that waited for the first
+// sample would let it through. The one asymmetry a caller must know about:
+// after drained, both are false forever.
+func (sp *streamingSpeaker) speaking() (live, announced bool) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.accepted && !sp.drained, sp.announced
+}
+
+// noteAnnounced records that the answer has claimed the Speaking state.
+func (sp *streamingSpeaker) noteAnnounced() {
+	sp.mu.Lock()
+	sp.announced = true
+	sp.mu.Unlock()
+}
+
+// deliver marks the speaker fully drained and hands the result to close().
+// The order matters: once res carries the result nothing is playing, so a
+// CancelSpeech racing this must already see live == false and no-op.
+func (sp *streamingSpeaker) deliver(err error) {
+	sp.mu.Lock()
+	sp.drained = true
+	sp.mu.Unlock()
+	sp.res <- err
 }
 
 // speak queues one sentence of the answer. Sentences are normalized for speech
@@ -220,6 +283,9 @@ func (sp *streamingSpeaker) enqueue(u utterance) bool {
 	}
 	select {
 	case sp.in <- u:
+		sp.mu.Lock()
+		sp.accepted = true
+		sp.mu.Unlock()
 		return true
 	case <-sp.s.ctx.Done():
 		return false
@@ -266,6 +332,7 @@ func (sp *streamingSpeaker) run() {
 				return sp.s.ctx.Err()
 			}
 			announced = true
+			sp.noteAnnounced()
 			sp.e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": sp.s.id}})
 		}
 		if pcm == nil {
@@ -322,16 +389,16 @@ func (sp *streamingSpeaker) run() {
 	if pcm == nil {
 		// Nothing was ever spoken.
 		if sp.s.ctx.Err() != nil {
-			sp.res <- sp.s.ctx.Err()
+			sp.deliver(sp.s.ctx.Err())
 			return
 		}
-		sp.res <- synthErr
+		sp.deliver(synthErr)
 		return
 	}
 	close(pcm)
 	playErr := <-playDone
 	if sp.s.ctx.Err() != nil {
-		sp.res <- sp.s.ctx.Err()
+		sp.deliver(sp.s.ctx.Err())
 		return
 	}
 	if synthErr == nil {
@@ -343,7 +410,7 @@ func (sp *streamingSpeaker) run() {
 	if synthErr == nil && announced {
 		sp.e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": sp.s.id}})
 	}
-	sp.res <- synthErr
+	sp.deliver(synthErr)
 }
 
 // release wakes whoever is waiting on this utterance, whether it was spoken or

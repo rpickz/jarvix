@@ -191,6 +191,22 @@ type sess struct {
 	// wake marks a session a wake word started (ADR 0024). Its transcript
 	// begins with the wake word, which is stripped before anything reads it.
 	wake bool
+
+	// speaker is the turn's streaming speaker, registered at construction so
+	// CancelSpeech can ask the component that actually owns playback whether
+	// audio is live, instead of inferring it from the session state — the
+	// inference that made "stop" a no-op the moment a tool round put the state
+	// back in Thinking while sentences were still draining (issue #54).
+	// Guarded by Engine.mu. It stays registered after draining: the speaker
+	// itself reports drained, so there is nothing to unregister.
+	speaker *streamingSpeaker
+	// promptAudio marks a confirmation question playing outside any speaker —
+	// the direct path speakPrompt takes for a user-defined intent, which asks
+	// before the turn has a voice of its own. It exists so "stop" can silence
+	// that question too: no speaker is registered for it, and without this
+	// flag the one moment Jarvix speaks on an intent turn would be the one
+	// moment it could not be stopped. Guarded by Engine.mu.
+	promptAudio bool
 }
 
 // NewEngine wires the engine. logger, registry, and store may be nil (no
@@ -434,20 +450,70 @@ func (e *Engine) Cancel() error {
 	return nil
 }
 
-// CancelSpeech stops spoken output. In V1 speech is the final stage, so this
-// also completes the session; text output is untouched.
-func (e *Engine) CancelSpeech() error {
+// CancelSpeech stops spoken output whenever any is actually playing, and
+// reports whether it stopped anything. It is the one mechanism every stop path
+// reaches — the spoken "stop" intent (ADR 0017), the speech.cancel IPC method,
+// and any client binding — so there is exactly one place that decides whether
+// there is something to stop.
+//
+// That decision is made by asking the turn's speaker, never by reading the
+// session state. The state describes what the turn is doing; the speaker owns
+// the playback stream and knows whether the device is busy — and the two
+// disagree routinely, because a mid-answer tool round puts the session back in
+// Thinking or Responding while queued sentences are still draining (issue
+// #54). Guarding on `state == Speaking`, as this method used to, made "stop"
+// do nothing precisely when Jarvix was being long-winded.
+//
+// Stopping speech ends the turn: the user has heard enough, and a turn that
+// silently kept running tools and streaming text it would never say has no one
+// listening for it. The teardown mirrors the interruption path — the session
+// context is cancelled (which is what kills playback immediately, without
+// waiting on synthesis in flight), the state unwinds through Cancelling, and
+// session.finished is published, so the turn always reaches a terminal state.
+//
+// A pending tool confirmation is abandoned, exactly as an interruption
+// abandons it: the question is silenced with everything else, tool.declined is
+// recorded so the audit trail never shows a question without an answer, and
+// the command does not run. "Stop" while being asked "should I run this?" is
+// the emphatic no — it is even in the decline vocabulary for spoken replies.
+//
+// With nothing playing this is a reported no-op, not an error: false, a debug
+// line, and an untouched session. The debug line matters — a silently ignored
+// stop is how issue #54 stayed invisible.
+func (e *Engine) CancelSpeech() (stopped bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := e.current
-	if s == nil || e.state != StateSpeaking {
-		return nil
+	if s == nil {
+		e.log.Debug("speech cancel found no session", "component", "session")
+		return false
+	}
+	live, announced := s.promptAudio, false
+	if sp := s.speaker; sp != nil {
+		spLive, spAnnounced := sp.speaking()
+		live = live || spLive
+		announced = spAnnounced
+	}
+	if !live {
+		e.log.Debug("speech cancel found nothing playing", "component", "session",
+			"session_id", s.id, "state", string(e.state))
+		return false
 	}
 	s.cancel()
-	_ = e.setStateLocked(StateIdle)
-	e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": s.id, "interrupted": true}})
+	e.clearPendingLocked("interrupted")
+	if e.state.Active() {
+		e.forceStateLocked(StateCancelling)
+		e.forceStateLocked(StateIdle)
+	}
+	// The tts.finished bookend is owed only if tts.started was published: a
+	// turn whose only audio so far was an aside (a confirmation question, a
+	// progress reassurance) emits neither.
+	if announced {
+		e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": s.id, "interrupted": true}})
+	}
+	e.log.Info("speech cancelled", "component", "session", "session_id", s.id)
 	e.finishLocked(s)
-	return nil
+	return true
 }
 
 // ---------------------------------------------------------------- internals
@@ -467,15 +533,62 @@ func (e *Engine) setStateLocked(to State) error {
 	return nil
 }
 
-// advance transitions on behalf of a background stage, refusing if the
-// session was superseded or cancelled in the meantime.
+// advance transitions on behalf of a background stage. It returns false in two
+// situations that could not be more different, and telling them apart is the
+// whole point (issue #55):
+//
+//   - Superseded or cancelled: the user interrupted, or the session ended.
+//     This is the common case and it is fine — the cancel path already
+//     published the events, so this path stays quiet (and allocation-free:
+//     interruption is on the hot path).
+//
+//   - Refused: the session is live but the transition is not in the table.
+//     That is a programming error which has just cost the user their turn,
+//     and it used to be *silent* — two real bugs (issue #52) ran for days
+//     behind exactly this indistinguishable false, one of them leaving the
+//     session wedged with no error, no session.finished, and no answer. A
+//     refusal is therefore loud (an error log naming from, to, and session)
+//     and terminal: the session fails properly, so the caller's quiet unwind
+//     — correct for supersession — can never again strand a live turn in a
+//     non-terminal state with nothing published.
+//
+// Either way the caller must stop its work; it needs no second return value
+// because after a refusal the session is already failed and there is nothing
+// left for it to report.
 func (e *Engine) advance(s *sess, to State) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.current != s || s.ctx.Err() != nil {
 		return false
 	}
-	return e.setStateLocked(to) == nil
+	from := e.state
+	if err := e.setStateLocked(to); err != nil {
+		e.log.Error("state transition refused", "component", "session",
+			"session_id", s.id, "from", string(from), "to", string(to))
+		e.failLocked(s, "session", err)
+		return false
+	}
+	return true
+}
+
+// forceStateLocked performs a transition for a caller with no one to hand the
+// error to — teardown and resume paths whose callers used to write `_ =`. The
+// legality of these transitions is structural (every active state may reach
+// Cancelling, Cancelling and Error reach Idle, AwaitingConfirmation reaches
+// its resume states), so a refusal here is a programming error; it is logged
+// at error level rather than swallowed, because a refused transition must
+// never be silent (issue #55). The caller carries on regardless: these are
+// paths where stopping halfway would leave more wreckage than proceeding.
+func (e *Engine) forceStateLocked(to State) {
+	from := e.state
+	if err := e.setStateLocked(to); err != nil {
+		id := ""
+		if e.current != nil {
+			id = e.current.id
+		}
+		e.log.Error("state transition refused", "component", "session",
+			"session_id", id, "from", string(from), "to", string(to))
+	}
 }
 
 func (e *Engine) publish(ev Event) {
@@ -500,10 +613,12 @@ func (e *Engine) cancelLocked(reason string) {
 		// shutdown that raced it would leave both behind.
 		e.active.Go(rec.Cancel)
 	}
+	// A session cancelled before it ever left Idle (started, never advanced)
+	// has no transition to make — that is a quiet nothing, not a refusal.
 	if e.state.Active() {
-		_ = e.setStateLocked(StateCancelling)
+		e.forceStateLocked(StateCancelling)
+		e.forceStateLocked(StateIdle)
 	}
-	_ = e.setStateLocked(StateIdle)
 	e.publish(Event{Type: "session.cancelled", Data: map[string]any{"session_id": s.id, "reason": reason}})
 	e.log.Info("session cancelled", "component", "session", "session_id", s.id,
 		"reason", reason, "duration_ms", time.Since(s.started).Milliseconds())
@@ -516,7 +631,17 @@ func (e *Engine) finishLocked(s *sess) {
 		return
 	}
 	if e.state.Active() {
-		_ = e.setStateLocked(StateIdle)
+		if err := e.setStateLocked(StateIdle); err != nil {
+			// A finish from a state with no legal way to Idle is a programming
+			// error — but it must not leave the engine wedged in an active
+			// state with no session, which is unrecoverable without a restart.
+			// Every active state can reach Cancelling and Cancelling reaches
+			// Idle, so the fallback route always lands (issue #55).
+			e.log.Error("state transition refused", "component", "session",
+				"session_id", s.id, "from", string(e.state), "to", string(StateIdle))
+			e.forceStateLocked(StateCancelling)
+			e.forceStateLocked(StateIdle)
+		}
 	}
 	e.publishTimings(s)
 	e.publish(Event{Type: "session.finished", Data: map[string]any{"session_id": s.id}})
@@ -569,12 +694,17 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 	e.clearPendingLocked("error")
 	e.log.Error("session failed", "component", stage, "session_id", s.id, "error", err.Error())
 	if CanTransition(e.state, StateError) {
-		_ = e.setStateLocked(StateError)
+		e.forceStateLocked(StateError)
 	}
 	e.publish(Event{Type: "error", Data: map[string]any{
 		"session_id": s.id, "stage": stage, "message": err.Error(),
 	}})
-	_ = e.setStateLocked(StateIdle)
+	// From Error the way down is always legal; the guard covers a failure
+	// raised before the session ever left Idle (an empty text submission),
+	// where there is no transition to make.
+	if e.state.Active() {
+		e.forceStateLocked(StateIdle)
+	}
 	// A failure has a latency story too — often the interesting one, because
 	// the stage it died in is the stage that ran long.
 	e.publishTimings(s)
@@ -739,6 +869,9 @@ func (e *Engine) think(s *sess) {
 		// by now every word of it is committed to the one playback queue: from
 		// the gate's point of view it has been said.
 		turn = turn.add(text)
+		// The model has stopped answering and gone back to work: the moment
+		// the table's Responding → Thinking entry describes.
+		e.backToThinking(s)
 		for _, call := range calls {
 			if s.ctx.Err() != nil {
 				e.abortSpeaker(speaker)
@@ -831,6 +964,29 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 		"provider", e.provider.Name(), "tool_calls", len(calls),
 		"duration_ms", time.Since(start).Milliseconds())
 	return strings.TrimSpace(full.String()), calls, true
+}
+
+// backToThinking returns the session to Thinking for a tool round whose text
+// was streamed but never spoken — the state is Responding, and the next
+// round's first delta would otherwise be refused as Responding → Responding
+// (the table forbids self-transitions on purpose). This is the code path that
+// performs the table's Responding → Thinking entry, which was documented from
+// the start but wired to nothing: with speech enabled a complete sentence
+// moves the state on to Speaking before the tool call lands, so the gap only
+// opened with speech off or a preamble too short for the sentencer — and then
+// the turn died silently, which is how it went unnoticed (issues #52/#55).
+//
+// Speaking deliberately stays put: audio from the round's sentences is still
+// draining, and #52 established that the session remains Speaking while it
+// does — the next round re-enters Responding from there. Thinking needs no
+// move at all (the round streamed no text).
+func (e *Engine) backToThinking(s *sess) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.current != s || s.ctx.Err() != nil || e.state != StateResponding {
+		return
+	}
+	e.forceStateLocked(StateThinking)
 }
 
 // abortSpeaker closes a speaker without treating its result as a fresh error:

@@ -408,8 +408,8 @@ func TestCancelSpeechStopsOnlySpeech(t *testing.T) {
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("hi")
 	h.waitFor(t, "tts.started")
-	if err := h.engine.CancelSpeech(); err != nil {
-		t.Fatal(err)
+	if !h.engine.CancelSpeech() {
+		t.Fatal("CancelSpeech reported nothing playing while speech was held mid-utterance")
 	}
 	ev := h.waitFor(t, "tts.finished")
 	if ev.Data["interrupted"] != true {

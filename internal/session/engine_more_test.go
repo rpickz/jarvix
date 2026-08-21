@@ -116,12 +116,12 @@ func TestPlayerFailureFailsSession(t *testing.T) {
 
 func TestCancelSpeechOutsideSpeakingIsNoop(t *testing.T) {
 	h := newHarness(t, Options{})
-	if err := h.engine.CancelSpeech(); err != nil {
-		t.Errorf("CancelSpeech on idle engine: %v", err)
+	if h.engine.CancelSpeech() {
+		t.Error("CancelSpeech on an idle engine claimed to have stopped something")
 	}
 	_, _ = h.engine.StartSession()
-	if err := h.engine.CancelSpeech(); err != nil {
-		t.Errorf("CancelSpeech outside speaking: %v", err)
+	if h.engine.CancelSpeech() {
+		t.Error("CancelSpeech with no audio in flight claimed to have stopped something")
 	}
 }
 

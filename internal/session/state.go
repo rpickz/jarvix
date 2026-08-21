@@ -52,6 +52,9 @@ var transitions = map[State][]State{
 	StateThinking: {StateResponding, StateAwaitingConfirmation, StateCancelling, StateError},
 	// Responding → Thinking happens when the model streamed some text and
 	// then asked to call a tool: it goes back to working before answering.
+	// Performed by Engine.backToThinking — it was documented here long before
+	// any code path made it, and the round that needed it (streamed text, no
+	// speech claiming Speaking first) died silently instead (issue #55).
 	// Responding → AwaitingConfirmation is the same moment when that tool
 	// call needs the user's go-ahead.
 	StateResponding: {StateSpeaking, StateThinking, StateAwaitingConfirmation, StateIdle, StateCancelling, StateError},

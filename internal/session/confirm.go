@@ -77,7 +77,7 @@ func (e *Engine) resolveConfirmationLocked(approved bool, source string) {
 		return
 	}
 	e.pending = nil
-	_ = e.setStateLocked(p.resumeState())
+	e.forceStateLocked(p.resumeState())
 	eventType := "tool.confirmed"
 	if !approved {
 		eventType = "tool.declined"
@@ -342,7 +342,7 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 				continue
 			}
 			e.pending = nil
-			_ = e.setStateLocked(p.resumeState())
+			e.forceStateLocked(p.resumeState())
 			e.publish(Event{Type: "tool.declined", Data: e.confirmationData(p, "timeout")})
 			e.mu.Unlock()
 			e.log.Info("tool confirmation timed out", "component", "tools",
@@ -386,6 +386,20 @@ func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 	if spoken == "" {
 		return
 	}
+	// This is the one stretch of audio no streaming speaker accounts for, so
+	// it registers itself: CancelSpeech asks the session's voice whether
+	// anything is playing (issue #54), and a question asked on the direct path
+	// must be stoppable exactly like one queued on a speaker. Marked before
+	// synthesis, not before playback — killing the question must not wait on
+	// the synthesizer.
+	e.mu.Lock()
+	s.promptAudio = true
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		s.promptAudio = false
+		e.mu.Unlock()
+	}()
 	format, chunks, err := e.tts.Speak(s.ctx, tts.Request{Text: spoken})
 	if err != nil {
 		e.log.Warn("confirmation prompt could not be spoken", "component", "tts", "error", err.Error())
