@@ -38,6 +38,16 @@ type Daemon struct {
 	notifier   desktop.Notifier
 	openWindow func(context.Context) error
 
+	// The most recent session failure, retained past session.finished so the
+	// conversation window can render it. A window opened from an error
+	// notification only connects *after* the click, long after the `error`
+	// event went out on the bus, so without this it would open showing an
+	// idle, blameless conversation and the failure would be invisible.
+	// Cleared when the next session starts. Guarded by errMu.
+	errMu          sync.Mutex
+	lastErrStage   string
+	lastErrMessage string
+
 	// Running configuration plus what a reload needs to rebuild collaborators
 	// (settings.go). cfg holds the values the daemon is actually operating
 	// with: restart-class settings keep their booted values even after the
@@ -292,10 +302,16 @@ func (d *Daemon) registerMethods() {
 	// assistant.delta / transcript.final / state.changed / error events.
 	d.server.Handle("conversation.get", func(json.RawMessage) (any, error) {
 		state, id := d.engine.State()
+		stage, message := d.lastError()
 		return map[string]any{
 			"turns":      d.engine.Conversation(),
 			"state":      string(state),
 			"session_id": id,
+			// The last failure, if the session that just ended failed: the
+			// window is normally opened by clicking the notification about
+			// it, so the snapshot must carry what the `error` event said.
+			"error_stage":   stage,
+			"error_message": message,
 		}, nil
 	})
 	d.server.Handle("session.confirm", func(params json.RawMessage) (any, error) {

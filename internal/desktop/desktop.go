@@ -75,6 +75,17 @@ func (n *NotifySend) Send(ctx context.Context, note Notification) (string, error
 // assert on exactly what would run without needing a notification daemon.
 func notifySendArgs(n Notification) []string {
 	args := []string{"--app-name=Jarvix"}
+	if len(n.Actions) > 0 {
+		// Without --wait, notify-send exits as soon as the notification is
+		// submitted and is no longer around to receive the click — it prints
+		// nothing, Send reports no action, and the click is indistinguishable
+		// from a dismissal, so the window never opens. With it, notify-send
+		// lives until the notification is actioned, dismissed, or expires,
+		// which is the contract watchSessions already dispatches for.
+		// Only meaningful when an action exists: with none there is nothing
+		// to report back, and waiting would pin a goroutine for nothing.
+		args = append(args, "--wait")
+	}
 	for _, a := range n.Actions {
 		args = append(args, "--action="+a.ID+"="+a.Label)
 	}

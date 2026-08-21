@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,7 @@ func TestNotifySendArgsCarryActionsAndContent(t *testing.T) {
 	})
 	want := []string{
 		"--app-name=Jarvix",
+		"--wait",
 		"--action=default=Open",
 		"--",
 		"Jarvix answered",
@@ -23,6 +25,29 @@ func TestNotifySendArgsCarryActionsAndContent(t *testing.T) {
 	}
 	if !reflect.DeepEqual(args, want) {
 		t.Errorf("args = %q, want %q", args, want)
+	}
+}
+
+// A notification carrying an action must wait for it. Without --wait,
+// notify-send exits the moment the notification is submitted, so it never
+// prints the clicked action, Send reports none, and the click reads as a
+// dismissal — the window would never open, which is the whole feature.
+func TestNotifySendWaitsWhenAnActionCanBeClicked(t *testing.T) {
+	args := notifySendArgs(Notification{
+		Summary: "Jarvix answered",
+		Actions: []Action{{ID: DefaultActionID, Label: "Open"}},
+	})
+	if !slices.Contains(args, "--wait") {
+		t.Errorf("args = %q, want --wait so the click can be reported", args)
+	}
+}
+
+// With nothing to click there is nothing to wait for, and waiting would pin
+// the delivering goroutine until the notification expires.
+func TestNotifySendDoesNotWaitWithoutActions(t *testing.T) {
+	args := notifySendArgs(Notification{Summary: "Jarvix answered"})
+	if slices.Contains(args, "--wait") {
+		t.Errorf("args = %q, want no --wait when there is no action", args)
 	}
 }
 

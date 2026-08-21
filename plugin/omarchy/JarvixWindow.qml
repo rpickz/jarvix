@@ -1,5 +1,9 @@
 import QtQuick
 import Quickshell
+// FloatingWindow lives in Quickshell.Wayland, not Quickshell: without this
+// import the type does not resolve, JarvixOverlay.qml fails to instantiate
+// the window, and the whole plugin fails to load.
+import Quickshell.Wayland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -49,7 +53,19 @@ FloatingWindow {
     }
   }
 
+  // Events are delivered on the same connection as the conversation.get
+  // response, and the daemon writes notifications and responses
+  // independently: a live assistant.delta can arrive *before* the snapshot
+  // we asked for. Applying the snapshot then would wipe what that event just
+  // rendered. So while a request is in flight events are queued, and replayed
+  // on top of the snapshot once it lands — the snapshot is the state as of
+  // the request, and queued events are strictly newer than it.
+  property bool snapshotPending: false
+  property var queuedEvents: []
+
   function requestConversation() {
+    snapshotPending = true
+    queuedEvents = []
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "conversation.get" }) + "\n")
   }
 
@@ -63,6 +79,18 @@ FloatingWindow {
     }
     sessionState = String(result.state || "idle")
     assistantStreaming = false
+    // A window opened by clicking an error notification connects after the
+    // `error` event has already gone out, so the snapshot carries it.
+    errorStage = String(result.error_stage || "")
+    errorMessage = String(result.error_message || "")
+
+    // Replay anything that arrived while the snapshot was in flight.
+    snapshotPending = false
+    var queued = queuedEvents
+    queuedEvents = []
+    for (var j = 0; j < queued.length; j++) {
+      handleEvent(queued[j].method, queued[j].params)
+    }
   }
 
   function handleEvent(method, params) {
@@ -128,9 +156,19 @@ FloatingWindow {
         var frame
         try { frame = JSON.parse(line) } catch (e) { return }
         if (frame.method) {
-          win.handleEvent(frame.method, frame.params || {})
+          if (win.snapshotPending) {
+            // Queue: the snapshot we are waiting for predates this event.
+            win.queuedEvents.push({ method: frame.method, params: frame.params || {} })
+          } else {
+            win.handleEvent(frame.method, frame.params || {})
+          }
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
+        } else if (frame.id === 1 && frame.error) {
+          // The snapshot failed; stop queueing or events would pile up
+          // unrendered for the life of the connection.
+          win.snapshotPending = false
+          win.queuedEvents = []
         }
       }
     }
@@ -142,6 +180,11 @@ FloatingWindow {
       } else {
         win.sessionState = "idle"
         win.assistantStreaming = false
+        // A disconnect mid-request means the snapshot will never arrive;
+        // leaving the flag set would queue every event of the next
+        // connection unrendered.
+        win.snapshotPending = false
+        win.queuedEvents = []
         if (win.visible) retry.start()
       }
     }
