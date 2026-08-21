@@ -115,6 +115,12 @@ type Match struct {
 	// router decides *whether* an utterance is a routine, and the engine hands
 	// the name to the routine runner, which owns what the steps mean.
 	Routine string
+	// CaptureName is the routine name spoken to "save this as <name>" (#62),
+	// empty for every other intent. Like Routine, only the name travels: the
+	// router decides *whether* the utterance asks for a capture, and the
+	// engine hands the name to the capture service, which owns everything
+	// about reading the desktop and writing configuration.
+	CaptureName string
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -205,6 +211,9 @@ type rule struct {
 	command     string
 	userDefined bool
 	routine     string
+	// capture marks the "save this as {name}" rules (#62): a match hands the
+	// trailing free-text words to the engine as Match.CaptureName.
+	capture bool
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -427,7 +436,65 @@ func New(opts Options) (*Router, error) {
 		}
 		r.names = append(r.names, "routine:"+name)
 	}
+
+	// The capture patterns (#62) compile last on purpose: rules are tried in
+	// insertion order, so every literal phrase — built-in, custom, or routine
+	// trigger — that happens to begin with the same words wins over the
+	// free-text name slot. A user whose routine is literally called "save
+	// this as backup" gets their routine, not a capture of a routine named
+	// "backup"; only utterances no literal phrase claims reach the slot.
+	for _, raw := range capturePatterns {
+		p, err := compileCapture(raw)
+		if err != nil {
+			// Unreachable for the shipped table; a bad pattern added later must
+			// fail compilation, not silently never match.
+			return nil, fmt.Errorf("capture pattern %q: %w", raw, err)
+		}
+		r.add(&rule{name: CaptureIntentName, pattern: p, capture: true})
+	}
+	r.names = append(r.names, CaptureIntentName)
 	return r, nil
+}
+
+// CaptureIntentName identifies the "save this as <name>" intent (#62) in
+// logs and the intent.executed event.
+const CaptureIntentName = "routine.capture"
+
+// capturePatterns are the utterances that save the live desktop as a routine
+// (#62). Like every entry in the built-in table they are a short, literal
+// list — a near-synonym is a code change with a test — but they end in the
+// one free-text slot the router has, because the name is the user's to
+// choose and cannot be enumerated.
+var capturePatterns = []string{
+	"save this as {name}",
+	"save this layout as {name}",
+	"save this setup as {name}",
+	"save this desktop as {name}",
+	"remember this layout as {name}",
+}
+
+// maxNameWords bounds how many words a spoken routine name may be. Past a
+// handful of words the utterance is far more likely a sentence for the model
+// than a name, and an unbounded slot would claim it.
+const maxNameWords = 6
+
+// compileCapture compiles one capture pattern: literal words ending in the
+// {name} slot. Kept separate from compile so {name} stays unusable in custom
+// intents and routine phrases, where free text would have to be interpolated
+// into a command or would parameterise steps that are fixed.
+func compileCapture(raw string) (pattern, error) {
+	const slot = "{name}"
+	words := strings.Fields(strings.ToLower(raw))
+	if len(words) < 2 || words[len(words)-1] != slot {
+		return pattern{}, fmt.Errorf("capture patterns must be literal words ending in %s", slot)
+	}
+	p, err := compile(strings.Join(words[:len(words)-1], " "))
+	if err != nil {
+		return pattern{}, err
+	}
+	p.raw = strings.Join(words, " ")
+	p.trailingText = true
+	return p, nil
 }
 
 func routineLabel(i int, name string) string {
@@ -493,6 +560,13 @@ func (r *Router) Match(transcript string) (Match, bool) {
 }
 
 func (ru *rule) match(fields []string) (Match, bool) {
+	if ru.capture {
+		name, ok := ru.pattern.matchText(fields)
+		if !ok {
+			return Match{}, false
+		}
+		return Match{Name: ru.name, CaptureName: name}, true
+	}
 	slot, hasSlot, ok := ru.pattern.match(fields)
 	if !ok {
 		return Match{}, false
@@ -538,6 +612,12 @@ type pattern struct {
 	tokens []token
 	// raw is the source phrase, used for identity and error messages.
 	raw string
+	// trailingText marks a capture pattern (#62): every token is a literal,
+	// and once they all match, the remaining one-to-maxNameWords fields are
+	// the spoken name. Trailing-only by design — a slot in the middle would
+	// make "save this as x on workspace two" ambiguous about where the name
+	// stops, and ambiguity belongs to the model, never to this table.
+	trailingText bool
 }
 
 // maxSlotWords bounds how many words one slot may swallow: "one hundred and
@@ -557,7 +637,25 @@ func (p pattern) maxFields() int {
 		}
 		n += maxSlotWords
 	}
+	if p.trailingText {
+		n += maxNameWords
+	}
 	return n
+}
+
+// matchText matches a trailing-text pattern: every literal token in order,
+// then one to maxNameWords remaining fields, which become the name.
+func (p pattern) matchText(fields []string) (string, bool) {
+	rest := len(fields) - len(p.tokens)
+	if rest < 1 || rest > maxNameWords {
+		return "", false
+	}
+	for i, t := range p.tokens {
+		if fields[i] != t.word {
+			return "", false
+		}
+	}
+	return strings.Join(fields[len(p.tokens):], " "), true
 }
 
 func (p pattern) match(fields []string) (slot int, hasSlot, ok bool) {
