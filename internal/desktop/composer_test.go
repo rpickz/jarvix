@@ -28,9 +28,8 @@ func TestConversationWindowLeavesTypedTurnDecisionsToTheDaemon(t *testing.T) {
 		t.Error("the window no longer submits typed turns through session.text")
 	}
 	// session.start would interrupt a session the window cannot know is
-	// waiting on a confirmation; session.confirm would mean the window had
-	// read the text itself and decided what "yes" means.
-	for _, forbidden := range []string{"session.start", "session.confirm", "session.submit"} {
+	// waiting on a confirmation.
+	for _, forbidden := range []string{"session.start", "session.submit"} {
 		if strings.Contains(qml, forbidden) {
 			t.Errorf("the window calls %s: typed turns go through session.text, "+
 				"which makes that choice daemon-side under the session lock (ADR 0021)", forbidden)
@@ -41,5 +40,26 @@ func TestConversationWindowLeavesTypedTurnDecisionsToTheDaemon(t *testing.T) {
 	// no test can exercise.
 	if strings.Contains(qml, "affirmative") || strings.Contains(qml, "isAffirmative") {
 		t.Error("the window appears to interpret yes/no itself; confirm.go owns that vocabulary")
+	}
+
+	// The confirmation card's buttons (issue #76) are the one legal use of
+	// session.confirm: a click (or Y/N on the focused card) that carries a
+	// literal boolean the user chose. That is not a second yes/no vocabulary —
+	// no text is read — so the guard pins the shape rather than banning the
+	// method: exactly one call site, reached only with literal booleans.
+	if got := strings.Count(qml, `method: "session.confirm"`); got != 1 {
+		t.Errorf("session.confirm call sites = %d, want exactly 1 (the card's "+
+			"answerConfirmation function); more would scatter the gate's answer path", got)
+	}
+	for _, literal := range []string{"answerConfirmation(true)", "answerConfirmation(false)"} {
+		if !strings.Contains(qml, literal) {
+			t.Errorf("the card never calls %s: approve/decline must be literal booleans "+
+				"from a click or key, never derived from text", literal)
+		}
+	}
+	// Typed input must never feed the confirm path: the composer's text goes
+	// to session.text and is interpreted daemon-side, buttons or no buttons.
+	if strings.Contains(qml, "answerConfirmation(composerInput") {
+		t.Error("the composer's text reaches answerConfirmation; typed answers belong to session.text")
 	}
 }
