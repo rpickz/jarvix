@@ -476,6 +476,69 @@ func TestConfigSetRestartClassIsReported(t *testing.T) {
 	}
 }
 
+// TestLexiconAppliesOnReload: a pronunciation added to [tts.lexicon] is heard
+// on the very next answer, without restarting the daemon — the point of
+// putting the lexicon in the editable-settings registry (ADR 0015, issue
+// #30). Asserted on what reached the synthesizer, which is where the spoken
+// form is decided.
+func TestLexiconAppliesOnReload(t *testing.T) {
+	h := startSettingsDaemon(t)
+	h.provider.Response = "Jarvix reports 9.2 million rows."
+
+	// Before: the shipped defaults expand the number but know no "Jarvix".
+	h.ask(t)
+	if got := h.tts.LastRequest.Text; !strings.Contains(got, "nine point two million") {
+		t.Errorf("spoken text = %q, want the decimal expanded", got)
+	}
+	if got := h.tts.LastRequest.Text; strings.Contains(got, "jarviks") {
+		t.Fatalf("spoken text = %q before the lexicon entry existed", got)
+	}
+
+	var set setResult
+	if err := h.client.Call("config.set", map[string]any{
+		"changes": map[string]any{"tts.lexicon": map[string]any{"Jarvix": "jarviks"}},
+	}, &set); err != nil {
+		t.Fatal(err)
+	}
+	if !set.Applied {
+		t.Fatalf("lexicon change not applied: %s", set.Reason)
+	}
+	if len(set.NeedsRestart) != 0 {
+		t.Errorf("needs_restart = %v; a lexicon entry must not need a restart", set.NeedsRestart)
+	}
+
+	h.ask(t)
+	if got := h.tts.LastRequest.Text; !strings.Contains(got, "jarviks") {
+		t.Errorf("spoken text = %q, want the new pronunciation", got)
+	}
+
+	// And it survives the round trip through the file: the same table comes
+	// back from config.get.
+	value, ok := h.field(t, h.get(t), "tts.lexicon").(map[string]any)
+	if !ok || value["Jarvix"] != "jarviks" {
+		t.Errorf("config.get tts.lexicon = %v", value)
+	}
+}
+
+// A hand-edited [tts.lexicon] section is picked up by config.reload, which is
+// how a user who edits the file directly gets their fix without a restart.
+func TestLexiconHandEditAppliesOnReload(t *testing.T) {
+	h := startSettingsDaemon(t)
+	h.provider.Response = "Kubernetes is healthy."
+
+	edited := settingsConfigTOML + "\n[tts.lexicon]\nkubernetes = \"kates\"\n"
+	if err := os.WriteFile(h.cfgPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Call("config.reload", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.ask(t)
+	if got := h.tts.LastRequest.Text; !strings.Contains(got, "kates") {
+		t.Errorf("spoken text = %q, want the hand-edited pronunciation", got)
+	}
+}
+
 // TestConfigChangedEventIsPublished: every connected client hears about a
 // successful set so open settings screens can refresh.
 func TestConfigChangedEventIsPublished(t *testing.T) {

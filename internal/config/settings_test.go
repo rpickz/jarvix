@@ -18,6 +18,8 @@ func sampleValue(t SettingType) any {
 		return true
 	case TypeStringList:
 		return []string{"a", "b"}
+	case TypeStringMap:
+		return map[string]string{"Golang": "go lang", "nginx": "engine ex"}
 	}
 	return nil
 }
@@ -105,6 +107,14 @@ func TestCoerce(t *testing.T) {
 		{TypeStringList, "", []string{}, false},
 		{TypeStringList, []any{"a"}, []string{"a"}, false},
 		{TypeStringList, []any{1}, nil, true},
+		{TypeStringMap, map[string]any{"Golang": "go lang"}, map[string]string{"Golang": "go lang"}, false},
+		{TypeStringMap, "Golang=go lang, nginx=engine ex",
+			map[string]string{"Golang": "go lang", "nginx": "engine ex"}, false},
+		{TypeStringMap, "", map[string]string{}, false},
+		{TypeStringMap, "no-equals-sign", nil, true},
+		{TypeStringMap, "=nothing", nil, true},
+		{TypeStringMap, map[string]any{"Golang": 3}, nil, true},
+		{TypeStringMap, []any{"Golang"}, nil, true},
 	}
 	for _, tc := range cases {
 		s := Setting{Key: "test", Type: tc.typ}

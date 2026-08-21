@@ -184,6 +184,7 @@ func engineOptions(cfg config.Config, logger *slog.Logger) session.Options {
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		Intents:           intentRouter(cfg),
 		Context:           contextCollector(cfg, logger),
+		Lexicon:           cfg.TTS.Lexicon,
 	}
 }
 

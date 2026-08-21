@@ -20,11 +20,20 @@ var (
 	reBlankLines = regexp.MustCompile(`\n{2,}`)
 )
 
-// speechText turns assistant markdown into plain prose suitable for TTS.
-// Spoken output must never contain backticks, asterisks, or bullet glyphs —
-// engines read them literally. List items become sentences so the rhythm
-// stays natural.
-func speechText(s string) string {
+// defaultSpeech normalizes with the shipped lexicon and no user entries —
+// what speechText uses, and the fallback for any path without an engine to
+// carry the configured one.
+var defaultSpeech = newSpeechNormalizer(nil)
+
+// speechText turns assistant text into the form Jarvix speaks: markdown
+// stripped, mispronounced terms respelled, numbers expanded. The overlay
+// still shows the original text; only the spoken form is normalized.
+func speechText(s string) string { return defaultSpeech.text(s) }
+
+// markdownProse strips assistant markdown down to plain prose. Spoken output
+// must never contain backticks, asterisks, or bullet glyphs — engines read
+// them literally. List items become sentences so the rhythm stays natural.
+func markdownProse(s string) string {
 	s = reCodeFence.ReplaceAllString(s, " ")
 	s = reLink.ReplaceAllString(s, "$1")
 	s = reInlineCode.ReplaceAllString(s, "$1")
@@ -40,8 +49,7 @@ func speechText(s string) string {
 	// The regexes above only strip paired/anchored markers; an unpaired
 	// backtick or asterisk ("2 * 3", a stray ` in prose) would survive and be
 	// read aloud literally. Found by FuzzSpeechText — strip the stragglers.
-	s = strings.ReplaceAll(s, "`", " ")
-	s = strings.ReplaceAll(s, "*", " ")
+	s = stripSpeechMarkers(s)
 	s = reMultiSpace.ReplaceAllString(s, " ")
 	s = reBlankLines.ReplaceAllString(s, "\n")
 
@@ -60,4 +68,12 @@ func speechText(s string) string {
 		lines[i] = line
 	}
 	return strings.TrimSpace(strings.Join(lines, " "))
+}
+
+// stripSpeechMarkers removes the markdown glyphs a TTS engine would read
+// aloud. It is applied to lexicon replacements too, so a spoken form written
+// into config.toml cannot reintroduce what the rest of this file removes.
+func stripSpeechMarkers(s string) string {
+	s = strings.ReplaceAll(s, "`", " ")
+	return strings.ReplaceAll(s, "*", " ")
 }

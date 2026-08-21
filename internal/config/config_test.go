@@ -399,6 +399,29 @@ func TestDocumentedConfigExamplesAreValid(t *testing.T) {
 	}
 }
 
+// The pronunciation lexicon is a hand-editable table of user entries. It
+// defaults to empty: the shipped respellings live in the speech layer, so
+// what is in the file is only ever what the user asked for (issue #30).
+func TestLexiconLoadsFromTOML(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[tts.lexicon]
+Kubernetes = "koo ber net eez"
+"k9s" = "kay nine ess"
+`)
+	if got := cfg.TTS.Lexicon["Kubernetes"]; got != "koo ber net eez" {
+		t.Errorf("lexicon[Kubernetes] = %q", got)
+	}
+	if got := cfg.TTS.Lexicon["k9s"]; got != "kay nine ess" {
+		t.Errorf("lexicon[k9s] = %q", got)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("a lexicon must validate: %v", err)
+	}
+	if len(Default().TTS.Lexicon) != 0 {
+		t.Errorf("the default lexicon should be empty, got %v", Default().TTS.Lexicon)
+	}
+}
+
 func TestIntentsDefaultOn(t *testing.T) {
 	cfg := Default()
 	if !cfg.Intents.Enabled {

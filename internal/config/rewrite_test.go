@@ -108,6 +108,82 @@ func TestRewriteRejectsUnknownKey(t *testing.T) {
 	}
 }
 
+// A table-valued setting is edited as a table. TOML forbids defining the same
+// table twice, so writing the lexicon as an inline value next to an existing
+// [tts.lexicon] section would produce a document that does not parse — the
+// section's body is replaced in place instead, and everything around it
+// survives (issue #30).
+func TestRewriteReplacesATableInPlace(t *testing.T) {
+	doc := `# hand written
+[tts]
+provider = "kokoro"
+
+[tts.lexicon]
+golang = "goh lang"
+
+[log]
+level = "info"
+`
+	got, err := RewriteTOML([]byte(doc), map[string]any{
+		"tts.lexicon": map[string]string{"Golang": "go lang", "nginx": "engine ex"},
+	})
+	if err != nil {
+		t.Fatalf("RewriteTOML: %v", err)
+	}
+	want := `# hand written
+[tts]
+provider = "kokoro"
+
+[tts.lexicon]
+Golang = "go lang"
+nginx = "engine ex"
+
+[log]
+level = "info"
+`
+	if string(got) != want {
+		t.Errorf("rewrite mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	cfg, err := ParseBytes(got)
+	if err != nil {
+		t.Fatalf("rewritten document does not parse: %v", err)
+	}
+	if cfg.TTS.Lexicon["Golang"] != "go lang" || len(cfg.TTS.Lexicon) != 2 {
+		t.Errorf("lexicon after rewrite = %v", cfg.TTS.Lexicon)
+	}
+}
+
+// With no section to replace, the table is appended — and a term that is not
+// a bare TOML key is quoted rather than written as a broken document.
+func TestRewriteAppendsATableAndQuotesAwkwardKeys(t *testing.T) {
+	got, err := RewriteTOML([]byte("[tts]\nprovider = \"kokoro\"\n"), map[string]any{
+		"tts.lexicon": map[string]string{"C++": "see plus plus"},
+	})
+	if err != nil {
+		t.Fatalf("RewriteTOML: %v", err)
+	}
+	want := "[tts]\nprovider = \"kokoro\"\n\n[tts.lexicon]\n\"C++\" = \"see plus plus\"\n"
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Clearing a lexicon leaves an empty table rather than a stale one.
+func TestRewriteClearsATable(t *testing.T) {
+	doc := "[tts.lexicon]\ngolang = \"goh lang\"\n"
+	got, err := RewriteTOML([]byte(doc), map[string]any{"tts.lexicon": map[string]string{}})
+	if err != nil {
+		t.Fatalf("RewriteTOML: %v", err)
+	}
+	cfg, err := ParseBytes(got)
+	if err != nil {
+		t.Fatalf("rewritten document does not parse: %v", err)
+	}
+	if len(cfg.TTS.Lexicon) != 0 {
+		t.Errorf("lexicon = %v after clearing", cfg.TTS.Lexicon)
+	}
+}
+
 func TestEncodeTOMLValue(t *testing.T) {
 	cases := []struct {
 		in   any

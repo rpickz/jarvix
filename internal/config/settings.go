@@ -37,6 +37,10 @@ const (
 	TypeFloat      SettingType = "float"
 	TypeBool       SettingType = "bool"
 	TypeStringList SettingType = "string_list"
+	// TypeStringMap is a table of string → string, written as its own TOML
+	// table ([tts.lexicon]). Clients may send a JSON object or the CLI's
+	// "key=value,key=value" form.
+	TypeStringMap SettingType = "string_map"
 )
 
 // Setting describes one editable configuration option: where it lives in the
@@ -78,6 +82,8 @@ func (s Setting) Coerce(v any) (any, error) {
 		return coerceBool(v)
 	case TypeStringList:
 		return coerceStringList(v)
+	case TypeStringMap:
+		return coerceStringMap(v)
 	}
 	return nil, fmt.Errorf("%s: unknown setting type %q", s.Key, s.Type)
 }
@@ -131,6 +137,20 @@ func Settings() []Setting {
 		{Key: "tts.kokoro.speed", Label: "Kokoro speed", Type: TypeFloat, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.TTS.Kokoro.Speed },
 			set: func(c *Config, v any) { c.TTS.Kokoro.Speed = v.(float64) }},
+		// Idle class, like the rest of the voice: the normalizer that holds
+		// the lexicon is rebuilt with the engine's collaborators, so a fix to
+		// a mispronounced word is spoken on the next answer — no restart.
+		// Get copies, and never returns nil, so the daemon's "did this change"
+		// comparison sees a value rather than the map the config is holding.
+		{Key: "tts.lexicon", Label: "Pronunciation lexicon", Type: TypeStringMap, Reload: ReloadIdle,
+			Get: func(c Config) any {
+				out := make(map[string]string, len(c.TTS.Lexicon))
+				for term, spoken := range c.TTS.Lexicon {
+					out[term] = spoken
+				}
+				return out
+			},
+			set: func(c *Config, v any) { c.TTS.Lexicon = v.(map[string]string) }},
 
 		{Key: "stt.whisper.model", Label: "Whisper model", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.STT.Whisper.Model },
@@ -360,4 +380,46 @@ func coerceStringList(v any) ([]string, error) {
 		return out, nil
 	}
 	return nil, fmt.Errorf("expected a list of strings, got %T", v)
+}
+
+// coerceStringMap accepts a JSON object of strings or the CLI's comma form
+// ("Golang=go lang,nginx=engine ex"). An empty string means an empty table,
+// so a lexicon can be cleared from the CLI. The returned map is never nil:
+// "no entries" is a value the rewrite and the change-detection can compare.
+func coerceStringMap(v any) (map[string]string, error) {
+	switch t := v.(type) {
+	case map[string]string:
+		if t == nil {
+			return map[string]string{}, nil
+		}
+		return t, nil
+	case map[string]any:
+		out := make(map[string]string, len(t))
+		for key, raw := range t {
+			s, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("expected string values, got a %T for %q", raw, key)
+			}
+			out[key] = s
+		}
+		return out, nil
+	case string:
+		out := map[string]string{}
+		if strings.TrimSpace(t) == "" {
+			return out, nil
+		}
+		for _, pair := range strings.Split(t, ",") {
+			key, value, ok := strings.Cut(pair, "=")
+			if !ok {
+				return nil, fmt.Errorf("expected key=value pairs, got %q", pair)
+			}
+			key = strings.TrimSpace(key)
+			if key == "" {
+				return nil, fmt.Errorf("expected key=value pairs, got %q", pair)
+			}
+			out[key] = strings.TrimSpace(value)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("expected a table of strings, got %T", v)
 }

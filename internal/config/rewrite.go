@@ -65,6 +65,15 @@ func RewriteTOML(doc []byte, changes map[string]any) ([]byte, error) {
 
 	out := string(doc)
 	for _, key := range keys {
+		// A map is a TOML *table*, not a value on a line, so it is edited as
+		// a table — see rewriteTable.
+		if table, ok := changes[key].(map[string]string); ok {
+			var err error
+			if out, err = rewriteTable(out, key, table); err != nil {
+				return nil, fmt.Errorf("%s: %w", key, err)
+			}
+			continue
+		}
 		encoded, err := encodeTOMLValue(changes[key])
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", key, err)
@@ -197,6 +206,87 @@ func rewriteOne(doc, key, encoded string) (string, error) {
 		out += "\n\n"
 	}
 	return out + "[" + table + "]\n" + bare + " = " + encoded + "\n", nil
+}
+
+// rewriteTable sets a whole table ([tts.lexicon]) to the given entries. A
+// table-valued setting cannot go through rewriteOne: TOML forbids defining
+// the same table twice, so writing `lexicon = { … }` under [tts] next to an
+// existing [tts.lexicon] section would produce a document that does not
+// parse. The table's own body is replaced instead, which is also the shape a
+// hand-editor wrote and expects to keep reading.
+//
+// The body — every line from the header to the table's last key — is
+// replaced wholesale, so comments *inside* the table do not survive being
+// rewritten from the settings surface. Comments elsewhere, including the ones
+// above the header, are untouched.
+func rewriteTable(doc, key string, entries map[string]string) (string, error) {
+	lines := strings.Split(doc, "\n")
+	idx, err := scanDoc(lines)
+	if err != nil {
+		return "", err
+	}
+	// An inline table already on a line ("lexicon = { … }") stays inline.
+	if _, ok := idx.keys[key]; ok {
+		return rewriteOne(doc, key, encodeTOMLInlineTable(entries))
+	}
+
+	body := encodeTOMLTableBody(entries)
+	if header, ok := idx.tables[key]; ok {
+		out := append([]string{}, lines[:header+1]...)
+		out = append(out, body...)
+		out = append(out, lines[idx.last[key]+1:]...)
+		return strings.Join(out, "\n"), nil
+	}
+
+	out := strings.TrimRight(doc, "\n")
+	if out != "" {
+		out += "\n\n"
+	}
+	out += "[" + key + "]\n"
+	for _, line := range body {
+		out += line + "\n"
+	}
+	return out, nil
+}
+
+// encodeTOMLTableBody renders the entries of a table, one key per line, in a
+// deterministic order so repeated rewrites are byte-identical.
+func encodeTOMLTableBody(entries map[string]string) []string {
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	body := make([]string, 0, len(keys))
+	for _, k := range keys {
+		body = append(body, encodeTOMLKey(k)+" = "+encodeTOMLString(entries[k]))
+	}
+	return body
+}
+
+// encodeTOMLInlineTable renders entries as `{ a = "b", c = "d" }`.
+func encodeTOMLInlineTable(entries map[string]string) string {
+	body := encodeTOMLTableBody(entries)
+	if len(body) == 0 {
+		return "{}"
+	}
+	return "{ " + strings.Join(body, ", ") + " }"
+}
+
+// encodeTOMLKey renders a table key, quoting anything that is not a bare key.
+func encodeTOMLKey(k string) string {
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		bare := c == '_' || c == '-' ||
+			(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !bare {
+			return encodeTOMLString(k)
+		}
+	}
+	if k == "" {
+		return `""`
+	}
+	return k
 }
 
 // scanDoc walks the document tracking the current table and the extent of
