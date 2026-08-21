@@ -64,7 +64,7 @@ func TestAdvisorPolicyTiersFollowWhatTheAdvisorCanDo(t *testing.T) {
 }
 
 func TestProviderKeysAreWithheldFromAdvisors(t *testing.T) {
-	cfg := config.Default()
+	cfg := testConfig()
 	names := strings.Join(providerKeyEnvNames(cfg), " ")
 	for _, want := range []string{"OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
 		if !strings.Contains(names, want) {
@@ -105,7 +105,7 @@ func TestAdvisorToolIsRegisteredOnlyWhenConfigured(t *testing.T) {
 		t.Errorf("advisor.ask should be registered: %v", names)
 	}
 
-	none := config.Default()
+	none := testConfig()
 	if names := newTestDaemon(t, none).registry.Names(); contains(names, tools.AdvisorToolName) {
 		t.Errorf("advisor.ask must not be registered with no advisors: %v", names)
 	}

@@ -34,6 +34,14 @@ api_key = "unit-test-inline-marker"
 
 [tts]
 provider = "piper" # fast to set up
+
+# Desktop context off: these sessions are real, and gathering would run
+# hyprctl and wl-paste against whatever machine the suite is on. Context has
+# its own tests in internal/desktop and internal/session.
+[context]
+window = false
+selection = false
+clipboard = false
 `
 
 // settingsHarness is a daemon over a real socket, booted from a config file
@@ -47,7 +55,7 @@ type settingsHarness struct {
 
 func startSettingsDaemon(t *testing.T) *settingsHarness {
 	t.Helper()
-	dir := t.TempDir()
+	dir := daemonTempDir(t)
 	paths := config.Paths{
 		Config:  dir,
 		Data:    dir,

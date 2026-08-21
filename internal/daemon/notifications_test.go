@@ -42,7 +42,7 @@ func (w *windowSpy) count() int {
 // config and collaborators.
 func startNotifyDaemon(t *testing.T, cfg config.Config, notifier desktop.Notifier, opener func(context.Context) error, provider *ai.Fake) *ipc.Client {
 	t.Helper()
-	dir := t.TempDir()
+	dir := daemonTempDir(t)
 	paths := config.Paths{
 		Config:  dir,
 		Data:    dir,
@@ -123,7 +123,7 @@ func waitForNotifications(t *testing.T, fake *desktop.FakeNotifier, n int) []des
 
 func TestFinishedSessionNotifiesWithAnswerPreview(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open,
+	client := startNotifyDaemon(t, testConfig(), fake, (&windowSpy{}).open,
 		&ai.Fake{Response: "Recursion is a function calling itself."})
 
 	runSession(t, client, "explain recursion")
@@ -144,7 +144,7 @@ func TestFinishedSessionNotifiesWithAnswerPreview(t *testing.T) {
 func TestNotificationPreviewTruncatesLongAnswers(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
 	long := strings.Repeat("all work and no play makes jarvix a dull daemon ", 5)
-	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open, &ai.Fake{Response: long})
+	client := startNotifyDaemon(t, testConfig(), fake, (&windowSpy{}).open, &ai.Fake{Response: long})
 
 	runSession(t, client, "ramble")
 
@@ -159,7 +159,7 @@ func TestNotificationPreviewTruncatesLongAnswers(t *testing.T) {
 
 func TestNotificationPreviewOffHidesContent(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.UI.NotificationPreview = false
 	client := startNotifyDaemon(t, cfg, fake, (&windowSpy{}).open,
 		&ai.Fake{Response: "The secret answer."})
@@ -174,7 +174,7 @@ func TestNotificationPreviewOffHidesContent(t *testing.T) {
 
 func TestNotificationsDisabledSendsNothing(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.UI.Notifications = false
 	client := startNotifyDaemon(t, cfg, fake, (&windowSpy{}).open, &ai.Fake{Response: "Quiet."})
 
@@ -189,7 +189,7 @@ func TestNotificationsDisabledSendsNothing(t *testing.T) {
 
 func TestErrorSessionNotifiesStageAndMessage(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open,
+	client := startNotifyDaemon(t, testConfig(), fake, (&windowSpy{}).open,
 		&ai.Fake{Response: "irrelevant", Fail: errors.New("model exploded")})
 
 	runSession(t, client, "boom")
@@ -205,7 +205,7 @@ func TestErrorSessionNotifiesStageAndMessage(t *testing.T) {
 
 func TestErrorNotificationWithoutPreviewKeepsStageOnly(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.UI.NotificationPreview = false
 	client := startNotifyDaemon(t, cfg, fake, (&windowSpy{}).open,
 		&ai.Fake{Fail: errors.New("secret-ish detail")})
@@ -224,7 +224,7 @@ func TestErrorNotificationWithoutPreviewKeepsStageOnly(t *testing.T) {
 func TestNotificationClickOpensWindow(t *testing.T) {
 	fake := &desktop.FakeNotifier{InvokeAction: desktop.DefaultActionID}
 	spy := &windowSpy{}
-	client := startNotifyDaemon(t, config.Default(), fake, spy.open, &ai.Fake{Response: "Hello."})
+	client := startNotifyDaemon(t, testConfig(), fake, spy.open, &ai.Fake{Response: "Hello."})
 
 	runSession(t, client, "hi")
 
@@ -240,7 +240,7 @@ func TestNotificationClickOpensWindow(t *testing.T) {
 func TestDismissedNotificationLeavesWindowClosed(t *testing.T) {
 	fake := &desktop.FakeNotifier{} // InvokeAction "" = dismissed/expired
 	spy := &windowSpy{}
-	client := startNotifyDaemon(t, config.Default(), fake, spy.open, &ai.Fake{Response: "Hello."})
+	client := startNotifyDaemon(t, testConfig(), fake, spy.open, &ai.Fake{Response: "Hello."})
 
 	runSession(t, client, "hi")
 
@@ -254,7 +254,7 @@ func TestDismissedNotificationLeavesWindowClosed(t *testing.T) {
 func TestAbsentNotificationDaemonDegradesQuietly(t *testing.T) {
 	fake := &desktop.FakeNotifier{Err: errors.New("no notification daemon on the bus")}
 	spy := &windowSpy{}
-	client := startNotifyDaemon(t, config.Default(), fake, spy.open, &ai.Fake{Response: "Hello."})
+	client := startNotifyDaemon(t, testConfig(), fake, spy.open, &ai.Fake{Response: "Hello."})
 
 	// The session must still complete normally; delivery failure is log-only.
 	runSession(t, client, "hi")
@@ -269,7 +269,7 @@ func TestAbsentNotificationDaemonDegradesQuietly(t *testing.T) {
 
 func TestConversationGetReturnsTurns(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open,
+	client := startNotifyDaemon(t, testConfig(), fake, (&windowSpy{}).open,
 		&ai.Fake{Response: "Recursion is a function calling itself."})
 
 	runSession(t, client, "explain recursion")
@@ -305,7 +305,7 @@ func TestConversationGetReturnsTurns(t *testing.T) {
 // conversation and the user never learns what went wrong.
 func TestConversationGetReportsTheLastFailure(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
-	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open,
+	client := startNotifyDaemon(t, testConfig(), fake, (&windowSpy{}).open,
 		&ai.Fake{Fail: errors.New("model exploded")})
 
 	runSession(t, client, "explain recursion")
@@ -332,7 +332,7 @@ func TestConversationGetReportsTheLastFailure(t *testing.T) {
 func TestConversationGetClearsTheFailureOnTheNextSession(t *testing.T) {
 	fake := &desktop.FakeNotifier{}
 	provider := &ai.Fake{Fail: errors.New("model exploded")}
-	client := startNotifyDaemon(t, config.Default(), fake, (&windowSpy{}).open, provider)
+	client := startNotifyDaemon(t, testConfig(), fake, (&windowSpy{}).open, provider)
 
 	runSession(t, client, "first")
 	waitForNotifications(t, fake, 1)

@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai/openaicompat"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
@@ -81,7 +83,7 @@ func assistantSystemPrompt(cfg config.Config) string {
 
 // engineOptions maps configuration onto engine options, shared by New and by
 // config reloads so both always agree on the translation.
-func engineOptions(cfg config.Config) session.Options {
+func engineOptions(cfg config.Config, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -94,7 +96,29 @@ func engineOptions(cfg config.Config) session.Options {
 		ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		Intents:           intentRouter(cfg),
+		Context:           contextCollector(cfg, logger),
 	}
+}
+
+// contextCollector builds the desktop-context collector (ADR 0018), or leaves
+// the option nil when every source is switched off.
+//
+// The explicit nil return matters more than it looks: assigning a typed-nil
+// *desktop.Collector into the interface field would leave the engine holding
+// a non-nil interface and gathering "nothing" on every turn. Disabled must
+// mean absent.
+func contextCollector(cfg config.Config, logger *slog.Logger) session.ContextCollector {
+	c := desktop.NewCollector(desktop.Options{
+		Window:    cfg.Context.Window,
+		Selection: cfg.Context.Selection,
+		Clipboard: cfg.Context.Clipboard,
+		MaxChars:  cfg.Context.MaxChars,
+		Timeout:   time.Duration(cfg.Context.TimeoutMs) * time.Millisecond,
+	}, logger)
+	if c == nil {
+		return nil
+	}
+	return c
 }
 
 // intentRouter compiles the deterministic intent table (ADR 0017). Nil means

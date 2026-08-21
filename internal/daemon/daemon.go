@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -167,11 +168,22 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			"intents", len(router.Names()))
 	}
 
+	// What Jarvix may look at is stated at startup, once, in the journal: an
+	// ambient-capture feature should never be something a user discovers by
+	// reading the source (ADR 0018).
+	if sources := cfg.Context.EnabledSources(); len(sources) > 0 {
+		logger.Info("desktop context enabled", "component", "context",
+			"sources", strings.Join(sources, ","),
+			"max_chars", cfg.Context.MaxChars, "timeout_ms", cfg.Context.TimeoutMs)
+	} else {
+		logger.Info("desktop context disabled", "component", "context")
+	}
+
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
 	store := &history.File{Path: paths.HistoryFile()}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, registry, store, bus, logger, engineOptions(cfg))
+		deps.Recorder, deps.Player, registry, store, bus, logger, engineOptions(cfg, logger))
 
 	if deps.Notifier == nil {
 		deps.Notifier = &desktop.NotifySend{}
@@ -389,6 +401,7 @@ func (d *Daemon) registerMethods() {
 		}, nil
 	})
 	d.registerConfigMethods()
+	d.registerContextMethods()
 }
 
 // effectivePolicy reports the permission gate as it actually applies: the

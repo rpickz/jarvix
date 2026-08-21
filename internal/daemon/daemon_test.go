@@ -19,7 +19,7 @@ import (
 // engines faked: the complete integration surface minus hardware.
 func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := daemonTempDir(t)
 	paths := config.Paths{
 		Config:  dir,
 		Data:    dir,
@@ -27,7 +27,7 @@ func startDaemon(t *testing.T) (*ipc.Client, *ai.Fake) {
 		Runtime: dir,
 		Socket:  filepath.Join(dir, "j.sock"),
 	}
-	cfg := config.Default()
+	cfg := testConfig()
 	// Fake voice flows start and stop capture instantly; the accidental-tap
 	// guard has its own tests in internal/session.
 	cfg.Audio.MinRecordingMs = 0
@@ -213,12 +213,12 @@ func TestStatusReportsEffectivePolicy(t *testing.T) {
 // declines it, and the daemon never runs anything — the fake provider then
 // answers from the declined result.
 func TestConfirmOverSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := daemonTempDir(t)
 	paths := config.Paths{
 		Config: dir, Data: dir, State: dir, Runtime: dir,
 		Socket: filepath.Join(dir, "j.sock"),
 	}
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.Audio.MinRecordingMs = 0
 	// Persistence runs async after session.finished and would race t.TempDir
 	// cleanup ("directory not empty"); it has its own tests in

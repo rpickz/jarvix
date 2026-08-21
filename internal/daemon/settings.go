@@ -288,7 +288,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		return false, err.Error()
 	}
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, engineOptions(merged)); err != nil {
+		deps.Recorder, deps.Player, engineOptions(merged, d.log)); err != nil {
 		// The engine kept its old collaborators. Live settings still land, so
 		// the notification switches never wait on an idle engine.
 		d.cfgMu.Lock()
