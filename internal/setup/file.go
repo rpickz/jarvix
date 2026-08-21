@@ -11,8 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/rpickz/jarvix/internal/config"
 )
 
 // File is a minimal, comment-preserving editor for config.toml. The wizard
@@ -171,28 +172,26 @@ func (f *File) Set(table, key, value string) {
 // Save writes the file back if anything changed, creating the directory and
 // file on first use. Unchanged files are left untouched.
 //
-// The file is 0600, matching every other piece of user state Jarvix writes
-// (history, the IPC socket). config.toml is not a secret store — API keys are
-// read from the environment on purpose — but it does record local paths, the
-// machine's advisor binaries, and the user's shell-tool policy, none of which
-// is anyone else's business on a shared machine (raised in review of #20).
+// The write goes through config.WriteFileAtomic, the same temp-file-and-
+// rename path the settings screen uses (ADR 0015), so both writers of
+// config.toml agree on mode 0600 and on never leaving a truncated config
+// behind. The wizard used to write 0644 directly. config.toml is not a
+// secret store — API keys are read from the environment on purpose — but it
+// records local paths, the machine's advisor binaries, and the shell-tool
+// policy, none of which is anyone else's business on a shared machine
+// (raised in review of #20).
+//
+// A config left 0644 by an earlier build is tightened rather than preserved:
+// the rename brings the fresh 0600 temp file's mode with it.
 func (f *File) Save() error {
 	if !f.dirty {
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
-		return err
 	}
 	content := strings.Join(f.lines, "\n")
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
-	if err := os.WriteFile(f.path, []byte(content), 0o600); err != nil {
-		return err
-	}
-	// WriteFile only applies its mode to a file it creates, so a config left
-	// 0644 by an earlier build (or by hand) would keep those modes forever.
-	if err := os.Chmod(f.path, 0o600); err != nil {
+	if err := config.WriteFileAtomic(f.path, []byte(content)); err != nil {
 		return err
 	}
 	f.dirty = false
