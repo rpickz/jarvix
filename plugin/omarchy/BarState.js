@@ -67,6 +67,49 @@ function tooltip(status) {
   return status.label + " — " + status.detail
 }
 
+// The states that are phases of a session — the ones whose tooltip earns an
+// elapsed counter and live tool detail. Mirrors desktop.busyBarStateKeys.
+var busyStates = {
+  "acting": true,
+  "awaiting_confirmation": true,
+  "cancelling": true,
+  "listening": true,
+  "responding": true,
+  "speaking": true,
+  "thinking": true,
+  "transcribing": true,
+  "working": true
+}
+
+// formatElapsed mirrors desktop.formatActivityElapsed: "12s", then "1m05s"
+// past a minute.
+function formatElapsed(sec) {
+  sec = Math.max(0, Math.floor(sec || 0))
+  if (sec < 60) return sec + "s"
+  var s = sec % 60
+  return Math.floor(sec / 60) + "m" + (s < 10 ? "0" : "") + s + "s"
+}
+
+// liveTooltip mirrors desktop.LiveTooltip: the state's label plus the most
+// informative detail of the moment — the confirmation question while one is
+// pending, the running tool's own label or name while one is in flight, the
+// static detail otherwise — prefixed with how long this phase has run.
+// Non-session states keep their plain tooltip.
+function liveTooltip(status, elapsedSec, tool, toolDetail, question) {
+  if (!status) return ""
+  if (!busyStates[status.key]) return tooltip(status)
+  var detail = status.detail
+  var q = String(question || "")
+  var td = String(toolDetail || "")
+  var tn = String(tool || "")
+  if (status.key === "awaiting_confirmation" && q !== "") detail = q
+  else if (td !== "") detail = td.replace(/…$/, "")
+  else if (tn !== "") detail = "running " + tn
+  if (Math.floor(elapsedSec || 0) > 0) detail = formatElapsed(elapsedSec) + " · " + detail
+  if (detail === "") return status.label
+  return status.label + " — " + detail
+}
+
 // The panel's menu, in draw order. Every command already exists: the plugin's
 // own IPC surface — the same handler "jarvix window" and a clicked
 // notification go through — or the CLI. Mirrors desktop.BarActionsFor.
