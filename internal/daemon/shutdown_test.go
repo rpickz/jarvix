@@ -73,8 +73,27 @@ func startShutdownDaemon(t *testing.T, tune func(d *Daemon), override func(*Deps
 	store.SaveGate = gate
 	var once sync.Once
 	release := func() { once.Do(func() { close(gate) }) }
-	// Whatever the test asserts, nothing may be left parked on the gate.
-	t.Cleanup(release)
+	// Whatever the test asserts, nothing may be left parked on the gate — and
+	// once released, the tail it parked must actually *finish* before the
+	// t.TempDir above is removed. The think tail continues past the history
+	// save into the archive append, which lands in a real FileStore under
+	// that TempDir; a harness that only released would race the append
+	// against RemoveAll — the very "directory not empty" flake the drain
+	// exists to kill, reintroduced by the test (#74). The daemon is stopped
+	// by a later-registered (so earlier-run) cleanup, which makes this
+	// re-drain a bounded wait on the released tail, not a second shutdown.
+	var drainEngine func(context.Context) error // bound once the daemon exists
+	t.Cleanup(func() {
+		release()
+		if drainEngine == nil {
+			return // New failed; there is no engine to wait for
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := drainEngine(ctx); err != nil {
+			t.Errorf("engine had not quiesced by the end of the test: %v", err)
+		}
+	})
 
 	logs := &syncBuffer{}
 	deps := Deps{
@@ -97,6 +116,7 @@ func startShutdownDaemon(t *testing.T, tune func(d *Daemon), override func(*Deps
 	if tune != nil {
 		tune(d)
 	}
+	drainEngine = d.engine.Shutdown
 
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})

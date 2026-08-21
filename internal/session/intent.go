@@ -57,7 +57,13 @@ func (e *Engine) routeIntentLocked(s *sess) bool {
 		e.failLocked(s, "session", err)
 		return true
 	}
-	go e.runIntent(s, m, utterance, time.Now())
+	// Tracked in e.active like think(): the tail of runIntent is where an
+	// intent turn's history and archive writes live, and an untracked goroutine
+	// there is invisible to both Shutdown's drain and Reconfigure's — a daemon
+	// stop (or an engine rebuild) could then race the archive append, which is
+	// exactly the post-session-work loss #29 closed for the think path (#74).
+	started := time.Now()
+	e.active.Go(func() { e.runIntent(s, m, utterance, started) })
 	return true
 }
 
