@@ -407,3 +407,102 @@ func TestInventoryIsNotTruncatedByTheDiagnosticCap(t *testing.T) {
 		t.Fatalf("windows = %d, err = %v, want %d", len(got), err, windows)
 	}
 }
+
+// TestPlacementArgvPerDialect pins the placement dispatches routines make
+// (ADR 0025) in both dialects. Every one is a *set* rather than a toggle —
+// `setfloating`, never `togglefloating`; `exact`, never a delta — because a
+// routine re-run must converge on the same layout, not oscillate around it.
+func TestPlacementArgvPerDialect(t *testing.T) {
+	const addr = "0x55d8e53e7c60"
+	tests := []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"float on lua", floatArgs(dialectLua, addr, true),
+			[]string{"dispatch", `hl.dsp.window.set_floating({ window = "address:0x55d8e53e7c60", floating = true })`}},
+		{"float on legacy", floatArgs(dialectLegacy, addr, true),
+			[]string{"dispatch", "setfloating", "address:0x55d8e53e7c60"}},
+		{"float off lua", floatArgs(dialectLua, addr, false),
+			[]string{"dispatch", `hl.dsp.window.set_floating({ window = "address:0x55d8e53e7c60", floating = false })`}},
+		{"float off legacy", floatArgs(dialectLegacy, addr, false),
+			[]string{"dispatch", "settiled", "address:0x55d8e53e7c60"}},
+		{"resize lua", resizeArgs(dialectLua, addr, 1200, 800),
+			[]string{"dispatch", `hl.dsp.window.resize({ window = "address:0x55d8e53e7c60", width = 1200, height = 800, exact = true })`}},
+		{"resize legacy", resizeArgs(dialectLegacy, addr, 1200, 800),
+			[]string{"dispatch", "resizewindowpixel", "exact 1200 800,address:0x55d8e53e7c60"}},
+		{"position lua", positionArgs(dialectLua, addr, 100, -50),
+			[]string{"dispatch", `hl.dsp.window.position({ window = "address:0x55d8e53e7c60", x = 100, y = -50, exact = true })`}},
+		{"position legacy", positionArgs(dialectLegacy, addr, 100, -50),
+			[]string{"dispatch", "movewindowpixel", "exact 100 -50,address:0x55d8e53e7c60"}},
+		{"master lua", masterArgs(dialectLua, addr),
+			[]string{"dispatch", `hl.dsp.layout.swap_with_master({ window = "address:0x55d8e53e7c60" })`}},
+		{"master legacy", masterArgs(dialectLegacy, addr),
+			[]string{"dispatch", "layoutmsg", "swapwithmaster"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.Join(tt.got, "\x00") != strings.Join(tt.want, "\x00") {
+				t.Fatalf("argv = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPlacementVerbsRefuseNonsenseBeforeDispatching mirrors the workspace and
+// spawn guards: a malformed address or an absurd geometry is refused before
+// anything is rendered into a dispatch.
+func TestPlacementVerbsRefuseNonsenseBeforeDispatching(t *testing.T) {
+	bin := writeStub(t, "hyprctl", "#!/bin/sh\nprintf 'ok\\n'\n")
+	h := &Hyprland{Binary: bin}
+	ctx := context.Background()
+	const good = "0xabc123"
+	for _, addr := range []string{"", "abc", `0x12"; id`, "address:0x12"} {
+		if err := h.SetFloating(ctx, addr, true); err == nil {
+			t.Errorf("SetFloating(%q) was dispatched", addr)
+		}
+		if err := h.PromoteMaster(ctx, addr); err == nil {
+			t.Errorf("PromoteMaster(%q) was dispatched", addr)
+		}
+	}
+	for _, wh := range [][2]int{{0, 100}, {100, 0}, {-1, 100}, {maxPixel + 1, 100}} {
+		if err := h.ResizeWindow(ctx, good, wh[0], wh[1]); err == nil {
+			t.Errorf("ResizeWindow(%d, %d) was dispatched", wh[0], wh[1])
+		}
+	}
+	for _, xy := range [][2]int{{maxPixel + 1, 0}, {0, -maxPixel - 1}} {
+		if err := h.PositionWindow(ctx, good, xy[0], xy[1]); err == nil {
+			t.Errorf("PositionWindow(%d, %d) was dispatched", xy[0], xy[1])
+		}
+	}
+}
+
+// TestPromoteMasterFocusesFirst pins the two-dispatch shape: the legacy
+// layout message has no window selector, so the seam focuses the window and
+// then swaps — and it does the same on Lua so both dialects behave alike.
+func TestPromoteMasterFocusesFirst(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeStub(t, "hyprctl", `#!/bin/sh
+printf '%s\n' "$*" >> "`+dir+`/calls"
+printf 'ok\n'
+`)
+	h := &Hyprland{Binary: bin}
+	if err := h.PromoteMaster(context.Background(), "0xabc123"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// First call is the dialect probe; then focus, then the swap.
+	if len(calls) != 3 {
+		t.Fatalf("calls = %q, want probe + focus + swap", calls)
+	}
+	if !strings.Contains(calls[1], "address:0xabc123") {
+		t.Errorf("second call %q does not focus the window", calls[1])
+	}
+	if !strings.Contains(calls[2], "swap_with_master") && !strings.Contains(calls[2], "swapwithmaster") {
+		t.Errorf("third call %q is not the master swap", calls[2])
+	}
+}

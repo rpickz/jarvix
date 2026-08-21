@@ -153,6 +153,24 @@ type Compositor interface {
 	// name or absolute path — see spawnPattern for why that is a rule and not
 	// a convention.
 	Spawn(ctx context.Context, program string) error
+	// SetFloating puts the window at address into (true) or back out of
+	// (false) the floating layer. It is a set, not a toggle, on purpose:
+	// routines re-run (ADR 0025), and a toggle applied twice undoes itself
+	// while a set applied twice converges.
+	SetFloating(ctx context.Context, address string, floating bool) error
+	// ResizeWindow sets a floating window's size in pixels. On a tiled window
+	// the compositor's answer is its own — the layout owns tiled geometry,
+	// which is why callers float first.
+	ResizeWindow(ctx context.Context, address string, width, height int) error
+	// PositionWindow moves a floating window's top-left corner to x,y in
+	// pixels. Coordinates may be negative: on a multi-monitor layout the
+	// global origin is wherever the user arranged it to be.
+	PositionWindow(ctx context.Context, address string, x, y int) error
+	// PromoteMaster makes the window at address its workspace's master
+	// window — the big pane of a master/stack layout. Implementations may
+	// need to focus the window to do it (see Hyprland.PromoteMaster), so
+	// callers should expect the user's view to follow.
+	PromoteMaster(ctx context.Context, address string) error
 }
 
 // Compositor call bounds. A window action is a local IPC round trip: if it has
@@ -294,6 +312,67 @@ func (h *Hyprland) Spawn(ctx context.Context, program string) error {
 	})
 }
 
+// maxPixel bounds any pixel value before it may be rendered into a dispatch.
+// It is defensive rather than load-bearing — every caller's value came from
+// validated configuration and is rendered with strconv, never interpolated as
+// syntax — but a bound means a corrupted value fails as a sentence instead of
+// as a window teleported somewhere no monitor will ever be.
+const maxPixel = 32768
+
+// SetFloating implements Compositor.
+func (h *Hyprland) SetFloating(ctx context.Context, address string, floating bool) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return floatArgs(d, address, floating)
+	})
+}
+
+// ResizeWindow implements Compositor.
+func (h *Hyprland) ResizeWindow(ctx context.Context, address string, width, height int) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	if width <= 0 || height <= 0 || width > maxPixel || height > maxPixel {
+		return fmt.Errorf("refusing to resize a window to %d by %d pixels", width, height)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return resizeArgs(d, address, width, height)
+	})
+}
+
+// PositionWindow implements Compositor.
+func (h *Hyprland) PositionWindow(ctx context.Context, address string, x, y int) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	if x < -maxPixel || x > maxPixel || y < -maxPixel || y > maxPixel {
+		return fmt.Errorf("refusing to move a window to %d,%d", x, y)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return positionArgs(d, address, x, y)
+	})
+}
+
+// PromoteMaster implements Compositor.
+//
+// The window is focused first, and that is a workaround stated openly rather
+// than hidden: the legacy dialect's layout message (`layoutmsg
+// swapwithmaster`) takes no window selector — it acts on whatever has focus —
+// so naming the window means becoming it for a moment. The Lua form does take
+// a selector, but focusing on both dialects keeps the two behaviourally
+// identical, which matters more than saving the Lua users one dispatch: a
+// routine must place windows the same way on every machine it is written for.
+func (h *Hyprland) PromoteMaster(ctx context.Context, address string) error {
+	if err := h.dispatch(ctx, focusArgs, address, 0); err != nil {
+		return err
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return masterArgs(d, address)
+	})
+}
+
 // clientsArgs builds the inventory invocation. JSON rather than the human
 // format, for the same reason the context gatherer chooses it: `-j` is the
 // documented machine interface, the human one is a display surface.
@@ -396,6 +475,57 @@ func spawnArgs(d dispatchDialect, program string) []string {
 		return []string{"dispatch", "exec", program}
 	}
 	return []string{"dispatch", `hl.dsp.exec_cmd("` + program + `")`}
+}
+
+// floatArgs sets a window's floating state. Legacy spells the two directions
+// as separate dispatchers (`setfloating` / `settiled`) — deliberately not
+// `togglefloating`, whose second application undoes the first; Lua takes the
+// state as a value. Both are sets, which is what makes a re-run routine
+// converge instead of oscillate (ADR 0025).
+func floatArgs(d dispatchDialect, address string, floating bool) []string {
+	if d == dialectLegacy {
+		verb := "settiled"
+		if floating {
+			verb = "setfloating"
+		}
+		return []string{"dispatch", verb, "address:" + address}
+	}
+	return []string{"dispatch",
+		`hl.dsp.window.set_floating({ window = "address:` + address + `", floating = ` + strconv.FormatBool(floating) + ` })`}
+}
+
+// resizeArgs sets a floating window's size. `exact` in both dialects: a
+// relative resize applied twice keeps growing, and routines re-run.
+func resizeArgs(d dispatchDialect, address string, width, height int) []string {
+	w, h := strconv.Itoa(width), strconv.Itoa(height)
+	if d == dialectLegacy {
+		return []string{"dispatch", "resizewindowpixel", "exact " + w + " " + h + ",address:" + address}
+	}
+	return []string{"dispatch",
+		`hl.dsp.window.resize({ window = "address:` + address + `", width = ` + w + `, height = ` + h + `, exact = true })`}
+}
+
+// positionArgs moves a floating window's top-left corner. Exact for the same
+// reason resizeArgs is.
+func positionArgs(d dispatchDialect, address string, x, y int) []string {
+	xs, ys := strconv.Itoa(x), strconv.Itoa(y)
+	if d == dialectLegacy {
+		return []string{"dispatch", "movewindowpixel", "exact " + xs + " " + ys + ",address:" + address}
+	}
+	return []string{"dispatch",
+		`hl.dsp.window.position({ window = "address:` + address + `", x = ` + xs + `, y = ` + ys + `, exact = true })`}
+}
+
+// masterArgs promotes a window to its workspace's master slot. The legacy
+// layout message carries no window selector — PromoteMaster focuses the
+// window first, which is why the address goes unused there; the Lua form
+// names it directly, and PromoteMaster still focuses first so the two
+// dialects behave identically.
+func masterArgs(d dispatchDialect, address string) []string {
+	if d == dialectLegacy {
+		return []string{"dispatch", "layoutmsg", "swapwithmaster"}
+	}
+	return []string{"dispatch", `hl.dsp.layout.swap_with_master({ window = "address:` + address + `" })`}
 }
 
 // dispatch performs one window action.
