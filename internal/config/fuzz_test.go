@@ -37,6 +37,15 @@ api_key = "sk-inline-key"
 	f.Add(`[[ai]]`)                             // array where a table belongs
 	f.Add(`ai = "not a table"`)
 	f.Add(`[tools]` + "\n" + `shell = true`)
+	f.Add(`
+[advisors.claude]
+binary = "/usr/bin/claude"
+
+[advisors.house]
+args = ["--ask", "{question}"]
+timeout_sec = 30
+`)
+	f.Add(`[advisors]` + "\n" + `claude = "not a table"`)
 	f.Add("\x00\xff not toml at all")
 	f.Fuzz(func(t *testing.T, doc string) {
 		cfg, err := parse([]byte(doc), Default())

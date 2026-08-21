@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/doctor"
 )
 
@@ -236,8 +237,10 @@ func chooseOllama(d AIDeps, models []string) error {
 }
 
 // KnownAdvisorCLIs are the assistant CLIs the wizard looks for on PATH.
-// Detection is exec.LookPath only — no network, no invocation.
-var KnownAdvisorCLIs = []string{"claude", "codex", "gemini", "aider", "goose", "opencode"}
+// Detection is exec.LookPath only — no network, no invocation. The list is
+// the shipped preset table itself, so what the wizard records is always
+// something the runtime knows how to invoke.
+var KnownAdvisorCLIs = config.KnownAdvisors()
 
 // AdvisorsDeps are the injected dependencies of the advisor detection step.
 type AdvisorsDeps struct {
@@ -249,9 +252,10 @@ type AdvisorsDeps struct {
 }
 
 // AdvisorsStep detects installed assistant CLIs and records them as
-// [advisors.<name>] tables. Jarvix does not execute advisors yet — the
-// delegation feature (issue #3) consumes these tables when it lands; the
-// wizard only writes the shape so that feature works out of the box.
+// [advisors.<name>] tables. Recording one is all delegation needs: the
+// shipped preset supplies the non-interactive argv and timeout, and the
+// assistant can then hand a question too big for the local model to that CLI
+// and speak its answer (ADR 0016).
 func AdvisorsStep(d AdvisorsDeps) Step {
 	return Step{
 		Title: "Advisor CLIs (stronger assistants)",
@@ -275,8 +279,9 @@ func AdvisorsStep(d AdvisorsDeps) Step {
 				fprintf(d.Out, "No known assistant CLIs found on PATH (looked for: %v).\nNothing to configure — re-run jarvix setup after installing one.\n", KnownAdvisorCLIs)
 				return nil
 			}
-			fprintln(d.Out, "These assistant CLIs are installed; recording them lets Jarvix delegate")
-			fprintln(d.Out, "heavyweight questions to them once delegation ships (each keeps its own auth).")
+			fprintln(d.Out, "These assistant CLIs are installed; recording one lets Jarvix hand it a")
+			fprintln(d.Out, "question too big for the local model and speak the answer (each keeps its")
+			fprintln(d.Out, "own auth and billing; Jarvix never passes its own API keys on).")
 			for _, name := range names {
 				if d.Prompt.Confirm(fmt.Sprintf("Record %s (%s) as an advisor?", name, found[name]), true) {
 					setValue(d.File, d.Prompt, d.Out, "advisors."+name, "binary", found[name])
