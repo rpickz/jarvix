@@ -27,7 +27,7 @@ import (
 // helper deliberately turns off.
 func startTypingDaemon(t *testing.T, shape func(*config.Config)) (*ipc.Client, *ai.Fake) {
 	t.Helper()
-	dir := daemonTempDir(t)
+	dir := t.TempDir()
 	paths := config.Paths{
 		Config: dir, Data: dir, State: dir, Runtime: dir,
 		Socket: filepath.Join(dir, "j.sock"),
@@ -50,24 +50,8 @@ func startTypingDaemon(t *testing.T, shape func(*config.Config)) (*ipc.Client, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = d.Run(ctx) }()
-
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		client, err = ipc.Dial(paths.Socket)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("daemon socket never came up: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	return client, provider
+	serveDaemon(t, d)
+	return dialDaemon(t, paths.Socket), provider
 }
 
 // waitForEvent drains until the wanted event arrives, failing on any error

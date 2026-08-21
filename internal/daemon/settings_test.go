@@ -55,7 +55,7 @@ type settingsHarness struct {
 
 func startSettingsDaemon(t *testing.T) *settingsHarness {
 	t.Helper()
-	dir := daemonTempDir(t)
+	dir := t.TempDir()
 	paths := config.Paths{
 		Config:  dir,
 		Data:    dir,
@@ -89,22 +89,8 @@ func startSettingsDaemon(t *testing.T) *settingsHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = d.Run(ctx) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		h.client, err = ipc.Dial(paths.Socket)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("daemon socket never came up: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Cleanup(func() { _ = h.client.Close() })
+	serveDaemon(t, d)
+	h.client = dialDaemon(t, paths.Socket)
 	return h
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -114,11 +115,14 @@ type Engine struct {
 	// with; read without the lock like the other swappable collaborators.
 	speech *speechNormalizer
 
-	// active tracks the session goroutines (transcribe, think) that read the
-	// swappable collaborators and options without holding mu. Reconfigure
-	// waits on it so a swap never races a draining goroutine — a cancelled
-	// session's think() can still be executing briefly after current is nil.
-	active sync.WaitGroup
+	// active tracks the session goroutines (transcribe, think, recording
+	// teardown) that read the swappable collaborators and options without
+	// holding mu. Reconfigure waits on it so a swap never races a draining
+	// goroutine — a cancelled session's think() can still be executing briefly
+	// after current is nil (ADR 0015) — and Shutdown waits on it so the daemon
+	// does not exit through the tail of a finished session, which is where the
+	// post-finish history write lives (ADR 0011).
+	active quiesce.Group
 
 	mu      sync.Mutex
 	state   State
@@ -134,6 +138,10 @@ type Engine struct {
 	// reconfiguring blocks new sessions for the brief window in which
 	// Reconfigure drains e.active before swapping collaborators.
 	reconfiguring bool
+	// shuttingDown latches in Shutdown: the engine is stopping for good and
+	// refuses new sessions from that moment on, so the drain has a door it can
+	// close rather than chasing work that keeps arriving.
+	shuttingDown bool
 
 	// Conversation memory: prior exchanges carried across sessions so
 	// follow-up questions have context. Guarded by mu.
@@ -270,7 +278,15 @@ func (e *Engine) StartSession() (string, error) {
 // turn and a pending confirmation (text.go) — can start the session without
 // dropping the lock in between. Releasing it would open a window in which the
 // state it just read no longer holds.
+//
+// Every refusal a new session can meet lives here rather than in StartSession,
+// so a second entry point cannot be added that quietly skips one: typed input
+// (SubmitText) is refused by a shutting-down engine on exactly the same terms
+// as a spoken turn.
 func (e *Engine) startSessionLocked() (string, error) {
+	if e.shuttingDown {
+		return "", fmt.Errorf("the daemon is shutting down")
+	}
 	if e.reconfiguring {
 		// Milliseconds at most: Reconfigure only drains goroutine tails.
 		return "", fmt.Errorf("new settings are being applied; try again in a moment")
@@ -355,8 +371,7 @@ func (e *Engine) StopVoice() (discarded bool, err error) {
 	// some later stage happened to begin.
 	s.timings.markCaptureStop()
 	e.publish(Event{Type: "recording.stopped", Data: map[string]any{"session_id": s.id}})
-	e.active.Add(1)
-	go func() { defer e.active.Done(); e.transcribe(s, rec) }()
+	e.active.Go(func() { e.transcribe(s, rec) })
 	return false, nil
 }
 
@@ -470,7 +485,9 @@ func (e *Engine) cancelLocked(reason string) {
 		rec := s.recording
 		s.recording = nil
 		// Recording teardown can block briefly; do not hold the lock for it.
-		go rec.Cancel()
+		// Tracked all the same: it is a subprocess and a file handle, and a
+		// shutdown that raced it would leave both behind.
+		e.active.Go(rec.Cancel)
 	}
 	if e.state.Active() {
 		_ = e.setStateLocked(StateCancelling)
@@ -590,8 +607,7 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		e.failLocked(s, "session", err)
 		return
 	}
-	e.active.Add(1)
-	go func() { defer e.active.Done(); e.think(s) }()
+	e.active.Go(func() { e.think(s) })
 }
 
 // transcribe runs STT on a finished recording, then hands over to the
@@ -925,6 +941,42 @@ func (e *Engine) ResetConversation() {
 	e.log.Debug("conversation history cleared", "component", "session")
 }
 
+// Shutdown stops the engine for good and waits for its work to finish.
+//
+// It exists because a session is not over when the user thinks it is. The
+// exchange is committed to history and session.finished is published, and
+// only *then* — off the lock, on the tail of think() — is the conversation
+// written to disk, so that disk I/O adds no latency to the spoken answer
+// (ADR 0011). Nothing used to wait for that write, so a shutdown landing in
+// the gap (a `systemctl --user restart jarvixd`, an update) dropped the last
+// exchange from the persisted conversation. Shutdown closes that gap: no new
+// session may start, any session in flight is cancelled, and every tracked
+// session goroutine — transcribe, think, the recording teardown, and with
+// them the history write — is waited for.
+//
+// The wait is bounded by ctx and Shutdown returns ctx.Err() when it expires:
+// a wedged disk must never keep the daemon alive. Callers log what did not
+// settle and exit anyway.
+//
+// Shutdown is idempotent, and on an already-quiescent engine it returns nil
+// even for an expired ctx — so a second call is a cheap assertion that
+// everything really has stopped.
+func (e *Engine) Shutdown(ctx context.Context) error {
+	e.mu.Lock()
+	e.shuttingDown = true
+	// A session in flight is not worth waiting out: it is a live model stream
+	// with a person no longer there to hear it. Cancelling is what makes the
+	// drain finite — the stages watch s.ctx and unwind.
+	e.cancelLocked("the daemon is shutting down")
+	e.mu.Unlock()
+	return e.active.Wait(ctx)
+}
+
+// InFlight reports how many session goroutines are still running. It is there
+// for the shutdown log: when a drain gives up, the count is the difference
+// between one stuck history write and a session that never unwound.
+func (e *Engine) InFlight() int { return e.active.InFlight() }
+
 // Reconfigure swaps the engine's collaborators and options for a new
 // configuration without a daemon restart. It refuses while a session is
 // active: adapters are only ever swapped between sessions, never under one —
@@ -951,8 +1003,12 @@ func (e *Engine) Reconfigure(provider ai.Provider, transcriber stt.Transcriber,
 	e.reconfiguring = true
 	e.mu.Unlock()
 
-	// No new session can start now; drain the tails of past sessions.
-	e.active.Wait()
+	// No new session can start now; drain the tails of past sessions. The wait
+	// is unbounded on purpose: a reload that gave up early would swap
+	// collaborators out from under a goroutine still reading them, which is
+	// the race this drain exists to prevent. Shutdown is the bounded caller —
+	// there, exiting late is worse than exiting with work outstanding.
+	_ = e.active.Wait(context.Background())
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
