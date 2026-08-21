@@ -153,31 +153,11 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger
 	return deps, workers, nil
 }
 
-// assistantSystemPrompt is the system prompt the engine runs with: the
-// configured base plus the instructions for each enabled tool. The tool
-// flags decide the suffixes because the tool registry is built from them —
-// on a reload the running (booted) tool flags are what matter, not the file.
+// assistantSystemPrompt is the system prompt the engine runs with. The
+// composition lives in config.AssistantSystemPrompt so doctor's context-floor
+// check (issue #71) measures the same prompt the daemon sends, from one copy.
 func assistantSystemPrompt(cfg config.Config) string {
-	prompt := cfg.AI.SystemPrompt
-	if cfg.Tools.Shell {
-		prompt += config.ToolSystemPrompt
-	}
-	if cfg.Tools.Artifacts {
-		prompt += config.ArtifactSystemPrompt
-	}
-	if cfg.Tools.Desktop {
-		prompt += config.DesktopSystemPrompt
-	}
-	if cfg.Tools.Typing.Enable {
-		prompt += config.TypingSystemPrompt
-	}
-	if len(cfg.Advisors) > 0 {
-		prompt += config.AdvisorSystemPrompt
-	}
-	if cfg.Memory.Enabled {
-		prompt += config.MemorySystemPrompt
-	}
-	return prompt
+	return config.AssistantSystemPrompt(cfg)
 }
 
 // routineRunner builds the routine runner (ADR 0026), or nil when nothing is

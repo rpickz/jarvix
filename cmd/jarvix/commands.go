@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/rpickz/jarvix/internal/ai/openaicompat"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/doctor"
@@ -28,7 +29,7 @@ import (
 // cmdStatus prints the daemon's state. With last set, it also prints the
 // latency budget of the most recent interaction — the "why did that feel slow"
 // answer, without asking anyone to tail the journal.
-func cmdStatus(paths config.Paths, last bool) error {
+func cmdStatus(cfg config.Config, paths config.Paths, last bool) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
 		return err
@@ -47,6 +48,7 @@ func cmdStatus(paths config.Paths, last bool) error {
 	printWake(status["wake"])
 	printWarmWorkers(status["warm"])
 	printConversationSearch(status["conversations"])
+	printPromptBudget(cfg, status["prompt_budget"])
 	if last {
 		printTimings(status["last_timings"])
 		// "What did that cost?" and "what did it see?" are the same question
@@ -92,6 +94,54 @@ func printConversationSearch(v any) {
 		return
 	}
 	fmt.Printf("search:   conversation search active (%.0f archived)\n", toFloat(report["archived"]))
+}
+
+// printPromptBudget renders what one turn sends before the user says a word,
+// against the context window the model is actually served with — the check
+// that would have named the live incident's silent truncation (issue #71).
+// The window is read from ollama best-effort with a short timeout: other
+// providers, or an unreachable ollama, just print the budget alone.
+func printPromptBudget(cfg config.Config, v any) {
+	budget, ok := doctor.BudgetFromReport(v)
+	if !ok {
+		return // an older daemon that predates the budget surface
+	}
+	line := fmt.Sprintf("prompt:   ~%d tokens before you speak (system prompt + tools + memory + context + headroom)",
+		budget.Floor())
+	if window, ok := servedContextWindow(cfg); ok {
+		verdict := "fits"
+		if window < budget.Floor() {
+			verdict = "TOO SMALL — run jarvix doctor"
+		}
+		line += fmt.Sprintf("\n          model context ~%d tokens: %s", window, verdict)
+	}
+	fmt.Println(line)
+}
+
+// servedContextWindow best-effort reads the served model's window from
+// ollama. ok is false for other providers and for any failure — status must
+// never block or nag on a provider that cannot answer.
+func servedContextWindow(cfg config.Config) (int, bool) {
+	if cfg.AI.Provider != "ollama" {
+		return 0, false
+	}
+	ep, ok := cfg.Endpoint()
+	if !ok {
+		return 0, false
+	}
+	client := openaicompat.New(cfg.AI.Provider, ep.BaseURL, ep.Key())
+	served, err := client.OllamaServedContext(context.Background(), cfg.AI.Model)
+	if err != nil {
+		return 0, false
+	}
+	if served.NumCtx > 0 {
+		return served.NumCtx, true
+	}
+	window := doctor.OllamaDefaultContext
+	if served.MaxCtx > 0 && served.MaxCtx < window {
+		window = served.MaxCtx
+	}
+	return window, true
 }
 
 // timingLabels turn the wire keys of session.timings into the pipeline stages

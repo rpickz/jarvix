@@ -594,6 +594,35 @@ const MemorySystemPrompt = " You have a long-term memory of facts, injected abov
 	"in plain words. When they ask you to forget something, use memory.forget. After remembering " +
 	"or forgetting, confirm what changed in one short sentence."
 
+// AssistantSystemPrompt is the system prompt the engine runs with: the
+// configured base plus the instructions for each enabled tool. The tool
+// flags decide the suffixes because the tool registry is built from them —
+// on a reload the running (booted) tool flags are what matter, not the file.
+// It lives here rather than in the daemon so doctor's context-floor check
+// (issue #71) measures the same prompt the daemon sends, from one copy.
+func AssistantSystemPrompt(cfg Config) string {
+	prompt := cfg.AI.SystemPrompt
+	if cfg.Tools.Shell {
+		prompt += ToolSystemPrompt
+	}
+	if cfg.Tools.Artifacts {
+		prompt += ArtifactSystemPrompt
+	}
+	if cfg.Tools.Desktop {
+		prompt += DesktopSystemPrompt
+	}
+	if cfg.Tools.Typing.Enable {
+		prompt += TypingSystemPrompt
+	}
+	if len(cfg.Advisors) > 0 {
+		prompt += AdvisorSystemPrompt
+	}
+	if cfg.Memory.Enabled {
+		prompt += MemorySystemPrompt
+	}
+	return prompt
+}
+
 // minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
 // warm (whisper base.en alone is ~165 MB resident). A cap below it would
 // retire the worker the moment it loaded its model, turning warm mode into a

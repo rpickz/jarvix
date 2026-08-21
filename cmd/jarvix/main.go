@@ -82,9 +82,9 @@ func run(args []string) int {
 		// "no flag": `jarvix status --lastt` must not look like it worked.
 		switch {
 		case len(rest) == 0:
-			err = cmdStatus(paths, false)
+			err = cmdStatus(cfg, paths, false)
 		case rest[0] == "--last":
-			err = cmdStatus(paths, true)
+			err = cmdStatus(cfg, paths, true)
 		default:
 			return fail(fmt.Errorf("usage: jarvix status [--last]"))
 		}
