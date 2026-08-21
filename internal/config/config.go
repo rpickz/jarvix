@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/hotkey"
+	"github.com/rpickz/jarvix/internal/intent"
 )
 
 // Config is the root configuration document.
@@ -24,6 +25,7 @@ type Config struct {
 	STT          STT          `toml:"stt"`
 	TTS          TTS          `toml:"tts"`
 	Conversation Conversation `toml:"conversation"`
+	Intents      Intents      `toml:"intents"`
 	Tools        Tools        `toml:"tools"`
 	Artifacts    Artifacts    `toml:"artifacts"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
@@ -291,6 +293,7 @@ func Default() Config {
 			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
 		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900},
+		Intents:      Intents{Enabled: true, Terminal: intent.DefaultTerminal},
 		Tools: Tools{
 			Shell: false, ShellTimeoutSec: 30, ShellMaxOutputKB: 16, Artifacts: true,
 			Policy: ToolsPolicy{
@@ -490,6 +493,7 @@ func (c Config) Validate() error {
 		}
 	}
 	problems = append(problems, c.validateAdvisors()...)
+	problems = append(problems, c.intentProblems()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:

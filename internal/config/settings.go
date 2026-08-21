@@ -156,6 +156,17 @@ func Settings() []Setting {
 			Get: func(c Config) any { return c.Conversation.FollowUpWindowSec },
 			set: func(c *Config, v any) { c.Conversation.FollowUpWindowSec = v.(int) }},
 
+		// The intent table itself is rebuilt with the engine, so these are
+		// idle-class. [[intents.custom]] entries stay hand-edited TOML — like
+		// [ai.<name>] endpoints, they are structured tables rather than single
+		// values — and land on the next idle-class reload or restart.
+		{Key: "intents.enabled", Label: "Deterministic intents", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Intents.Enabled },
+			set: func(c *Config, v any) { c.Intents.Enabled = v.(bool) }},
+		{Key: "intents.terminal", Label: "Terminal for \"open terminal\"", Type: TypeString, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Intents.Terminal },
+			set: func(c *Config, v any) { c.Intents.Terminal = v.(string) }},
+
 		{Key: "audio.input_device", Label: "Microphone device", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Audio.InputDevice },
 			set: func(c *Config, v any) { c.Audio.InputDevice = v.(string) }},

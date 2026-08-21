@@ -17,6 +17,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/history"
+	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -47,6 +48,13 @@ type Options struct {
 	// are cleared with the conversation — they never survive `jarvix new`,
 	// the follow-up window, or a daemon restart.
 	RememberApprovals bool
+	// Intents is the deterministic intent router consulted before every
+	// provider call (ADR 0017). Nil disables routing: every transcript goes
+	// to the model, exactly as it did before the router existed.
+	Intents *intent.Router
+	// IntentRunner executes matched intents. Nil alongside a router installs
+	// the real one; tests substitute a fake so no test touches wpctl.
+	IntentRunner intent.Runner
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -140,6 +148,9 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 	store history.Store, bus *Bus, logger *slog.Logger, opts Options) *Engine {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if opts.Intents != nil && opts.IntentRunner == nil {
+		opts.IntentRunner = &intent.ExecRunner{Log: logger}
 	}
 	e := &Engine{
 		provider: provider,
@@ -477,6 +488,13 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 	}
 	if strings.TrimSpace(s.transcript) == "" {
 		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))
+		return
+	}
+	// The deterministic intent router gets the transcript first (ADR 0017).
+	// A hit executes a local action and finishes the session without ever
+	// opening a provider request; a miss costs one map lookup and falls
+	// through to think() unchanged.
+	if e.routeIntentLocked(s) {
 		return
 	}
 	if err := e.setStateLocked(StateThinking); err != nil {

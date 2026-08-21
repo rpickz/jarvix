@@ -50,11 +50,14 @@ to each field in the settings screen:
 | Class | Options | When it takes effect |
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response) | Immediately on save, even mid-session |
-| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `audio.*` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*`, `stt.whisper.*`, `conversation.*`, `audio.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `activation.ptt_chord`, `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, tool registry, artifact tool, and logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly) |
 
 A reload that fails validation keeps the running configuration and reports
-why — the daemon never hot-swaps into a broken state. Secrets never pass
+why — the daemon never hot-swaps into a broken state. `[[intents.custom]]`
+entries are structured tables rather than single values, so like
+`[ai.<name>]` they stay hand-edited; they are picked up by the next
+idle-class reload or a restart. Secrets never pass
 through the settings surface: API keys are shown as presence only
 ("OPENAI_API_KEY: set") and cannot be entered there; manage them via the
 environment as described below. Endpoint tables (`[ai.<name>]`) also stay
@@ -159,6 +162,17 @@ shell_deny = []                  # extra command prefixes that never run,
                                  # artifact directory. Unknown tools default
                                  # to "ask".
 
+[intents]                        # the deterministic intent router (Phase 3)
+enabled = true                   # false = every utterance goes to the AI
+terminal = "alacritty"           # what "open terminal" launches; a single
+                                 # executable name or absolute path (it is run
+                                 # directly, never through a shell)
+
+[[intents.custom]]               # your own phrases; repeat the block per intent
+match = "lock the screen"        # literal phrase, matched whole and exactly
+run = "hyprlock"                 # shell command, subject to [tools.policy]
+say = "Locking."                 # spoken acknowledgement (default: "Done.")
+
 [conversation]
 speak_responses = true           # false = text-only sessions
 history_turns = 16               # remember this many prior exchanges as context
@@ -239,6 +253,68 @@ Voice names resolve by searching `/usr/share/piper-voices` (the Arch
 [Piper voices collection](https://huggingface.co/rhasspy/piper-voices) works:
 download the `.onnx` + `.onnx.json` pair and point `tts.piper.voice` at the
 `.onnx` path.
+
+## Deterministic intents (`[intents]`)
+
+Some things are not questions. "Volume thirty" has exactly one right outcome,
+and waiting seconds for a language model to reach it is absurd — so Jarvix
+matches a table of fixed phrases *before* the AI and, on a hit, runs a local
+command in microseconds with no model call at all
+([ADR 0017](adr/0017-deterministic-intent-router.md)).
+
+The shipped table:
+
+| Intent | Say | Runs |
+|---|---|---|
+| `volume.set` | "volume thirty", "volume 30", "set the volume to 55", "volume 20 percent" | `wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ <n>%` |
+| `volume.up` | "volume up", "louder", "turn it up", "turn the volume up" | `wpctl set-volume … 5%+` |
+| `volume.down` | "volume down", "quieter", "turn it down", "turn the volume down" | `wpctl set-volume … 5%-` |
+| `volume.mute` | "mute", "mute the volume/audio/sound" | `wpctl set-mute … 1` |
+| `volume.unmute` | "unmute", "unmute the volume/audio/sound" | `wpctl set-mute … 0` |
+| `speech.stop` | "stop", "stop talking", "be quiet", "shut up", "enough" | stops speech — **acknowledged with silence** |
+| `conversation.new` | "new conversation", "start over", "forget that", "clear the conversation" | the same reset as `jarvix new` |
+| `workspace.switch` | "workspace 4", "go to workspace four", "switch to workspace 4" | `hyprctl dispatch workspace <n>` |
+| `terminal.open` | "open terminal", "open a terminal", "new terminal" | `hyprctl dispatch exec <[intents] terminal>` |
+
+Numbers work spoken or written — "volume thirty" and "volume 30" are the same
+request — anywhere from 0 to 150 (workspaces 1–10).
+
+**Matching is strict, and that is the feature.** A pattern must match the
+*whole* utterance, word for word. "Turn it up" is an intent; "turn it up a
+bit" is not, and goes to the AI, which is exactly where an ambiguous request
+belongs. Nothing is fuzzy-matched, and a value outside the allowed range
+(`volume 500`) is treated as a miss rather than quietly clamped. A matched
+intent is still recorded in the conversation, so a follow-up like "a bit
+louder" reaches the model with the context it needs.
+
+`jarvix doctor` checks that `wpctl`, `hyprctl`, and your terminal are
+installed. A command that fails (or a missing binary) gets one spoken line —
+the session never hangs.
+
+### Your own intents (`[[intents.custom]]`)
+
+```toml
+[[intents.custom]]
+match = "good night"
+run = "systemctl suspend"
+say = "Good night."
+```
+
+`match` is a literal phrase (no placeholders — a slot would mean splicing
+speech into a shell command). `run` is a real shell command, so it goes
+through the **tool permission gate** exactly like the assistant's own calls,
+under the tool name `intent.run`: by default it asks for confirmation before
+running. To make your own intents instant, either allow that identity —
+
+```toml
+[tools.policy.tool]
+"intent.run" = "allow"           # deny rules (rm -rf /, …) still apply
+```
+
+— or allow-list just the commands you use (`shell_allow = ["hyprlock"]`).
+
+A malformed entry fails validation at startup, naming the entry:
+`intents.custom[1]: match "…" has no run command`.
 
 ## Tools (assistant actions)
 

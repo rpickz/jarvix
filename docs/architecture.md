@@ -46,6 +46,7 @@ Package layout (all internal — Jarvix exposes no Go API yet):
 | `internal/stt` | `Transcriber` interface + fake; `stt/whispercpp` adapter |
 | `internal/tts` | `Synthesizer` interface + fake; `tts/piper` adapter |
 | `internal/audio` | `Recorder`/`Player` interfaces + fakes; PipeWire impl |
+| `internal/intent` | Deterministic intent router: grammar table, slot parsing, command runner |
 | `internal/daemon` | Wires config → engines → IPC methods |
 | `internal/doctor` | Environment checks with actionable fixes |
 
@@ -63,8 +64,14 @@ stateDiagram-v2
     [*] --> Idle
     Idle --> Listening : voice.start
     Idle --> Thinking : session.submit {text}
+    Idle --> Acting : submitted text matches an intent
     Listening --> Transcribing : voice.stop
     Transcribing --> Thinking : transcript final + submitted
+    Transcribing --> Acting : transcript matches an intent
+    Acting --> AwaitingConfirmation : user-defined intent needs the gate
+    AwaitingConfirmation --> Acting : approved / declined / timeout
+    Acting --> Speaking : acknowledgement
+    Acting --> Idle : silent intent ("stop")
     Thinking --> Responding : first token
     Thinking --> AwaitingConfirmation : tool call needs the user
     Responding --> AwaitingConfirmation : tool call needs the user
@@ -78,6 +85,7 @@ stateDiagram-v2
     Thinking --> Cancelling
     Responding --> Cancelling
     AwaitingConfirmation --> Cancelling
+    Acting --> Cancelling
     Speaking --> Cancelling
     Cancelling --> Idle
     Listening --> Error
@@ -85,6 +93,7 @@ stateDiagram-v2
     Thinking --> Error
     Responding --> Error
     AwaitingConfirmation --> Error
+    Acting --> Error
     Speaking --> Error
     Error --> Idle
 ```
@@ -94,6 +103,21 @@ final transcript has arrived **and** the client has submitted — whichever
 order those happen in. Push-to-talk release sends `voice.stop` +
 `session.submit` back-to-back; `jarvix ask` sends `session.submit` with text
 and skips audio entirely.
+
+### Deterministic intents
+
+Before a transcript reaches the model it is offered to an explicit grammar
+table ([ADR 0017](adr/0017-deterministic-intent-router.md)). "Volume thirty",
+"mute", "workspace four", "stop talking" and their table-mates execute a
+fixed local command in microseconds, acknowledge in one phrase, and finish
+the session — no provider request is ever opened, which is why they get their
+own state (`Acting`) rather than borrowing `Thinking`. Matching is strict and
+whole-utterance: a near-miss like "turn it up a bit" is not claimed, and
+reaches the assistant exactly as it did before the router existed (~230ns
+later). A matched intent is still committed to conversation history, so the
+follow-up that *does* reach the model has the context. User-defined intents
+(`[[intents.custom]]`) run real shell commands and therefore pass the same
+permission gate the model's tool calls do.
 
 ### Tool confirmations
 

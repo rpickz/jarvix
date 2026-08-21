@@ -294,3 +294,95 @@ func BenchmarkDecideAllowListed(b *testing.B) {
 		}
 	}
 }
+
+// TestDecideCommandGatesUserIntents covers the user-defined intent path (ADR
+// 0015): the command is classified by the same shell analysis the model's
+// calls face, under its own tool identity so it can be configured separately.
+func TestDecideCommandGatesUserIntents(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        PolicyConfig
+		command    string
+		want       PolicyDecision
+		ruleHas    string
+		summarised bool
+	}{
+		{
+			name:    "unclassified command asks by default",
+			cfg:     PolicyConfig{Default: PolicyAsk},
+			command: "hyprlock", want: PolicyAsk,
+			ruleHas: "no matching pattern", summarised: true,
+		},
+		{
+			name:    "read-only command runs silently",
+			cfg:     PolicyConfig{Default: PolicyAsk},
+			command: "df -h", want: PolicyAllow, ruleHas: "allow pattern",
+		},
+		{
+			name: "the user can allow their own intents wholesale",
+			cfg: PolicyConfig{Default: PolicyAsk, Tools: map[string]PolicyDecision{
+				IntentToolName: PolicyAllow,
+			}},
+			command: "hyprlock", want: PolicyAllow, ruleHas: IntentToolName,
+		},
+		{
+			name: "…but never past a deny rule",
+			cfg: PolicyConfig{Default: PolicyAsk, Tools: map[string]PolicyDecision{
+				IntentToolName: PolicyAllow,
+			}},
+			command: "rm -rf /", want: PolicyDeny, ruleHas: "rm targeting /",
+		},
+		{
+			name:    "an allow pattern silences a configured intent",
+			cfg:     PolicyConfig{Default: PolicyAsk, ShellAllow: []string{"hyprlock"}},
+			command: "hyprlock", want: PolicyAllow, ruleHas: "configured allow pattern",
+		},
+		{
+			name: "intents can be disabled entirely",
+			cfg: PolicyConfig{Default: PolicyAsk, Tools: map[string]PolicyDecision{
+				IntentToolName: PolicyDeny,
+			}},
+			command: "hyprlock", want: PolicyDeny, ruleHas: IntentToolName,
+		},
+		{
+			name:    "shell.run's own setting does not disable user intents",
+			cfg:     PolicyConfig{Default: PolicyAsk, Tools: map[string]PolicyDecision{"shell.run": PolicyDeny}},
+			command: "df -h", want: PolicyAllow, ruleHas: "allow pattern",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewPolicy(tc.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := p.DecideCommand(IntentToolName, tc.command)
+			if v.Decision != tc.want {
+				t.Errorf("decision = %q, want %q (rule %q)", v.Decision, tc.want, v.Rule)
+			}
+			if v.Tool != IntentToolName {
+				t.Errorf("tool = %q, want %q", v.Tool, IntentToolName)
+			}
+			if v.Command != tc.command {
+				t.Errorf("command = %q, want %q", v.Command, tc.command)
+			}
+			if !strings.Contains(v.Rule, tc.ruleHas) {
+				t.Errorf("rule = %q, want it to mention %q", v.Rule, tc.ruleHas)
+			}
+			if tc.summarised && !strings.Contains(v.Summary, tc.command) {
+				t.Errorf("summary %q does not quote the command", v.Summary)
+			}
+			if v.Decision != PolicyAsk && v.Summary != "" {
+				t.Errorf("only the ask tier carries a summary, got %q", v.Summary)
+			}
+		})
+	}
+}
+
+func TestRegistryCheckCommandWithoutPolicy(t *testing.T) {
+	r := NewRegistry(nil)
+	v := r.CheckCommand(IntentToolName, "hyprlock")
+	if v.Decision != PolicyAllow || v.Command != "hyprlock" {
+		t.Errorf("verdict = %+v", v)
+	}
+}

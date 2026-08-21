@@ -297,6 +297,13 @@ func followSession(client *ipc.Client, showTranscript bool) error {
 				fmt.Print(ev.Data["content"])
 			case "assistant.finished":
 				fmt.Println()
+			case "intent.executed":
+				// A deterministic intent produces no assistant.delta stream,
+				// so without this the CLI would say nothing at all about the
+				// thing it just did.
+				if ack, _ := ev.Data["acknowledgement"].(string); ack != "" {
+					fmt.Printf("⚡ %s\n", ack)
+				}
 			case "tts.started":
 				fmt.Println("🔊 speaking (jarvix cancel to stop)")
 			case "tool.started":

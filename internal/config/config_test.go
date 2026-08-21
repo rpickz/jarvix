@@ -398,3 +398,137 @@ func TestDocumentedConfigExamplesAreValid(t *testing.T) {
 		}
 	}
 }
+
+func TestIntentsDefaultOn(t *testing.T) {
+	cfg := Default()
+	if !cfg.Intents.Enabled {
+		t.Error("intents.enabled should default to true")
+	}
+	if cfg.Intents.Terminal == "" {
+		t.Error("intents.terminal needs a default")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("defaults must validate: %v", err)
+	}
+}
+
+func TestCustomIntentsLoad(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[intents]
+enabled = true
+terminal = "ghostty"
+
+[[intents.custom]]
+match = "lock the screen"
+run = "hyprlock"
+say = "Locking."
+
+[[intents.custom]]
+match = "good night"
+run = "systemctl suspend"
+`)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid intents rejected: %v", err)
+	}
+	if cfg.Intents.Terminal != "ghostty" {
+		t.Errorf("terminal = %q", cfg.Intents.Terminal)
+	}
+	if len(cfg.Intents.Custom) != 2 {
+		t.Fatalf("custom intents = %d, want 2", len(cfg.Intents.Custom))
+	}
+	if cfg.Intents.Custom[0].Run != "hyprlock" || cfg.Intents.Custom[0].Say != "Locking." {
+		t.Errorf("first entry = %+v", cfg.Intents.Custom[0])
+	}
+	opts := cfg.IntentOptions()
+	if len(opts.Custom) != 2 || opts.Terminal != "ghostty" {
+		t.Errorf("IntentOptions = %+v", opts)
+	}
+}
+
+// TestMalformedIntentNamesTheEntry is the configuration criterion: a bad
+// pattern fails validation with the offending entry named, not a vague
+// message the user has to bisect their config file to understand.
+func TestMalformedIntentNamesTheEntry(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    string
+		wantSub []string
+	}{
+		{
+			name: "no run command",
+			toml: `
+[[intents.custom]]
+match = "lock the screen"
+`,
+			wantSub: []string{"intents.custom[0]", "lock the screen", "run command"},
+		},
+		{
+			name: "second entry is the broken one",
+			toml: `
+[[intents.custom]]
+match = "lock the screen"
+run = "hyprlock"
+
+[[intents.custom]]
+match = ""
+run = "systemctl suspend"
+`,
+			wantSub: []string{"intents.custom[1]", "match is empty"},
+		},
+		{
+			name: "placeholder in a user pattern",
+			toml: `
+[[intents.custom]]
+match = "volume {volume}"
+run = "wpctl set-volume"
+`,
+			wantSub: []string{"intents.custom[0]", "placeholder"},
+		},
+		{
+			name: "shadows a built-in",
+			toml: `
+[[intents.custom]]
+match = "mute"
+run = "amixer set Master mute"
+`,
+			wantSub: []string{"intents.custom[0]", "built-in intent", "volume.mute"},
+		},
+		{
+			name: "terminal is not a single token",
+			toml: `
+[intents]
+terminal = "alacritty --title x"
+`,
+			wantSub: []string{"intents.terminal", "single executable name"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := writeAndLoad(t, tc.toml).Validate()
+			if err == nil {
+				t.Fatal("expected a validation error")
+			}
+			for _, want := range tc.wantSub {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing mention of %q: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// A disabled router is not validated: a user turning intents off must not be
+// blocked by entries they are no longer using.
+func TestDisabledIntentsSkipValidation(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[intents]
+enabled = false
+
+[[intents.custom]]
+match = ""
+run = ""
+`)
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("disabled intents should not be validated: %v", err)
+	}
+}
