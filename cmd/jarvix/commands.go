@@ -99,9 +99,11 @@ func printConversationSearch(v any) {
 var timingLabels = []struct{ key, label string }{
 	{session.StageCaptureToTranscript, "release → transcript"},
 	{session.StageContext, "desktop context gathered"},
-	{session.StageTranscriptToDelta, "transcript → first token (model)"},
-	{session.StageDeltaToFirstPCM, "first token → first audio sample"},
+	{session.StageTranscriptToDelta, "transcript → first output (model)"},
+	{session.StageDeltaToFirstPCM, "first output → first audio sample"},
 	{session.StageFirstPCMToAudioOut, "first sample → audio out"},
+	{session.StageToolRuns, "tools ran for (excluded)"},
+	{session.StageConfirmWait, "waiting on your confirmation (excluded)"},
 	{session.StageReleaseToFirstAudio, "release → first audio (total)"},
 	{session.StageJarvixOverhead, "  of which Jarvix (excl. model)"},
 }

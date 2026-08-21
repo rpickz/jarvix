@@ -162,7 +162,11 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	if slow {
 		stopProgress = e.startToolProgress(s, call, waiting, speaker)
 	}
+	// Execution time is the user's command running, not Jarvix latency: an
+	// excluded span, reported as tool_ms and kept out of jarvix_ms (#72).
+	s.timings.beginExcluded(StageToolRuns)
 	result := e.tools.Execute(s.ctx, call)
+	s.timings.endExcluded()
 	stopProgress()
 
 	e.publish(Event{Type: "tool.finished", Data: map[string]any{
@@ -316,6 +320,13 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 	// Speak first, then start the clock: the user's 30 seconds begin when
 	// the question has been asked, not while it is still being said.
 	e.speakPrompt(s, req.summary, req.speaker)
+
+	// From here the turn is waiting on the user's decision — time that
+	// belongs to neither Jarvix nor the model. It accrues as the excluded
+	// confirm_wait_ms span (#72), opened exactly where the timeout clock
+	// starts and closed however the wait ends.
+	s.timings.beginExcluded(StageConfirmWait)
+	defer s.timings.endExcluded()
 
 	timerC, stopTimer := e.timer(timeout)
 	defer stopTimer()
