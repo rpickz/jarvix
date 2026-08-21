@@ -11,13 +11,14 @@
 // model untouched. Ambiguity always belongs to the AI; the router only claims
 // utterances it is certain about.
 //
-// Security follows from the same strictness: a built-in intent maps to a
-// FIXED argv (`wpctl set-volume …`, `hyprctl dispatch workspace …`) with no
-// shell involved, and the transcript contributes nothing but a slot value
-// that has been parsed as an integer and bounds-checked. There is no path by
-// which spoken words become part of a command line. User-defined intents do
-// run a shell command, which is why the engine puts them through the tool
-// permission gate (ADR 0014) rather than executing them here.
+// Security follows from the same strictness: a built-in intent maps either to
+// a FIXED argv (`wpctl set-volume …`) with no shell involved, or to a named
+// compositor action the desktop seam renders (Desktop, below), and the
+// transcript contributes nothing but a slot value that has been parsed as an
+// integer and bounds-checked. There is no path by which spoken words become
+// part of a command line. User-defined intents do run a shell command, which
+// is why the engine puts them through the tool permission gate (ADR 0014)
+// rather than executing them here.
 package intent
 
 import (
@@ -32,6 +33,24 @@ import (
 // desktop, so they cannot be expressed as an argv.
 type Control string
 
+// Desktop names an action the engine performs through the compositor seam
+// (internal/desktop, ADR 0022) rather than by running an argv of its own.
+//
+// The distinction is not tidiness, it is the fix for issue #47. `hyprctl
+// dispatch` changed syntax when Hyprland moved its configuration to Lua, and
+// which syntax a given machine speaks is not a version question — it follows
+// the config format, so it has to be *discovered*. The seam discovers it once
+// and remembers it. A table entry that built its own `hyprctl dispatch
+// workspace 4` was therefore a second, un-probed copy of a decision only the
+// seam can make, and on a Lua-configured desktop it was a parse error:
+// "workspace four" did nothing.
+//
+// So the table names the action and the seam decides how to say it. That also
+// buys the honesty half of the same bug: the seam knows `hyprctl` exits 0 for
+// a dispatch the compositor refused, and reports a refusal as a failure the
+// user hears.
+type Desktop string
+
 // The engine-level intent effects.
 const (
 	// ControlNone is a normal intent: run its command, then acknowledge.
@@ -43,6 +62,16 @@ const (
 	// ControlNewConversation clears the carried-over conversation, the same
 	// reset `jarvix new` performs.
 	ControlNewConversation Control = "new_conversation"
+)
+
+// The compositor actions the built-in table uses.
+const (
+	// DesktopNone is an intent that does not touch the compositor.
+	DesktopNone Desktop = ""
+	// DesktopWorkspace takes the user to the workspace in Match.Slot.
+	DesktopWorkspace Desktop = "workspace"
+	// DesktopSpawn starts the program named in Match.Program.
+	DesktopSpawn Desktop = "spawn"
 )
 
 // Match is one routed utterance: everything the engine needs to act, announce,
@@ -60,9 +89,19 @@ type Match struct {
 	Ack string
 	// Control is the engine-level effect, ControlNone for command intents.
 	Control Control
+	// Desktop is the compositor action, DesktopNone for everything else.
+	// A compositor intent carries no Argv: the dispatch syntax depends on the
+	// dialect this machine's compositor speaks, and only the desktop seam
+	// knows that.
+	Desktop Desktop
+	// Program is the executable DesktopSpawn starts. It has been validated as
+	// a single bare token (ValidateTerminal), so it can only ever be one
+	// program name. Empty for every other intent.
+	Program string
 	// Argv is the fixed command line for a built-in intent: argv[0] is the
 	// binary, and any slot value has already been rendered into an argument.
 	// No shell is involved and the transcript never reaches it verbatim.
+	// Empty for a compositor intent, which names a Desktop action instead.
 	Argv []string
 	// Command is a user-defined intent's shell command, exactly as written in
 	// configuration. Empty for built-ins. It is never executed here — the
@@ -137,6 +176,8 @@ type rule struct {
 	name        string
 	pattern     pattern
 	control     Control
+	desktop     Desktop
+	program     string
 	argv        func(slot int) []string
 	ack         func(slot int) string
 	command     string
@@ -148,6 +189,8 @@ type builtin struct {
 	name     string
 	patterns []string
 	control  Control
+	desktop  Desktop
+	program  string
 	argv     func(slot int) []string
 	ack      func(slot int) string
 }
@@ -239,10 +282,8 @@ func builtinTable(terminal string) []builtin {
 				"workspace {workspace}", "go to workspace {workspace}",
 				"switch to workspace {workspace}", "move to workspace {workspace}",
 			},
-			argv: func(n int) []string {
-				return []string{"hyprctl", "dispatch", "workspace", strconv.Itoa(n)}
-			},
-			ack: func(n int) string { return "Workspace " + SpokenNumber(n) },
+			desktop: DesktopWorkspace,
+			ack:     func(n int) string { return "Workspace " + SpokenNumber(n) },
 		},
 		{
 			name: "terminal.open",
@@ -250,17 +291,20 @@ func builtinTable(terminal string) []builtin {
 				"open terminal", "open a terminal", "open the terminal",
 				"new terminal", "launch terminal", "launch a terminal",
 			},
-			argv: func(int) []string {
-				return []string{"hyprctl", "dispatch", "exec", terminal}
-			},
-			ack: func(int) string { return "Terminal." },
+			desktop: DesktopSpawn,
+			program: terminal,
+			ack:     func(int) string { return "Terminal." },
 		},
 	}
 }
 
 // BuiltinBinaries lists the executables the built-in table needs, so `jarvix
 // doctor` can report a missing one before a user discovers it by saying
-// "mute" and hearing an apology.
+// "mute" and hearing an apology. hyprctl is still on the list even though the
+// compositor intents now go through the desktop seam: the seam drives hyprctl
+// too, and a missing one breaks them the same way. Being installed is not
+// sufficient, though — see the doctor check, which also asks whether a
+// dispatch would actually reach a compositor.
 func BuiltinBinaries(terminal string) []string {
 	if strings.TrimSpace(terminal) == "" {
 		terminal = DefaultTerminal
@@ -290,7 +334,8 @@ func New(opts Options) (*Router, error) {
 				return nil, fmt.Errorf("built-in intent %q pattern %q: %w", b.name, raw, err)
 			}
 			builtinNames[p.key()] = b.name
-			r.add(&rule{name: b.name, pattern: p, control: b.control, argv: b.argv, ack: b.ack})
+			r.add(&rule{name: b.name, pattern: p, control: b.control,
+				desktop: b.desktop, program: b.program, argv: b.argv, ack: b.ack})
 		}
 	}
 
@@ -379,6 +424,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 	}
 	m := Match{
 		Name: ru.name, Slot: slot, HasSlot: hasSlot, Control: ru.control,
+		Desktop: ru.desktop, Program: ru.program,
 		Command: ru.command, UserDefined: ru.userDefined,
 	}
 	if ru.argv != nil {

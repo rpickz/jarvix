@@ -82,6 +82,15 @@ func (r *ExecRunner) timeout() time.Duration {
 
 // finish runs the command and turns its failure into one short sentence,
 // because the caller speaks it.
+//
+// Exit status is the whole success test here, and that was checked rather
+// than assumed when #47 turned up a tool for which it is not: hyprctl exits 0
+// for a dispatch the compositor refused. Every argv this runner is now given
+// is wpctl's, and wpctl exits non-zero on every failure it has — an unknown
+// object is 3, a malformed argument 1 — with its diagnostic on the streams
+// CombinedOutput already captures. The tool that lies about its exit status is
+// the compositor, and its intents no longer come through here at all: they go
+// through internal/desktop, which judges a dispatch by the reply.
 func (r *ExecRunner) finish(ctx context.Context, name string, cmd *exec.Cmd) error {
 	logger := r.Log
 	if logger == nil {

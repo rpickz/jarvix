@@ -43,9 +43,12 @@ type FakeCompositor struct {
 
 // FakeAction is one recorded dispatch.
 type FakeAction struct {
-	Verb      string // "focus", "close", "move"
+	Verb      string // "focus", "close", "move", "workspace", "spawn"
 	Address   string
 	Workspace int
+	// Program is the executable a "spawn" was asked to start, empty for the
+	// window verbs.
+	Program string
 }
 
 // NewFakeCompositor builds a fake holding the given inventory.
@@ -98,6 +101,39 @@ func (f *FakeCompositor) Close(ctx context.Context, address string) error {
 // MoveToWorkspace implements Compositor.
 func (f *FakeCompositor) MoveToWorkspace(ctx context.Context, address string, workspace int) error {
 	return f.act(ctx, "move", address, workspace)
+}
+
+// SwitchWorkspace implements Compositor.
+func (f *FakeCompositor) SwitchWorkspace(ctx context.Context, workspace int) error {
+	if workspace < minWorkspace || workspace > maxWorkspace {
+		return fmt.Errorf("workspace %d does not exist", workspace)
+	}
+	return f.record(ctx, FakeAction{Verb: "workspace", Workspace: workspace})
+}
+
+// Spawn implements Compositor.
+func (f *FakeCompositor) Spawn(ctx context.Context, program string) error {
+	if !spawnPattern.MatchString(program) {
+		return fmt.Errorf("refusing to start %q", program)
+	}
+	return f.record(ctx, FakeAction{Verb: "spawn", Program: program})
+}
+
+// record notes a dispatch that names no window. The window verbs cannot use
+// it because they must also check the address against the inventory; these
+// have nothing to check against, which is precisely why they need no
+// BeforeAction hook either — there is no resolution to race.
+func (f *FakeCompositor) record(ctx context.Context, action FakeAction) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return f.Err
+	}
+	f.actions = append(f.actions, action)
+	return f.FailAction
 }
 
 func (f *FakeCompositor) act(ctx context.Context, verb, address string, workspace int) error {

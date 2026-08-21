@@ -21,7 +21,7 @@ import (
 
 func daemonWith(t *testing.T, cfg config.Config) *Daemon {
 	t.Helper()
-	dir := daemonTempDir(t)
+	dir := t.TempDir()
 	d, err := New(cfg, config.Paths{Config: dir, Data: dir, State: dir, Runtime: dir,
 		Socket: filepath.Join(dir, "j.sock")}, nil, Deps{
 		Provider:    &ai.Fake{},

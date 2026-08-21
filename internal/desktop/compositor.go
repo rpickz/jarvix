@@ -141,6 +141,18 @@ type Compositor interface {
 	// Close asks the window at address to close, as its own close button
 	// would — the application may still refuse or prompt.
 	Close(ctx context.Context, address string) error
+	// SwitchWorkspace takes the *user* to a numbered workspace. It is the
+	// mirror image of MoveToWorkspace: that one sends a window away and
+	// leaves the view alone, this one moves the view and leaves the windows
+	// alone. Both exist because "move this to three" and "go to three" are
+	// different requests.
+	SwitchWorkspace(ctx context.Context, workspace int) error
+	// Spawn starts a program as a child of the compositor, so it lands on the
+	// active workspace with the graphical session's environment and outlives
+	// the daemon that asked for it. program must be a single bare executable
+	// name or absolute path — see spawnPattern for why that is a rule and not
+	// a convention.
+	Spawn(ctx context.Context, program string) error
 }
 
 // Compositor call bounds. A window action is a local IPC round trip: if it has
@@ -158,6 +170,12 @@ const (
 	// there because a truncated JSON document parses as no compositor at all,
 	// and that failure must be impossible rather than merely unlikely.
 	maxInventoryOutput = 512 * 1024
+	// minWorkspace and maxWorkspace bound a workspace number before it may be
+	// rendered into a dispatch. Hyprland numbers workspaces from 1; the
+	// negative ids belong to special workspaces, which are named rather than
+	// numbered and are not what anyone means by "workspace four".
+	minWorkspace = 1
+	maxWorkspace = 99
 )
 
 // Hyprland drives the Hyprland compositor through hyprctl, the same
@@ -255,6 +273,27 @@ func (h *Hyprland) MoveToWorkspace(ctx context.Context, address string, workspac
 	return h.dispatch(ctx, moveArgs, address, workspace)
 }
 
+// SwitchWorkspace implements Compositor.
+func (h *Hyprland) SwitchWorkspace(ctx context.Context, workspace int) error {
+	if workspace < minWorkspace || workspace > maxWorkspace {
+		return fmt.Errorf("workspace %d does not exist; workspaces are numbered %d to %d",
+			workspace, minWorkspace, maxWorkspace)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return workspaceArgs(d, workspace)
+	})
+}
+
+// Spawn implements Compositor.
+func (h *Hyprland) Spawn(ctx context.Context, program string) error {
+	if !spawnPattern.MatchString(program) {
+		return fmt.Errorf("refusing to start %q: it is not a program name", program)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return spawnArgs(d, program)
+	})
+}
+
 // clientsArgs builds the inventory invocation. JSON rather than the human
 // format, for the same reason the context gatherer chooses it: `-j` is the
 // documented machine interface, the human one is a display surface.
@@ -275,6 +314,17 @@ func probeArgs() []string { return []string{"dispatch", "hl.dsp.no_op()"} }
 // exactly when a defensive check is worth having, because the value is about
 // to be handed to a program that acts on windows.
 var addressPattern = regexp.MustCompile(`^0x[0-9a-fA-F]{1,32}$`)
+
+// spawnPattern is what a program name must look like before Spawn will send
+// it. This one is load-bearing rather than defensive: the Lua dialect spells a
+// spawn as `hl.dsp.exec_cmd("…")`, so the name is interpolated into a Lua
+// string literal, and the compositor runs that string through a shell. A
+// quote, a backslash, a space or a semicolon would therefore be *syntax* at
+// two levels rather than a program that does not exist. Bounding the value to
+// one bare executable name or absolute path removes both, and it costs
+// nothing: every caller's value is a configured setting, never a spoken or
+// model-chosen string.
+var spawnPattern = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
 
 // dispatchArgs builds one dispatch invocation in the given dialect. Split out
 // per verb, and pure, so the argv guarantees are asserted in table tests
@@ -313,7 +363,56 @@ func moveArgs(d dispatchDialect, address string, workspace int) []string {
 		`hl.dsp.window.move({ workspace = ` + ws + `, window = "address:` + address + `", follow = false })`}
 }
 
+// workspaceArgs moves the user to a workspace. Legacy spells it with the
+// bare `workspace` dispatcher — the form every script and every keybinding on
+// the internet uses, and a Lua parse error on a Lua-configured compositor,
+// which is the whole of issue #47. Lua spells the same thing as focusing a
+// workspace rather than a window: `hl.dsp.focus` takes whichever of `window`
+// or `workspace` it is given.
+func workspaceArgs(d dispatchDialect, workspace int) []string {
+	ws := strconv.Itoa(workspace)
+	if d == dialectLegacy {
+		return []string{"dispatch", "workspace", ws}
+	}
+	return []string{"dispatch", `hl.dsp.focus({ workspace = ` + ws + ` })`}
+}
+
+// spawnArgs starts a program.
+//
+// ADR 0022 declined `hl.dsp.exec_cmd` for the *launch tool*, and that stands:
+// there the program name comes from the model, and handing a model-chosen
+// string to a shell is the thing the whole tool family exists to prevent, so
+// the tool starts a detached child directly instead. Here the name comes from
+// the `[intents] terminal` setting, validated as one bare token when the
+// router compiles and again by spawnPattern before it is rendered — a shell
+// with nothing to chew on. What it buys is the reason "open a terminal" used
+// this route in the first place: the terminal is a child of the compositor,
+// so it lands on the active workspace with the graphical session's
+// environment and survives a daemon restart. Starting it from jarvixd would
+// regress all three, most sharply for a daemon started by systemd outside the
+// session.
+func spawnArgs(d dispatchDialect, program string) []string {
+	if d == dialectLegacy {
+		return []string{"dispatch", "exec", program}
+	}
+	return []string{"dispatch", `hl.dsp.exec_cmd("` + program + `")`}
+}
+
 // dispatch performs one window action.
+func (h *Hyprland) dispatch(ctx context.Context, args dispatchArgs, address string, workspace int) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return args(d, address, workspace)
+	})
+}
+
+// dispatchProbed renders one dispatch in the discovered dialect and runs it.
+// Every dispatch in Jarvix goes through here — the window verbs and the
+// deterministic workspace and terminal intents alike — so the dialect is
+// probed once for all of them and a refusal is judged the same way for all of
+// them.
 //
 // The retry deserves its explanation: a dispatch can fail because the dialect
 // changed underneath us (the user switched their configuration and restarted
@@ -321,17 +420,14 @@ func moveArgs(d dispatchDialect, address string, workspace int) []string {
 // failed. Retrying is only safe because a dispatch in the wrong dialect is a
 // syntax error, which does nothing at all — there is no state to have half
 // changed.
-func (h *Hyprland) dispatch(ctx context.Context, args dispatchArgs, address string, workspace int) error {
-	if !addressPattern.MatchString(address) {
-		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
-	}
+func (h *Hyprland) dispatchProbed(ctx context.Context, argv func(dispatchDialect) []string) error {
 	d := h.probeDialect(ctx)
-	err := h.runDispatch(ctx, args(d, address, workspace))
+	err := h.runDispatch(ctx, argv(d))
 	if err == nil {
 		return nil
 	}
 	if redetected := h.reprobeDialect(ctx); redetected != d {
-		if retryErr := h.runDispatch(ctx, args(redetected, address, workspace)); retryErr == nil {
+		if retryErr := h.runDispatch(ctx, argv(redetected)); retryErr == nil {
 			return nil
 		}
 	}

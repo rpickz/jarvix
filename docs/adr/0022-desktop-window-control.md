@@ -67,7 +67,7 @@ tier from configuration, and the tool supplies the words from what it can see,
 so the model's description of what it is doing is never what the user approves.
 
 **The compositor is an interface; Hyprland is the only implementation.**
-`desktop.Compositor` has five methods and a fake. No test in the tree needs a
+`desktop.Compositor` has a method per verb and a fake. No test in the tree needs a
 running compositor.
 
 ## Consequences
@@ -82,9 +82,23 @@ once with a dispatcher that does nothing (`hl.dsp.no_op()`) and remembers the
 answer, re-probing only after a failure. Both dialects fail as syntax errors,
 which change nothing, so probing can never move a window.
 
-The same change breaks `hyprctl dispatch workspace N` in the deterministic
-intent router (ADR 0017) on a Lua-configured Hyprland. That is a separate
-defect with a separate fix; the dialect logic here is where the fix belongs.
+The same change broke `hyprctl dispatch workspace N` in the deterministic
+intent router (ADR 0017) on a Lua-configured Hyprland
+([#47](https://github.com/rpickz/jarvix/issues/47)). It was fixed where this
+paragraph said it belonged: the router's two compositor intents — "workspace
+four" and "open a terminal" — now name an *action* (`SwitchWorkspace`,
+`Spawn`) that this seam renders in the probed dialect, instead of carrying a
+fixed `hyprctl` argv of their own. There is one dispatch path in the tree and
+one place that decides how a dispatch is written.
+
+`Spawn` is the one exception to the paragraph below on launching, and only
+because its argument is a different kind of value: `[intents] terminal` is a
+configured setting, validated as a single bare token when the router compiles
+and again before it is rendered, never a model-chosen or spoken string. In
+exchange the terminal is a child of the compositor, so it lands on the active
+workspace with the graphical session's environment and outlives a daemon
+restart — which is what the intent always did, and what starting it from
+jarvixd would have regressed.
 
 **Success is what the compositor says, not its exit code.** `hyprctl` exits 0
 for a dispatch the compositor refused — "window not found" arrives on stdout

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -80,6 +81,8 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		if !alive {
 			return // cancelled or superseded; that path owns the events
 		}
+	case m.Desktop != intent.DesktopNone:
+		runErr = e.runDesktopIntent(s, m)
 	case len(m.Argv) > 0:
 		runErr = e.intentRunner().Run(s.ctx, m.Argv)
 	}
@@ -116,6 +119,39 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 	e.finishLocked(s)
 	e.mu.Unlock()
 	e.persistHistory()
+}
+
+// runDesktopIntent carries out an intent that acts on the compositor —
+// "workspace four", "open a terminal" — through the seam the window tools use
+// (ADR 0022) rather than by running an hyprctl command line of its own.
+//
+// That indirection is the fix for #47, and it buys two things the old fixed
+// argv could not have. The dispatch is written in the dialect this machine's
+// compositor was probed for, so it works whether the user configures Hyprland
+// in Lua or hyprlang; and a dispatch the compositor *refused* comes back as an
+// error, because the seam reads the reply rather than trusting hyprctl's exit
+// code. Both halves matter equally: the first made the action fail, the second
+// made the failure inaudible.
+func (e *Engine) runDesktopIntent(s *sess, m intent.Match) error {
+	compositor := e.opts.Compositor
+	if compositor == nil {
+		// No seam wired: off a graphical session, or a daemon built without
+		// one. Saying so is the entire point — the alternative is the
+		// acknowledgement without the action that #47 was about.
+		return fmt.Errorf("I cannot reach the window manager")
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, intent.DefaultTimeout)
+	defer cancel()
+	switch m.Desktop {
+	case intent.DesktopWorkspace:
+		return compositor.SwitchWorkspace(ctx, m.Slot)
+	case intent.DesktopSpawn:
+		return compositor.Spawn(ctx, m.Program)
+	default:
+		// Unreachable for a compiled table; a new action added without a case
+		// here must be a spoken failure, never a silent success.
+		return fmt.Errorf("I do not know how to do that on this desktop")
+	}
 }
 
 // runUserIntent executes a configured intent's command through the tool

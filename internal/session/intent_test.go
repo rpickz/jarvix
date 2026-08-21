@@ -7,16 +7,19 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
-// intentHarness is the standard harness plus a compiled router and a fake
-// runner, so an "executed" intent is a recorded argv and nothing else — no
-// test in this package may reach wpctl or hyprctl.
+// intentHarness is the standard harness plus a compiled router, a fake runner
+// and a fake compositor, so an "executed" intent is a recorded argv or a
+// recorded dispatch and nothing else — no test in this package may reach
+// wpctl, hyprctl, or the developer's own workspaces.
 type intentHarness struct {
 	*harness
 	runner *intent.FakeRunner
+	comp   *desktop.FakeCompositor
 }
 
 func newIntentHarness(t *testing.T, opts Options, custom ...intent.Custom) *intentHarness {
@@ -26,9 +29,13 @@ func newIntentHarness(t *testing.T, opts Options, custom ...intent.Custom) *inte
 		t.Fatalf("intent.New: %v", err)
 	}
 	runner := &intent.FakeRunner{}
+	comp := desktop.NewFakeCompositor()
 	opts.Intents = router
 	opts.IntentRunner = runner
-	return &intentHarness{harness: newHarness(t, opts), runner: runner}
+	if opts.Compositor == nil {
+		opts.Compositor = comp
+	}
+	return &intentHarness{harness: newHarness(t, opts), runner: runner, comp: comp}
 }
 
 // say drives one text utterance through the engine to completion.
@@ -335,6 +342,92 @@ func TestIntentCommandFailureSpeaksAndRecovers(t *testing.T) {
 	h.say(t, "explain recursion")
 	if len(h.provider.Requests) != 1 {
 		t.Errorf("provider calls = %d", len(h.provider.Requests))
+	}
+}
+
+// ------------------------------------------------------ compositor intents
+
+// TestDesktopIntentsDispatchThroughTheCompositor is the regression for #47:
+// "workspace four" and "open a terminal" reach the compositor seam as actions
+// rather than as an `hyprctl dispatch …` command line the router wrote
+// itself. The seam is what knows which dispatch dialect this machine speaks;
+// a table that wrote its own was a Lua parse error on a current Omarchy
+// desktop, and nothing moved.
+func TestDesktopIntentsDispatchThroughTheCompositor(t *testing.T) {
+	h := newIntentHarness(t, Options{SpeakResponses: true})
+
+	seen := h.say(t, "workspace four")
+	if ev := seen["intent.executed"]; ev.Data["intent"] != "workspace.switch" ||
+		ev.Data["status"] != "ok" || ev.Data["slot"] != 4 {
+		t.Fatalf("event data = %v", ev.Data)
+	}
+	h.say(t, "open a terminal")
+
+	got := h.comp.Actions()
+	if len(got) != 2 {
+		t.Fatalf("dispatches = %+v, want a workspace switch and a spawn", got)
+	}
+	if got[0].Verb != "workspace" || got[0].Workspace != 4 || got[0].Address != "" {
+		t.Errorf("first dispatch = %+v, want a switch to workspace 4", got[0])
+	}
+	if got[1].Verb != "spawn" || got[1].Program != intent.DefaultTerminal {
+		t.Errorf("second dispatch = %+v, want the configured terminal spawned", got[1])
+	}
+	// And nothing was executed behind the seam's back.
+	if argv := h.runner.Argv(); argv != nil {
+		t.Errorf("a compositor intent ran a command line: %v", argv)
+	}
+}
+
+// TestRefusedDesktopDispatchIsSpokenNotSilent is the deeper half of #47.
+// hyprctl exits 0 for a dispatch the compositor refused, so before the seam
+// owned the decision a refusal was indistinguishable from success: Jarvix
+// said "Workspace four" and the screen did not move. It must now say what
+// went wrong instead.
+func TestRefusedDesktopDispatchIsSpokenNotSilent(t *testing.T) {
+	h := newIntentHarness(t, Options{SpeakResponses: true})
+	h.comp.FailAction = errors.New("hyprctl dispatch: workspace not found")
+
+	seen := h.say(t, "workspace four")
+
+	ev := seen["intent.executed"]
+	if ev.Data["status"] != "failed" {
+		t.Fatalf("status = %v, want failed for a refused dispatch", ev.Data["status"])
+	}
+	if ev.Data["acknowledgement"] == "Workspace four" {
+		t.Error("a refused dispatch was acknowledged as though it had worked")
+	}
+	if !strings.Contains(h.tts.LastRequest.Text, "workspace not found") {
+		t.Errorf("the refusal was not spoken: %q", h.tts.LastRequest.Text)
+	}
+	if _, isError := seen["error"]; isError {
+		t.Error("a refused dispatch must not fail the session")
+	}
+	if state, _ := h.engine.State(); state != StateIdle {
+		t.Errorf("state = %s, want idle", state)
+	}
+}
+
+// TestDesktopIntentWithoutACompositorSaysSo covers the daemon started outside
+// a graphical session. There is nothing to dispatch to, and the one thing
+// Jarvix must not do is acknowledge the action anyway.
+func TestDesktopIntentWithoutACompositorSaysSo(t *testing.T) {
+	router, err := intent.New(intent.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, Options{SpeakResponses: true, Intents: router,
+		IntentRunner: &intent.FakeRunner{}}) // no compositor wired
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("open terminal")
+	seen := h.collectUntil(t, "session.finished")
+	h.waitIdle(t)
+
+	if ev := seen["intent.executed"]; ev.Data["status"] != "failed" {
+		t.Fatalf("status = %v, want failed with no compositor", ev.Data["status"])
+	}
+	if !strings.Contains(h.tts.LastRequest.Text, "window manager") {
+		t.Errorf("spoken failure = %q, want it to name what is missing", h.tts.LastRequest.Text)
 	}
 }
 

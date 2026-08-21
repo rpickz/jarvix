@@ -28,6 +28,8 @@ func TestBuiltinHits(t *testing.T) {
 		argv      []string
 		ack       string
 		control   Control
+		desktop   Desktop
+		program   string
 	}{
 		{
 			utterance: "volume thirty", intent: "volume.set", slot: 30, hasSlot: true,
@@ -77,16 +79,22 @@ func TestBuiltinHits(t *testing.T) {
 			control: ControlNewConversation, ack: "New conversation.",
 		},
 		{utterance: "start over", intent: "conversation.new", control: ControlNewConversation},
+		// The two compositor intents carry an action, never an argv: how a
+		// dispatch is written depends on the dialect the desktop seam probed
+		// for, and a table that guessed it was issue #47.
 		{
 			utterance: "workspace 4", intent: "workspace.switch", slot: 4, hasSlot: true,
-			argv: []string{"hyprctl", "dispatch", "workspace", "4"}, ack: "Workspace four",
+			desktop: DesktopWorkspace, ack: "Workspace four",
 		},
-		{utterance: "go to workspace ten", intent: "workspace.switch", slot: 10, hasSlot: true, ack: "Workspace ten"},
+		{
+			utterance: "go to workspace ten", intent: "workspace.switch", slot: 10, hasSlot: true,
+			desktop: DesktopWorkspace, ack: "Workspace ten",
+		},
 		{
 			utterance: "open terminal", intent: "terminal.open",
-			argv: []string{"hyprctl", "dispatch", "exec", DefaultTerminal}, ack: "Terminal.",
+			desktop: DesktopSpawn, program: DefaultTerminal, ack: "Terminal.",
 		},
-		{utterance: "open a terminal", intent: "terminal.open"},
+		{utterance: "open a terminal", intent: "terminal.open", desktop: DesktopSpawn, program: DefaultTerminal},
 	}
 
 	r := newRouter(t)
@@ -107,6 +115,14 @@ func TestBuiltinHits(t *testing.T) {
 			}
 			if tc.argv != nil && strings.Join(m.Argv, " ") != strings.Join(tc.argv, " ") {
 				t.Errorf("argv = %v, want %v", m.Argv, tc.argv)
+			}
+			if m.Desktop != tc.desktop || m.Program != tc.program {
+				t.Errorf("desktop action = %q/%q, want %q/%q", m.Desktop, m.Program, tc.desktop, tc.program)
+			}
+			// A compositor intent must not also carry a command line: two
+			// ways to perform one action is how the dialects diverged.
+			if tc.desktop != DesktopNone && len(m.Argv) > 0 {
+				t.Errorf("compositor intent also built an argv: %v", m.Argv)
 			}
 			if tc.ack != "" && m.Ack != tc.ack {
 				t.Errorf("ack = %q, want %q", m.Ack, tc.ack)
@@ -315,12 +331,16 @@ func TestTerminalValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := r.Match("open terminal")
-	if m.Argv[len(m.Argv)-1] != DefaultTerminal {
-		t.Errorf("argv = %v, want the default terminal", m.Argv)
+	if m.Program != DefaultTerminal {
+		t.Errorf("program = %q, want the default terminal", m.Program)
 	}
 }
 
-func TestTerminalIsOneArgument(t *testing.T) {
+// TestTerminalIsOneProgram is the security half of "open a terminal": the
+// configured value reaches the compositor seam as one program name and
+// nothing else, so it cannot become arguments, a command line, or — now that
+// the Lua dialect renders it into `hl.dsp.exec_cmd("…")` — Lua syntax.
+func TestTerminalIsOneProgram(t *testing.T) {
 	r, err := New(Options{Terminal: "/usr/bin/foot"})
 	if err != nil {
 		t.Fatal(err)
@@ -329,9 +349,11 @@ func TestTerminalIsOneArgument(t *testing.T) {
 	if !ok {
 		t.Fatal("no match")
 	}
-	want := []string{"hyprctl", "dispatch", "exec", "/usr/bin/foot"}
-	if strings.Join(m.Argv, "\x00") != strings.Join(want, "\x00") {
-		t.Errorf("argv = %v, want %v", m.Argv, want)
+	if m.Program != "/usr/bin/foot" || m.Desktop != DesktopSpawn {
+		t.Errorf("match = %q/%q, want a spawn of /usr/bin/foot", m.Desktop, m.Program)
+	}
+	if len(m.Argv) != 0 || m.Command != "" {
+		t.Errorf("terminal intent built a command line: %v %q", m.Argv, m.Command)
 	}
 }
 

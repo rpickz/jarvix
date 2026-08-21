@@ -452,8 +452,8 @@ The shipped table:
 | `volume.unmute` | "unmute", "unmute the volume/audio/sound" | `wpctl set-mute … 0` |
 | `speech.stop` | "stop", "stop talking", "be quiet", "shut up", "enough" | stops speech — **acknowledged with silence** |
 | `conversation.new` | "new conversation", "start over", "forget that", "clear the conversation" | the same reset as `jarvix new` |
-| `workspace.switch` | "workspace 4", "go to workspace four", "switch to workspace 4" | `hyprctl dispatch workspace <n>` |
-| `terminal.open` | "open terminal", "open a terminal", "new terminal" | `hyprctl dispatch exec <[intents] terminal>` |
+| `workspace.switch` | "workspace 4", "go to workspace four", "switch to workspace 4" | switches you to workspace `<n>` |
+| `terminal.open` | "open terminal", "open a terminal", "new terminal" | starts `<[intents] terminal>` |
 
 Numbers work spoken or written — "volume thirty" and "volume 30" are the same
 request — anywhere from 0 to 150 (workspaces 1–10).
@@ -466,9 +466,20 @@ belongs. Nothing is fuzzy-matched, and a value outside the allowed range
 intent is still recorded in the conversation, so a follow-up like "a bit
 louder" reaches the model with the context it needs.
 
+The last two act on your compositor, and they go through the same seam the
+`desktop.*` window tools use ([ADR 0022](adr/0022-desktop-window-control.md)).
+That matters because `hyprctl dispatch` changed syntax when Hyprland moved its
+configuration to Lua, and which syntax your machine speaks follows the config
+format rather than the version — so it is discovered once, at run time, and
+both forms work.
+
 `jarvix doctor` checks that `wpctl`, `hyprctl`, and your terminal are
-installed. A command that fails (or a missing binary) gets one spoken line —
-the session never hangs.
+installed, **and that a dispatch actually reaches a compositor** — an
+installed `hyprctl` with no Hyprland behind it (a daemon started outside the
+graphical session, say) would otherwise look perfectly healthy while
+"workspace four" did nothing. A command that fails, a dispatch the compositor
+refuses, or a missing binary gets one spoken line — the session never hangs,
+and it never claims to have done something it did not do.
 
 ### Your own intents (`[[intents.custom]]`)
 
