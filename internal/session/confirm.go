@@ -27,6 +27,18 @@ type pendingConfirmation struct {
 	tool    string
 	command string
 	key     string
+	// summary and rule are kept so the conversation snapshot can restate the
+	// question to a window opened mid-wait (issue #76): the card must show
+	// what is being asked without waiting for an event that already happened.
+	summary string
+	rule    string
+	// timeout is the configured confirmation window, and deadline is when it
+	// actually expires. deadline stays zero until the countdown starts — the
+	// clock begins when the question has been asked aloud, not when it was
+	// published — so a zero deadline means "the question is still being
+	// asked" and a client should show the full timeout rather than a tick.
+	timeout  time.Duration
+	deadline time.Time
 	// resume is the state the session returns to once the question is
 	// answered: Thinking for a model tool round (the tool loop continues),
 	// Acting for a user-defined intent (the router finishes its work). It is
@@ -317,6 +329,9 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		tool:    req.tool,
 		command: req.command,
 		key:     req.key,
+		summary: req.summary,
+		rule:    req.rule,
+		timeout: timeout,
 		resume:  req.resume,
 		outcome: make(chan bool, 1),
 	}
@@ -335,6 +350,24 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 	// Speak first, then start the clock: the user's 30 seconds begin when
 	// the question has been asked, not while it is still being said.
 	e.speakPrompt(s, req.summary, req.speaker)
+
+	// The clock is starting *now*, which is later than the event above went
+	// out — so the deadline gets an announcement of its own rather than a
+	// guess in confirmation_required. The window's countdown derives from
+	// this timestamp (issue #76): a number the daemon computed from the
+	// configured timeout, never a client-side hardcoded 30. Guarded because
+	// an answer can land while the question is still being spoken — a
+	// deadline for a confirmation that no longer exists must not go out.
+	e.mu.Lock()
+	if e.pending == p {
+		p.deadline = time.Now().Add(timeout)
+		e.publish(Event{Type: "tool.confirmation_deadline", Data: map[string]any{
+			"session_id": s.id, "tool": p.tool, "command": p.command,
+			"deadline_ms": p.deadline.UnixMilli(),
+			"timeout_sec": int(timeout.Seconds()),
+		}})
+	}
+	e.mu.Unlock()
 
 	// From here the turn is waiting on the user's decision — time that
 	// belongs to neither Jarvix nor the model. It accrues as the excluded
@@ -461,6 +494,43 @@ func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 	if synthErr != nil {
 		e.log.Warn("confirmation prompt could not be spoken", "component", "tts", "error", synthErr.Error())
 	}
+}
+
+// PendingConfirmationInfo describes the tool call currently waiting on the
+// user, for the conversation snapshot (issue #76): a window opened during the
+// wait must be able to render the question, the exact command, and the
+// countdown without having seen the events that announced them.
+type PendingConfirmationInfo struct {
+	Tool    string
+	Command string
+	Summary string
+	Rule    string
+	// Timeout is the configured confirmation window; Deadline is when it
+	// expires, zero while the question is still being spoken (the clock has
+	// not started yet).
+	Timeout  time.Duration
+	Deadline time.Time
+}
+
+// PendingConfirmation reports the confirmation the session is waiting on, if
+// any. It answers whenever one is pending — including while a voice reply to
+// it is being captured — because the question remains open until resolved,
+// whatever intermediate state the answer passes through.
+func (e *Engine) PendingConfirmation() (PendingConfirmationInfo, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p := e.pending
+	if p == nil {
+		return PendingConfirmationInfo{}, false
+	}
+	return PendingConfirmationInfo{
+		Tool:     p.tool,
+		Command:  p.command,
+		Summary:  p.summary,
+		Rule:     p.rule,
+		Timeout:  p.timeout,
+		Deadline: p.deadline,
+	}, true
 }
 
 // approvalKey identifies a call for remember_for_conversation: the tool plus
