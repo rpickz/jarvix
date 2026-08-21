@@ -16,6 +16,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
+	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/intent"
@@ -75,6 +76,13 @@ type Options struct {
 	// base (ADR 0025) — for turns that reach the model. Nil disables it
 	// entirely: no consultation, no message, no cost.
 	Memory MemoryInjector
+	// Archive is the durable conversation store (ADR 0027). Every completed
+	// exchange is appended to it *before* HistoryTurns trims the in-memory
+	// head: the cap governs what the model is sent, never what is kept. Nil
+	// disables archiving entirely (conversation.retention = "off"): nothing
+	// staged, nothing written, `jarvix new` behaves as before the archive
+	// existed.
+	Archive conversations.Store
 	// WakeWord is the word background listening triggers on (ADR 0024). It
 	// is here because the wake word is *in* the transcript: the pre-roll
 	// deliberately includes it, so whisper returns "Jarvix, volume thirty".
@@ -159,6 +167,21 @@ type Engine struct {
 	// follow-up questions have context. Guarded by mu.
 	history  []ai.Message
 	lastTurn time.Time
+
+	// The durable archive's view of the thread (ADR 0027; archive.go).
+	// archiveID is which archived conversation the live thread belongs to
+	// ("" until the first flush names one); pendingArchive holds completed
+	// exchanges staged by commitTurn and not yet flushed; archiveGen counts
+	// thread changes (reset, reopen, lapse) so an in-flight flush can tell
+	// its thread has ended and must not adopt a conversation id for the next
+	// one. All three guarded by mu. archiveMu serialises whole flushes (see
+	// persistArchive); archiveFailed latches like persistFailed — one warning,
+	// then in-memory-only for the engine's lifetime.
+	archiveID      string
+	pendingArchive []conversations.Turn
+	archiveGen     int
+	archiveMu      sync.Mutex
+	archiveFailed  atomic.Bool
 
 	// The most recent desktop context capture, kept so the user can always
 	// audit what Jarvix saw (ADR 0019). It outlives its session deliberately —
@@ -289,6 +312,13 @@ func (e *Engine) loadHistory() {
 	}
 	e.history = msgs
 	e.lastTurn = lastTurn
+	// The restored head belongs to an archived conversation; reattach so the
+	// next turn appends to the same record instead of forking a new one per
+	// restart (ADR 0027). A stale or missing pointer degrades to "": the next
+	// flush simply starts a fresh conversation.
+	if e.opts.Archive != nil {
+		e.archiveID = e.opts.Archive.Active()
+	}
 	e.log.Debug("conversation history loaded", "component", "session", "turns", len(msgs)/2)
 }
 
@@ -925,8 +955,11 @@ func (e *Engine) think(s *sess) {
 	e.mu.Unlock()
 
 	// Persist only after the session has fully finished, off the lock path:
-	// disk I/O adds zero latency to the spoken exchange.
+	// disk I/O adds zero latency to the spoken exchange. The archive flush
+	// rides the same tail for the same reason — and, running inside e.active,
+	// the same shutdown drain (#29).
 	e.persistHistory()
+	e.persistArchive()
 }
 
 // streamOnce runs one provider turn, forwarding text deltas to the overlay
@@ -1044,6 +1077,13 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 		// Remembered tool approvals are conversation-scoped: a new thread
 		// must ask again.
 		e.approvals = make(map[string]bool)
+		// The archived record ends with the thread; the new one must not
+		// append to it (ADR 0027). Nothing is pending to flush here — every
+		// commitTurn's staging is flushed on its own session tail — so only
+		// the attachment ends; the generation bump tells any flush still in
+		// flight not to adopt an id for this new thread.
+		e.archiveID = ""
+		e.archiveGen++
 	}
 	msgs := make([]ai.Message, 0, len(e.history)+4)
 	if e.opts.SystemPrompt != "" {
@@ -1064,11 +1104,15 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 // to the configured number of turns. Intermediate tool traffic is not stored;
 // the user question and the assistant's final answer are what carry meaning.
 func (e *Engine) commitTurn(userText, assistantText string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// The archive is staged before the cap can trim anything, and even with
+	// in-memory history disabled: history_turns governs what the model is
+	// sent, never what is kept (ADR 0027).
+	e.stageArchiveTurnLocked(userText, assistantText)
 	if e.opts.HistoryTurns <= 0 {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.history = append(e.history,
 		ai.Message{Role: ai.RoleUser, Content: userText},
 		ai.Message{Role: ai.RoleAssistant, Content: assistantText})
@@ -1134,12 +1178,21 @@ func (e *Engine) Conversation() []Turn {
 // so the next turn starts a fresh thread and a later restart resurrects
 // nothing. Remembered tool approvals die with the conversation too: they are
 // scoped to it by design and never persist.
+//
+// With the archive on, this is what "jarvix new archives the current thread"
+// amounts to (ADR 0027): the turns are already on disk — they were appended
+// as they completed — so the reset only writes whatever the last exchange
+// left staged, then ends the attachment. The archived conversation stays,
+// listed and reopenable; only the live head is destroyed.
 func (e *Engine) ResetConversation() {
 	e.mu.Lock()
 	e.history = nil
 	e.lastTurn = time.Time{}
 	e.approvals = make(map[string]bool)
+	archive, archivedID, pending := e.detachArchiveLocked()
 	e.mu.Unlock()
+	e.flushArchiveDetached(archive, archivedID, pending)
+	e.publish(Event{Type: "conversation.changed", Data: map[string]any{"reason": "reset"}})
 	if e.store == nil {
 		return
 	}

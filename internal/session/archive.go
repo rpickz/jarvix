@@ -1,0 +1,175 @@
+package session
+
+// This file is the engine half of the durable conversation archive
+// (ADR 0027). internal/conversations owns the files; the engine owns what a
+// turn means for the record: every completed exchange is staged *before* the
+// retention cap trims the in-memory head (commitTurn), and flushed to disk
+// after session.finished, off the lock path — exactly where the history write
+// lives (ADR 0011), so archiving adds no latency to the spoken exchange and
+// rides the same shutdown drain (#29).
+//
+// The archive and the history store deliberately coexist. history.json stays
+// the live head — small, capped, loaded at boot — while the archive is the
+// unbounded record behind it; the `active` pointer in the archive directory
+// is what lets a restarted daemon keep appending to the same conversation the
+// live head came from.
+
+import (
+	"github.com/rpickz/jarvix/internal/ai"
+	"github.com/rpickz/jarvix/internal/conversations"
+)
+
+// stageArchiveTurnLocked records a completed exchange for the archive.
+// Callers hold e.mu. It must run before the retention cap is applied: the cap
+// governs what the model is sent, never what is kept, so a 100-turn
+// conversation archives 100 turns however small history_turns is.
+func (e *Engine) stageArchiveTurnLocked(userText, assistantText string) {
+	if e.opts.Archive == nil {
+		return // retention off: nothing is ever staged, so nothing is written
+	}
+	now := e.now()
+	e.pendingArchive = append(e.pendingArchive,
+		conversations.Turn{Role: string(ai.RoleUser), Text: userText, Time: now},
+		conversations.Turn{Role: string(ai.RoleAssistant), Text: assistantText, Time: now})
+}
+
+// persistArchive flushes staged turns to the archive. It runs after
+// session.finished on the tail of think()/runIntent, inside e.active, so the
+// shutdown drain waits for it (#29). Failure degrades exactly like history
+// persistence: the engine warns once, latches, and keeps conversing — turn
+// contents are never logged.
+//
+// archiveMu serialises whole flushes. Without it, two session tails could
+// interleave: the second would snapshot an empty conversation id before the
+// first's append had created one, and a single thread would fork into two
+// archived conversations. With it, the first flush adopts the created id
+// before the second takes its snapshot.
+func (e *Engine) persistArchive() {
+	if e.archiveFailed.Load() {
+		return
+	}
+	e.archiveMu.Lock()
+	defer e.archiveMu.Unlock()
+	e.mu.Lock()
+	archive := e.opts.Archive
+	turns := e.pendingArchive
+	e.pendingArchive = nil
+	id, gen := e.archiveID, e.archiveGen
+	e.mu.Unlock()
+	if archive == nil || len(turns) == 0 {
+		return
+	}
+	landed, err := archive.Append(id, turns)
+	if err != nil {
+		e.warnArchiveFailed(err)
+		return
+	}
+	if id == "" {
+		// The append created a conversation; adopt its id so the thread keeps
+		// appending to it — unless the thread this flush belonged to has been
+		// reset, reopened, or lapsed in the meantime (the generation check),
+		// in which case the new thread must not inherit the old record.
+		e.mu.Lock()
+		if e.archiveGen == gen && e.archiveID == "" {
+			e.archiveID = landed
+		}
+		e.mu.Unlock()
+	}
+	e.log.Debug("conversation archived", "component", "session",
+		"conversation_id", landed, "turns", len(turns)/2)
+}
+
+// flushArchiveDetached writes turns that belong to a thread the engine has
+// already moved on from — the staged tail a reset or reopen found in flight.
+// No id is adopted: the thread is over, the record just has to be complete.
+func (e *Engine) flushArchiveDetached(archive conversations.Store, id string, turns []conversations.Turn) {
+	if archive == nil || len(turns) == 0 || e.archiveFailed.Load() {
+		return
+	}
+	e.archiveMu.Lock()
+	defer e.archiveMu.Unlock()
+	if _, err := archive.Append(id, turns); err != nil {
+		e.warnArchiveFailed(err)
+	}
+}
+
+// warnArchiveFailed latches the archive off after its first failed write and
+// says so exactly once, mirroring persistHistory's degradation: a broken disk
+// costs the record, never the conversation.
+func (e *Engine) warnArchiveFailed(err error) {
+	if e.archiveFailed.CompareAndSwap(false, true) {
+		e.log.Warn("conversation could not be archived; continuing without archiving",
+			"component", "session", "error", err.Error())
+	}
+}
+
+// detachArchiveLocked ends the engine's association with the current archived
+// conversation and returns what still has to be written to it. Callers hold
+// e.mu and must pass the returned batch to flushArchiveDetached after
+// releasing the lock — the conversation already archived stays on disk
+// untouched; only the attachment ends.
+func (e *Engine) detachArchiveLocked() (archive conversations.Store, id string, turns []conversations.Turn) {
+	archive, id, turns = e.opts.Archive, e.archiveID, e.pendingArchive
+	e.pendingArchive = nil
+	e.archiveID = ""
+	e.archiveGen++
+	return archive, id, turns
+}
+
+// ActiveConversationID reports which archived conversation the live thread
+// belongs to, "" when none. The daemon consults it before a delete: removing
+// the conversation the user is *in* must also reset the thread, or the next
+// turn would quietly rebuild a record they just destroyed.
+func (e *Engine) ActiveConversationID() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.archiveID
+}
+
+// AdoptConversation installs an archived conversation as the active thread:
+// an explicit user action (`jarvix conversations open`, the window's Resume).
+// Follow-ups continue it with its context within the model budget — the most
+// recent history_turns exchanges reach the model; the archive keeps
+// everything — and new turns append to the same archived record.
+//
+// Like ResetConversation it does not cancel a session in flight; a turn that
+// completes after the switch commits into the adopted thread, which is what
+// an explicit "continue this conversation" means.
+func (e *Engine) AdoptConversation(id string, msgs []ai.Message) {
+	e.mu.Lock()
+	prevArchive, prevID, pending := e.detachArchiveLocked()
+	if max := e.opts.HistoryTurns * 2; e.opts.HistoryTurns <= 0 {
+		// Memory is disabled: no context can be carried, but the thread still
+		// attaches to the archive so new turns extend the reopened record.
+		e.history = nil
+	} else if len(msgs) > max {
+		e.history = append([]ai.Message(nil), msgs[len(msgs)-max:]...)
+	} else {
+		e.history = append([]ai.Message(nil), msgs...)
+	}
+	// The clock restarts now: reopening is an explicit act, so the follow-up
+	// window must not immediately expire a conversation last touched days ago.
+	e.lastTurn = e.now()
+	// Remembered tool approvals are scoped to the thread that earned them,
+	// and this is a different thread.
+	e.approvals = make(map[string]bool)
+	e.archiveID = id
+	archive := e.opts.Archive
+	e.mu.Unlock()
+
+	e.flushArchiveDetached(prevArchive, prevID, pending)
+	if archive != nil {
+		// Move the live-head pointer immediately: a daemon restarted before
+		// the next turn must resume this conversation, not the previous one.
+		if err := archive.SetActive(id); err != nil {
+			e.log.Warn("could not record the reopened conversation",
+				"component", "session", "error", err.Error())
+		}
+	}
+	// Persist the adopted head at once, for the same restart: the reopen must
+	// survive even if no follow-up is ever asked.
+	e.persistHistory()
+	e.log.Info("conversation reopened", "component", "session", "conversation_id", id)
+	e.publish(Event{Type: "conversation.changed", Data: map[string]any{
+		"reason": "opened", "conversation_id": id}})
+}
