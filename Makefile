@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test ci coverage vet lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean
+.PHONY: all build test ci coverage vet lint install install-kokoro install-plugin install-systemd install-hyprland uninstall clean release-snapshot
 
 all: build
 
@@ -50,9 +50,14 @@ install-systemd:
 install-hyprland:
 	scripts/install-hyprland-bindings.sh
 
+# Local dry run of the release packaging (.github/workflows/release.yml runs
+# the same script): tarballs + SHA256SUMS into ./dist, versioned from git.
+release-snapshot:
+	scripts/package-release.sh
+
 uninstall:
 	rm -f $(BINDIR)/jarvix $(BINDIR)/jarvixd
 	rm -f $(HOME)/.config/systemd/user/jarvixd.service
 
 clean:
-	rm -rf bin
+	rm -rf bin dist

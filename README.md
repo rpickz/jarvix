@@ -46,6 +46,23 @@ with an Omarchy overlay and full cancellation. See
 
 ## Installation
 
+### From a release (recommended)
+
+Grab the tarball for your architecture from the
+[latest release](https://github.com/rpickz/jarvix/releases) (checksums in
+`SHA256SUMS`), follow its `INSTALL.md`, then let the first-run wizard walk
+you through the machine-specific choices — voice engine, push-to-talk
+access, AI provider, advisor CLIs — verifying each step as it goes:
+
+```bash
+jarvix setup            # idempotent: re-run any time, finished steps are skipped
+```
+
+An AUR package is seeded at `packaging/arch/PKGBUILD` (build with
+`makepkg -si` until it is published).
+
+### From source
+
 ```bash
 git clone https://github.com/rpickz/jarvix.git
 cd jarvix
@@ -54,11 +71,15 @@ make install            # builds and installs jarvix + jarvixd to ~/.local/bin
 make install-systemd    # installs the user service
 systemctl --user enable --now jarvixd
 
-jarvix setup whisper    # downloads the Whisper model (~148 MB, one-time)
+jarvix setup            # first-run wizard: voice, activation, AI, advisors + verify
+```
 
+The wizard covers the pieces below; they remain available individually:
+
+```bash
+jarvix setup whisper    # downloads the Whisper model (~148 MB, one-time)
 make install-plugin     # links the Omarchy overlay plugin and enables it
 make install-hyprland   # adds the push-to-talk keybindings
-
 jarvix doctor           # verifies every dependency, explains anything missing
 ```
 
@@ -68,6 +89,9 @@ For the default local setup, make sure Ollama is running with the model:
 sudo systemctl enable --now ollama
 ollama pull llama3.2:3b
 ```
+
+`jarvix --version` + `jarvix doctor` together describe an installation —
+include both in bug reports.
 
 ## Configuration
 
