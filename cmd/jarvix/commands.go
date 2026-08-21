@@ -753,3 +753,79 @@ func cmdConfig(cfg config.Config, paths config.Paths) error {
 	}
 	return nil
 }
+
+// cmdRoutines lists the configured routines offline, from config.toml — like
+// `jarvix config`, it works with the daemon down, because "what have I set
+// up?" should not require a running daemon to answer. Steps are summarised
+// per line so the listing reads like the routine will run.
+func cmdRoutines(cfg config.Config, asJSON bool) error {
+	type routineListing struct {
+		Name    string   `json:"name"`
+		Phrases []string `json:"phrases"`
+		Steps   []string `json:"steps"`
+	}
+	listing := make([]routineListing, 0, len(cfg.Routines))
+	for _, r := range cfg.Routines {
+		entry := routineListing{Name: r.Name, Phrases: r.Phrases, Steps: []string{}}
+		for _, s := range r.Steps {
+			entry.Steps = append(entry.Steps, describeRoutineStep(s))
+		}
+		listing = append(listing, entry)
+	}
+	if asJSON {
+		out, err := json.Marshal(map[string]any{"routines": listing})
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+	if len(listing) == 0 {
+		fmt.Println("no routines configured (add [[routines]] tables to config.toml; see docs/configuration.md)")
+		return nil
+	}
+	for i, r := range listing {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("%s — say \"%s\"\n", r.Name, strings.Join(r.Phrases, `" or "`))
+		for _, step := range r.Steps {
+			fmt.Printf("  %s\n", step)
+		}
+	}
+	return nil
+}
+
+// describeRoutineStep renders one step the way it will execute.
+func describeRoutineStep(s config.RoutineStep) string {
+	desc := fmt.Sprintf("%s → workspace %d", s.App, s.Workspace)
+	switch {
+	case s.Float:
+		desc += " (floating"
+		if len(s.Size) == 2 {
+			desc += fmt.Sprintf(" %dx%d", s.Size[0], s.Size[1])
+		}
+		if len(s.Position) == 2 {
+			desc += fmt.Sprintf(" at %d,%d", s.Position[0], s.Position[1])
+		}
+		desc += ")"
+	case s.Tile != "":
+		desc += " (" + s.Tile + ")"
+	}
+	return desc
+}
+
+// cmdRoutineRun triggers one routine through the daemon and follows the
+// session, so the summary — and anything that failed — lands in the terminal
+// the way it lands in the ear.
+func cmdRoutineRun(paths config.Paths, name string) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	if err := client.Call("routines.run", map[string]string{"name": name}, nil); err != nil {
+		return err
+	}
+	return followSession(client, false)
+}
