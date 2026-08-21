@@ -61,3 +61,35 @@ uninstall:
 
 clean:
 	rm -rf bin dist
+
+# --- Test-depth targets (issue #8) -----------------------------------------
+# Local and CI invocations are identical: CI calls these same targets.
+
+.PHONY: fuzz bench mutate
+
+# Fuzz every parser that eats external input. Each target runs briefly; the
+# committed seed corpora under testdata/fuzz regression-check known inputs on
+# every plain `go test` run as well.
+FUZZTIME ?= 30s
+fuzz:
+	$(GO) test -run='^$$' -fuzz='^FuzzSentencer$$' -fuzztime=$(FUZZTIME) ./internal/session
+	$(GO) test -run='^$$' -fuzz='^FuzzSpeechText$$' -fuzztime=$(FUZZTIME) ./internal/session
+	$(GO) test -run='^$$' -fuzz='^FuzzConfigParse$$' -fuzztime=$(FUZZTIME) ./internal/config
+	$(GO) test -run='^$$' -fuzz='^FuzzWireDecode$$' -fuzztime=$(FUZZTIME) ./internal/ipc
+	$(GO) test -run='^$$' -fuzz='^FuzzReadStream$$' -fuzztime=$(FUZZTIME) ./internal/ai/openaicompat
+
+# Latency/throughput benchmarks over our own pipeline (fakes, not engines).
+# BENCHCOUNT=5 gives benchstat-able samples; CI passes it, local runs default
+# to one — same command either way.
+BENCHCOUNT ?= 1
+bench:
+	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCHCOUNT) ./internal/session
+
+# Mutation testing over the session engine (the core state machine).
+# GOFLAGS=-count=1 keeps gremlins' baseline honest: a cached test run makes
+# the derived per-mutant timeout near zero and everything "times out".
+# The gremlins version is pinned so the documented mutation score stays
+# reproducible — bump it deliberately and re-triage the survivors.
+GREMLINS_VERSION ?= v0.6.0
+mutate:
+	GOFLAGS=-count=1 $(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@$(GREMLINS_VERSION) unleash --timeout-coefficient 3 ./internal/session

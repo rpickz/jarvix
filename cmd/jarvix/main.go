@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -38,25 +39,31 @@ The daemon must be running for session commands:
   systemctl --user enable --now jarvixd`
 
 func main() {
-	if len(os.Args) < 2 {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run dispatches one CLI invocation and returns the process exit code. It is
+// the testable seam: main only binds it to os.Args/os.Exit.
+func run(args []string) int {
+	if len(args) < 1 {
 		fmt.Println(usage)
-		os.Exit(2)
+		return 2
 	}
 	paths := config.DefaultPaths()
 	cfg, err := config.Load(paths.ConfigFile())
 	if err != nil {
-		fatal(err)
+		return fail(err)
 	}
 
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "status":
 		err = cmdStatus(paths)
 	case "ask":
-		if len(args) < 1 {
-			fatal(fmt.Errorf("usage: jarvix ask \"question\""))
+		if len(rest) < 1 {
+			return fail(fmt.Errorf("usage: jarvix ask \"question\""))
 		}
-		err = cmdAsk(paths, args[0])
+		err = cmdAsk(paths, rest[0])
 	case "listen":
 		err = cmdListen(paths)
 	case "cancel":
@@ -68,10 +75,10 @@ func main() {
 	case "new":
 		err = cmdNewConversation(paths)
 	case "ptt":
-		if len(args) < 1 || (args[0] != "start" && args[0] != "stop" && args[0] != "toggle") {
-			fatal(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
+		if len(rest) < 1 || (rest[0] != "start" && rest[0] != "stop" && rest[0] != "toggle") {
+			return fail(fmt.Errorf("usage: jarvix ptt start|stop|toggle"))
 		}
-		err = cmdPTT(paths, args[0])
+		err = cmdPTT(paths, rest[0])
 	case "window":
 		err = cmdWindow()
 	case "artifacts":
@@ -80,38 +87,38 @@ func main() {
 		err = cmdDoctor(cfg, paths)
 	case "setup":
 		switch {
-		case len(args) >= 1 && args[0] == "whisper":
+		case len(rest) >= 1 && rest[0] == "whisper":
 			model := cfg.STT.Whisper.Model
-			if len(args) > 1 {
-				model = args[1]
+			if len(rest) > 1 {
+				model = rest[1]
 			}
 			err = cmdSetupWhisper(paths, model)
-		case len(args) >= 1 && args[0] == "input":
+		case len(rest) >= 1 && rest[0] == "input":
 			err = cmdSetupInput()
-		case len(args) == 0:
+		case len(rest) == 0:
 			err = cmdSetupWizard(cfg, paths)
 		default:
-			fatal(fmt.Errorf("usage: jarvix setup | jarvix setup whisper [model] | jarvix setup input"))
+			return fail(fmt.Errorf("usage: jarvix setup | jarvix setup whisper [model] | jarvix setup input"))
 		}
 	case "config":
 		switch {
-		case len(args) == 0:
+		case len(rest) == 0:
 			err = cmdConfig(cfg, paths)
-		case args[0] == "get":
+		case rest[0] == "get":
 			key := ""
-			if len(args) > 1 {
-				key = args[1]
+			if len(rest) > 1 {
+				key = rest[1]
 			}
 			err = cmdConfigGet(paths, key)
-		case args[0] == "set":
-			if len(args) < 2 {
-				fatal(fmt.Errorf("usage: jarvix config set key=value [key=value ...]"))
+		case rest[0] == "set":
+			if len(rest) < 2 {
+				return fail(fmt.Errorf("usage: jarvix config set key=value [key=value ...]"))
 			}
-			err = cmdConfigSet(paths, args[1:])
-		case args[0] == "reload":
+			err = cmdConfigSet(paths, rest[1:])
+		case rest[0] == "reload":
 			err = cmdConfigReload(paths)
 		default:
-			fatal(fmt.Errorf("usage: jarvix config [get [key] | set key=value ... | reload]"))
+			return fail(fmt.Errorf("usage: jarvix config [get [key] | set key=value ... | reload]"))
 		}
 	case "version", "--version", "-v":
 		fmt.Println("jarvix", build.Version)
@@ -119,14 +126,25 @@ func main() {
 		fmt.Println(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "jarvix: unknown command %q\n\n%s\n", cmd, usage)
-		os.Exit(2)
+		return 2
 	}
 	if err != nil {
-		fatal(err)
+		if errors.Is(err, errChecksFailed) {
+			// The command already printed its own report (doctor's check
+			// list); only the exit code is left to deliver.
+			return 1
+		}
+		return fail(err)
 	}
+	return 0
 }
 
-func fatal(err error) {
+// errChecksFailed signals a non-zero exit whose explanation was already
+// printed. It exists so commands never call os.Exit themselves — run() is
+// the only place an exit code is decided, which is what makes it testable.
+var errChecksFailed = errors.New("checks failed")
+
+func fail(err error) int {
 	fmt.Fprintln(os.Stderr, "jarvix:", err)
-	os.Exit(1)
+	return 1
 }

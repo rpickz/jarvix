@@ -37,6 +37,11 @@ func speechText(s string) string {
 	// not run together, but without speaking the bullet character.
 	s = reBullet.ReplaceAllString(s, "")
 	s = reNumbered.ReplaceAllString(s, "")
+	// The regexes above only strip paired/anchored markers; an unpaired
+	// backtick or asterisk ("2 * 3", a stray ` in prose) would survive and be
+	// read aloud literally. Found by FuzzSpeechText — strip the stragglers.
+	s = strings.ReplaceAll(s, "`", " ")
+	s = strings.ReplaceAll(s, "*", " ")
 	s = reMultiSpace.ReplaceAllString(s, " ")
 	s = reBlankLines.ReplaceAllString(s, "\n")
 

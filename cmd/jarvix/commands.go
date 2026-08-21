@@ -319,8 +319,7 @@ func cmdDoctor(cfg config.Config, paths config.Paths) error {
 		return nil
 	}
 	fmt.Println("Fix the failures above, then run jarvix doctor again.")
-	os.Exit(1)
-	return nil
+	return errChecksFailed
 }
 
 func splitLines(s string) []string {
