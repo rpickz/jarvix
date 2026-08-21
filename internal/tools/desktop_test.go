@@ -57,6 +57,7 @@ type harness struct {
 	comp     *desktop.FakeCompositor
 	launcher *fakeLauncher
 	events   []string
+	refusals []string
 	mu       sync.Mutex
 }
 
@@ -77,8 +78,19 @@ func newHarness(t *testing.T, windows ...desktop.Window) *harness {
 			defer h.mu.Unlock()
 			h.events = append(h.events, verb+":"+target)
 		},
+		OnRefusal: func(verb, target, reason string) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.refusals = append(h.refusals, verb+":"+target+":"+reason)
+		},
 	})
 	return h
+}
+
+func (h *harness) firedRefusals() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.refusals...)
 }
 
 func (h *harness) tool(t *testing.T, name string) Tool {
