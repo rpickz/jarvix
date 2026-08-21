@@ -14,6 +14,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/hotkey"
@@ -62,6 +63,12 @@ type Daemon struct {
 	// through it, the engine injects from it, and the memory.* IPC methods
 	// read it — so every surface always agrees on what is remembered.
 	memory *memory.Book
+
+	// conversations is the durable archive (ADR 0027). Never nil, and held
+	// even with retention off: the off switch stops writing, but listing,
+	// reading and deleting what is already kept must keep working — the user's
+	// control over their transcripts does not lapse with the recording.
+	conversations conversations.Store
 
 	// Background wake-word listening (ADR 0024), nil unless activation.mode
 	// is "wake_word" and its detector is installed. wakeSession is the
@@ -163,6 +170,10 @@ type Deps struct {
 	// the XDG state dir. Injectable so a test can hold a write open across
 	// shutdown — the one thing a real file store cannot be asked to do.
 	HistoryStore history.Store
+	// ConversationStore is the durable archive (ADR 0027); nil uses the file
+	// store under the XDG state dir. Injectable for the same reason as
+	// HistoryStore: only a fake can hold an archive write open.
+	ConversationStore conversations.Store
 	// WakeSource opens the background capture stream; nil uses pw-record.
 	// Injected by tests so no test ever opens the user's microphone.
 	WakeSource wake.Source
@@ -382,9 +393,22 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	if deps.HistoryStore != nil {
 		store = deps.HistoryStore
 	}
+	// The durable archive (ADR 0027). Whether the engine *writes* to it is
+	// the retention switch, decided in engineOptions; the store itself always
+	// exists so listing and deleting past conversations work regardless.
+	var convs conversations.Store = &conversations.FileStore{Dir: paths.ConversationsDir()}
+	if deps.ConversationStore != nil {
+		convs = deps.ConversationStore
+	}
+	if cfg.Conversation.Retention == config.RetentionOff {
+		logger.Info("conversation retention off", "component", "session")
+	} else {
+		logger.Info("conversation retention on", "component", "session",
+			"dir", paths.ConversationsDir())
+	}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger,
-		engineOptions(cfg, compositor, book, logger))
+		engineOptions(cfg, compositor, book, convs, logger))
 
 	// The memory tools are registered after the engine exists because a
 	// stored fact carries its source turn, and only the engine knows which
@@ -418,7 +442,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy, memory: book,
-		notifier: deps.Notifier, openWindow: deps.OpenWindow,
+		conversations: convs,
+		notifier:      deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor,
 		paths:      paths, injected: injected, cfg: cfg, warm: workers,
 		shutdownGrace: DefaultShutdownGrace,
@@ -741,6 +766,7 @@ func (d *Daemon) registerMethods() {
 	})
 	d.registerConfigMethods()
 	d.registerContextMethods()
+	d.registerConversationMethods()
 	d.registerMemoryMethods()
 	d.registerTextMethods()
 	d.registerWakeMethods()

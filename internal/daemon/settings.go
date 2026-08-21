@@ -298,7 +298,8 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		return false, err.Error()
 	}
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
-		deps.Recorder, deps.Player, engineOptions(merged, d.compositor, d.memory, d.log)); err != nil {
+		deps.Recorder, deps.Player,
+		engineOptions(merged, d.compositor, d.memory, d.conversations, d.log)); err != nil {
 		// The engine kept its old collaborators, so the workers just built are
 		// unreachable — close them before they are dropped. Nothing has been
 		// spawned yet (supervisors start lazily), which is what makes this
