@@ -209,7 +209,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			// SourceValidator for structured formats) and append it here.
 			// The tool's schema, naming, events, and listing pick it up.
 			Renderers: []tools.Renderer{
-				&tools.MermaidRenderer{},
+				&tools.MermaidRenderer{OutputFormat: cfg.Artifacts.DiagramFormat},
 				&tools.DocumentRenderer{},
 				&tools.SpreadsheetRenderer{},
 				&tools.ExcalidrawRenderer{},

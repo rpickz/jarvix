@@ -619,6 +619,19 @@ func recentArtifacts(dir string, limit int, now time.Time) (artifactListing, err
 		return listing, err
 	}
 
+	// A diagram is two files — the .mmd source and its render — but one
+	// artifact: listing both would show every diagram twice and make the
+	// count lie. First find which base names have a render, so the pass
+	// below can fold the source into it. An orphan .mmd (its render deleted,
+	// or kept deliberately) still lists: it is the only file the user has.
+	rendered := map[string]bool{}
+	for _, entry := range entries {
+		switch strings.ToLower(filepath.Ext(entry.Name())) {
+		case ".png", ".svg":
+			rendered[strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))] = true
+		}
+	}
+
 	type found struct {
 		entry   artifactEntry
 		modTime time.Time
@@ -627,6 +640,10 @@ func recentArtifacts(dir string, limit int, now time.Time) (artifactListing, err
 	for _, entry := range entries {
 		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
+		}
+		if strings.ToLower(filepath.Ext(entry.Name())) == ".mmd" &&
+			rendered[strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))] {
+			continue // the render is the artifact; the source rides along
 		}
 		info, err := entry.Info()
 		if err != nil {

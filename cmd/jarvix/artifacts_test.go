@@ -75,6 +75,40 @@ func TestRecentArtifactsIsNewestFirstAndDescribed(t *testing.T) {
 	}
 }
 
+// A diagram is one artifact, not two: its .mmd source is saved beside the
+// render but must fold into it in the listing — the user made one diagram,
+// and a list that counts it twice misreports their work (#56). An orphan
+// source with no render is still shown: it is the only file there is.
+func TestRecentArtifactsFoldsDiagramSourceIntoItsRender(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	writeArtifact(t, dir, "flow.mmd", 2*time.Minute, now)
+	writeArtifact(t, dir, "flow.png", time.Minute, now)
+	// The svg opt-in path folds the same way.
+	writeArtifact(t, dir, "legacy.mmd", 4*time.Minute, now)
+	writeArtifact(t, dir, "legacy.svg", 3*time.Minute, now)
+	writeArtifact(t, dir, "orphan.mmd", 5*time.Minute, now)
+
+	listing, err := recentArtifacts(dir, 20, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, a := range listing.Artifacts {
+		names = append(names, a.Name)
+	}
+	want := []string{"flow.png", "legacy.svg", "orphan.mmd"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", names, want)
+	}
+	if listing.Artifacts[0].Kind != "diagram" || listing.Artifacts[1].Kind != "diagram" {
+		t.Errorf("renders must keep kind \"diagram\": %+v", listing.Artifacts)
+	}
+	if listing.Artifacts[2].Kind != "source" {
+		t.Errorf("an orphan .mmd is still a source: %+v", listing.Artifacts[2])
+	}
+}
+
 // "Recent" has to mean a glance, not a scroll: the panel and the terminal
 // both show a fixed number of the newest files.
 func TestRecentArtifactsCapsTheListing(t *testing.T) {
