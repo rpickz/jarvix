@@ -103,6 +103,19 @@ func TestSentencerRunonFlushesWithoutTerminator(t *testing.T) {
 	}
 }
 
+func TestSentencerRunonBoundaryIsExact(t *testing.T) {
+	// Exactly maxSentenceRunon unpunctuated bytes must still be held back;
+	// one more byte trips the run-on flush. Pins the > (not >=) boundary,
+	// which mutation testing showed was unasserted.
+	var sc sentencer
+	if got := sc.push(strings.Repeat("a", maxSentenceRunon)); len(got) != 0 {
+		t.Fatalf("flushed at exactly the boundary: %q", got)
+	}
+	if got := sc.push("a"); len(got) != 1 {
+		t.Fatalf("did not flush past the boundary: %q", got)
+	}
+}
+
 func TestSentencerFlushIsTerminal(t *testing.T) {
 	var sc sentencer
 	sc.push("leftover text")
