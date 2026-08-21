@@ -4,12 +4,24 @@
 name: ci
 
 on:
+  # Every branch, not just main. Restricting the push trigger to main meant a
+  # feature branch without an open PR got no verdict at all, which is the one
+  # thing this workflow promises (raised in review of #15).
   push:
-    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# One run per commit. With push covering every branch, a branch that also has
+# an open PR fires both triggers for the same code; keying the group on the
+# commit (github.sha for a push, the PR's head sha for a pull_request — the
+# same value) makes the second trigger cancel the redundant first instead of
+# paying for both. Distinct commits land in distinct groups, so no push ever
+# loses its verdict to a later one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -61,4 +73,8 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          # Pinned, not "latest": with latest, a golangci-lint release can
+          # turn an unchanged commit red overnight and the gate stops being
+          # reproducible. Bump this deliberately, in its own PR, so the new
+          # findings are reviewed as a change (raised in review of #15).
+          version: v2.13.1
