@@ -779,7 +779,7 @@ func (d *Daemon) registerMethods() {
 	d.server.Handle("conversation.get", func(json.RawMessage) (any, error) {
 		state, id := d.engine.State()
 		stage, message := d.lastError()
-		return map[string]any{
+		snapshot := map[string]any{
 			"turns":      d.engine.Conversation(),
 			"state":      string(state),
 			"session_id": id,
@@ -788,7 +788,27 @@ func (d *Daemon) registerMethods() {
 			// it, so the snapshot must carry what the `error` event said.
 			"error_stage":   stage,
 			"error_message": message,
-		}, nil
+		}
+		// A pending tool confirmation rides the snapshot too (issue #76): a
+		// window opened during the wait missed tool.confirmation_required,
+		// and a state with no content and no affordance is exactly the
+		// blindness the confirmation card exists to fix. deadline_ms is
+		// absent while the question is still being spoken — the clock has
+		// not started, so there is no deadline to count down from yet.
+		if pending, ok := d.engine.PendingConfirmation(); ok {
+			confirmation := map[string]any{
+				"tool":        pending.Tool,
+				"command":     pending.Command,
+				"summary":     pending.Summary,
+				"rule":        pending.Rule,
+				"timeout_sec": int(pending.Timeout.Seconds()),
+			}
+			if !pending.Deadline.IsZero() {
+				confirmation["deadline_ms"] = pending.Deadline.UnixMilli()
+			}
+			snapshot["confirmation"] = confirmation
+		}
+		return snapshot, nil
 	})
 	d.server.Handle("session.confirm", func(params json.RawMessage) (any, error) {
 		// Approved defaults to true: `jarvix confirm` is the affirmative;
