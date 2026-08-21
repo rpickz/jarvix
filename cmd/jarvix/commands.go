@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -81,9 +83,32 @@ func cmdCancel(paths config.Paths) error {
 	return client.Call("session.cancel", nil, nil)
 }
 
+// daemonIsDown reports whether a dial error means "nothing is listening on
+// the socket" as opposed to "something went wrong reaching it".
+//
+// The distinction decides whether `jarvix new` may delete the user's saved
+// conversation, so it is drawn narrowly: only a missing socket file (ENOENT)
+// and a socket nobody is accepting on (ECONNREFUSED, which is also what
+// connecting to a stale non-socket file gives) count as down. A permission
+// error, a misconfigured path, a dial timeout — anything else — leaves the
+// history alone, because the daemon may well be running and holding a
+// conversation this command has no business destroying.
+//
+// ipc.Dial wraps the net error with %w, and net/os wrap the syscall errno the
+// same way, so errors.Is reaches the errno through all three layers.
+func daemonIsDown(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
 func cmdNewConversation(paths config.Paths) error {
 	client, err := ipc.Dial(paths.Socket)
 	if err != nil {
+		if !daemonIsDown(err) {
+			// Destroying the saved conversation on an error we do not
+			// understand is unrecoverable data loss; report and change
+			// nothing (raised in review of #16).
+			return fmt.Errorf("could not reach jarvixd, so the saved conversation was left untouched: %w", err)
+		}
 		// No daemon means no in-memory thread to reset — but a persisted
 		// conversation may still sit on disk, and it would resurrect when the
 		// daemon next starts. Clear it directly so "new" always means new.
