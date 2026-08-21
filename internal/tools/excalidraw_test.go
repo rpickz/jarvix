@@ -69,3 +69,20 @@ func TestExcalidrawValidationErrorsAreSpecific(t *testing.T) {
 		}
 	}
 }
+
+// encoding/json decodes JSON null into a nil slice without complaint, so a
+// scene with "elements": null used to validate and be saved — then fail to
+// load in Excalidraw with its opaque "couldn't load" error. An empty array
+// still means "empty canvas" and must keep passing
+// (raised in review of #19).
+func TestExcalidrawRejectsNullElementsButAllowsEmpty(t *testing.T) {
+	r := &ExcalidrawRenderer{}
+	if err := r.ValidateSource(`{"type":"excalidraw","version":2,"elements":null}`); err == nil {
+		t.Error(`"elements": null must be rejected`)
+	} else if !strings.Contains(err.Error(), "null") {
+		t.Errorf("error must name the problem: %v", err)
+	}
+	if err := r.ValidateSource(`{"type":"excalidraw","version":2,"elements":[]}`); err != nil {
+		t.Errorf("an empty canvas is valid: %v", err)
+	}
+}

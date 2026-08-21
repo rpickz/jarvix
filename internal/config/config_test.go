@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -142,7 +144,7 @@ func TestArtifactDefaults(t *testing.T) {
 	if !strings.HasSuffix(cfg.Artifacts.Dir, filepath.Join("Documents", "Jarvix")) {
 		t.Errorf("artifacts.dir default = %q", cfg.Artifacts.Dir)
 	}
-	if cfg.Artifacts.OpenCommand != "xdg-open" || cfg.Artifacts.RenderTimeoutSec != 10 {
+	if !slices.Equal(cfg.Artifacts.OpenCommand, []string{"xdg-open"}) || cfg.Artifacts.RenderTimeoutSec != 10 {
 		t.Errorf("artifacts defaults = %+v", cfg.Artifacts)
 	}
 	if !cfg.Tools.Artifacts {
@@ -167,16 +169,16 @@ excalidraw = ""
 	if cfg.Tools.Artifacts {
 		t.Error("tools.artifacts should be off")
 	}
-	if cfg.Artifacts.Dir != "/tmp/my-artifacts" || cfg.Artifacts.OpenCommand != "imv" ||
+	if cfg.Artifacts.Dir != "/tmp/my-artifacts" || !slices.Equal(cfg.Artifacts.OpenCommand, []string{"imv"}) ||
 		cfg.Artifacts.RenderTimeoutSec != 30 {
 		t.Errorf("artifacts = %+v", cfg.Artifacts)
 	}
-	if cfg.Artifacts.OpenCommands["document"] != "obsidian" {
+	if !slices.Equal(cfg.Artifacts.OpenCommands["document"], []string{"obsidian"}) {
 		t.Errorf("open_commands = %+v", cfg.Artifacts.OpenCommands)
 	}
 	// An explicitly empty override is meaningful ("no viewer for this
 	// format"), so it must survive the parse as a present-but-empty entry.
-	if v, ok := cfg.Artifacts.OpenCommands["excalidraw"]; !ok || v != "" {
+	if v, ok := cfg.Artifacts.OpenCommands["excalidraw"]; !ok || len(v) != 0 {
 		t.Errorf("empty override lost: %+v", cfg.Artifacts.OpenCommands)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -322,6 +324,77 @@ shell_allow = ["  "]
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing mention of %q: %v", want, err)
+		}
+	}
+}
+
+// A viewer whose path or argument contains a space cannot be written as the
+// whitespace-split string form, so open commands also accept an argv array.
+// The string form is the original shape and keeps working unchanged
+// (raised in review of #19).
+func TestOpenCommandAcceptsBothStringAndArrayForms(t *testing.T) {
+	cfg := writeAndLoad(t, `
+[artifacts]
+open_command = ["/opt/my viewer/bin/view", "--new window"]
+
+[artifacts.open_commands]
+document = "obsidian --new"
+spreadsheet = ["flatpak", "run", "org.libreoffice.LibreOffice"]
+excalidraw = []
+`)
+	if want := []string{"/opt/my viewer/bin/view", "--new window"}; !slices.Equal(cfg.Artifacts.OpenCommand, want) {
+		t.Errorf("open_command = %q, want %q", cfg.Artifacts.OpenCommand, want)
+	}
+	// The legacy string form still splits on whitespace, so configs written
+	// before the array existed behave exactly as they did.
+	if want := []string{"obsidian", "--new"}; !slices.Equal(cfg.Artifacts.OpenCommands["document"], want) {
+		t.Errorf("document = %q, want %q", cfg.Artifacts.OpenCommands["document"], want)
+	}
+	if want := []string{"flatpak", "run", "org.libreoffice.LibreOffice"}; !slices.Equal(cfg.Artifacts.OpenCommands["spreadsheet"], want) {
+		t.Errorf("spreadsheet = %q, want %q", cfg.Artifacts.OpenCommands["spreadsheet"], want)
+	}
+	// An empty array is the "no viewer" declaration, same as "".
+	if v, ok := cfg.Artifacts.OpenCommands["excalidraw"]; !ok || len(v) != 0 {
+		t.Errorf("empty array override lost: %+v", cfg.Artifacts.OpenCommands)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestOpenCommandRejectsNonStringElements(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[artifacts]\nopen_command = [\"xdg-open\", 7]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Error("a non-string element must be a parse error, not a silent drop")
+	}
+}
+
+// Every TOML block in docs/configuration.md is presented as a config you can
+// copy into place, so each one must parse AND validate. The reference block
+// once showed artifacts.dir = "~/..." while validation rejected "~", so
+// copy-pasting the documentation produced a config the daemon refused to
+// start on (raised in review of #17).
+func TestDocumentedConfigExamplesAreValid(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "configuration.md"))
+	if err != nil {
+		t.Fatalf("read the configuration reference: %v", err)
+	}
+	blocks := regexp.MustCompile("(?s)```toml\\n(.*?)```").FindAllStringSubmatch(string(data), -1)
+	if len(blocks) == 0 {
+		t.Fatal("no toml examples found; this test guards them, so it must not silently pass")
+	}
+	for i, block := range blocks {
+		cfg, err := parse([]byte(block[1]), Default())
+		if err != nil {
+			t.Errorf("toml example %d does not parse: %v", i+1, err)
+			continue
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("toml example %d is documented but invalid: %v", i+1, err)
 		}
 	}
 }
