@@ -100,9 +100,25 @@ func cmdSetupWizard(cfg config.Config, paths config.Paths) error {
 	return err
 }
 
-// findScript locates one of the repo's helper scripts on this installation:
-// the packaged location, the checkout/tarball relative to the binary, or the
-// working directory. Returns "" when the script is nowhere to be found.
+// findScript locates one of the repo's helper scripts on this installation.
+// The wizard delegates its heavy steps (Kokoro setup, Hyprland bindings) to
+// them, so failing to find one silently downgrades `jarvix setup` — the
+// prompts for those steps simply never appear.
+//
+// Every place the scripts can plausibly live is searched, in order of how
+// specific it is to this installation:
+//
+//   - /usr/share/jarvix/scripts — distribution package
+//   - <exe>/../scripts and <exe>/scripts — release tarball unpacked whole, or
+//     a repo checkout running out of ./bin
+//   - $XDG_DATA_HOME/jarvix/scripts (~/.local/share/jarvix/scripts) — the
+//     tarball's documented manual install, where only the two binaries go to
+//     ~/.local/bin and the helpers need a stable home of their own; without
+//     this entry that install could never run the delegated steps
+//     (raised in review of #20)
+//   - ./scripts — running from the checkout root
+//
+// Returns "" when the script is nowhere to be found.
 func findScript(name string) string {
 	candidates := []string{
 		filepath.Join("/usr/share/jarvix/scripts", name), // installed package
@@ -110,7 +126,12 @@ func findScript(name string) string {
 	if exe, err := os.Executable(); err == nil {
 		// Release tarball or repo checkout: <root>/bin/jarvix + <root>/scripts.
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "..", "scripts", name))
+		// Binaries and scripts installed side by side in one directory.
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "scripts", name))
 	}
+	// User-local data dir, resolved through the same XDG rules as everything
+	// else Jarvix stores.
+	candidates = append(candidates, filepath.Join(config.DefaultPaths().Data, "scripts", name))
 	candidates = append(candidates, filepath.Join("scripts", name))
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && !info.IsDir() {

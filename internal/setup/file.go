@@ -170,6 +170,12 @@ func (f *File) Set(table, key, value string) {
 
 // Save writes the file back if anything changed, creating the directory and
 // file on first use. Unchanged files are left untouched.
+//
+// The file is 0600, matching every other piece of user state Jarvix writes
+// (history, the IPC socket). config.toml is not a secret store — API keys are
+// read from the environment on purpose — but it does record local paths, the
+// machine's advisor binaries, and the user's shell-tool policy, none of which
+// is anyone else's business on a shared machine (raised in review of #20).
 func (f *File) Save() error {
 	if !f.dirty {
 		return nil
@@ -181,7 +187,12 @@ func (f *File) Save() error {
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
-	if err := os.WriteFile(f.path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(f.path, []byte(content), 0o600); err != nil {
+		return err
+	}
+	// WriteFile only applies its mode to a file it creates, so a config left
+	// 0644 by an earlier build (or by hand) would keep those modes forever.
+	if err := os.Chmod(f.path, 0o600); err != nil {
 		return err
 	}
 	f.dirty = false

@@ -130,7 +130,13 @@ func ActivationStep(d ActivationDeps) Step {
 			}
 			if instructionsGiven {
 				fprintln(d.Out, "Follow the printed commands, then re-run `jarvix setup` to verify.")
-				return nil
+				// `jarvix setup input` prints commands for the user to run as
+				// root when it cannot do the work itself, so reaching here
+				// means push-to-talk still does not work by either route.
+				// Returning nil would list Activation as finished in the
+				// wizard's closing summary — the one place the user looks to
+				// find out what is left (raised in review of #20).
+				return errors.New("activation is not configured yet — run the commands printed above (a re-login may be needed for group changes), then re-run `jarvix setup` to verify")
 			}
 			return errors.New("activation is not configured — run `jarvix setup input` for hold-to-talk, or scripts/install-hyprland-bindings.sh for the key bindings")
 		},
