@@ -1,0 +1,6 @@
+[tts]
+provider = "piper"
+
+[ui]
+show_transcript = true
+# tail comment stays below the settings

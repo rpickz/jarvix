@@ -1,0 +1,8 @@
+[tts]
+provider = "piper"
+kokoro.speed = 1.5
+
+[ui]
+show_transcript = true
+notification_preview = false
+# tail comment stays below the settings

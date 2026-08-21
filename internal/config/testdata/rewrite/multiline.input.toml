@@ -1,0 +1,14 @@
+[activation]
+mode = "push_to_talk"
+ptt_chord = [
+  "leftmeta", # super
+  "leftalt",
+  "v",
+] # hold all three
+
+[ai]
+provider = "ollama"
+model = "llama3.2:3b"
+system_prompt = """
+Answer briefly.
+Plain prose only."""
