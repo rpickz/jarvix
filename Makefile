@@ -68,5 +68,7 @@ bench:
 	$(GO) test -run='^$$' -bench=. -benchmem ./internal/session
 
 # Mutation testing over the session engine (the core state machine).
+# GOFLAGS=-count=1 keeps gremlins' baseline honest: a cached test run makes
+# the derived per-mutant timeout near zero and everything "times out".
 mutate:
-	$(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@latest unleash ./internal/session
+	GOFLAGS=-count=1 $(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@latest unleash --timeout-coefficient 3 ./internal/session
