@@ -59,9 +59,62 @@ func TestConfirmationTransitions(t *testing.T) {
 	}
 }
 
+// TestActingTransitions pins the deterministic intent router's state (ADR
+// 0015). The illegal half is the point: Acting exists so a matched intent can
+// never be mistaken for — or drift into — a model turn.
+func TestActingTransitions(t *testing.T) {
+	legal := [][2]State{
+		// Submitted text the router claims (`jarvix ask "volume thirty"`)…
+		{StateIdle, StateActing},
+		// …and the same from a voice transcript.
+		{StateTranscribing, StateActing},
+		// The terse acknowledgement is spoken like any other answer…
+		{StateActing, StateSpeaking},
+		// …or the intent completes in silence ("stop", speak_responses off).
+		{StateActing, StateIdle},
+		// A user-defined intent's command can need the permission gate, and
+		// resolution returns to Acting rather than to a tool loop.
+		{StateActing, StateAwaitingConfirmation},
+		{StateAwaitingConfirmation, StateActing},
+		// Interruption and failure work like every other active state.
+		{StateActing, StateCancelling},
+		{StateActing, StateError},
+	}
+	for _, pair := range legal {
+		if !CanTransition(pair[0], pair[1]) {
+			t.Errorf("expected %s → %s to be legal", pair[0], pair[1])
+		}
+	}
+	illegal := [][2]State{
+		// The whole point: a matched intent never reaches the model.
+		{StateActing, StateThinking},
+		{StateActing, StateResponding},
+		{StateThinking, StateActing},   // once thinking, the model owns the turn
+		{StateResponding, StateActing}, //
+		{StateListening, StateActing},  // a capture must be transcribed first
+		{StateSpeaking, StateActing},
+		{StateError, StateActing},
+		{StateCancelling, StateActing},
+		{StateActing, StateListening},    // the router never starts a capture
+		{StateActing, StateTranscribing}, //
+		{StateActing, StateActing},       // one action per session
+	}
+	for _, pair := range illegal {
+		if CanTransition(pair[0], pair[1]) {
+			t.Errorf("expected %s → %s to be illegal", pair[0], pair[1])
+		}
+	}
+	if !StateActing.Active() {
+		t.Error("acting is an active state")
+	}
+	if !StateActing.Valid() {
+		t.Error("acting must validate")
+	}
+}
+
 func TestCancellationFromEveryActiveState(t *testing.T) {
 	active := []State{StateListening, StateTranscribing, StateThinking,
-		StateResponding, StateAwaitingConfirmation, StateSpeaking}
+		StateResponding, StateAwaitingConfirmation, StateActing, StateSpeaking}
 	for _, s := range active {
 		if !CanTransition(s, StateCancelling) {
 			t.Errorf("%s must allow cancellation", s)
@@ -93,7 +146,7 @@ func TestActiveAndValid(t *testing.T) {
 	if StateIdle.Active() {
 		t.Error("idle is not active")
 	}
-	for _, s := range []State{StateListening, StateSpeaking, StateError, StateCancelling} {
+	for _, s := range []State{StateListening, StateSpeaking, StateActing, StateError, StateCancelling} {
 		if !s.Active() {
 			t.Errorf("%s should be active", s)
 		}

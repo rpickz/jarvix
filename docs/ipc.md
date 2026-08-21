@@ -93,11 +93,17 @@ Every event's params include `session_id` where a session is involved.
 | `tool.confirmed` | `{tool, command, source}` | The user approved; the call executes. `source`: `cli`, `text`, or `voice` |
 | `tool.declined` | `{tool, command, source}` | The call will not run. `source`: `cli`, `text`, `voice`, `timeout`, `interrupted`, or `error` |
 | `tool.denied` | `{tool, command, rule}` | A deny rule blocked the call outright; no confirmation is possible |
+| `intent.executed` | `{intent, source, status, acknowledgement, duration_ms, slot?, error?}` | The deterministic intent router handled the utterance locally, with no provider request (ADR 0017). `intent` is the id (`volume.set`, `speech.stop`, `custom.lock the screen`); `source` is `builtin` or `user`; `status` is `ok` or `failed` (with `error` when the command failed, was declined, or was denied); `slot` is the validated integer for intents that take one; `duration_ms` is measured from the final transcript. `acknowledgement` is what Jarvix says — flash it in the overlay; it is empty for `speech.stop`, where silence is the confirmation |
 | `tts.started` / `tts.finished` | `{}`; finished may carry `{interrupted:true}` | Speech bounds |
 | `session.finished` | `{}` | Session completed (also after an error) |
 | `session.cancelled` | `{reason}` | Session cancelled or interrupted |
 | `error` | `{stage, message}` | A stage failed: `audio`, `stt`, `assistant`, `tts`, `session` |
 | `config.changed` | `{fingerprint}` | Configuration was saved (`config.set`) or reloaded; open settings views should refresh via `config.get` |
+
+States seen in `state.changed`: `idle`, `listening`, `transcribing`,
+`thinking`, `responding`, `awaiting_confirmation`, `acting`, `speaking`,
+`cancelling`, `error`. `acting` is a matched deterministic intent — it never
+passes through `thinking`/`responding`, because no provider request is open.
 
 Ordering guarantees: `state.changed` precedes the stage events it enables;
 `session.finished`/`session.cancelled` is always the last event of a session.

@@ -16,6 +16,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/hotkey"
+	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
@@ -153,6 +154,18 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		return nil, err // Validate catches this first; belt and braces
 	}
 	registry.SetPolicy(policy)
+
+	// The deterministic intent router sits in front of the model (ADR 0017).
+	// The engine receives it through engineOptions, so a live reload rebuilds
+	// it too; compiling it here is the startup error path.
+	if cfg.Intents.Enabled {
+		router, err := intent.New(cfg.IntentOptions())
+		if err != nil {
+			return nil, err // Validate catches this first; belt and braces
+		}
+		logger.Info("intent router enabled", "component", "intent",
+			"intents", len(router.Names()))
+	}
 
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).

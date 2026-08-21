@@ -178,6 +178,50 @@ const shellToolName = "shell.run"
 // configuration and status reporting can name it without guessing.
 const AdvisorToolName = advisorToolName
 
+// IntentToolName is the identity user-defined voice intents ([[intents.custom]])
+// execute under. They are not a model tool — the user wrote the command
+// themselves — but they are still arbitrary shell execution triggered by
+// speech, so they face the same classifier (ADR 0017). Giving them their own
+// name rather than borrowing shell.run's means a user can allow their own
+// intents (`[tools.policy.tool]."intent.run" = "allow"`) without also
+// unleashing the model, and disabling shell.run does not silently break
+// phrases they configured by hand. Deny rules still win either way.
+const IntentToolName = "intent.run"
+
+// DecideCommand classifies a bare command string that no model asked for —
+// a user-defined intent — through the very same shell classifier a model's
+// shell.run call faces. The tier comes from tool's own policy entry (or the
+// policy default), so the decision is configurable per identity while the
+// risk analysis stays identical.
+func (p *Policy) DecideCommand(tool, command string) Verdict {
+	args, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil { // a string always marshals; belt and braces
+		return Verdict{Decision: PolicyAsk, Tool: tool, Command: command,
+			Rule:    "arguments could not be encoded",
+			Summary: "I could not check that command. Should I go ahead?"}
+	}
+	v := p.decideShell(ai.ToolCall{Name: tool, Arguments: string(args)}, p.ToolDecision(tool))
+	v.Tool = tool
+	// The tool-level deny tier short-circuits before the command is recorded;
+	// the overlay and the audit trail still need to know what was refused.
+	v.Command = command
+	// decideShell names shell.run in its tier rules; restate them for this
+	// identity so the audit trail says what the user actually configured.
+	switch v.Decision {
+	case PolicyDeny:
+		if v.Rule == `tool "shell.run" is set to deny` {
+			v.Rule = fmt.Sprintf("tool %q is set to deny", tool)
+		}
+	case PolicyAllow:
+		if v.Rule == `tool "shell.run" is set to allow` {
+			v.Rule = fmt.Sprintf("tool %q is set to allow", tool)
+		}
+	}
+	return v
+}
+
 // Decide classifies one tool call. For shell.run the command is parsed and
 // classified daemon-side: a compound command (`;`, `&&`, pipes, command
 // substitution) is judged by its riskiest part, and deny beats ask beats

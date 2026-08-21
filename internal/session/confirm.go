@@ -27,12 +27,27 @@ type pendingConfirmation struct {
 	tool    string
 	command string
 	key     string
+	// resume is the state the session returns to once the question is
+	// answered: Thinking for a model tool round (the tool loop continues),
+	// Acting for a user-defined intent (the router finishes its work). It is
+	// a field rather than a constant because both callers share this one
+	// confirmation mechanism — there is no second permission path.
+	resume State
 	// outcome carries the user's answer to the waiting tool loop. Buffered:
 	// the resolver must never block on the waiter.
 	outcome chan bool
 	// engaged is set when a voice reply is being captured; the timeout no
 	// longer applies — the user is answering, however long whisper takes.
 	engaged bool
+}
+
+// resumeState is where a resolved confirmation returns the session, defaulting
+// to Thinking so a pending confirmation built without one behaves as before.
+func (p *pendingConfirmation) resumeState() State {
+	if p.resume == "" {
+		return StateThinking
+	}
+	return p.resume
 }
 
 // Confirm resolves the pending tool confirmation: approved runs the command,
@@ -51,8 +66,9 @@ func (e *Engine) Confirm(approved bool) error {
 	return nil
 }
 
-// resolveConfirmationLocked delivers the user's answer to the waiting tool
-// loop and returns the session to Thinking. Legal from AwaitingConfirmation
+// resolveConfirmationLocked delivers the user's answer to the waiting asker
+// and returns the session to whichever state asked (Thinking for a tool
+// round, Acting for a user-defined intent). Legal from AwaitingConfirmation
 // (CLI/text answers) and Transcribing (voice answers). No-op when nothing is
 // pending — the confirmation may have timed out a moment earlier.
 func (e *Engine) resolveConfirmationLocked(approved bool, source string) {
@@ -61,7 +77,7 @@ func (e *Engine) resolveConfirmationLocked(approved bool, source string) {
 		return
 	}
 	e.pending = nil
-	_ = e.setStateLocked(StateThinking)
+	_ = e.setStateLocked(p.resumeState())
 	eventType := "tool.confirmed"
 	if !approved {
 		eventType = "tool.declined"
@@ -145,12 +161,68 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall) string {
 	return result
 }
 
-// confirmAndExecute runs the ask tier: enter AwaitingConfirmation, speak the
-// summary, and block this tool round until the user answers, the timeout
-// fires, or the session dies. It runs on the think goroutine, which is
-// exactly the point — the model's turn pauses on the user's word.
+// confirmAndExecute runs the ask tier for a model tool call: ask, then
+// execute if and only if the answer was yes. It runs on the think goroutine,
+// which is exactly the point — the model's turn pauses on the user's word.
 func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verdict) (string, bool) {
-	key := approvalKey(call, verdict)
+	outcome, alive := e.awaitConfirmation(s, confirmRequest{
+		tool:    call.Name,
+		command: verdict.Command,
+		summary: verdict.Summary,
+		rule:    verdict.Rule,
+		key:     approvalKey(call, verdict),
+		resume:  StateThinking,
+	})
+	if !alive {
+		return "", false
+	}
+	switch outcome {
+	case confirmDeclined:
+		return "The user declined to run this command. It was not executed. " +
+			"Do not retry it; acknowledge the decline and continue helping.", true
+	case confirmTimedOut:
+		return "The user did not confirm in time, so the command was not executed. " +
+			"Do not retry it unless asked again.", true
+	}
+	return e.executeTool(s, call), true
+}
+
+// confirmRequest is one thing that needs the user's go-ahead. Model tool
+// calls and user-defined voice intents both build one of these, so there is
+// exactly one confirmation mechanism in the daemon — one state, one timeout,
+// one set of events, one audit trail.
+type confirmRequest struct {
+	// tool is the identity shown and logged: a tool name for a model call,
+	// tools.IntentToolName for a user-defined intent.
+	tool string
+	// command is the exact command being judged, published verbatim.
+	command string
+	// summary is the spoken question, generated daemon-side from command.
+	summary string
+	// rule names the policy rule that decided to ask.
+	rule string
+	// key identifies the request for remember_for_conversation.
+	key string
+	// resume is the state to return to once answered.
+	resume State
+}
+
+// confirmOutcome is how a confirmation ended. Declined and timed out are
+// distinct because the model is told different things about them.
+type confirmOutcome int
+
+const (
+	confirmApproved confirmOutcome = iota
+	confirmDeclined
+	confirmTimedOut
+)
+
+// awaitConfirmation runs the ask tier: enter AwaitingConfirmation, speak the
+// summary, and block the caller's goroutine until the user answers, the
+// timeout fires, or the session dies. alive is false only when the session
+// ended underneath it, in which case the caller must stop without reporting
+// anything — the cancel path owns those events.
+func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirmOutcome, alive bool) {
 	timeout := e.opts.ConfirmTimeout
 	if timeout <= 0 {
 		timeout = DefaultConfirmTimeout
@@ -159,40 +231,41 @@ func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verd
 	e.mu.Lock()
 	if e.current != s || s.ctx.Err() != nil {
 		e.mu.Unlock()
-		return "", false
+		return confirmDeclined, false
 	}
-	if e.opts.RememberApprovals && e.approvals[key] {
+	if e.opts.RememberApprovals && e.approvals[req.key] {
 		e.mu.Unlock()
-		e.log.Info("tool call allowed", "component", "tools", "tool", call.Name,
-			"command", verdict.Command, "rule", verdict.Rule, "source", "remembered approval")
-		return e.executeTool(s, call), true
+		e.log.Info("tool call allowed", "component", "tools", "tool", req.tool,
+			"command", req.command, "rule", req.rule, "source", "remembered approval")
+		return confirmApproved, true
 	}
 	if err := e.setStateLocked(StateAwaitingConfirmation); err != nil {
 		e.mu.Unlock()
 		e.fail(s, "session", err)
-		return "", false
+		return confirmDeclined, false
 	}
 	p := &pendingConfirmation{
-		tool:    call.Name,
-		command: verdict.Command,
-		key:     key,
+		tool:    req.tool,
+		command: req.command,
+		key:     req.key,
+		resume:  req.resume,
 		outcome: make(chan bool, 1),
 	}
 	e.pending = p
 	// The exact command goes on the bus before anything is spoken: the
 	// overlay must show what the user is confirming, verbatim.
 	e.publish(Event{Type: "tool.confirmation_required", Data: map[string]any{
-		"session_id": s.id, "tool": call.Name, "command": verdict.Command,
-		"summary": verdict.Summary, "rule": verdict.Rule,
+		"session_id": s.id, "tool": req.tool, "command": req.command,
+		"summary": req.summary, "rule": req.rule,
 		"timeout_sec": int(timeout.Seconds()),
 	}})
 	e.mu.Unlock()
-	e.log.Info("tool confirmation required", "component", "tools", "tool", call.Name,
-		"command", verdict.Command, "rule", verdict.Rule)
+	e.log.Info("tool confirmation required", "component", "tools", "tool", req.tool,
+		"command", req.command, "rule", req.rule)
 
 	// Speak first, then start the clock: the user's 30 seconds begin when
 	// the question has been asked, not while it is still being said.
-	e.speakPrompt(s, verdict.Summary)
+	e.speakPrompt(s, req.summary)
 
 	timerC, stopTimer := e.timer(timeout)
 	defer stopTimer()
@@ -200,15 +273,14 @@ func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verd
 		select {
 		case approved := <-p.outcome:
 			if !approved {
-				return "The user declined to run this command. It was not executed. " +
-					"Do not retry it; acknowledge the decline and continue helping.", true
+				return confirmDeclined, true
 			}
 			if e.opts.RememberApprovals {
 				e.mu.Lock()
-				e.approvals[key] = true
+				e.approvals[req.key] = true
 				e.mu.Unlock()
 			}
-			return e.executeTool(s, call), true
+			return confirmApproved, true
 		case <-timerC:
 			e.mu.Lock()
 			if e.pending != p || p.engaged {
@@ -220,16 +292,15 @@ func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verd
 				continue
 			}
 			e.pending = nil
-			_ = e.setStateLocked(StateThinking)
+			_ = e.setStateLocked(p.resumeState())
 			e.publish(Event{Type: "tool.declined", Data: e.confirmationData(p, "timeout")})
 			e.mu.Unlock()
 			e.log.Info("tool confirmation timed out", "component", "tools",
-				"tool", call.Name, "command", verdict.Command)
-			return "The user did not confirm in time, so the command was not executed. " +
-				"Do not retry it unless asked again.", true
+				"tool", req.tool, "command", req.command)
+			return confirmTimedOut, true
 		case <-s.ctx.Done():
 			// Cancelled or superseded; the cancel path published the events.
-			return "", false
+			return confirmDeclined, false
 		}
 	}
 }

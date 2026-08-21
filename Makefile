@@ -98,13 +98,14 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzConfigParse$$' -fuzztime=$(FUZZTIME) ./internal/config
 	$(GO) test -run='^$$' -fuzz='^FuzzWireDecode$$' -fuzztime=$(FUZZTIME) ./internal/ipc
 	$(GO) test -run='^$$' -fuzz='^FuzzReadStream$$' -fuzztime=$(FUZZTIME) ./internal/ai/openaicompat
+	$(GO) test -run='^$$' -fuzz='^FuzzRouterMatch$$' -fuzztime=$(FUZZTIME) ./internal/intent
 
 # Latency/throughput benchmarks over our own pipeline (fakes, not engines).
 # BENCHCOUNT=5 gives benchstat-able samples; CI passes it, local runs default
 # to one — same command either way.
 BENCHCOUNT ?= 1
 bench:
-	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCHCOUNT) ./internal/session
+	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCHCOUNT) ./internal/session ./internal/intent
 
 # Mutation testing over the session engine (the core state machine).
 # GOFLAGS=-count=1 keeps gremlins' baseline honest: a cached test run makes

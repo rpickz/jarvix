@@ -52,6 +52,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkWhisperModel,
 		checkTTS,
 		checkArtifactRenderer,
+		checkIntentBinaries,
 		checkDaemon,
 		checkProviderConfigured,
 		checkProviderReachable,

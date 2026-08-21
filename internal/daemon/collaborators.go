@@ -7,6 +7,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai/openaicompat"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
@@ -92,5 +93,22 @@ func engineOptions(cfg config.Config) session.Options {
 		FollowUpWindow:    time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
 		ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
+		Intents:           intentRouter(cfg),
 	}
+}
+
+// intentRouter compiles the deterministic intent table (ADR 0017). Nil means
+// no routing at all — every transcript reaches the assistant. A compile error
+// cannot happen for a validated configuration, because Config.Validate
+// compiles this very table; treating one as "disabled" keeps a live reload
+// from ever handing the engine a half-built router.
+func intentRouter(cfg config.Config) *intent.Router {
+	if !cfg.Intents.Enabled {
+		return nil
+	}
+	router, err := intent.New(cfg.IntentOptions())
+	if err != nil {
+		return nil
+	}
+	return router
 }

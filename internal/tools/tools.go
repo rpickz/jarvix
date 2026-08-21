@@ -96,6 +96,16 @@ func (r *Registry) Activity(call ai.ToolCall) (label, waiting string, ok bool) {
 	return p.Activity(json.RawMessage(call.Arguments))
 }
 
+// CheckCommand classifies a bare command string under the given tool identity
+// — the user-defined intent path (ADR 0017). Like Check, no policy means
+// everything is allowed.
+func (r *Registry) CheckCommand(tool, command string) Verdict {
+	if r.policy == nil {
+		return Verdict{Decision: PolicyAllow, Tool: tool, Command: command, Rule: "no policy installed"}
+	}
+	return r.policy.DecideCommand(tool, command)
+}
+
 // Names returns registered tool names in registration order.
 func (r *Registry) Names() []string {
 	return append([]string(nil), r.order...)

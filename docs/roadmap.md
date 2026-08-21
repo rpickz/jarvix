@@ -20,7 +20,7 @@ offered to the model. "What does this error mean?" while a terminal is
 focused should just work. Requires the permissions architecture to say what
 Jarvix may look at.
 
-## Phase 3 — Deterministic local intents
+## Phase 3 — Deterministic local intents (done)
 
 A fast intent router in front of the AI:
 
@@ -30,8 +30,15 @@ STT ──► Intent Router ──► deterministic intent ("volume 30", "mute",
          └───────────────► AI conversation (everything else)
 ```
 
-Common commands execute in milliseconds without any model. The router starts
-as an explicit grammar/pattern table — not a machine-learning system.
+Common commands execute in milliseconds without any model
+([ADR 0017](adr/0017-deterministic-intent-router.md)): the router is an
+explicit grammar/pattern table — not a machine-learning system — matched
+strictly against the whole utterance, so anything it does not recognise
+verbatim reaches the AI unchanged. Built-ins (volume set/up/down,
+mute/unmute, "stop", "new conversation", workspace *n*, open terminal) map to
+a fixed argv; user-defined intents (`[[intents.custom]]`) run through the
+tool permission gate. Measured: ~230ns on the miss path, zero provider calls
+on a hit.
 
 ## Phase 4 — AI tools (started)
 

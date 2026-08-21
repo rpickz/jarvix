@@ -1,0 +1,231 @@
+package session
+
+import (
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/tools"
+)
+
+// This file is the engine half of the deterministic intent router (ADR 0017).
+// internal/intent owns the grammar and the argv table; the engine owns what a
+// hit means for a session: a state, an action, an acknowledgement, a history
+// entry, and an event — with no provider request anywhere in it.
+//
+// The seam is maybeThinkLocked. That is the exact point where a final
+// transcript would otherwise become a model call, and putting the router
+// there is what makes the miss path byte-identical to before: on a miss the
+// function continues into Thinking as it always did, one map lookup later.
+
+// errIntentDeclined marks a user-defined intent the user refused at the
+// permission gate. It is a "failure" only in the sense that nothing ran; the
+// acknowledgement says so plainly rather than apologising for a bug.
+var errIntentDeclined = errors.New("declined")
+
+// routeIntentLocked offers the transcript to the intent table. It reports
+// whether the router claimed the utterance; false means the caller proceeds
+// to the model exactly as it did before this feature existed.
+//
+// Must be called with e.mu held and the session already validated.
+func (e *Engine) routeIntentLocked(s *sess) bool {
+	if e.opts.Intents == nil {
+		return false
+	}
+	m, ok := e.opts.Intents.Match(s.transcript)
+	if !ok {
+		return false
+	}
+	// Capture the utterance now: a user-defined intent may pause for a spoken
+	// confirmation, and that reply overwrites s.transcript. The conversation
+	// must remember "lock the screen", not "yes".
+	utterance := s.transcript
+	if err := e.setStateLocked(StateActing); err != nil {
+		e.failLocked(s, "session", err)
+		return true
+	}
+	go e.runIntent(s, m, utterance, time.Now())
+	return true
+}
+
+// runIntent carries out a matched intent off the engine lock: act, announce,
+// remember, finish. It runs on its own goroutine for the same reason think()
+// does — speaking blocks, and mu must never be held across audio.
+func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started time.Time) {
+	if m.Control == intent.ControlStopSpeech {
+		// "Stop" is answered with silence: an acknowledgement would be the
+		// one thing the user just asked for less of. Speech is halted through
+		// the existing CancelSpeech path — a no-op unless a session really is
+		// speaking, which is the case once a transcript can arrive without a
+		// new session interrupting the old one (wake word, Phase 6). Today
+		// the interrupting session.start has usually stopped it already, and
+		// the outcome the user hears is identical either way.
+		_ = e.CancelSpeech()
+		e.publishIntent(s, m, "", nil, started)
+		e.mu.Lock()
+		e.finishLocked(s)
+		e.mu.Unlock()
+		return
+	}
+
+	ack := m.Ack
+	var runErr error
+	switch {
+	case m.Control == intent.ControlNewConversation:
+		e.ResetConversation()
+	case m.UserDefined:
+		var alive bool
+		runErr, alive = e.runUserIntent(s, m)
+		if !alive {
+			return // cancelled or superseded; that path owns the events
+		}
+	case len(m.Argv) > 0:
+		runErr = e.intentRunner().Run(s.ctx, m.Argv)
+	}
+	if s.ctx.Err() != nil {
+		return
+	}
+	if runErr != nil {
+		// A failing command must never leave a stuck session: Jarvix says one
+		// line about it and the session completes normally.
+		ack = intentFailureAck(runErr)
+		e.log.Warn("intent failed", "component", "intent", "session_id", s.id,
+			"intent", m.Name, "error", runErr.Error())
+	}
+
+	e.publishIntent(s, m, ack, runErr, started)
+	e.speakAck(s, ack)
+
+	// A matched intent is still a turn of the conversation: recording it means
+	// a follow-up that *does* reach the model ("a bit louder than that") knows
+	// what just happened. The exception is conversation.new, whose entire
+	// purpose is an empty history — re-seeding it with the reset itself would
+	// undo the thing the user asked for.
+	if m.Control != intent.ControlNewConversation {
+		e.commitTurn(utterance, ack)
+	}
+
+	e.mu.Lock()
+	e.finishLocked(s)
+	e.mu.Unlock()
+	e.persistHistory()
+}
+
+// runUserIntent executes a configured intent's command through the tool
+// permission gate. User-written or not, it is arbitrary shell execution
+// triggered by speech, so it faces the same allow/ask/deny classifier and the
+// same spoken confirmation as anything the model asks for (ADR 0014) — the
+// gate is reused wholesale rather than reimplemented with softer rules.
+func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive bool) {
+	verdict := e.intentVerdict(m.Command)
+	switch verdict.Decision {
+	case tools.PolicyDeny:
+		e.log.Info("intent denied", "component", "tools", "tool", tools.IntentToolName,
+			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
+		e.publish(Event{Type: "tool.denied", Data: map[string]any{
+			"session_id": s.id, "tool": tools.IntentToolName,
+			"command": verdict.Command, "rule": verdict.Rule}})
+		return fmt.Errorf("that command is not permitted (%s)", verdict.Rule), true
+	case tools.PolicyAsk:
+		outcome, ok := e.awaitConfirmation(s, confirmRequest{
+			tool:    tools.IntentToolName,
+			command: verdict.Command,
+			summary: verdict.Summary,
+			rule:    verdict.Rule,
+			key:     tools.IntentToolName + "\x00" + verdict.Command,
+			resume:  StateActing,
+		})
+		if !ok {
+			return nil, false
+		}
+		if outcome != confirmApproved {
+			return errIntentDeclined, true
+		}
+	default:
+		e.log.Debug("intent allowed", "component", "tools", "tool", tools.IntentToolName,
+			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
+	}
+	return e.intentRunner().RunShell(s.ctx, m.Command), true
+}
+
+// intentVerdict classifies a user-defined command. With no registry wired
+// (tests) there is no gate to consult, and an ungated shell command must not
+// run silently — so the safe reading is "ask".
+func (e *Engine) intentVerdict(command string) tools.Verdict {
+	if e.tools == nil {
+		return tools.Verdict{
+			Decision: tools.PolicyAsk, Tool: tools.IntentToolName, Command: command,
+			Rule:    "no permission gate installed",
+			Summary: fmt.Sprintf("I want to run %q. Should I go ahead?", command),
+		}
+	}
+	return e.tools.CheckCommand(tools.IntentToolName, command)
+}
+
+// intentRunner returns the configured runner. NewEngine installs a real one
+// alongside a router, so this is nil only when a caller passed a router and
+// then cleared the runner.
+func (e *Engine) intentRunner() intent.Runner {
+	if e.opts.IntentRunner != nil {
+		return e.opts.IntentRunner
+	}
+	return &intent.ExecRunner{Log: e.log}
+}
+
+// speakAck says the acknowledgement through the ordinary streaming speaker,
+// so the overlay sees the same Speaking state and tts.* events it sees for an
+// AI answer — a deterministic intent should be indistinguishable from the
+// outside except for how fast it happens. Speech failure is logged, never
+// fatal: the action already happened.
+func (e *Engine) speakAck(s *sess, ack string) {
+	if ack == "" || !e.opts.SpeakResponses || e.tts == nil {
+		return
+	}
+	speaker := newStreamingSpeaker(e, s)
+	speaker.speak(ack)
+	if err := speaker.close(); err != nil && s.ctx.Err() == nil {
+		e.log.Warn("intent acknowledgement could not be spoken",
+			"component", "tts", "session_id", s.id, "error", err.Error())
+	}
+}
+
+// intentFailureAck turns a command failure into one spoken sentence.
+func intentFailureAck(err error) string {
+	if errors.Is(err, errIntentDeclined) {
+		return "Cancelled."
+	}
+	return "Sorry, " + err.Error() + "."
+}
+
+// publishIntent records the hit for the overlay and the logs. duration_ms is
+// measured from the final transcript, which is the number the ≤300ms budget
+// is about.
+func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error, started time.Time) {
+	source := "builtin"
+	if m.UserDefined {
+		source = "user"
+	}
+	elapsed := time.Since(started)
+	data := map[string]any{
+		"session_id":      s.id,
+		"intent":          m.Name,
+		"source":          source,
+		"status":          "ok",
+		"acknowledgement": ack,
+		"duration_ms":     elapsed.Milliseconds(),
+	}
+	attrs := []any{"component", "intent", "session_id", s.id, "intent", m.Name,
+		"source", source, "duration_ms", elapsed.Milliseconds()}
+	if m.HasSlot {
+		data["slot"] = m.Slot
+		attrs = append(attrs, "slot", m.Slot)
+	}
+	if runErr != nil {
+		data["status"] = "failed"
+		data["error"] = runErr.Error()
+		attrs = append(attrs, "error", runErr.Error())
+	}
+	e.publish(Event{Type: "intent.executed", Data: data})
+	e.log.Info("intent executed", attrs...)
+}
