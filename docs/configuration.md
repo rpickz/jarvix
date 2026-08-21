@@ -220,6 +220,8 @@ shell_deny = []                  # extra command prefixes that never run,
 # "desktop.list_windows" = "allow"   # built-in defaults: the two window reads
 # "desktop.focus_window" = "allow"   # run silently; move, close and launch
                                      # take the default above ("ask")
+# "conversations.search" = "allow"   # built-in default: a read of your own
+                                     # archive (ADR 0028), like memory.recall
 # "typing.type_text" = "allow"   # the typing tools ALWAYS ask unless you name
 # "typing.press_key" = "allow"   # them here — a global default of "allow"
                                  # deliberately does not reach them. A global
