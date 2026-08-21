@@ -522,13 +522,25 @@ func Default() Config {
 	}
 }
 
+// defaultSystemPrompt carries the honesty rule alongside the speech style
+// because it binds even with every tool switched off: a session that cannot
+// act must say so, never narrate an action it has no way to perform. The
+// wording is pinned by TestSystemPromptPinsTheHonestyRule — a live session
+// narrated launches and window moves with tool_calls=0 (issue #71), and this
+// sentence is the standing instruction against that.
 const defaultSystemPrompt = "You are Jarvix, a voice assistant built into the user's Linux computer. " +
 	"Your responses are spoken aloud, so answer concisely in plain prose: no markdown, " +
-	"no lists, no code blocks, no preamble. Get straight to the point."
+	"no lists, no code blocks, no preamble. Get straight to the point. " +
+	"Never say you have done something, or are doing it, unless you really did it; if you cannot " +
+	"do something, say so plainly instead of describing it as done."
 
 // ToolSystemPrompt is appended to the system prompt when tools are enabled.
 // It tells the model to act on its own rather than instruct the user, and to
-// keep spoken answers about command output brief.
+// keep spoken answers about command output brief. It also states the cardinal
+// rule of the tool loop — an action exists only as a tool call — because the
+// failure it forbids (narrating "opening it now" while calling nothing) is a
+// choice the model makes before any tool description is read (issue #71).
+// The rule's wording is pinned by TestToolSystemPromptPinsTheHonestyRule.
 const ToolSystemPrompt = " You can run shell commands yourself with the shell.run tool to answer " +
 	"questions about the computer's live state and to carry out tasks. When the user asks what is " +
 	"happening with something (Docker, git, processes, disk, services), run the appropriate command " +
@@ -536,7 +548,10 @@ const ToolSystemPrompt = " You can run shell commands yourself with the shell.ru
 	"commands. Commands that change the system trigger a built-in spoken confirmation from the user " +
 	"before they run; if a tool result says the command was declined or not permitted, do not retry " +
 	"it — acknowledge and move on. Summarise command output for speech: report what matters, not " +
-	"raw tables."
+	"raw tables. The cardinal rule: an action only happens when you make the tool call that " +
+	"performs it, in this turn. Never describe an action as done or underway unless you are " +
+	"making that call; if you did not call the tool, the action did not happen — say plainly " +
+	"that you have not done it."
 
 // ArtifactSystemPrompt is appended to the system prompt when the artifact
 // tool is enabled. The spoken-summary rules live here because they are model
@@ -578,6 +593,35 @@ const MemorySystemPrompt = " You have a long-term memory of facts, injected abov
 	"When they ask what you know or remember, answer from the remembered facts or memory.recall, " +
 	"in plain words. When they ask you to forget something, use memory.forget. After remembering " +
 	"or forgetting, confirm what changed in one short sentence."
+
+// AssistantSystemPrompt is the system prompt the engine runs with: the
+// configured base plus the instructions for each enabled tool. The tool
+// flags decide the suffixes because the tool registry is built from them —
+// on a reload the running (booted) tool flags are what matter, not the file.
+// It lives here rather than in the daemon so doctor's context-floor check
+// (issue #71) measures the same prompt the daemon sends, from one copy.
+func AssistantSystemPrompt(cfg Config) string {
+	prompt := cfg.AI.SystemPrompt
+	if cfg.Tools.Shell {
+		prompt += ToolSystemPrompt
+	}
+	if cfg.Tools.Artifacts {
+		prompt += ArtifactSystemPrompt
+	}
+	if cfg.Tools.Desktop {
+		prompt += DesktopSystemPrompt
+	}
+	if cfg.Tools.Typing.Enable {
+		prompt += TypingSystemPrompt
+	}
+	if len(cfg.Advisors) > 0 {
+		prompt += AdvisorSystemPrompt
+	}
+	if cfg.Memory.Enabled {
+		prompt += MemorySystemPrompt
+	}
+	return prompt
+}
 
 // minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
 // warm (whisper base.en alone is ~165 MB resident). A cap below it would

@@ -197,12 +197,12 @@ func TestCaptureIsAuditableAfterwards(t *testing.T) {
 func TestContextGatheringIsChargedToJarvix(t *testing.T) {
 	var s sess
 	base := time.Now()
-	s.timings.captureStop = base
-	s.timings.transcript = base.Add(100 * time.Millisecond)
-	s.timings.contextDone = base.Add(150 * time.Millisecond)
-	s.timings.firstDelta = base.Add(400 * time.Millisecond)
-	s.timings.firstPCM = base.Add(450 * time.Millisecond)
-	s.timings.audioOut = base.Add(500 * time.Millisecond)
+	s.timings.captureStop = mark{at: base}
+	s.timings.transcript = mark{at: base.Add(100 * time.Millisecond)}
+	s.timings.contextDone = mark{at: base.Add(150 * time.Millisecond)}
+	s.timings.firstDelta = mark{at: base.Add(400 * time.Millisecond)}
+	s.timings.firstPCM = mark{at: base.Add(450 * time.Millisecond)}
+	s.timings.audioOut = mark{at: base.Add(500 * time.Millisecond)}
 
 	report := s.timings.report()
 	if got := report[StageContext]; got != int64(50) {
@@ -220,9 +220,9 @@ func TestContextGatheringIsChargedToJarvix(t *testing.T) {
 	// With context disabled there is no stage at all — absent, not zero, so a
 	// reader can tell "off" from "instant".
 	var without sess
-	without.timings.captureStop = base
-	without.timings.transcript = base.Add(100 * time.Millisecond)
-	without.timings.firstDelta = base.Add(400 * time.Millisecond)
+	without.timings.captureStop = mark{at: base}
+	without.timings.transcript = mark{at: base.Add(100 * time.Millisecond)}
+	without.timings.firstDelta = mark{at: base.Add(400 * time.Millisecond)}
 	plain := without.timings.report()
 	if _, present := plain[StageContext]; present {
 		t.Errorf("%s reported with context disabled: %v", StageContext, plain)

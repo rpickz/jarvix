@@ -64,6 +64,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkWarmEngines,
 		checkProviderConfigured,
 		checkProviderReachable,
+		checkContextFloor,
 		checkPlugin,
 		checkKeybindings,
 		checkPushToTalk,

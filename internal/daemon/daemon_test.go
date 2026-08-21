@@ -10,6 +10,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/doctor"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -64,6 +65,20 @@ func TestStatusOverSocket(t *testing.T) {
 	}
 	if status["protocol"] != float64(ipc.ProtocolVersion) {
 		t.Errorf("protocol = %v", status["protocol"])
+	}
+	// The prompt budget rides status.get so budget-vs-context is visible
+	// after setup, not only under doctor (issue #71). The daemon's numbers
+	// must reflect its real composed prompt and registered tools.
+	budget, ok := doctor.BudgetFromReport(status["prompt_budget"])
+	if !ok {
+		t.Fatalf("status.get has no prompt_budget: %v", status)
+	}
+	if budget.SystemPrompt <= 0 || budget.Headroom <= 0 {
+		t.Errorf("prompt budget = %+v, want measured system prompt and headroom", budget)
+	}
+	if budget.ToolSchemas <= 0 {
+		t.Errorf("prompt budget = %+v, want the registered tool schemas measured "+
+			"(the default config registers the desktop and artifact tools)", budget)
 	}
 }
 
