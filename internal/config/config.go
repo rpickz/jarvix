@@ -39,6 +39,10 @@ type Config struct {
 	// Memory is the knowledge base — facts the user explicitly asks Jarvix
 	// to remember, consulted on every model turn (see memory.go, ADR 0025).
 	Memory Memory `toml:"memory"`
+	// Knowledge is the feed section — user-configured fetchers whose latest
+	// value the daemon keeps warm so changing facts answer instantly (see
+	// knowledge.go, ADR 0030). Empty feeds disable the feature.
+	Knowledge Knowledge `toml:"knowledge"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
 	// delegation entirely — the tool is not registered.
@@ -521,7 +525,10 @@ func Default() Config {
 		// "remember ..." explicitly, so the trust decision is made per fact,
 		// not per install (ADR 0025).
 		Memory: Memory{Enabled: true, MaxFacts: 200, MaxInjectedTokens: 500},
-		Audio:  Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
+		// No feeds by default: a feed runs a command on a schedule, and that
+		// is a decision the user makes by writing the command (ADR 0030).
+		Knowledge: Knowledge{MaxInjectedTokens: DefaultKnowledgeInjectedTokens},
+		Audio:     Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		// Warm by default: presence is the product, and the memory is
 		// reclaimed after ten idle minutes. The cap is a leak detector, not a
 		// working budget — whisper base.en plus Kokoro sit well under it.
@@ -633,6 +640,9 @@ func AssistantSystemPrompt(cfg Config) string {
 	if cfg.Memory.Enabled {
 		prompt += MemorySystemPrompt
 	}
+	if len(cfg.Knowledge.Feeds) > 0 {
+		prompt += KnowledgeSystemPrompt
+	}
 	return prompt
 }
 
@@ -706,6 +716,9 @@ func parse(data []byte, cfg Config) (Config, error) {
 	// [advisors.<name>] decodes straight into the map (no scalars share the
 	// table, unlike [ai]), so it only needs its presets applying.
 	applyAdvisorDefaults(&cfg)
+	// [[knowledge.feeds]] decodes straight into the slice; each table is
+	// filled from the feed defaults (mode, interval, ttl, timeout).
+	applyKnowledgeDefaults(&cfg)
 	return cfg, nil
 }
 
@@ -853,6 +866,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.routineProblems()...)
 	problems = append(problems, c.contextProblems()...)
 	problems = append(problems, c.memoryProblems()...)
+	problems = append(problems, c.knowledgeProblems()...)
 	problems = append(problems, c.voiceProblems()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

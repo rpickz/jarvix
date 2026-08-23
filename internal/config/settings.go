@@ -214,11 +214,12 @@ func Settings() []Setting {
 			set:  func(c *Config, v any) { c.Conversation.Retention = v.(string) }},
 
 		// The intent table itself is rebuilt with the engine, so these are
-		// idle-class. [[intents.custom]] and [[routines]] entries stay
-		// hand-edited TOML — like [ai.<name>] endpoints, they are structured
-		// tables rather than single values — and land on the next idle-class
-		// reload or restart. Routines are listed read-only through the
-		// `routines.list` IPC method (v1 lists, never edits).
+		// idle-class. [[intents.custom]], [[routines]] and [[knowledge.feeds]]
+		// entries stay hand-edited TOML — like [ai.<name>] endpoints, they are
+		// structured tables rather than single values — and land on the next
+		// idle-class reload or restart. Routines are listed read-only through
+		// the `routines.list` IPC method, feeds through `knowledge.status`
+		// (v1 lists, never edits).
 		{Key: "intents.enabled", Label: "Deterministic intents", Type: TypeBool, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Intents.Enabled },
 			set: func(c *Config, v any) { c.Intents.Enabled = v.(bool) }},
