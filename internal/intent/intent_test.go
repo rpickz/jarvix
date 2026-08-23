@@ -520,3 +520,167 @@ func TestRoutinePhraseValidation(t *testing.T) {
 		})
 	}
 }
+
+// The script router tests (ADR 0030) mirror the routine ones deliberately:
+// scripts are the fourth phrase family, and the properties that keep routing
+// safe — whole-utterance matching, a payload-free Match, and load-time
+// collision errors across every family — must hold for them identically.
+
+func TestScriptPhraseRoutesToTheScript(t *testing.T) {
+	r, err := New(Options{Scripts: []ScriptPhrases{
+		{Name: "backup notes", Phrases: []string{"backup my notes", "back up my notes"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, utterance := range []string{"backup my notes", "Back up my notes.", "BACKUP MY NOTES"} {
+		m, ok := r.Match(utterance)
+		if !ok {
+			t.Fatalf("%q did not match", utterance)
+		}
+		if m.Script != "backup notes" {
+			t.Errorf("%q → script %q", utterance, m.Script)
+		}
+		if m.Name != ScriptIntentName {
+			t.Errorf("%q → name %q", utterance, m.Name)
+		}
+		// The no-payload assertion is the routing half of the zero-arguments
+		// rule: a Match that carried an argv, a command, or a slot would be
+		// the first place something spoken could ride towards an exec.
+		if len(m.Argv) != 0 || m.Command != "" || m.Program != "" || m.UserDefined || m.HasSlot {
+			t.Errorf("%q carries an executable payload: %+v", utterance, m)
+		}
+		if m.Ack != "" {
+			t.Errorf("%q carries an immediate ack %q; the run's outcome is the acknowledgement", utterance, m.Ack)
+		}
+	}
+	if _, ok := r.Match("backup my notes please"); ok {
+		t.Error("a longer sentence matched; script phrases are whole-utterance like every other intent")
+	}
+	if _, ok := r.Match("backup my"); ok {
+		t.Error("a prefix matched; script phrases are whole-utterance like every other intent")
+	}
+}
+
+// TestScriptPhraseCollisionsFailCompilation walks every pair a script phrase
+// can collide in — built-in, custom intent, routine, another script — and
+// requires a load-time error naming the first owner. The router compiles
+// scripts last of the literal families, so the ordering guarantees each of
+// the four owners is already in the taken table when the clash arrives.
+func TestScriptPhraseCollisionsFailCompilation(t *testing.T) {
+	tests := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"builtin", Options{Scripts: []ScriptPhrases{
+			{Name: "hush", Phrases: []string{"mute"}},
+		}}, `the built-in intent "volume.mute"`},
+		{"custom", Options{
+			Custom: []Custom{{Match: "lock it down", Run: "loginctl lock-session"}},
+			Scripts: []ScriptPhrases{
+				{Name: "lockdown", Phrases: []string{"lock it down"}},
+			}}, `intents.custom[0]`},
+		{"routine", Options{
+			Routines: []RoutinePhrases{{Name: "morning", Phrases: []string{"set up my desk"}}},
+			Scripts: []ScriptPhrases{
+				{Name: "desk backup", Phrases: []string{"set up my desk"}},
+			}}, `the trigger for routine "morning"`},
+		{"another script", Options{Scripts: []ScriptPhrases{
+			{Name: "notes", Phrases: []string{"run my backup"}},
+			{Name: "photos", Phrases: []string{"run my backup"}},
+		}}, `the trigger for script "notes"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.opts)
+			if err == nil {
+				t.Fatal("compiled despite the collision")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %s", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestScriptPhraseNeverCollidesSilently is the inverse sweep: distinct
+// phrases across all four families coexist, and each one still routes to its
+// own family — compiling scripts last must not let an earlier family shadow
+// a non-colliding script phrase.
+func TestScriptPhraseNeverCollidesSilently(t *testing.T) {
+	r, err := New(Options{
+		Custom:   []Custom{{Match: "lock the screen", Run: "loginctl lock-session"}},
+		Routines: []RoutinePhrases{{Name: "morning", Phrases: []string{"morning setup"}}},
+		Scripts:  []ScriptPhrases{{Name: "backup notes", Phrases: []string{"backup my notes"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := r.Match("backup my notes"); !ok || m.Script != "backup notes" {
+		t.Errorf("script phrase → %+v, %v", m, ok)
+	}
+	if m, ok := r.Match("morning setup"); !ok || m.Routine != "morning" {
+		t.Errorf("routine phrase → %+v, %v", m, ok)
+	}
+	if m, ok := r.Match("lock the screen"); !ok || !m.UserDefined {
+		t.Errorf("custom phrase → %+v, %v", m, ok)
+	}
+	if m, ok := r.Match("mute"); !ok || m.Name != "volume.mute" {
+		t.Errorf("builtin phrase → %+v, %v", m, ok)
+	}
+}
+
+// TestScriptPhraseValidation: the malformed shapes fail with messages that
+// name the offending script. The placeholder refusal is the load-bearing
+// case — {volume}-style slots are the only mechanism by which speech could
+// ever become a value, and script phrases reject the syntax outright.
+func TestScriptPhraseValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"empty name", Options{Scripts: []ScriptPhrases{{Phrases: []string{"go"}}}},
+			"scripts[0]: name is empty"},
+		{"no phrases", Options{Scripts: []ScriptPhrases{{Name: "backup notes"}}},
+			`scripts[0] ("backup notes"): it has no phrases`},
+		{"placeholder", Options{Scripts: []ScriptPhrases{
+			{Name: "backup notes", Phrases: []string{"backup workspace {workspace}"}}}},
+			"contains a placeholder"},
+		{"free-text slot", Options{Scripts: []ScriptPhrases{
+			{Name: "backup notes", Phrases: []string{"backup {name}"}}}},
+			"contains a placeholder"},
+		{"empty phrase", Options{Scripts: []ScriptPhrases{
+			{Name: "backup notes", Phrases: []string{"  "}}}},
+			"pattern is empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.opts)
+			if err == nil {
+				t.Fatal("compiled despite the problem")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestScriptPhraseLosesToLiteralCaptureOverlap pins the insertion-order
+// contract extended to scripts: a script phrase beginning with "save this
+// as" is a literal phrase, so it beats the capture slot exactly as routines
+// and custom intents do.
+func TestScriptPhraseLosesToLiteralCaptureOverlap(t *testing.T) {
+	r, err := New(Options{Scripts: []ScriptPhrases{
+		{Name: "weird", Phrases: []string{"save this as backup"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := r.Match("save this as backup")
+	if !ok || m.Script != "weird" || m.CaptureName != "" {
+		t.Errorf("literal script phrase lost to the capture slot: %+v, %v", m, ok)
+	}
+}

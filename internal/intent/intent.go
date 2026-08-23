@@ -121,6 +121,13 @@ type Match struct {
 	// engine hands the name to the capture service, which owns everything
 	// about reading the desktop and writing configuration.
 	CaptureName string
+	// Script is the configured script this utterance triggers ([[scripts]],
+	// ADR 0030), empty for every other intent. Only the name travels, and for
+	// a stronger reason than Routine's tidiness: the script runner passes its
+	// executable zero arguments by construction, and a Match that carried
+	// anything more than a name would be the first place an argument could
+	// come from.
+	Script string
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -150,6 +157,22 @@ type RoutinePhrases struct {
 	Phrases []string
 }
 
+// ScriptPhrases is the router's view of one configured script ([[scripts]],
+// ADR 0030): the name the engine will run and the phrases that trigger it.
+// The path, timeout, and report mode are deliberately absent — routing
+// decides *whether* an utterance is a script, never what runs or how, so
+// nothing about execution can leak into the grammar table.
+type ScriptPhrases struct {
+	// Name is the script's configured name, spoken in confirmations and
+	// handed to the runner on a match.
+	Name string
+	// Phrases are the literal trigger phrases. Placeholders are not accepted:
+	// a script runs with zero arguments in v1, so there is nothing a slot
+	// value could ever become — and refusing the syntax outright means the
+	// question of interpolating speech into an argv can never even be asked.
+	Phrases []string
+}
+
 // Options configures a router.
 type Options struct {
 	// Terminal is the binary "open terminal" launches. It is validated as a
@@ -159,6 +182,8 @@ type Options struct {
 	Custom []Custom
 	// Routines holds the configured routines' trigger phrases (ADR 0026).
 	Routines []RoutinePhrases
+	// Scripts holds the configured scripts' trigger phrases (ADR 0030).
+	Scripts []ScriptPhrases
 }
 
 // DefaultTerminal is the terminal "open terminal" launches when configuration
@@ -211,6 +236,7 @@ type rule struct {
 	command     string
 	userDefined bool
 	routine     string
+	script      string
 	// capture marks the "save this as {name}" rules (#62): a match hands the
 	// trailing free-text words to the engine as Match.CaptureName.
 	capture bool
@@ -437,6 +463,43 @@ func New(opts Options) (*Router, error) {
 		r.names = append(r.names, "routine:"+name)
 	}
 
+	// Scripts compile after routines and face the same closed world: a phrase
+	// that already belongs to a built-in, a custom intent, a routine, or an
+	// earlier script is a config error at load naming both owners, never a
+	// silent coin toss at match time. The rules they compile to carry only
+	// the script's name — no ack (the engine speaks the run's outcome), no
+	// argv, no command, and nowhere an argument could hide (ADR 0030).
+	for i, sc := range opts.Scripts {
+		name := strings.TrimSpace(sc.Name)
+		label := scriptLabel(i, name)
+		if name == "" {
+			return nil, fmt.Errorf("%s: name is empty; give the script a name to trigger and log under", label)
+		}
+		if len(sc.Phrases) == 0 {
+			return nil, fmt.Errorf("%s: it has no phrases; add at least one trigger phrase", label)
+		}
+		for _, phrase := range sc.Phrases {
+			if strings.ContainsAny(phrase, "{}") {
+				// A slot value would have nowhere to go but the script's argv
+				// or environment, which is the one flow this feature exists to
+				// make impossible (zero-argument scripts, ADR 0030).
+				return nil, fmt.Errorf("%s: phrase %q contains a placeholder; script phrases are "+
+					"literal, because nothing spoken may ever reach the script", label, phrase)
+			}
+			p, err := compile(phrase)
+			if err != nil {
+				return nil, fmt.Errorf("%s: phrase %q: %w", label, phrase, err)
+			}
+			if owner, clash := taken[p.key()]; clash {
+				return nil, fmt.Errorf("%s: phrase %q is already %s; choose a different phrase",
+					label, phrase, owner)
+			}
+			taken[p.key()] = fmt.Sprintf("the trigger for script %q", name)
+			r.add(&rule{name: ScriptIntentName, pattern: p, script: name})
+		}
+		r.names = append(r.names, "script:"+name)
+	}
+
 	// The capture patterns (#62) compile last on purpose: rules are tried in
 	// insertion order, so every literal phrase — built-in, custom, or routine
 	// trigger — that happens to begin with the same words wins over the
@@ -459,6 +522,19 @@ func New(opts Options) (*Router, error) {
 // CaptureIntentName identifies the "save this as <name>" intent (#62) in
 // logs and the intent.executed event.
 const CaptureIntentName = "routine.capture"
+
+// ScriptIntentName identifies a matched script phrase (ADR 0030) in logs and
+// the intent.executed event. It deliberately spells the same identity the
+// permission gate judges (tools.ScriptToolName), so the audit trail reads as
+// one story from match to verdict.
+const ScriptIntentName = "script.run"
+
+func scriptLabel(i int, name string) string {
+	if name == "" {
+		return fmt.Sprintf("scripts[%d]", i)
+	}
+	return fmt.Sprintf("scripts[%d] (%q)", i, name)
+}
 
 // capturePatterns are the utterances that save the live desktop as a routine
 // (#62). Like every entry in the built-in table they are a short, literal
@@ -575,7 +651,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Name: ru.name, Slot: slot, HasSlot: hasSlot, Control: ru.control,
 		Desktop: ru.desktop, Program: ru.program,
 		Command: ru.command, UserDefined: ru.userDefined,
-		Routine: ru.routine,
+		Routine: ru.routine, Script: ru.script,
 	}
 	if ru.argv != nil {
 		m.Argv = ru.argv(slot)

@@ -189,11 +189,33 @@ FloatingWindow {
     }) + "\n")
   }
 
+  // --- scripts ------------------------------------------------------------
+  // The configured scripts (ADR 0030), listed with their paths so what a
+  // click would run is visible before it runs. Display and trigger only:
+  // scripts.run replays the script's phrase through the daemon's ordinary
+  // session path, so the router, the script.run permission gate (ask by
+  // default — the confirmation card names the script and its path), and the
+  // spoken outcome all behave exactly as if the phrase had been spoken —
+  // this window decides nothing (ADR 0013).
+  property var scripts: []
+
+  function requestScripts() {
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 17, method: "scripts.list" }) + "\n")
+  }
+
+  function runScript(name) {
+    if (!daemon.connected) return
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: 18, method: "scripts.run", params: { name: name }
+    }) + "\n")
+  }
+
   // --- typed turns --------------------------------------------------------
   // Request id 1 is the conversation snapshot; typed submissions take ids
   // from 2 upwards so a reply can be matched to the text that produced it.
   // Dynamic request ids start above the fixed ones this connection also
-  // carries (1 = conversation.get, 15/16 = routines list/run; settings has
+  // carries (1 = conversation.get, 15/16 = routines list/run, 17/18 =
+  // scripts list/run; settings has
   // 11–14 on its own socket). Two features merged with each scheme unaware
   // of the other, and a dynamic counter walking into the fixed range would
   // misroute a history reply as a routines one — hence the gap.
@@ -582,8 +604,9 @@ FloatingWindow {
       if (historyOpen) requestHistory()
       break
     case "config.changed":
-      // A saved config may have added or renamed routines.
+      // A saved config may have added or renamed routines or scripts.
       requestRoutines()
+      requestScripts()
       break
     }
   }
@@ -624,6 +647,11 @@ FloatingWindow {
         } else if (frame.id === 16 && frame.error) {
           win.errorStage = "routine"
           win.errorMessage = String(frame.error.message || "the routine could not be started")
+        } else if (frame.id === 17 && frame.result) {
+          win.scripts = frame.result.scripts || []
+        } else if (frame.id === 18 && frame.error) {
+          win.errorStage = "script"
+          win.errorMessage = String(frame.error.message || "the script could not be started")
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
         } else if (frame.id === 1 && frame.error) {
@@ -640,6 +668,7 @@ FloatingWindow {
       if (connected) {
         win.requestConversation()
         win.requestRoutines()
+        win.requestScripts()
         // The snapshot replaces the model wholesale (seq keeps replays
         // honest), so a reconnect — possibly to a restarted daemon — always
         // converges on what the daemon actually holds.
@@ -1559,6 +1588,73 @@ FloatingWindow {
               color: Color.popups.text
               text: routineRow.modelData.name
                 + "  —  say “" + (routineRow.modelData.phrases || []).join("” or “") + "”"
+            }
+          }
+        }
+      }
+
+      // Scripts panel (ADR 0030): each configured script with its phrases
+      // and the path it runs — shown here for the same reason the gate's
+      // confirmation names it: what a click would execute must be visible
+      // before the click. Run takes the identical gated path as speech.
+      Column {
+        id: scriptsPanel
+        visible: win.socketReady && win.scripts.length > 0
+        width: parent.width
+        spacing: Style.space(4)
+        bottomPadding: Style.space(8)
+
+        Text {
+          text: "Scripts"
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.subtitle
+          color: Util.alpha(Color.popups.text, 0.7)
+        }
+
+        Repeater {
+          model: win.scripts
+          delegate: Row {
+            id: scriptRow
+            required property var modelData
+            width: scriptsPanel.width
+            spacing: Style.space(8)
+
+            Rectangle {
+              id: scriptRunButton
+              width: scriptRunLabel.width + Style.space(20)
+              height: scriptRunLabel.height + Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.accent, scriptRunButton.activeFocus ? 0.35 : 0.18)
+              border.color: Color.accent
+              border.width: scriptRunButton.activeFocus ? 2 : 1
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Run script " + scriptRow.modelData.name
+              Keys.onReturnPressed: win.runScript(scriptRow.modelData.name)
+              Keys.onSpacePressed: win.runScript(scriptRow.modelData.name)
+              Text {
+                id: scriptRunLabel
+                anchors.centerIn: parent
+                text: "Run"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea { anchors.fill: parent; onClicked: win.runScript(scriptRow.modelData.name) }
+            }
+
+            Text {
+              width: scriptRow.width - scriptRunButton.width - Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+              text: scriptRow.modelData.name
+                + "  —  say “" + (scriptRow.modelData.phrases || []).join("” or “") + "”"
+                + "  ·  " + scriptRow.modelData.path
             }
           }
         }

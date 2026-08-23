@@ -346,10 +346,10 @@ func (d *Daemon) restartPending(next config.Config) []string {
 
 // idleClassChanged reports whether any idle-class setting differs between the
 // running and candidate configurations. The structured tables the engine
-// compiles — [[routines]] and [[intents.custom]] — have no entry in the
-// settings registry, so they are compared directly: without this, a reload
-// after a hand edit or a layout capture (#62) would update the stored config
-// but never rebuild the router that makes the phrases work.
+// compiles — [[routines]], [[scripts]], and [[intents.custom]] — have no
+// entry in the settings registry, so they are compared directly: without
+// this, a reload after a hand edit or a layout capture (#62) would update the
+// stored config but never rebuild the router that makes the phrases work.
 func idleClassChanged(running, next config.Config) bool {
 	for _, s := range config.Settings() {
 		if s.Reload != config.ReloadIdle {
@@ -360,6 +360,7 @@ func idleClassChanged(running, next config.Config) bool {
 		}
 	}
 	return !reflect.DeepEqual(running.Routines, next.Routines) ||
+		!reflect.DeepEqual(running.Scripts, next.Scripts) ||
 		!reflect.DeepEqual(running.Intents.Custom, next.Intents.Custom)
 }
 
