@@ -20,6 +20,14 @@ type Routine struct {
 	// Name is what the summary opens with and what `jarvix routines run`
 	// takes. Unique across routines, case-insensitively.
 	Name string `toml:"name"`
+	// Enabled parks the routine without deleting it (issue #93, the one
+	// `enabled` convention shared with [[knowledge.feeds]] and [[scripts]]):
+	// false takes its phrases out of the intent grammar on the standard
+	// reload and its schedule off the clock, while the entry — steps,
+	// comments, everything — stays listed and validated. A pointer because
+	// absent means true: the key only appears in config.toml when someone
+	// (hand or window) chose to write it.
+	Enabled *bool `toml:"enabled"`
 	// Phrases are the literal trigger phrases the intent router matches, so
 	// they follow intent grammar (plain spoken words, no placeholders) and
 	// must not collide with built-in or custom intents — validated at load.
@@ -114,6 +122,13 @@ func RoutineFromDefinition(d routine.Definition) Routine {
 		r.Steps = append(r.Steps, step)
 	}
 	return r
+}
+
+// IsEnabled reads the enabled switch with its default applied (absent means
+// true) — the same reading KnowledgeFeed.IsEnabled gives the shared
+// convention.
+func (r Routine) IsEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
 }
 
 // Incomplete reports whether any step still carries the capture placeholder

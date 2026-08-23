@@ -34,11 +34,14 @@ func scheduleProblems(label, schedule string, announce bool) []string {
 // table into the scheduler's entries, in declaration order (routines first,
 // matching the file's own section order). Call on validated configuration:
 // an unparseable schedule is skipped here, because Validate already refused
+// it. A disabled entry (#93) is skipped too — parked means its schedule is
+// off the clock, exactly as its phrases are out of the grammar — so the
+// standard reload that flips `enabled` also rebuilds the schedules without
 // it.
 func (c Config) AutomationEntries() []automation.Entry {
 	var entries []automation.Entry
-	add := func(kind automation.Kind, name, schedule string, announce bool) {
-		if schedule == "" {
+	add := func(kind automation.Kind, name, schedule string, announce, enabled bool) {
+		if schedule == "" || !enabled {
 			return
 		}
 		spec, err := automation.ParseSpec(schedule)
@@ -50,10 +53,10 @@ func (c Config) AutomationEntries() []automation.Entry {
 		})
 	}
 	for _, r := range c.Routines {
-		add(automation.KindRoutine, r.Name, r.Schedule, r.Announce)
+		add(automation.KindRoutine, r.Name, r.Schedule, r.Announce, r.IsEnabled())
 	}
 	for _, s := range c.Scripts {
-		add(automation.KindScript, s.Name, s.Schedule, s.Announce)
+		add(automation.KindScript, s.Name, s.Schedule, s.Announce, s.IsEnabled())
 	}
 	return entries
 }

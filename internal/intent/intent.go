@@ -155,6 +155,12 @@ type RoutinePhrases struct {
 	// a routine's steps are fixed by configuration, so there is nothing a slot
 	// value could parameterise.
 	Phrases []string
+	// Disabled parks the routine (issue #93): its own shape — name, phrases,
+	// grammar — is still validated, so re-enabling cannot surprise, but the
+	// phrases enter neither the grammar nor the collision set. The inverted
+	// name keeps the zero value meaning "routable", matching every caller
+	// that predates the switch.
+	Disabled bool
 }
 
 // ScriptPhrases is the router's view of one configured script ([[scripts]],
@@ -171,6 +177,12 @@ type ScriptPhrases struct {
 	// value could ever become — and refusing the syntax outright means the
 	// question of interpolating speech into an argv can never even be asked.
 	Phrases []string
+	// Disabled parks the script (issue #93): its own shape — name, phrases,
+	// grammar — is still validated, so re-enabling cannot surprise, but the
+	// phrases enter neither the grammar nor the collision set. The inverted
+	// name keeps the zero value meaning "routable", matching every caller
+	// that predates the switch.
+	Disabled bool
 }
 
 // Options configures a router.
@@ -432,6 +444,13 @@ func New(opts Options) (*Router, error) {
 	// config error at load, never a silent coin toss at match time. The rules
 	// they compile to carry only the routine's name — no ack (the engine
 	// speaks the run's summary instead) and no argv or command of any kind.
+	//
+	// A disabled routine (#93) walks the same per-entry checks — its name,
+	// its phrases, their grammar — so a parked entry that rotted is still a
+	// load error, but its phrases enter neither the grammar nor the collision
+	// set: the utterance falls through to the assistant, and another entry
+	// may hold the phrase meanwhile. Re-enabling recompiles this table, which
+	// is where such a collision is caught, with the same error a load gives.
 	for i, rt := range opts.Routines {
 		name := strings.TrimSpace(rt.Name)
 		label := routineLabel(i, name)
@@ -453,12 +472,18 @@ func New(opts Options) (*Router, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s: phrase %q: %w", label, phrase, err)
 			}
+			if rt.Disabled {
+				continue
+			}
 			if owner, clash := taken[p.key()]; clash {
 				return nil, fmt.Errorf("%s: phrase %q is already %s; choose a different phrase",
 					label, phrase, owner)
 			}
 			taken[p.key()] = fmt.Sprintf("the trigger for routine %q", name)
 			r.add(&rule{name: "routine.run", pattern: p, routine: name})
+		}
+		if rt.Disabled {
+			continue
 		}
 		r.names = append(r.names, "routine:"+name)
 	}
@@ -490,12 +515,22 @@ func New(opts Options) (*Router, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s: phrase %q: %w", label, phrase, err)
 			}
+			// A disabled script (#93) keeps every per-entry check above but
+			// stays out of the grammar and the collision set — the routine
+			// loop's rule, restated for the family whose phrase must reach an
+			// executable only while the entry says so.
+			if sc.Disabled {
+				continue
+			}
 			if owner, clash := taken[p.key()]; clash {
 				return nil, fmt.Errorf("%s: phrase %q is already %s; choose a different phrase",
 					label, phrase, owner)
 			}
 			taken[p.key()] = fmt.Sprintf("the trigger for script %q", name)
 			r.add(&rule{name: ScriptIntentName, pattern: p, script: name})
+		}
+		if sc.Disabled {
+			continue
 		}
 		r.names = append(r.names, "script:"+name)
 	}

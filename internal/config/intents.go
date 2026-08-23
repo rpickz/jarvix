@@ -51,7 +51,11 @@ func (c Config) intentProblems() []string {
 
 // IntentOptions builds the router options from configuration: the terminal,
 // the custom intents, and the routines' and scripts' trigger phrases
-// (ADR 0026, ADR 0030).
+// (ADR 0026, ADR 0030). Every entry travels, with its enabled switch (#93):
+// the router still validates a disabled entry's own shape — name, phrases,
+// grammar — so re-enabling cannot surprise, but its phrases stay out of the
+// grammar and out of the collision set, which is what lets a disabled entry
+// coexist with an enabled one that took its phrase over.
 func (c Config) IntentOptions() intent.Options {
 	custom := make([]intent.Custom, 0, len(c.Intents.Custom))
 	for _, e := range c.Intents.Custom {
@@ -61,12 +65,14 @@ func (c Config) IntentOptions() intent.Options {
 	for _, r := range c.Routines {
 		routines = append(routines, intent.RoutinePhrases{
 			Name: r.Name, Phrases: append([]string(nil), r.Phrases...),
+			Disabled: !r.IsEnabled(),
 		})
 	}
 	scripts := make([]intent.ScriptPhrases, 0, len(c.Scripts))
 	for _, s := range c.Scripts {
 		scripts = append(scripts, intent.ScriptPhrases{
 			Name: s.Name, Phrases: append([]string(nil), s.Phrases...),
+			Disabled: !s.IsEnabled(),
 		})
 	}
 	return intent.Options{Terminal: c.Intents.Terminal, Custom: custom,

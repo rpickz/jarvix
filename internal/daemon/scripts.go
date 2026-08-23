@@ -9,7 +9,7 @@ import (
 )
 
 // registerScriptMethods adds the script surface (ADR 0030): `scripts.list`
-// for the CLI and the conversation window's panel, and `scripts.run` to
+// for the CLI and the window's Automations tab, and `scripts.run` to
 // trigger one by name from either.
 //
 // scripts.run is deliberately not a private execution path. It starts a
@@ -43,6 +43,9 @@ func (d *Daemon) registerScriptMethods() {
 				"path":        s.Path,
 				"report":      report,
 				"timeout_sec": timeout,
+				// The enabled switch (#93): a parked script still lists —
+				// disabled means switched off, never hidden.
+				"enabled": s.IsEnabled(),
 			})
 		}
 		return map[string]any{"scripts": out}, nil
@@ -59,6 +62,14 @@ func (d *Daemon) registerScriptMethods() {
 		}
 		phrase, ok := d.scriptPhrase(p.Name)
 		if !ok {
+			// A disabled script (#93) is refused by name: its phrases are out
+			// of the intent grammar, so submitting one would fall through to
+			// the model — the opposite of running the script — and a run
+			// surface must say "switched off", not "unknown".
+			if d.scriptDisabled(p.Name) {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams,
+					"script %q is disabled; enable it in the Automations tab or set enabled = true in config.toml", p.Name)
+			}
 			return nil, ipc.Errorf(ipc.CodeInvalidParams,
 				"no script is called %q; `jarvix scripts` lists them", p.Name)
 		}
@@ -75,15 +86,30 @@ func (d *Daemon) registerScriptMethods() {
 
 // scriptPhrase resolves a script name (case-insensitively) to its first
 // trigger phrase — the utterance scripts.run replays through the ordinary
-// session path.
+// session path. A disabled script resolves to nothing: its phrases are out
+// of the grammar, so there is no utterance that runs it (#93).
 func (d *Daemon) scriptPhrase(name string) (string, bool) {
 	want := strings.ToLower(strings.TrimSpace(name))
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
 	for _, s := range d.cfg.Scripts {
-		if strings.ToLower(strings.TrimSpace(s.Name)) == want && len(s.Phrases) > 0 {
+		if strings.ToLower(strings.TrimSpace(s.Name)) == want && len(s.Phrases) > 0 && s.IsEnabled() {
 			return s.Phrases[0], true
 		}
 	}
 	return "", false
+}
+
+// scriptDisabled reports whether name exists but is switched off — the fact
+// that turns scripts.run's "unknown" into the actionable "disabled".
+func (d *Daemon) scriptDisabled(name string) bool {
+	want := strings.ToLower(strings.TrimSpace(name))
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	for _, s := range d.cfg.Scripts {
+		if strings.ToLower(strings.TrimSpace(s.Name)) == want {
+			return !s.IsEnabled()
+		}
+	}
+	return false
 }

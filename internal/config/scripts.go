@@ -23,6 +23,14 @@ type Script struct {
 	// takes, and what every log and event carries. Unique across scripts,
 	// case-insensitively.
 	Name string `toml:"name"`
+	// Enabled parks the script without deleting it (issue #93, the one
+	// `enabled` convention shared with [[knowledge.feeds]] and [[routines]]):
+	// false takes its phrases out of the intent grammar on the standard
+	// reload and its schedule off the clock, while the entry stays listed and
+	// validated — the path checks included, so a parked script that rotted is
+	// still reported. A pointer because absent means true: the key only
+	// appears in config.toml when someone (hand or window) chose to write it.
+	Enabled *bool `toml:"enabled"`
 	// Phrases are the literal trigger phrases the intent router matches, so
 	// they follow intent grammar (plain spoken words, no placeholders) and
 	// must not collide with built-ins, custom intents, routines, or other
@@ -76,6 +84,13 @@ func (c Config) ScriptDefinitions() []script.Definition {
 		defs = append(defs, def)
 	}
 	return defs
+}
+
+// IsEnabled reads the enabled switch with its default applied (absent means
+// true) — the same reading KnowledgeFeed.IsEnabled gives the shared
+// convention.
+func (s Script) IsEnabled() bool {
+	return s.Enabled == nil || *s.Enabled
 }
 
 // scriptProblems validates the [[scripts]] tables: the structural rules (and

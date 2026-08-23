@@ -1,0 +1,18 @@
+# the routines I curated by hand
+[[routines]]
+name = "evening"
+phrases = ["evening mode"]
+enabled = true # parked for the summer
+
+  # the film screen
+  [[routines.steps]]
+  app = "mpv"
+  workspace = 5
+
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup"]
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 1

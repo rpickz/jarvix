@@ -802,12 +802,24 @@ message naming both owners, never a coin toss at match time. Because the
 router is the trigger, `intents.enabled = false` with routines configured is
 a validation error.
 
+Every routine also takes the shared **`enabled`** switch (the
+`[[knowledge.feeds]]` convention, adopted here with #93): `enabled = false`
+parks the routine without deleting it. The entry, its steps, and your
+comments stay — still listed everywhere, still validated, so a parked entry
+that rots is reported — but its phrases leave the intent grammar on the next
+reload (the utterance falls through to the assistant), any `schedule` comes
+off the clock, and the run surfaces refuse it by name with "disabled", never
+"unknown". A parked phrase is free for another entry to take; see the
+knowledge section for how re-enabling behaves then.
+
 `jarvix routines` lists what is configured (offline, from the file);
 `jarvix routines run "morning setup"` triggers one from a script or
 keybinding through the same gate the spoken phrase uses, and the conversation
-window shows each routine with a Run button. Like `[[intents.custom]]`, the
-tables are hand-edited TOML — outside `jarvix config set` — and land on the
-next `config.reload` or restart.
+window's Automations tab shows each routine with Run and Enable/Disable.
+Enable/Disable persists through `automations.set_enabled` (the surgical
+config write — only that entry's `enabled` key changes); everything else in
+the tables is hand-edited TOML — outside `jarvix config set` — and lands on
+the next `config.reload` or restart.
 
 ### Capturing a routine from the live desktop ("save this as …")
 
@@ -938,12 +950,26 @@ a startup message naming both owners, never a coin toss at match time.
 Because the router is the trigger, `intents.enabled = false` with scripts
 configured is a validation error.
 
+Every script also takes the shared **`enabled`** switch (the
+`[[knowledge.feeds]]` convention, adopted here with #93): `enabled = false`
+parks the script without deleting it. The entry stays — still listed, still
+validated, path checks included, so a parked script whose file rotted is
+still a startup message — but its phrases leave the intent grammar on the
+next reload, any `schedule` comes off the clock, and the run surfaces refuse
+it by name with "disabled", never "unknown". A parked phrase is free for
+another entry to take; see the knowledge section for how re-enabling behaves
+then.
+
 `jarvix scripts` lists what is configured (offline, from the file, path
 included); `jarvix scripts run "backup notes"` triggers one through the same
-gate the spoken phrase uses, and the conversation window shows each script
-with its path and a Run button. Like `[[routines]]`, the tables are
-hand-edited TOML — outside `jarvix config set` and read-only over IPC — and
-land on the next `config.reload` or restart.
+gate the spoken phrase uses, and the conversation window's Automations tab
+shows each script with its path, Run, and Enable/Disable. Enable/Disable
+persists through `automations.set_enabled` (the surgical config write — only
+that entry's `enabled` key changes); everything else in the tables is
+hand-edited TOML — outside `jarvix config set`, and the definitions
+(phrases, paths) stay read-only over IPC on purpose: no IPC client can
+repoint a phrase at a different file. Definition edits land on the next
+`config.reload` or restart.
 
 Scripts and routines stay distinct on purpose: a routine step launches and
 places apps and can never be a command (ADR 0026); a script runs a command
@@ -970,7 +996,10 @@ optionally followed by days.
 ```
 
 A bad schedule is refused at load with the accepted forms in the message.
-Times are your local wall clock; a firing lands within the minute.
+Times are your local wall clock; a firing lands within the minute. A
+disabled entry (`enabled = false`, #93) keeps its `schedule` key but is off
+the clock entirely — nothing fires, and the Automations tab shows the
+schedule as paused rather than with a next-fire time.
 
 The worked nightly-backup example — the backup script from above, run every
 night at two:
@@ -1252,12 +1281,20 @@ enabled = false   # parked: nothing fetches, the entry and its last value stay
 This is the one convention for switching any `[[…]]` entry off (issue #92),
 and every table-array family follows it: the field is named `enabled`,
 **absent means true** (every existing config keeps working unchanged), and a
-disabled entry is still fully validated — a broken command is reported even
-while parked, so re-enabling can never surprise. Feeds implement it today; a
-disabled feed is never fetched (scheduled, lazy, or manual), never injected,
-answers "switched off" through the tool, and keeps its cached value visible —
-with its honest age — in `knowledge.status` and the window's Knowledge tab.
-`[[routines]]` and `[[scripts]]` adopt the same key with #93.
+disabled entry is still validated — a broken command or a rotted script path
+is reported even while parked, so re-enabling can never surprise with a
+per-entry problem. Feeds implement it; a disabled feed is never fetched
+(scheduled, lazy, or manual), never injected, answers "switched off" through
+the tool, and keeps its cached value visible — with its honest age — in
+`knowledge.status` and the window's Knowledge tab. `[[routines]]` and
+`[[scripts]]` carry the same key (#93): a disabled entry's phrases leave the
+intent grammar on the standard reload and its schedule leaves the clock,
+while the entry stays listed in every surface. One carve-out follows from
+parking a phrase family: a disabled entry's phrases leave the **collision
+check** too — that is exactly what lets a new entry take a sleeping one's
+phrase — so re-enabling recompiles the grammar and can fail with the same
+collision error a config load gives, naming both owners. The switch surfaces
+that error and writes nothing: never a silent half-enable.
 
 Feed tables are hand-edited TOML like `[[routines]]` — outside `config.set`
 and listed over IPC (`knowledge.status`). Two operations are available from

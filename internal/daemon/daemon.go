@@ -178,6 +178,13 @@ type Daemon struct {
 	activity    []activityEntry
 	activitySeq uint64
 
+	// lastRuns is the Automations tab's last-run memory (#93): one record per
+	// routine/script, taken from the same bus subscription that feeds the
+	// activity ring — honest observation on the same terms, so it dies with
+	// the daemon and an entry that has not run since boot simply has none
+	// (the tab shows nothing rather than fabricating). Guarded by actMu.
+	lastRuns map[string]automationRun
+
 	// captureReload is set when a layout capture (#62) has written new
 	// [[routines]] tables that the engine's router does not know yet. The
 	// engine cannot be reconfigured under the very session that spoke the
@@ -954,6 +961,7 @@ func (d *Daemon) registerMethods() {
 	d.registerRoutineMethods()
 	d.registerScriptMethods()
 	d.registerAutomationMethods()
+	d.registerAutomationAdminMethods()
 }
 
 // promptBudgetReport measures what one turn sends before the user has said
