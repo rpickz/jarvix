@@ -87,6 +87,10 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger
 			Binary:    cfg.STT.Whisper.Binary,
 			ModelPath: whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
 			Language:  cfg.STT.Whisper.Language,
+			// One prompt, composed once, for both paths: the warm request and
+			// the cold fallback must bias identically or a fallback would
+			// change what Jarvix's own name transcribes as (issue #83).
+			Prompt: cfg.STTBiasPrompt(),
 		}
 		if cfg.Performance.WarmEngines {
 			server := &whispercpp.ServerTranscriber{
@@ -96,6 +100,7 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger
 				Binary:    whispercpp.ServerBinaryFor(cfg.STT.Whisper.Binary),
 				ModelPath: cold.ModelPath,
 				Language:  cold.Language,
+				Prompt:    cold.Prompt,
 				Cold:      cold,
 				MemoryCap: memCap,
 				IdleAfter: idle,
@@ -217,6 +222,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Memory:            memoryInjector(book),
 		Archive:           conversationArchive(cfg, archive),
 		WakeWord:          cfg.Activation.WakeWord,
+		WakeAliases:       cfg.Activation.WakeAliases,
 		Lexicon:           cfg.TTS.Lexicon,
 	}
 }

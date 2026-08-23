@@ -39,6 +39,21 @@ func (c Config) wakeProblems() []string {
 	if a.MaxUtteranceSec < 0 {
 		problems = append(problems, "activation.max_utterance_sec must not be negative")
 	}
+	// Aliases are checked in every mode: a broken entry must not sit unnoticed
+	// until the day wake_word mode is switched on. The strip compares one
+	// whitespace-delimited transcript word at a time, so an alias containing
+	// whitespace could never match anything — reject it rather than let it
+	// silently do nothing.
+	for _, alias := range a.WakeAliases {
+		switch {
+		case strings.TrimSpace(alias) == "":
+			problems = append(problems,
+				"activation.wake_aliases contains an empty entry; each one must be a single word the wake word is misheard as (e.g. \"jarvis\")")
+		case strings.ContainsAny(alias, " \t"):
+			problems = append(problems, fmt.Sprintf(
+				"activation.wake_aliases entry %q contains whitespace; the transcript strip matches single words, so a multi-word alias can never match", alias))
+		}
+	}
 
 	if !a.WakeWordEnabled() {
 		return problems

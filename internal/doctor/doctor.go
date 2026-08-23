@@ -50,6 +50,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkOutput,
 		checkWhisperBinary,
 		checkWhisperModel,
+		checkNameRecognition,
 		checkTTS,
 		checkVoiceLanguage,
 		checkSpeechLanguage,

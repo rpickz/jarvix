@@ -161,6 +161,12 @@ func Settings() []Setting {
 		{Key: "stt.whisper.language", Label: "Speech language", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.STT.Whisper.Language },
 			set: func(c *Config, v any) { c.STT.Whisper.Language = v.(string) }},
+		// Idle class like the rest of [stt]: the transcriber that carries the
+		// bias prompt is rebuilt with the engine's collaborators, so a new term
+		// is heard on the next question — no restart.
+		{Key: "stt.vocabulary", Label: "Recognition vocabulary", Type: TypeStringList, Reload: ReloadIdle,
+			Get: func(c Config) any { return append([]string(nil), c.STT.Vocabulary...) },
+			set: func(c *Config, v any) { c.STT.Vocabulary = v.([]string) }},
 
 		{Key: "activation.ptt_chord", Label: "Push-to-talk chord", Type: TypeStringList, Reload: ReloadRestart,
 			Get: func(c Config) any { return append([]string(nil), c.Activation.PTTChord...) },
@@ -193,6 +199,13 @@ func Settings() []Setting {
 		{Key: "activation.max_utterance_sec", Label: "Longest hands-free request (seconds)", Type: TypeInt, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Activation.MaxUtteranceSec },
 			set: func(c *Config, v any) { c.Activation.MaxUtteranceSec = v.(int) }},
+		// Idle class, unlike the wake keys above, and deliberately so: aliases
+		// live only in the engine's transcript strip (issue #83), which is
+		// rebuilt with the engine's options — the wake listener and its
+		// supervised children never see them, so nothing needs a restart.
+		{Key: "activation.wake_aliases", Label: "Wake word aliases", Type: TypeStringList, Reload: ReloadIdle,
+			Get: func(c Config) any { return append([]string(nil), c.Activation.WakeAliases...) },
+			set: func(c *Config, v any) { c.Activation.WakeAliases = v.([]string) }},
 
 		{Key: "conversation.speak_responses", Label: "Speak responses aloud", Type: TypeBool, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Conversation.SpeakResponses },
