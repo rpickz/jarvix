@@ -80,7 +80,10 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 	results = append(results, advisorChecks(cfg)...)
 	// And one per configured script, so a file that moved or lost its
 	// execute bit is named here before its phrase is ever spoken (ADR 0030).
-	return append(results, scriptChecks(cfg)...)
+	results = append(results, scriptChecks(cfg)...)
+	// The feed cache (ADR 0031): per-feed command availability, plus the
+	// running scheduler's health — fresh, stale, failing since when.
+	return append(results, knowledgeChecks(cfg, paths)...)
 }
 
 // Healthy reports whether no check failed (warnings are tolerated).

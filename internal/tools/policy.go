@@ -187,6 +187,15 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // what you said?" before answering "what did we say about X?" would turn the
 // question into a toll booth — and the search's contents never leave the
 // daemon except as the spoken answer the user asked for.
+// knowledge.refresh is allow for the routine.run reason: authorship. A feed's
+// command was written by the user in their own configuration — a fixed argv,
+// no shell anywhere (ADR 0031) — and reading its cached output is a read of
+// the user's own data. Asking "may I check your AMD feed?" after "what's the
+// AMD price?" would be asking the user to confirm their own sentence. A user
+// who wants the question anyway writes
+// `[tools.policy.tool]."knowledge.refresh" = "ask"` (which also stops the
+// background schedules — a scheduled fetch has no way to ask), and deny
+// disables feeds outright.
 var builtinToolDefaults = map[string]PolicyDecision{
 	"artifact.create":           PolicyAllow,
 	ListWindowsToolName:         PolicyAllow,
@@ -195,6 +204,7 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	MemoryRecallToolName:        PolicyAllow,
 	RoutineToolName:             PolicyAllow,
 	ConversationsSearchToolName: PolicyAllow,
+	KnowledgeRefreshToolName:    PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
@@ -224,6 +234,12 @@ var neverSilent = map[string]bool{
 func (p *Policy) ToolDecision(name string) PolicyDecision {
 	if d, ok := p.tools[name]; ok {
 		return d
+	}
+	// knowledge.get is judged under the knowledge.refresh identity (ADR
+	// 0030): reading a feed is what triggers fetching it, so one name governs
+	// both and a `[tools.policy.tool]` entry cannot half-disable the feature.
+	if name == KnowledgeGetToolName {
+		return p.ToolDecision(KnowledgeRefreshToolName)
 	}
 	if name == shellToolName || name == advisorToolName {
 		return PolicyAsk
@@ -410,6 +426,9 @@ func (p *Policy) Decide(call ai.ToolCall) Verdict {
 	if call.Name == advisorToolName {
 		return p.decideAdvisor(call, mode)
 	}
+	if call.Name == KnowledgeGetToolName {
+		return p.decideKnowledge(call, mode)
+	}
 	if call.Name != shellToolName {
 		v := Verdict{Decision: mode, Tool: call.Name}
 		switch mode {
@@ -493,6 +512,47 @@ func (p *Policy) decideAdvisor(call ai.ToolCall, mode PolicyDecision) Verdict {
 		v.Rule = fmt.Sprintf("advisor %q is not configured", advisor)
 	}
 	v.Summary = fmt.Sprintf("I'd like to ask %s about this. Should I go ahead?", advisor)
+	return v
+}
+
+// decideKnowledge classifies one knowledge.get call under the
+// knowledge.refresh identity (ADR 0031). There is no per-feed classifier to
+// consult — every feed's command was written by the user and validated at
+// config load — so the verdict is the identity's configured tier, with the
+// feed's name as the Command the audit trail and any confirmation are about.
+func (p *Policy) decideKnowledge(call ai.ToolCall, mode PolicyDecision) Verdict {
+	v := Verdict{Tool: KnowledgeRefreshToolName}
+	var args struct {
+		Feed string `json:"feed"`
+	}
+	if err := json.Unmarshal([]byte(call.Arguments), &args); err == nil {
+		v.Command = strings.TrimSpace(args.Feed)
+	}
+	_, explicit := p.tools[KnowledgeRefreshToolName]
+	switch mode {
+	case PolicyDeny:
+		v.Decision = PolicyDeny
+		v.Rule = `tool "knowledge.refresh" is set to deny`
+	case PolicyAsk:
+		v.Decision = PolicyAsk
+		if explicit {
+			v.Rule = `tool "knowledge.refresh" is set to ask`
+		} else {
+			v.Rule = `tool "knowledge.refresh" asks under this policy`
+		}
+		if v.Command != "" {
+			v.Summary = fmt.Sprintf("I want to check your %s feed. Should I go ahead?", v.Command)
+		} else {
+			v.Summary = "I want to read one of your feeds. Should I go ahead?"
+		}
+	default:
+		v.Decision = PolicyAllow
+		if explicit {
+			v.Rule = `tool "knowledge.refresh" is set to allow`
+		} else {
+			v.Rule = `tool "knowledge.refresh" defaults to allow; the user authored the feed's command`
+		}
+	}
 	return v
 }
 

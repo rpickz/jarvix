@@ -395,6 +395,11 @@ var secretEnvFragments = []string{
 // the script runner (internal/script, ADR 0030), which owes its children the
 // same discipline advisors get, from this one copy of the secret-name rules —
 // a second list would be the one that misses the next variable.
+//
+// One package cannot share it: internal/knowledge (ADR 0031) carries its own
+// copy in fetch.go, because this package imports knowledge for the
+// knowledge.get tool and the import would cycle. A change to the secret-name
+// rules here must be mirrored there — its test suite covers the same cases.
 func ScrubbedEnv(environ []string, extra []string) []string {
 	return scrubbedEnv(environ, extra)
 }

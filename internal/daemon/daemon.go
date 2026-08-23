@@ -21,6 +21,7 @@ import (
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/session"
@@ -64,6 +65,14 @@ type Daemon struct {
 	// through it, the engine injects from it, and the memory.* IPC methods
 	// read it — so every surface always agrees on what is remembered.
 	memory *memory.Book
+
+	// knowledge is the feed cache (ADR 0031), nil when no [[knowledge.feeds]]
+	// are configured. One instance for the daemon's life, like the memory
+	// book: the knowledge.get tool reads through it, the engine injects from
+	// it, and knowledge.status reports it. Its scheduler goroutines are
+	// tracked inside the service and drained as their own shutdown stage; a
+	// reload rebuilds the schedules through Reconfigure, never the service.
+	knowledge *knowledge.Service
 
 	// conversations is the durable archive (ADR 0027). Never nil, and held
 	// even with retention off: the off switch stops writing, but listing,
@@ -437,6 +446,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("memory disabled", "component", "memory")
 	}
 
+	// The feed cache (ADR 0031): commands the user configured whose latest
+	// value the daemon keeps warm. Nil when no [[knowledge.feeds]] exist —
+	// disabled means absent, like memory. Built after the policy because the
+	// background-refresh decision is the knowledge.refresh identity's tier,
+	// consulted once here: the tools section is restart-class, so the answer
+	// holds for the daemon's life.
+	feeds := newKnowledgeService(cfg, paths, policy, logger)
+
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
 	var store history.Store = &history.File{Path: paths.HistoryFile()}
@@ -470,7 +487,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// engine first. Nothing can capture before Run serves, so the late bind
 	// is single-threaded construction, not a race.
 	capture := newLayoutCapturer(paths, compositor, logger)
-	engOpts := engineOptions(cfg, compositor, bus, book, convs, logger)
+	engOpts := engineOptions(cfg, compositor, bus, book, feeds, convs, logger)
 	engOpts.Capture = capture
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
@@ -495,6 +512,18 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			"tools", strings.Join(mem.Names(), ","))
 	}
 
+	// The knowledge.get tool (ADR 0031), registered only when feeds exist:
+	// a tool with an empty enum would spend every turn's context describing
+	// a feature that cannot be used. Its description and schema read the
+	// live service, so a reload that edits the feed tables is reflected on
+	// the next turn — but the *first* feed, like enabling any tool family,
+	// takes a restart to appear.
+	if feeds != nil {
+		registry.Register(&tools.KnowledgeGet{Source: feeds, Log: logger})
+		logger.Info("tool enabled", "component", "tools",
+			"tool", tools.KnowledgeGetToolName, "feeds", cfg.KnowledgeFeedNames())
+	}
+
 	if deps.Notifier == nil {
 		deps.Notifier = &desktop.NotifySend{}
 	}
@@ -506,7 +535,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	server := ipc.NewServer(paths.Socket, bus, logger)
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
-		registry: registry, policy: cfg.Tools.Policy, memory: book,
+		registry: registry, policy: cfg.Tools.Policy, memory: book, knowledge: feeds,
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor,
@@ -568,6 +597,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// it, dropped for like any slow client rather than ever wedging a session.
 	activityEvents, unsubscribeActivity := d.bus.Subscribe()
 	d.post.Go(func() { d.watchActivity(ctx, activityEvents, unsubscribeActivity) })
+	// The feed scheduler (ADR 0031) starts with the daemon's own context:
+	// its cancellation reaches every loop and every in-flight fetch, and the
+	// service's tracked group is what the knowledge shutdown stage drains.
+	if d.knowledge != nil {
+		d.knowledge.Start(ctx)
+	}
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -617,6 +652,13 @@ func (d *Daemon) shutdown() {
 		{"sessions", d.engine.Shutdown, d.engine.InFlight},
 		{"ipc", d.server.Drain, d.server.InFlight},
 		{"notifications", d.post.Wait, d.post.InFlight},
+		// The feed scheduler last of the drains: a draining session may be
+		// mid-Get, and its sync fetch finishes (or is killed by its own
+		// timeout) before this stage is reached. The drain kills any fetch
+		// still in flight — the process group dies with the context — and
+		// waits for the loops to unwind, so a stopping daemon never abandons
+		// a values-file write (ADR 0031, the #74 lesson).
+		{"knowledge", d.knowledgeDrain, d.knowledgeInFlight},
 	} {
 		if err := stage.wait(ctx); err != nil {
 			d.log.Warn("shutdown drain gave up waiting; exiting anyway",
@@ -878,6 +920,7 @@ func (d *Daemon) registerMethods() {
 	d.registerContextMethods()
 	d.registerConversationMethods()
 	d.registerMemoryMethods()
+	d.registerKnowledgeMethods()
 	d.registerTextMethods()
 	d.registerWakeMethods()
 	d.registerRoutineMethods()

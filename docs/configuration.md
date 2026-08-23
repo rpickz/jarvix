@@ -1087,6 +1087,91 @@ What the design guarantees:
   tools and injects nothing, and leaves the store file untouched: only an
   explicit forget (or deleting the file) removes facts.
 
+## Knowledge feeds (`[[knowledge.feeds]]`)
+
+Memory holds facts you *stated*; feeds hold values that **change** — a stock
+price, the weather, a build status
+([ADR 0031](adr/0031-knowledge-feeds.md)). You write a command that prints
+the current value; Jarvix runs it on a schedule (or on first use), keeps the
+latest output warm in the daemon, and answers from it instantly — with the
+value's age spoken honestly:
+
+```text
+you:    what's the AMD price?
+jarvix: AMD is at 187 dollars 42, as of four minutes ago.
+```
+
+A worked example — a stock price via a one-line script. First the script
+(yours to write; Jarvix ships no network code for this):
+
+```bash
+#!/bin/sh
+# ~/bin/amd-price — print the current AMD share price and nothing else
+curl -sf 'https://query1.finance.yahoo.com/v8/finance/chart/AMD?range=1d&interval=1d' \
+  | jq -r '.chart.result[0].meta.regularMarketPrice'
+```
+
+`chmod +x ~/bin/amd-price`, check it prints one value, then configure the
+feed:
+
+```toml
+[[knowledge.feeds]]
+name = "amd"                              # what the model asks for
+description = "AMD share price in US dollars"  # steers the model to it
+command = ["/home/you/bin/amd-price"]     # fixed argv — never a shell line
+mode = "eager"                            # refreshed on schedule (default)
+interval_sec = 300                        # every five minutes (default)
+ttl_sec = 600                             # fresh for ten minutes (default: 2× interval)
+inject = true                             # optional: carry the value into every turn
+```
+
+Two modes:
+
+- **`eager`** (default) refreshes on `interval_sec`, so the value is already
+  sitting in the daemon before you ask. Best for things you ask about often.
+- **`lazy`** fetches on the first ask, then serves the cached value until
+  `ttl_sec` lapses, after which the next ask refetches. Best for occasional
+  questions where a few seconds' wait on first use is fine.
+
+What the design guarantees:
+
+- **The model never chooses what runs.** The command is a fixed argv from
+  your configuration; the model can only name a feed
+  (the `knowledge.get` tool). Fetches run with the advisor path's
+  discipline: no shell, a scrubbed environment (nothing named like a
+  credential, none of Jarvix's own API keys), a timeout that kills the whole
+  process group, and a capped output.
+- **Freshness is spoken, staleness is disclosed.** Every answer from a feed
+  carries the value's age in words ("as of four minutes ago"). A value past
+  its `ttl_sec` still serves — but is disclosed as stale, out loud.
+- **A failing feed never breaks a session.** The last good value serves with
+  its (older) age disclosed, the failure is logged and visible in
+  `jarvix doctor` (`feed "amd": … failing since …`), and retries back off —
+  doubling from the feed's own cadence, capped at an hour — so a broken
+  command is not hammered.
+- **Values survive restarts.** They persist in
+  `~/.local/state/jarvix/feeds.toml` (0600 — feed values may be sensitive;
+  they never appear in logs or bus events), so the daemon boots warm:
+  eager schedules resume where their timestamps left off, and a value past
+  its ttl at boot is served as stale until refreshed. The file is a
+  machine-written cache — deleting it just makes every feed fetch fresh.
+- **Injection shares the memory block's budget.** Feeds with `inject = true`
+  ride into every model turn under `knowledge.max_injected_tokens`
+  (default 300, `[knowledge]` table); values that do not fit are left out
+  of the turn — last-declared first — and the model is told the list is
+  incomplete so it reaches for `knowledge.get` instead.
+- **The gate applies, under its own identity.** Feed reads and refreshes are
+  judged as `knowledge.refresh`, which defaults to **allow** — you authored
+  the command, and a read of your own data should not interrupt itself with
+  a question. `[tools.policy.tool]."knowledge.refresh" = "deny"` disables
+  feeds outright; `"ask"` confirms each tool read and also stops the
+  background schedules (a scheduled fetch has no way to ask).
+
+Feed tables are hand-edited TOML like `[[routines]]` — outside `config.set`,
+listed read-only over IPC (`knowledge.status`). Edits to existing feeds apply
+on the next `jarvix config reload` (idle-class); adding the *first* feed
+registers the tool, which takes a daemon restart.
+
 ## Tools (assistant actions)
 
 With `[tools] shell = true`, the assistant can run shell commands itself to
