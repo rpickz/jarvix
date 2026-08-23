@@ -426,10 +426,25 @@ func pluginFilePath(t *testing.T, name string) string {
 // suite can catch this: the failure is invisible to Go, to the QML parser,
 // and to `omarchy plugin validate` alike.
 func TestFloatingWindowFilesDoNotImportQuickshellWayland(t *testing.T) {
-	names := []string{"JarvixWindow.qml", "JarvixOverlay.qml", "JarvixBar.qml", "JarvixSettings.qml"}
+	pluginDir := filepath.Dir(pluginFilePath(t, "placeholder"))
+	entries, err := os.ReadDir(pluginDir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", pluginDir, err)
+	}
+	// Every QML file in the plugin, not a fixed list: a new component added
+	// for a new tab (issue #91 grew several) is guarded the day it lands.
+	var names []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".qml") {
+			names = append(names, entry.Name())
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("no QML files in %s; this guard is no longer watching anything", pluginDir)
+	}
 	checked := 0
 	for _, name := range names {
-		source, err := os.ReadFile(pluginFilePath(t, name))
+		source, err := os.ReadFile(filepath.Join(pluginDir, name))
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)
 		}

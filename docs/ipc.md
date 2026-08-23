@@ -163,7 +163,7 @@ matters, because the window and the widget must work with jarvixd stopped.
 | Target | Function | Effect |
 |---|---|---|
 | `jarvix` | `openWindow` / `closeWindow` / `toggleWindow` | Show, hide, or toggle the conversation window. `jarvix window`, a clicked notification, and the bar widget all go through here — there is only ever one window |
-| `jarvix` | `openSettings` | Open the window already showing the settings screen (the bar widget's Settings action) |
+| `jarvix` | `openSettings` | Open the window already showing the Settings tab (the bar widget's Settings action) |
 | `jarvix` | `state` / `ping` | The overlay's view of the session state; liveness |
 | `jarvix.bar` | `open` / `close` / `toggle` / `show` / `hide` | The bar widget's panel |
 | `jarvix.bar` | `state` | The state key the bar icon is showing — one of the daemon states above, or `not-running`, `error`, or `working` (an unrecognised state), or `wake-armed` / `wake-muted` when the daemon is idle and background listening is on. `scripts/verify-bar-widget.sh` reads this to check the icon against the daemon |
