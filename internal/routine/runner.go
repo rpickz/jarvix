@@ -149,7 +149,8 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 	inventory, err := r.windows(ctx)
 	if err != nil {
 		r.emit("routine.finished", map[string]any{
-			"routine": def.Name, "placed": 0, "failed": len(def.Steps), "error": err.Error()})
+			"routine": def.Name, "placed": 0, "failed": len(def.Steps), "error": err.Error(),
+			"duration_ms": r.now().Sub(started).Milliseconds()})
 		return "", fmt.Errorf("I cannot reach the window manager")
 	}
 
@@ -217,9 +218,12 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 	cancel()
 
 	summary, placed, failed := summarise(def, outcomes)
+	// duration_ms rides the event (#93) so the Automations tab's last-run
+	// line carries the same number the log line below already reports.
 	r.emit("routine.finished", map[string]any{
 		"routine": def.Name, "placed": placed, "failed": len(failed),
 		"failures": failed, "summary": summary,
+		"duration_ms": r.now().Sub(started).Milliseconds(),
 	})
 	r.log.Info("routine finished", "component", "routine", "routine", def.Name,
 		"placed", placed, "failed", len(failed),

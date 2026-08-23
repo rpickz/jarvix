@@ -52,7 +52,10 @@ FloatingWindow {
   //                 Resume is one conversation.open call — the daemon owns
   //                 what reopening means.
   //   automations — the configured routines (ADR 0026) and scripts
-  //                 (ADR 0030), read-only listings with Run.
+  //                 (ADR 0030) as one managed collection (issue #93):
+  //                 automations.list for everything shown, Run through the
+  //                 existing gated paths, Enable/Disable through
+  //                 automations.set_enabled (the surgical config write).
   //   knowledge   — the feed cache (ADR 0031), read-only from
   //                 knowledge.status.
   //   memory      — the fact store (ADR 0025), read-only from memory.list.
@@ -84,6 +87,7 @@ FloatingWindow {
   function openTab(id) {
     currentTab = id
     if (id === "library") requestHistory()
+    else if (id === "automations") requestAutomations()
     else if (id === "knowledge") requestKnowledge()
     else if (id === "memory") requestMemory()
     else if (id === "chat" && pendingCardIndex >= 0) {
@@ -222,45 +226,187 @@ FloatingWindow {
     while (activityRows.count > activityLimit) activityRows.remove(0)
   }
 
-  // --- routines -----------------------------------------------------------
-  // The configured routines (ADR 0026), listed so one click places the
-  // desktop. Display and trigger only: routines.run replays the routine's
-  // phrase through the daemon's ordinary session path, so the router, the
-  // permission gate, and the spoken summary all behave exactly as if the
-  // phrase had been spoken — this window decides nothing (ADR 0013).
-  property var routines: []
+  // --- automations --------------------------------------------------------
+  // The Automations tab (issue #93): routines (ADR 0026) and scripts (ADR
+  // 0030) as one managed collection from automations.list — every row's
+  // facts (phrases, enabled, markers, schedule with the daemon's own
+  // next-fire, the would-refuse verdict, the last observed run) are decided
+  // daemon-side, and this window renders them and calls the verbs (ADR
+  // 0013). Run replays the entry's phrase through the daemon's ordinary
+  // session path — routines.run / scripts.run, the router, the permission
+  // gates, the standard refusal-while-running — exactly as if it had been
+  // spoken. Enable/Disable is automations.set_enabled, the surgical config
+  // write; the row flips when config.changed triggers the refresh — the
+  // daemon's word, not the click's.
+  property var automations: []
+  // The config file's fingerprint as of the last listing, passed back on
+  // set_enabled so a hand edit made while the window sat open is a refused
+  // conflict, never a clobber.
+  property string automationsFingerprint: ""
+  // Live progress per entry ("kind/name" → text), built from the run events
+  // (routine.started / routine.step / script.started) and cleared when the
+  // finish event refreshes the listing.
+  property var automationRuns: ({})
+  property int automationsRequestId: 0
+  property int automationsRunRequestId: 0
+  property int automationsEnableRequestId: 0
 
-  function requestRoutines() {
-    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 15, method: "routines.list" }) + "\n")
+  function requestAutomations() {
+    if (!daemon.connected) return
+    automationsRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationsRequestId,
+      method: "automations.list" }) + "\n")
   }
 
-  function runRoutine(name) {
+  function loadAutomations(result) {
+    automationsFingerprint = String(result.fingerprint || "")
+    automations = result.automations || []
+  }
+
+  // runAutomation triggers one entry through the existing gated run path for
+  // its kind — zero new execution code: the daemon starts a session and
+  // submits the trigger phrase, so confirmations arrive as the standard card
+  // in Chat and a busy session refuses exactly as it always has.
+  function runAutomation(kind, name) {
     if (!daemon.connected) return
+    automationsRunRequestId = nextRequestId
+    nextRequestId++
     daemon.write(JSON.stringify({
-      jsonrpc: "2.0", id: 16, method: "routines.run", params: { name: name }
+      jsonrpc: "2.0", id: automationsRunRequestId,
+      method: kind === "routine" ? "routines.run" : "scripts.run",
+      params: { name: name }
     }) + "\n")
   }
 
-  // --- scripts ------------------------------------------------------------
-  // The configured scripts (ADR 0030), listed with their paths so what a
-  // click would run is visible before it runs. Display and trigger only:
-  // scripts.run replays the script's phrase through the daemon's ordinary
-  // session path, so the router, the script.run permission gate (ask by
-  // default — the confirmation card names the script and its path), and the
-  // spoken outcome all behave exactly as if the phrase had been spoken —
-  // this window decides nothing (ADR 0013).
-  property var scripts: []
-
-  function requestScripts() {
-    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 17, method: "scripts.list" }) + "\n")
-  }
-
-  function runScript(name) {
+  // setAutomationEnabled persists the switch through the daemon's surgical
+  // config write. The row flips when config.changed triggers the refresh; a
+  // refused re-enable (a phrase collision, a conflict) lands in the banner
+  // with the daemon's own error.
+  function setAutomationEnabled(kind, name, enabled) {
     if (!daemon.connected) return
-    daemon.write(JSON.stringify({
-      jsonrpc: "2.0", id: 18, method: "scripts.run", params: { name: name }
-    }) + "\n")
+    automationsEnableRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationsEnableRequestId,
+      method: "automations.set_enabled",
+      params: { kind: kind, name: name, enabled: enabled,
+        fingerprint: automationsFingerprint } }) + "\n")
   }
+
+  // handleAutomationsActionReply surfaces a refused run or switch in the tab
+  // via the shared banner. A validation refusal (a re-enable collision)
+  // carries the daemon's per-problem messages — shown verbatim, because the
+  // error is the same one a config load gives. A conflict also re-requests
+  // the listing, so the rows and the fingerprint are fresh for the retry.
+  function handleAutomationsActionReply(frame) {
+    if (frame.error) {
+      errorStage = "automations"
+      errorMessage = String(frame.error.message || "the automation action failed")
+      var data = frame.error.data || {}
+      if (data.problems && data.problems.length > 0) {
+        errorMessage += " — " + data.problems.join("; ")
+      }
+      if (data.fingerprint) requestAutomations()
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) automationsFingerprint = String(result.fingerprint)
+    if (result.applied === false) {
+      // Written but not yet live — the daemon said why (a session is busy);
+      // honesty beats a row that pretends the grammar already moved.
+      errorStage = "automations"
+      errorMessage = "Saved to config.toml, but not applied yet: "
+        + String(result.reason || "the daemon is busy") + ". It applies on the next reload."
+    }
+  }
+
+  // setAutomationRun / clearAutomationRun keep the live-progress map, one
+  // reassignment per change so the bindings see it.
+  function setAutomationRun(kind, name, text) {
+    var runs = {}
+    for (var key in automationRuns) runs[key] = automationRuns[key]
+    runs[kind + "/" + name] = text
+    automationRuns = runs
+  }
+
+  function clearAutomationRun(kind, name) {
+    var runs = {}
+    for (var key in automationRuns) {
+      if (key !== kind + "/" + name) runs[key] = automationRuns[key]
+    }
+    automationRuns = runs
+  }
+
+  // automationSubtitle words a row's second line: the kind — the badge every
+  // row leads with — and the trigger phrases.
+  function automationSubtitle(entry) {
+    var kind = entry.kind === "routine" ? "Routine" : "Script"
+    return kind + " — say “" + (entry.phrases || []).join("” or “") + "”"
+  }
+
+  // automationMeta words a row's status line from the daemon's own facts —
+  // presentation, like feedCadence: disabled first (the flag colour never
+  // carries a state alone), then the per-kind markers, the schedule with its
+  // daemon-computed next fire, the would-refuse warning, the last observed
+  // run, and any live progress.
+  function automationMeta(entry) {
+    var parts = []
+    if (entry.enabled === false) parts.push("disabled — kept, phrases will not trigger it")
+    if (entry.kind === "routine") {
+      parts.push(Number(entry.steps || 0) + " " + (Number(entry.steps || 0) === 1 ? "step" : "steps"))
+      if (entry.incomplete) parts.push("incomplete — a launch command still needs filling in")
+    }
+    if (entry.path_problem) parts.push("broken — " + entry.path_problem)
+    if (entry.schedule) {
+      var sched = "runs at " + entry.schedule
+      if (entry.next_fire) {
+        sched += " · next " + String(entry.next_fire).substring(0, 16).replace("T", " ")
+      } else if (entry.enabled === false) {
+        sched += " · paused while disabled"
+      }
+      parts.push(sched)
+      if (entry.would_refuse) {
+        parts.push("will be refused when it fires — " + String(entry.rule || "needs allow"))
+      }
+      if (entry.running) parts.push("a scheduled run is in flight")
+    }
+    if (entry.last_run) {
+      var last = "last run " + String(entry.last_run.at || "").substring(0, 16).replace("T", " ")
+        + " — " + String(entry.last_run.outcome || "")
+      if (entry.last_run.duration) last += " · " + entry.last_run.duration
+      parts.push(last)
+    }
+    var progress = automationRuns[entry.kind + "/" + entry.name]
+    if (progress) parts.push(progress)
+    return parts.join(" · ")
+  }
+
+  // automationFlagged: the urgent colour for a row whose meta already says
+  // why in words — incomplete, a rotted path, a refused schedule, a failed
+  // last run. Never the only carrier (JarvixCollectionRow's contract).
+  function automationFlagged(entry) {
+    return Boolean(entry.incomplete) || Boolean(entry.path_problem)
+      || Boolean(entry.would_refuse)
+      || Boolean(entry.last_run && entry.last_run.failed)
+  }
+
+  // newAutomationTOML is the copyable hint block (issue #93): creating a
+  // routine or script stays a hand edit in v1 — definitions are
+  // code-adjacent — so the tab hands over the exact TOML to paste into
+  // config.toml instead of a form.
+  readonly property string newAutomationTOML: "[[routines]]\n"
+    + "name = \"morning setup\"\n"
+    + "phrases = [\"morning setup\"]\n"
+    + "# schedule = \"08:30 mon-fri\"  # optional: run it on a clock too\n"
+    + "\n"
+    + "  [[routines.steps]]\n"
+    + "  app = \"firefox\"\n"
+    + "  workspace = 2\n"
+    + "\n"
+    + "[[scripts]]\n"
+    + "name = \"backup notes\"\n"
+    + "phrases = [\"backup my notes\"]\n"
+    + "path = \"/home/you/bin/backup-notes.sh\"\n"
 
   // --- knowledge feeds ----------------------------------------------------
   // The Knowledge tab (issues #91/#92): the daemon's feed cache as cards —
@@ -460,14 +606,11 @@ FloatingWindow {
   }
 
   // --- typed turns --------------------------------------------------------
-  // Request id 1 is the conversation snapshot; typed submissions take ids
-  // from 2 upwards so a reply can be matched to the text that produced it.
-  // Dynamic request ids start above the fixed ones this connection also
-  // carries (1 = conversation.get, 15/16 = routines list/run, 17/18 =
-  // scripts list/run; settings has
-  // 11–14 on its own socket). Two features merged with each scheme unaware
-  // of the other, and a dynamic counter walking into the fixed range would
-  // misroute a history reply as a routines one — hence the gap.
+  // Request id 1 is the conversation snapshot; everything else takes dynamic
+  // ids from this counter so a reply can be matched to exactly the request
+  // that asked for it. The counter starts above the historical fixed range
+  // (settings still holds 11–14 on its own socket) so a dynamic id can never
+  // collide with a fixed one.
   property int nextRequestId: 100
   property int submitRequestId: 0
   // The text of the submission in flight, kept only so a failed submit can
@@ -830,6 +973,36 @@ FloatingWindow {
       // feed's name only; the fresh value rides the status reply.
       requestKnowledge()
       break
+    case "routine.started":
+      // Live progress for the Automations tab (issue #93): the run events
+      // carry the facts; these lines only relay them, and the finish always
+      // re-requests the listing so the row ends on the daemon's own record.
+      setAutomationRun("routine", String(params.routine || ""),
+        "running — " + Number(params.steps || 0) + " steps")
+      break
+    case "routine.step":
+      setAutomationRun("routine", String(params.routine || ""),
+        "step " + Number(params.step || 0) + ": " + String(params.app || "")
+        + (String(params.status || "") === "failed" ? " failed" : ""))
+      break
+    case "routine.finished":
+      clearAutomationRun("routine", String(params.routine || ""))
+      requestAutomations()
+      break
+    case "script.started":
+      setAutomationRun("script", String(params.script || ""), "running")
+      break
+    case "script.finished":
+      clearAutomationRun("script", String(params.script || ""))
+      requestAutomations()
+      break
+    case "automation.fired":
+    case "automation.skipped":
+    case "automation.refused":
+      // The clock moved (ADR 0032): last-fired, next-fire, or the refusal
+      // record changed — re-request rather than guess (ADR 0013).
+      requestAutomations()
+      break
     case "error":
       errorStage = String(params.stage || "")
       errorMessage = String(params.message || "something went wrong")
@@ -858,10 +1031,10 @@ FloatingWindow {
       if (currentTab === "library") requestHistory()
       break
     case "config.changed":
-      // A saved config may have added or renamed routines, scripts, or
-      // knowledge feeds — all three collections live in config.toml.
-      requestRoutines()
-      requestScripts()
+      // A saved config may have added, renamed, or switched routines,
+      // scripts, or knowledge feeds — all three collections live in
+      // config.toml.
+      requestAutomations()
       requestKnowledge()
       break
     }
@@ -913,16 +1086,11 @@ FloatingWindow {
                    frame.id === win.historyOpenRequestId ||
                    frame.id === win.historySearchRequestId)) {
           win.handleHistoryReply(frame)
-        } else if (frame.id === 15 && frame.result) {
-          win.routines = frame.result.routines || []
-        } else if (frame.id === 16 && frame.error) {
-          win.errorStage = "routine"
-          win.errorMessage = String(frame.error.message || "the routine could not be started")
-        } else if (frame.id === 17 && frame.result) {
-          win.scripts = frame.result.scripts || []
-        } else if (frame.id === 18 && frame.error) {
-          win.errorStage = "script"
-          win.errorMessage = String(frame.error.message || "the script could not be started")
+        } else if (frame.id !== undefined && frame.id === win.automationsRequestId) {
+          if (frame.result) win.loadAutomations(frame.result)
+        } else if (frame.id !== undefined && (frame.id === win.automationsRunRequestId ||
+                   frame.id === win.automationsEnableRequestId)) {
+          win.handleAutomationsActionReply(frame)
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
         } else if (frame.id === 1 && frame.error) {
@@ -938,8 +1106,7 @@ FloatingWindow {
       win.socketReady = connected
       if (connected) {
         win.requestConversation()
-        win.requestRoutines()
-        win.requestScripts()
+        win.requestAutomations()
         // The snapshot replaces the model wholesale (seq keeps replays
         // honest), so a reconnect — possibly to a restarted daemon — always
         // converges on what the daemon actually holds.
@@ -1498,15 +1665,17 @@ FloatingWindow {
       }
     }
 
-    // The Automations tab: the configured routines (ADR 0026) and scripts
-    // (ADR 0030), each with its phrases — the panels that used to sit above
-    // the composer, moved to their own tab on the shared collection rows.
-    // Run is display-and-trigger exactly as before: routines.run /
-    // scripts.run replay the entry's phrase through the daemon's ordinary
-    // session path, so the router, the permission gates, and the spoken
-    // outcome behave identically however it is triggered (ADR 0013).
-    // Managing the entries is the sibling tickets' job — the TOML tables in
-    // config.toml stay the source of truth.
+    // The Automations tab (issue #93): routines and scripts as one managed
+    // list on the shared collection rows — kind badge and phrases in the
+    // subtitle, the script's exact path in the monospace detail line (it is
+    // what the script.run gate's confirmation names, ADR 0030), and a status
+    // line carrying the daemon's own facts: the enabled switch, the
+    // incomplete/validity markers, the schedule with its daemon-computed
+    // next fire and would-refuse warning, the last observed run, and live
+    // progress from the run events. Run replays the entry's phrase through
+    // the existing gated path; Enable/Disable is the surgical config write;
+    // a disabled row says so and loses its Run button. The footer hands over
+    // the TOML for a new entry — creation stays a hand edit in v1.
     Item {
       id: automationsScreen
       visible: win.socketReady && win.currentTab === "automations"
@@ -1518,72 +1687,152 @@ FloatingWindow {
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
       JarvixEmptyState {
-        visible: win.routines.length === 0 && win.scripts.length === 0
+        visible: win.automations.length === 0
         anchors.centerIn: parent
         width: parent.width
-        text: "No routines or scripts yet — add [[routines]] or [[scripts]] tables to config.toml."
+        text: "No routines or scripts yet — copy the block below into config.toml to add one."
       }
 
-      Flickable {
-        visible: win.routines.length > 0 || win.scripts.length > 0
-        anchors.fill: parent
-        contentHeight: automationsColumn.height
+      ListView {
+        id: automationsList
+        visible: win.automations.length > 0
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: automationsHint.top
+        anchors.bottomMargin: Style.space(8)
         clip: true
+        spacing: Style.space(10)
+        model: win.automations
 
-        Column {
-          id: automationsColumn
+        delegate: JarvixCollectionRow {
+          required property var modelData
+          width: automationsList.width
+          title: modelData.name
+          subtitle: win.automationSubtitle(modelData)
+          detail: String(modelData.path || "")
+          meta: win.automationMeta(modelData)
+          flagged: win.automationFlagged(modelData)
+          // A disabled entry cannot run — its phrases are out of the
+          // grammar and the daemon would refuse — so the row does not offer
+          // it; Enable is the way back (the Knowledge tab's rule).
+          actionLabel: modelData.enabled === false ? "" : "Run"
+          actionName: "Run the " + modelData.name + " " + modelData.kind
+          onActionTriggered: win.runAutomation(modelData.kind, modelData.name)
+          action2Label: modelData.enabled === false ? "Enable" : "Disable"
+          action2Name: (modelData.enabled === false ? "Enable" : "Disable")
+            + " the " + modelData.name + " " + modelData.kind
+          onAction2Triggered: win.setAutomationEnabled(modelData.kind, modelData.name,
+            modelData.enabled === false)
+        }
+      }
+
+      // The new-entry hint (issue #93): a collapsed block that unfolds into
+      // the exact TOML to copy — the Knowledge tab's pattern, because
+      // routine and script definitions are code-adjacent and stay
+      // hand-edited in v1.
+      Column {
+        id: automationsHint
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Style.space(6)
+
+        Rectangle {
+          id: automationsHintToggle
+          width: automationsHintToggleLabel.width + Style.space(20)
+          height: automationsHintToggleLabel.height + Style.space(8)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text, automationsHintToggle.activeFocus ? 0.16 : 0.06)
+          border.color: automationsHintToggle.activeFocus
+            ? Color.accent : Util.alpha(Color.popups.text, 0.4)
+          border.width: automationsHintToggle.activeFocus ? 2 : 1
+          activeFocusOnTab: true
+          property bool open: false
+          Accessible.role: Accessible.Button
+          Accessible.name: open ? "Hide the new-automation TOML"
+            : "Show the TOML for adding a routine or script"
+          Keys.onReturnPressed: automationsHintToggle.open = !automationsHintToggle.open
+          Keys.onSpacePressed: automationsHintToggle.open = !automationsHintToggle.open
+          Text {
+            id: automationsHintToggleLabel
+            anchors.centerIn: parent
+            text: automationsHintToggle.open ? "Hide the TOML" : "Add a routine or script…"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+          MouseArea {
+            anchors.fill: parent
+            onClicked: automationsHintToggle.open = !automationsHintToggle.open
+          }
+        }
+
+        Rectangle {
+          visible: automationsHintToggle.open
           width: parent.width
-          spacing: Style.space(8)
+          height: automationsHintBody.height + Style.space(20)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text, 0.06)
 
-          Text {
-            visible: win.routines.length > 0
-            text: "Routines"
-            font.family: Style.font.family
-            font.bold: true
-            font.pixelSize: Style.font.subtitle
-            color: Util.alpha(Color.popups.text, 0.7)
-          }
+          Column {
+            id: automationsHintBody
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Style.space(10)
+            spacing: Style.space(6)
 
-          Repeater {
-            model: win.routines
-            delegate: JarvixCollectionRow {
-              required property var modelData
-              width: automationsColumn.width
-              title: modelData.name
-              subtitle: "Say “" + (modelData.phrases || []).join("” or “") + "”"
-              meta: Number(modelData.steps || 0) + " steps"
-                + (modelData.incomplete
-                  ? " · incomplete — a launch command still needs filling in" : "")
-              flagged: Boolean(modelData.incomplete)
-              actionLabel: "Run"
-              actionName: "Run routine " + modelData.name
-              onActionTriggered: win.runRoutine(modelData.name)
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Copy what you need into config.toml — a [[routines]] table, a "
+                + "[[scripts]] table, or both — then reload; the new row appears here."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
             }
-          }
-
-          Text {
-            visible: win.scripts.length > 0
-            topPadding: win.routines.length > 0 ? Style.space(8) : 0
-            text: "Scripts"
-            font.family: Style.font.family
-            font.bold: true
-            font.pixelSize: Style.font.subtitle
-            color: Util.alpha(Color.popups.text, 0.7)
-          }
-
-          Repeater {
-            model: win.scripts
-            delegate: JarvixCollectionRow {
-              required property var modelData
-              width: automationsColumn.width
-              title: modelData.name
-              subtitle: "Say “" + (modelData.phrases || []).join("” or “") + "”"
-              // The path is deliberately shown — it is exactly what the
-              // script.run gate's confirmation names (ADR 0030).
-              meta: String(modelData.path || "")
-              actionLabel: "Run"
-              actionName: "Run script " + modelData.name
-              onActionTriggered: win.runScript(modelData.name)
+            TextEdit {
+              id: automationsHintTOML
+              width: parent.width
+              readOnly: true
+              selectByMouse: true
+              wrapMode: TextEdit.WrapAnywhere
+              text: win.newAutomationTOML
+              font.family: "monospace"
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+              selectionColor: Util.alpha(Color.accent, 0.4)
+              Accessible.role: Accessible.StaticText
+              Accessible.name: "The TOML block for a new routine or script"
+            }
+            Rectangle {
+              id: automationsHintCopy
+              width: automationsHintCopyLabel.width + Style.space(20)
+              height: automationsHintCopyLabel.height + Style.space(8)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.accent, automationsHintCopy.activeFocus ? 0.35 : 0.18)
+              border.color: Color.accent
+              border.width: automationsHintCopy.activeFocus ? 2 : 1
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Copy the TOML block"
+              function copyTOML() {
+                automationsHintTOML.selectAll()
+                automationsHintTOML.copy()
+                automationsHintTOML.deselect()
+              }
+              Keys.onReturnPressed: automationsHintCopy.copyTOML()
+              Keys.onSpacePressed: automationsHintCopy.copyTOML()
+              Text {
+                id: automationsHintCopyLabel
+                anchors.centerIn: parent
+                text: "Copy"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea { anchors.fill: parent; onClicked: automationsHintCopy.copyTOML() }
             }
           }
         }

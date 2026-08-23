@@ -31,6 +31,13 @@ func TestSetEntryFieldGolden(t *testing.T) {
 		// A family with sub-tables ([[routines.steps]]): the key lands in the
 		// entry's own body, never inside a step — the #93 shape.
 		{"routine", "routines", "evening", "enabled", false},
+		// Re-enabling a routine (#93): the existing key flips in place, its
+		// inline comment kept, the steps untouched.
+		{"routine_reenable", "routines", "evening", "enabled", true},
+		// The scripts family (#93): the key lands after the entry's own last
+		// body key, before the comment that belongs to the next entry, with
+		// the sibling's inline comment intact.
+		{"script", "scripts", "backup notes", "enabled", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

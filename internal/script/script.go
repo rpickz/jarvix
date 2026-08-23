@@ -135,9 +135,18 @@ func Problems(defs []Definition) []string {
 	return problems
 }
 
-// pathProblem checks one script path the way the runner will: absolute,
+// PathProblem checks one script path the way the runner will: absolute,
 // present, a regular file, executable. One string per call — the first
 // problem is the one to fix, and "missing" makes the others unknowable.
+// Exported for the Automations tab's listing (#93): load validation already
+// refused a bad path, so a problem showing up there means the file changed
+// underneath a running daemon — the same recheck the runner performs, from
+// the same single copy of the rules.
+func PathProblem(path string) string {
+	return pathProblem(path)
+}
+
+// pathProblem is PathProblem's body; Problems calls it directly.
 func pathProblem(path string) string {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {

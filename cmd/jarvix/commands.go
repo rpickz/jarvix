@@ -840,11 +840,14 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 		// Incomplete marks a captured routine (#62) still carrying a launch
 		// placeholder; it stays marked until a human edits the app in.
 		Incomplete bool `json:"incomplete"`
+		// Enabled is the shared switch (#93): a parked routine still lists —
+		// disabled means switched off, never hidden.
+		Enabled bool `json:"enabled"`
 	}
 	listing := make([]routineListing, 0, len(cfg.Routines))
 	for _, r := range cfg.Routines {
 		entry := routineListing{Name: r.Name, Phrases: r.Phrases, Steps: []string{},
-			Incomplete: r.Incomplete()}
+			Incomplete: r.Incomplete(), Enabled: r.IsEnabled()}
 		for _, s := range r.Steps {
 			entry.Steps = append(entry.Steps, describeRoutineStep(s))
 		}
@@ -869,6 +872,9 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 		marker := ""
 		if r.Incomplete {
 			marker = " — incomplete: a step still needs its launch command (edit config.toml)"
+		}
+		if !r.Enabled {
+			marker += " — disabled: the phrases will not trigger it (enabled = false)"
 		}
 		fmt.Printf("%s — say \"%s\"%s\n", r.Name, strings.Join(r.Phrases, `" or "`), marker)
 		for _, step := range r.Steps {
@@ -912,11 +918,15 @@ func cmdScripts(cfg config.Config, asJSON bool) error {
 		Path       string   `json:"path"`
 		Report     string   `json:"report"`
 		TimeoutSec int      `json:"timeout_sec"`
+		// Enabled is the shared switch (#93): a parked script still lists —
+		// disabled means switched off, never hidden.
+		Enabled bool `json:"enabled"`
 	}
 	listing := make([]scriptListing, 0, len(cfg.Scripts))
-	for _, d := range cfg.ScriptDefinitions() {
+	for i, d := range cfg.ScriptDefinitions() {
 		listing = append(listing, scriptListing{Name: d.Name, Phrases: d.Phrases,
-			Path: d.Path, Report: string(d.Report), TimeoutSec: int(d.Timeout.Seconds())})
+			Path: d.Path, Report: string(d.Report), TimeoutSec: int(d.Timeout.Seconds()),
+			Enabled: cfg.Scripts[i].IsEnabled()})
 	}
 	if asJSON {
 		out, err := json.Marshal(map[string]any{"scripts": listing})
@@ -934,7 +944,11 @@ func cmdScripts(cfg config.Config, asJSON bool) error {
 		if i > 0 {
 			fmt.Println()
 		}
-		fmt.Printf("%s — say \"%s\"\n", s.Name, strings.Join(s.Phrases, `" or "`))
+		marker := ""
+		if !s.Enabled {
+			marker = " — disabled: the phrases will not trigger it (enabled = false)"
+		}
+		fmt.Printf("%s — say \"%s\"%s\n", s.Name, strings.Join(s.Phrases, `" or "`), marker)
 		fmt.Printf("  runs %s (no arguments) · report %s · timeout %ds\n", s.Path, s.Report, s.TimeoutSec)
 	}
 	return nil

@@ -8,7 +8,7 @@ import (
 )
 
 // registerRoutineMethods adds the routine surface (ADR 0026): `routines.list`
-// for the CLI and the conversation window's panel, and `routines.run` to
+// for the CLI and the window's Automations tab, and `routines.run` to
 // trigger one by name from either.
 //
 // routines.run is deliberately not a private execution path. It starts a
@@ -32,6 +32,9 @@ func (d *Daemon) registerRoutineMethods() {
 				// leaves a placeholder; the listing carries the mark so every
 				// surface can say "this one still needs a hand".
 				"incomplete": r.Incomplete(),
+				// The enabled switch (#93): a parked routine still lists —
+				// disabled means switched off, never hidden.
+				"enabled": r.IsEnabled(),
 			})
 		}
 		return map[string]any{"routines": out}, nil
@@ -48,6 +51,14 @@ func (d *Daemon) registerRoutineMethods() {
 		}
 		phrase, ok := d.routinePhrase(p.Name)
 		if !ok {
+			// A disabled routine (#93) is refused by name: its phrases are out
+			// of the intent grammar, so submitting one would fall through to
+			// the model — the opposite of running the routine — and a run
+			// surface must say "switched off", not "unknown".
+			if d.routineDisabled(p.Name) {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams,
+					"routine %q is disabled; enable it in the Automations tab or set enabled = true in config.toml", p.Name)
+			}
 			return nil, ipc.Errorf(ipc.CodeInvalidParams,
 				"no routine is called %q; `jarvix routines` lists them", p.Name)
 		}
@@ -64,15 +75,30 @@ func (d *Daemon) registerRoutineMethods() {
 
 // routinePhrase resolves a routine name (case-insensitively) to its first
 // trigger phrase — the utterance routines.run replays through the ordinary
-// session path.
+// session path. A disabled routine resolves to nothing: its phrases are out
+// of the grammar, so there is no utterance that runs it (#93).
 func (d *Daemon) routinePhrase(name string) (string, bool) {
 	want := strings.ToLower(strings.TrimSpace(name))
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
 	for _, r := range d.cfg.Routines {
-		if strings.ToLower(strings.TrimSpace(r.Name)) == want && len(r.Phrases) > 0 {
+		if strings.ToLower(strings.TrimSpace(r.Name)) == want && len(r.Phrases) > 0 && r.IsEnabled() {
 			return r.Phrases[0], true
 		}
 	}
 	return "", false
+}
+
+// routineDisabled reports whether name exists but is switched off — the fact
+// that turns routines.run's "unknown" into the actionable "disabled".
+func (d *Daemon) routineDisabled(name string) bool {
+	want := strings.ToLower(strings.TrimSpace(name))
+	d.cfgMu.Lock()
+	defer d.cfgMu.Unlock()
+	for _, r := range d.cfg.Routines {
+		if strings.ToLower(strings.TrimSpace(r.Name)) == want {
+			return !r.IsEnabled()
+		}
+	}
+	return false
 }

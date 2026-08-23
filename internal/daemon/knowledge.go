@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/config"
@@ -196,7 +195,9 @@ func (d *Daemon) registerKnowledgeMethods() {
 }
 
 // handleKnowledgeSetEnabled is the set_enabled body; see the registration
-// comment for the contract.
+// comment for the contract. The write itself is setEntryEnabled
+// (automations_admin.go), the one implementation this verb shares with
+// automations.set_enabled (#93).
 func (d *Daemon) handleKnowledgeSetEnabled(params json.RawMessage) (any, error) {
 	if d.knowledge == nil {
 		return nil, ipc.Errorf(ipc.CodeInvalidParams,
@@ -215,54 +216,5 @@ func (d *Daemon) handleKnowledgeSetEnabled(params json.RawMessage) (any, error) 
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "knowledge.set_enabled params: %v", err)
 		}
 	}
-
-	path := d.paths.ConfigFile()
-	raw, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
-	}
-	fp := config.FingerprintMissing
-	if raw != nil {
-		fp = config.Fingerprint(raw)
-	}
-	if p.Fingerprint != "" && p.Fingerprint != fp {
-		return nil, &ipc.Error{
-			Code: ipc.CodeConfigConflict,
-			Message: "config.toml changed on disk since it was read; " +
-				"the feed list has been refreshed — try the switch again",
-			Data: map[string]any{"fingerprint": fp},
-		}
-	}
-
-	newRaw, err := config.SetEntryField(raw, "knowledge.feeds", p.Name, "enabled", p.Enabled)
-	if err != nil {
-		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
-	}
-	fileCfg, err := config.ParseBytes(newRaw)
-	if err != nil {
-		return nil, ipc.Errorf(ipc.CodeInternalError, "rewrite config: %v", err)
-	}
-	fileCfg.Voices = fileCfg.InstalledVoices(d.paths)
-	if err := fileCfg.Validate(); err != nil {
-		return nil, &ipc.Error{
-			Code:    ipc.CodeConfigInvalid,
-			Message: "the change was rejected by validation; nothing was written",
-			Data:    map[string]any{"problems": validationProblems(err)},
-		}
-	}
-	if err := config.WriteFileAtomic(path, newRaw); err != nil {
-		return nil, ipc.Errorf(ipc.CodeInternalError, "write config: %v", err)
-	}
-
-	applied, reason := d.applyRuntime(fileCfg)
-	newFP := config.Fingerprint(newRaw)
-	d.publishConfigChanged(newFP)
-	result := map[string]any{
-		"fingerprint": newFP,
-		"applied":     applied,
-	}
-	if reason != "" {
-		result["reason"] = reason
-	}
-	return result, nil
+	return d.setEntryEnabled("knowledge.feeds", p.Name, p.Enabled, p.Fingerprint)
 }

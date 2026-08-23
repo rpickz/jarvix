@@ -1,0 +1,14 @@
+# the scripts I trust with a phrase
+[[scripts]]
+name = "backup notes"
+phrases = ["backup my notes"]
+path = "/home/me/bin/backup-notes.sh" # the audited copy
+schedule = "02:00"
+enabled = false
+
+# still experimenting with this one
+[[scripts]]
+name = "rotate wallpaper"
+phrases = ["rotate the wallpaper"]
+path = "/home/me/bin/rotate-wallpaper.sh"
+report = "silent"

@@ -646,8 +646,16 @@ func formatActivityElapsed(sec int) string {
 	return fmt.Sprintf("%dm%02ds", sec/60, sec%60)
 }
 
-// formatActivityDuration renders a millisecond figure the way a person reads
-// one: milliseconds under a second, one decimal of seconds above.
+// FormatActivityDuration renders a millisecond figure the way a person reads
+// one: milliseconds under a second, one decimal of seconds above. Exported
+// for the Automations tab's last-run line (#93), so the tab and the activity
+// feed can never word the same duration two ways.
+func FormatActivityDuration(ms int) string {
+	return formatActivityDuration(ms)
+}
+
+// formatActivityDuration is FormatActivityDuration's body, kept unexported
+// for the wording helpers in this file.
 func formatActivityDuration(ms int) string {
 	if ms < 0 {
 		ms = 0

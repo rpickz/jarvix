@@ -54,6 +54,10 @@ func (d *Daemon) watchActivity(ctx context.Context, events <-chan session.Event,
 				reason == "reset" && d.activityClearOnNew() {
 				d.clearActivity()
 			}
+			// The same subscription feeds the Automations tab's last-run
+			// memory (#93): a routine or script ending is recorded before its
+			// rendered row, so a list read racing the row push still agrees.
+			d.recordAutomationRun(ev)
 			for _, row := range desktop.ActivityRowsFor(ev.Type, ev.Data) {
 				d.appendActivity(ev, row)
 			}
