@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/script"
@@ -38,6 +39,18 @@ type Script struct {
 	// "stdout" (the first line the script printed), or "silent". Failures
 	// are spoken in every mode.
 	Report string `toml:"report"`
+	// Schedule optionally fires the script on a clock (ADR 0032): a time of
+	// day with optional days — "02:00", "08:30 mon-fri". Empty means
+	// phrase-triggered only. Because script.run defaults to ask and a
+	// schedule cannot answer a question, a scheduled script only executes
+	// when the identity is explicitly allowed; anything else is refused with
+	// a notification at the scheduled moment, and warned about at load.
+	Schedule string `toml:"schedule"`
+	// Announce opts a scheduled firing's report line into speech. Off by
+	// default on purpose: an unattended run reports through the activity
+	// feed and a notification, never a voice at whatever hour the schedule
+	// names.
+	Announce bool `toml:"announce"`
 }
 
 // ScriptDefinitions converts the TOML tables into the script package's
@@ -76,6 +89,10 @@ func (c Config) scriptProblems() []string {
 		return nil
 	}
 	problems := script.Problems(c.ScriptDefinitions())
+	for i, s := range c.Scripts {
+		problems = append(problems,
+			scheduleProblems(fmt.Sprintf("scripts[%d] (%q)", i, s.Name), s.Schedule, s.Announce)...)
+	}
 	if !c.Intents.Enabled {
 		// The router is the only trigger there is: with it disabled a phrase
 		// would fall through to the model, which must never be how a script

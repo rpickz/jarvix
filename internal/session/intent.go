@@ -423,7 +423,7 @@ func (e *Engine) intentRunner() intent.Runner {
 // outside except for how fast it happens. Speech failure is logged, never
 // fatal: the action already happened.
 func (e *Engine) speakAck(s *sess, ack string) {
-	if ack == "" || !e.opts.SpeakResponses || e.tts == nil {
+	if ack == "" || s.quiet || !e.opts.SpeakResponses || e.tts == nil {
 		return
 	}
 	speaker := newStreamingSpeaker(e, s)

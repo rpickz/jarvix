@@ -13,6 +13,7 @@
 var glyphs = {
   "artifact": "󰈤",
   "assistant": "󰍩",
+  "automation": "󰃰",
   "cancelled": "󰓛",
   "context": "󰍹",
   "desktop": "󰖲",

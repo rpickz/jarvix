@@ -51,25 +51,26 @@ type ActivityRow struct {
 // Row kinds. Stable identifiers, not prose: the glyph table, the tests, and
 // any future filtering key on these.
 const (
-	ActivityKindWake      = "wake"
-	ActivityKindYou       = "you"
-	ActivityKindModel     = "model"
-	ActivityKindAssistant = "assistant"
-	ActivityKindTurn      = "turn"
-	ActivityKindTool      = "tool"
-	ActivityKindGate      = "gate"
-	ActivityKindRefusal   = "refusal"
-	ActivityKindIntent    = "intent"
-	ActivityKindRoutine   = "routine"
-	ActivityKindScript    = "script"
-	ActivityKindDesktop   = "desktop"
-	ActivityKindTyping    = "typing"
-	ActivityKindContext   = "context"
-	ActivityKindMemory    = "memory"
-	ActivityKindArtifact  = "artifact"
-	ActivityKindTimings   = "timings"
-	ActivityKindError     = "error"
-	ActivityKindCancelled = "cancelled"
+	ActivityKindWake       = "wake"
+	ActivityKindYou        = "you"
+	ActivityKindModel      = "model"
+	ActivityKindAssistant  = "assistant"
+	ActivityKindTurn       = "turn"
+	ActivityKindTool       = "tool"
+	ActivityKindGate       = "gate"
+	ActivityKindRefusal    = "refusal"
+	ActivityKindIntent     = "intent"
+	ActivityKindRoutine    = "routine"
+	ActivityKindScript     = "script"
+	ActivityKindDesktop    = "desktop"
+	ActivityKindTyping     = "typing"
+	ActivityKindContext    = "context"
+	ActivityKindMemory     = "memory"
+	ActivityKindArtifact   = "artifact"
+	ActivityKindTimings    = "timings"
+	ActivityKindError      = "error"
+	ActivityKindCancelled  = "cancelled"
+	ActivityKindAutomation = "automation"
 )
 
 // Glyphs for the kinds barstatus.go does not already name, written as escapes
@@ -83,31 +84,33 @@ const (
 	glyphBook     = "\U000F00BA" // md-book
 	glyphClock    = "\U000F0150" // md-clock
 	glyphStop     = "\U000F04DB" // md-stop
+	glyphCalClock = "\U000F00F0" // md-calendar-clock
 )
 
 // activityGlyphs maps each row kind to its icon. Kinds reuse the bar's
 // verified glyph constants where the meaning matches; every kind gets a
 // distinguishable shape, because rows must read without colour.
 var activityGlyphs = map[string]string{
-	ActivityKindWake:      glyphMicrophoneOutline,
-	ActivityKindYou:       glyphMicrophone,
-	ActivityKindModel:     glyphBrain,
-	ActivityKindAssistant: glyphMessage,
-	ActivityKindTurn:      glyphDots,
-	ActivityKindTool:      glyphCog,
-	ActivityKindGate:      glyphHelp,
-	ActivityKindRefusal:   glyphCancel,
-	ActivityKindIntent:    glyphFlash,
-	ActivityKindRoutine:   glyphDiagram,
-	ActivityKindScript:    glyphConsole,
-	ActivityKindDesktop:   glyphWindow,
-	ActivityKindTyping:    glyphKeyboard,
-	ActivityKindContext:   glyphMonitor,
-	ActivityKindMemory:    glyphBook,
-	ActivityKindArtifact:  glyphFile,
-	ActivityKindTimings:   glyphClock,
-	ActivityKindError:     glyphAlert,
-	ActivityKindCancelled: glyphStop,
+	ActivityKindWake:       glyphMicrophoneOutline,
+	ActivityKindYou:        glyphMicrophone,
+	ActivityKindModel:      glyphBrain,
+	ActivityKindAssistant:  glyphMessage,
+	ActivityKindTurn:       glyphDots,
+	ActivityKindTool:       glyphCog,
+	ActivityKindGate:       glyphHelp,
+	ActivityKindRefusal:    glyphCancel,
+	ActivityKindIntent:     glyphFlash,
+	ActivityKindRoutine:    glyphDiagram,
+	ActivityKindScript:     glyphConsole,
+	ActivityKindDesktop:    glyphWindow,
+	ActivityKindTyping:     glyphKeyboard,
+	ActivityKindContext:    glyphMonitor,
+	ActivityKindMemory:     glyphBook,
+	ActivityKindArtifact:   glyphFile,
+	ActivityKindTimings:    glyphClock,
+	ActivityKindError:      glyphAlert,
+	ActivityKindCancelled:  glyphStop,
+	ActivityKindAutomation: glyphCalClock,
 }
 
 // ActivityGlyph resolves a row kind to its icon. An unknown kind — a newer
@@ -204,6 +207,25 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Detail: activityString(data, "path")})
 	case "script.finished":
 		return one(scriptFinishedRow(data))
+	case "automation.fired":
+		// A schedule fired (ADR 0032). The run itself reports through the
+		// ordinary rows that follow; this row is the trigger's own record —
+		// the clock, not a person, started what comes next.
+		return one(ActivityRow{Kind: ActivityKindAutomation,
+			Label:  "Schedule fired: " + activityString(data, "name"),
+			Detail: activityString(data, "schedule")})
+	case "automation.skipped":
+		return one(ActivityRow{Kind: ActivityKindAutomation,
+			Label:  "Schedule skipped: " + activityString(data, "name"),
+			Detail: activityString(data, "reason")})
+	case "automation.refused":
+		return one(ActivityRow{Kind: ActivityKindRefusal, Failed: true,
+			Label:  "Scheduled run refused: " + activityString(data, "name"),
+			Detail: joinActivity(activityString(data, "reason"), activityString(data, "rule"))})
+	case "automation.missed":
+		return one(ActivityRow{Kind: ActivityKindAutomation,
+			Label:  "Missed while off: " + activityString(data, "name"),
+			Detail: joinActivity("was due "+activityString(data, "due"), "reported, never re-fired")})
 	case "artifact.created":
 		return one(ActivityRow{Kind: ActivityKindArtifact,
 			Label:  "Artifact created",

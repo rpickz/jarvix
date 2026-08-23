@@ -24,6 +24,15 @@ type Routine struct {
 	// they follow intent grammar (plain spoken words, no placeholders) and
 	// must not collide with built-in or custom intents — validated at load.
 	Phrases []string `toml:"phrases"`
+	// Schedule optionally fires the routine on a clock (ADR 0032): a time of
+	// day with optional days — "08:30", "08:30 mon-fri". Empty means
+	// phrase-triggered only. The clockfire travels the same gated session
+	// path as the phrase; only allow-tier entries execute unattended.
+	Schedule string `toml:"schedule"`
+	// Announce opts a scheduled firing's summary into speech. Off by default
+	// on purpose: an unattended run reports through the activity feed and a
+	// notification, never a voice at whatever hour the schedule names.
+	Announce bool `toml:"announce"`
 	// Steps run in order.
 	Steps []RoutineStep `toml:"steps"`
 }
@@ -129,6 +138,8 @@ func (c Config) routineProblems() []string {
 	}
 	var problems []string
 	for i, r := range c.Routines {
+		problems = append(problems,
+			scheduleProblems(fmt.Sprintf("routines[%d] (%q)", i, r.Name), r.Schedule, r.Announce)...)
 		for j, s := range r.Steps {
 			label := fmt.Sprintf("routines[%d] (%q) steps[%d]", i, r.Name, j)
 			if n := len(s.Size); n != 0 && n != 2 {

@@ -131,6 +131,28 @@ func TestActivityRowVocabulary(t *testing.T) {
 			"script": "backup notes", "acknowledgement": "Backup notes finished.", "duration_ms": 2300},
 			ActivityRow{Kind: ActivityKindIntent, Label: "Intent: script.run (script backup notes)",
 				Detail: "Backup notes finished. · 2.3s"}},
+		// Schedules (ADR 0032): the clock's own rows. Fired precedes the run's
+		// ordinary rows; skipped, refused and missed are firings that did not
+		// run, each saying why — a schedule must never fail silently.
+		{"automation.fired", map[string]any{"kind": "script", "name": "backup notes",
+			"schedule": "02:00", "announce": false},
+			ActivityRow{Kind: ActivityKindAutomation, Label: "Schedule fired: backup notes",
+				Detail: "02:00"}},
+		{"automation.skipped", map[string]any{"kind": "script", "name": "backup notes",
+			"schedule": "02:00", "reason": "the last run is still going"},
+			ActivityRow{Kind: ActivityKindAutomation, Label: "Schedule skipped: backup notes",
+				Detail: "the last run is still going"}},
+		{"automation.refused", map[string]any{"kind": "script", "name": "backup notes",
+			"reason": "it needs your confirmation and a schedule cannot ask",
+			"rule":   `tool "script.run" asks unless the configuration names it`},
+			ActivityRow{Kind: ActivityKindRefusal, Failed: true,
+				Label: "Scheduled run refused: backup notes",
+				Detail: "it needs your confirmation and a schedule cannot ask · " +
+					`tool "script.run" asks unless the configuration names it`}},
+		{"automation.missed", map[string]any{"kind": "script", "name": "backup notes",
+			"schedule": "02:00", "due": "2026-08-21T02:00:00+01:00"},
+			ActivityRow{Kind: ActivityKindAutomation, Label: "Missed while off: backup notes",
+				Detail: "was due 2026-08-21T02:00:00+01:00 · reported, never re-fired"}},
 		{"artifact.created", map[string]any{"type": "diagram", "path": "/home/u/Documents/Jarvix/flow.png"},
 			ActivityRow{Kind: ActivityKindArtifact, Label: "Artifact created",
 				Detail: "diagram · /home/u/Documents/Jarvix/flow.png"}},

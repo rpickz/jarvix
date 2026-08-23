@@ -434,7 +434,12 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 // and the timeout still declines, so a broken voice never blocks the safety
 // decision.
 func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
-	if !e.opts.SpeakResponses || e.tts == nil || e.player == nil {
+	// A quiet session (ADR 0032) never reaches a confirmation on the intended
+	// path — the daemon refuses an ask-tier clockfire before a session exists
+	// — but belt and braces: if one ever does, the overlay still shows the
+	// question and the timeout still declines; the one thing that must not
+	// happen is a voice asking an empty room at 3am.
+	if s.quiet || !e.opts.SpeakResponses || e.tts == nil || e.player == nil {
 		return
 	}
 	if speaker != nil {

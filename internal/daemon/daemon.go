@@ -12,6 +12,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
+	"github.com/rpickz/jarvix/internal/automation"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/conversations"
@@ -73,6 +74,17 @@ type Daemon struct {
 	// tracked inside the service and drained as their own shutdown stage; a
 	// reload rebuilds the schedules through Reconfigure, never the service.
 	knowledge *knowledge.Service
+
+	// automations runs routines and scripts on a clock (ADR 0032). Always
+	// present — zero schedules cost zero goroutines — so the first `schedule`
+	// key lands on an idle reload. Its goroutines are tracked inside the
+	// service and drained as their own shutdown stage; a reload rebuilds the
+	// schedules through Reconfigure, never the service.
+	automations *automation.Service
+	// toolsPolicy is the compiled permission gate, held so the scheduler's
+	// fire path consults the very same tier resolution the session gate does
+	// — the clock and the voice can never disagree about what is permitted.
+	toolsPolicy *tools.Policy
 
 	// conversations is the durable archive (ADR 0027). Never nil, and held
 	// even with retention off: the off switch stops writing, but listing,
@@ -535,7 +547,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	server := ipc.NewServer(paths.Socket, bus, logger)
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
-		registry: registry, policy: cfg.Tools.Policy, memory: book, knowledge: feeds,
+		registry: registry, policy: cfg.Tools.Policy, toolsPolicy: policy,
+		memory: book, knowledge: feeds,
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor,
@@ -543,6 +556,10 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		shutdownGrace: DefaultShutdownGrace,
 	}
 	capture.committed = d.captureCommitted
+	// The automation scheduler (ADR 0032), built after the daemon exists
+	// because its fire path is the daemon's: policy pre-check, refusal
+	// notification, session entry. Nothing fires before Run starts it.
+	d.automations = d.newAutomationService(cfg)
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
 		if err != nil {
@@ -603,6 +620,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.knowledge != nil {
 		d.knowledge.Start(ctx)
 	}
+	// The automation scheduler (ADR 0032) on the same terms: the daemon's own
+	// context reaches every loop and every in-flight clockfire, and the
+	// service's tracked group is what the automations shutdown stage drains.
+	// Started after the bus subscribers above, so the boot-time
+	// missed-while-down report lands in the activity feed.
+	d.automations.Start(ctx)
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -652,6 +675,11 @@ func (d *Daemon) shutdown() {
 		{"sessions", d.engine.Shutdown, d.engine.InFlight},
 		{"ipc", d.server.Drain, d.server.InFlight},
 		{"notifications", d.post.Wait, d.post.InFlight},
+		// The automation scheduler after the sessions it may be waiting on: a
+		// clockfire blocks until its session ends, and the sessions stage has
+		// already ended them all, so this drain is loops unwinding a cancelled
+		// context (ADR 0032, the #74 lesson).
+		{"automations", d.automationsDrain, d.automationsInFlight},
 		// The feed scheduler last of the drains: a draining session may be
 		// mid-Get, and its sync fetch finishes (or is killed by its own
 		// timeout) before this stage is reached. The drain kills any fetch
@@ -925,6 +953,7 @@ func (d *Daemon) registerMethods() {
 	d.registerWakeMethods()
 	d.registerRoutineMethods()
 	d.registerScriptMethods()
+	d.registerAutomationMethods()
 }
 
 // promptBudgetReport measures what one turn sends before the user has said

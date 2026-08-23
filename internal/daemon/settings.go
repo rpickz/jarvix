@@ -329,6 +329,18 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	if d.knowledge != nil && !reflect.DeepEqual(running.Knowledge, merged.Knowledge) {
 		d.knowledge.Reconfigure(feedSpecs(merged))
 	}
+	// The automation schedules follow the same tables (ADR 0032): a changed
+	// [[routines]] or [[scripts]] set rebuilds the loops through Reconfigure —
+	// old generations unwind into the same tracked group — and the
+	// cannot-run-unattended warning re-fires against the new tables, so an
+	// edit that schedules an ask-tier entry is warned about at the reload that
+	// introduced it, not discovered at 2am.
+	if !reflect.DeepEqual(running.Routines, merged.Routines) ||
+		!reflect.DeepEqual(running.Scripts, merged.Scripts) {
+		entries := merged.AutomationEntries()
+		d.automations.Reconfigure(entries)
+		d.warnUnattendableSchedules(merged, entries)
+	}
 	// The swap succeeded: the previous configuration's engine processes are
 	// nobody's children now, so kill them. Without this a reload leaks a
 	// whisper-server and a Python interpreter per reload.
