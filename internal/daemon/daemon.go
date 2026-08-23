@@ -397,6 +397,17 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("routines enabled", "component", "routine",
 			"routines", strings.Join(names, ","))
 	}
+	// Scripts (ADR 0030) likewise: names only, never paths — the journal
+	// should say what phrases exist, not map the user's filesystem. The path
+	// is logged per run, where it is the fact being audited.
+	if len(cfg.Scripts) > 0 {
+		names := make([]string, 0, len(cfg.Scripts))
+		for _, s := range cfg.Scripts {
+			names = append(names, s.Name)
+		}
+		logger.Info("scripts enabled", "component", "script",
+			"scripts", strings.Join(names, ","))
+	}
 
 	// What Jarvix may look at is stated at startup, once, in the journal: an
 	// ambient-capture feature should never be something a user discovers by
@@ -870,6 +881,7 @@ func (d *Daemon) registerMethods() {
 	d.registerTextMethods()
 	d.registerWakeMethods()
 	d.registerRoutineMethods()
+	d.registerScriptMethods()
 }
 
 // promptBudgetReport measures what one turn sends before the user has said

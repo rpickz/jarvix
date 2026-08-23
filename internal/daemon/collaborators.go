@@ -13,6 +13,7 @@ import (
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/routine"
+	"github.com/rpickz/jarvix/internal/script"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
@@ -191,6 +192,29 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 	})
 }
 
+// scriptRunner builds the script runner (ADR 0030), or nil when nothing is
+// configured. The explicit nil matters for the same reason routineRunner's
+// does: a typed-nil *script.Runner in the interface field would read as
+// "scripts exist" to the engine. Rebuilt on config reload alongside the
+// intent router, so a hand-edited [[scripts]] entry and the phrase that
+// triggers it always come from the same file read.
+func scriptRunner(cfg config.Config, bus *session.Bus, logger *slog.Logger) session.ScriptRunner {
+	defs := cfg.ScriptDefinitions()
+	if len(defs) == 0 {
+		return nil
+	}
+	return script.New(script.Options{
+		Definitions: defs,
+		Log:         logger,
+		// script.started / script.finished go out on the bus so the activity
+		// feed records every run with its exit status and duration; the user
+		// only ever *hears* the configured report.
+		Publish: func(event string, data map[string]any) {
+			bus.Publish(session.Event{Type: event, Data: data})
+		},
+	})
+}
+
 // engineOptions maps configuration onto engine options, shared by New and by
 // config reloads so both always agree on the translation. The bus is here for
 // the routine runner, which publishes its progress events through it. book is
@@ -217,6 +241,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		Intents:           intentRouter(cfg),
 		Routines:          routineRunner(cfg, compositor, bus, logger),
+		Scripts:           scriptRunner(cfg, bus, logger),
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Memory:            memoryInjector(book),

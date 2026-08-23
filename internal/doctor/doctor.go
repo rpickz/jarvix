@@ -77,7 +77,10 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 	}
 	// One result per configured advisor, so a CLI that moved is visible
 	// before someone asks Jarvix to consult it (ADR 0016).
-	return append(results, advisorChecks(cfg)...)
+	results = append(results, advisorChecks(cfg)...)
+	// And one per configured script, so a file that moved or lost its
+	// execute bit is named here before its phrase is ever spoken (ADR 0030).
+	return append(results, scriptChecks(cfg)...)
 }
 
 // Healthy reports whether no check failed (warnings are tolerated).

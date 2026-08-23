@@ -394,11 +394,24 @@ func TestDocumentedConfigExamplesAreValid(t *testing.T) {
 	if len(blocks) == 0 {
 		t.Fatal("no toml examples found; this test guards them, so it must not silently pass")
 	}
+	// Script paths are the one field whose validity is a machine fact, not a
+	// documentation fact: validation stats them (ADR 0030 — a missing script
+	// must be a load-time message), and the reader's machine, not this test
+	// runner, is where the documented ~/bin path will exist. So the guardrail
+	// substitutes a stub for each documented script path and keeps every
+	// other check strict; the path checks themselves have their own tests.
+	stub := filepath.Join(t.TempDir(), "documented-example.sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for i, block := range blocks {
 		cfg, err := parse([]byte(block[1]), Default())
 		if err != nil {
 			t.Errorf("toml example %d does not parse: %v", i+1, err)
 			continue
+		}
+		for j := range cfg.Scripts {
+			cfg.Scripts[j].Path = stub
 		}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("toml example %d is documented but invalid: %v", i+1, err)

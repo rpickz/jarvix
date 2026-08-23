@@ -107,6 +107,30 @@ func TestActivityRowVocabulary(t *testing.T) {
 			"summary": "Morning is up; spotify did not start."},
 			ActivityRow{Kind: ActivityKindRoutine, Label: "Routine finished: morning",
 				Detail: "Morning is up; spotify did not start."}},
+		// Scripts (ADR 0030): every run is a row with its exit status and
+		// duration — success included, because "did my backup actually run?"
+		// must never be answerable only by trusting silence. The path appears
+		// on the started row (it is what the gate's confirmation named);
+		// output never appears anywhere.
+		{"script.started", map[string]any{"script": "backup notes", "path": "/home/u/bin/backup.sh"},
+			ActivityRow{Kind: ActivityKindScript, Label: "Script: backup notes",
+				Detail: "/home/u/bin/backup.sh"}},
+		{"script.finished", map[string]any{"script": "backup notes", "path": "/home/u/bin/backup.sh",
+			"status": "ok", "exit_code": 0, "timed_out": false, "duration_ms": 2300},
+			ActivityRow{Kind: ActivityKindScript, Label: "Script finished: backup notes",
+				Detail: "exit 0 · 2.3s"}},
+		{"script.finished", map[string]any{"script": "backup notes", "path": "/home/u/bin/backup.sh",
+			"status": "failed", "exit_code": 2, "timed_out": false, "duration_ms": 120},
+			ActivityRow{Kind: ActivityKindScript, Failed: true,
+				Label: "Script failed: backup notes", Detail: "exit 2 · 120ms"}},
+		{"script.finished", map[string]any{"script": "backup notes", "path": "/home/u/bin/backup.sh",
+			"status": "failed", "exit_code": -1, "timed_out": true, "duration_ms": 60000},
+			ActivityRow{Kind: ActivityKindScript, Failed: true,
+				Label: "Script failed: backup notes", Detail: "stopped at the timeout · 60.0s"}},
+		{"intent.executed", map[string]any{"intent": "script.run", "source": "script", "status": "ok",
+			"script": "backup notes", "acknowledgement": "Backup notes finished.", "duration_ms": 2300},
+			ActivityRow{Kind: ActivityKindIntent, Label: "Intent: script.run (script backup notes)",
+				Detail: "Backup notes finished. · 2.3s"}},
 		{"artifact.created", map[string]any{"type": "diagram", "path": "/home/u/Documents/Jarvix/flow.png"},
 			ActivityRow{Kind: ActivityKindArtifact, Label: "Artifact created",
 				Detail: "diagram · /home/u/Documents/Jarvix/flow.png"}},
@@ -203,6 +227,9 @@ func TestActivityRowsNeverLeakPrivateContent(t *testing.T) {
 			"duration_ms": 90, "sources": []any{map[string]any{
 				"source": "clipboard", "chars": 29, "truncated": false,
 				"redacted": false, "text": secret}}}},
+		{"script events with rogue output fields", "script.finished", map[string]any{
+			"script": "backup", "path": "/home/u/bin/backup.sh", "status": "failed",
+			"exit_code": 2, "duration_ms": 10, "stdout": secret, "stderr": secret}},
 		{"an unknown tool's arguments", "tool.started", map[string]any{
 			"tool": "future.tool", "arguments": `{"anything":"` + secret + `"}`}},
 	}

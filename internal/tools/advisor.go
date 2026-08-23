@@ -390,6 +390,15 @@ var secretEnvFragments = []string{
 	"API_KEY", "APIKEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "SESSION_KEY",
 }
 
+// ScrubbedEnv builds a child-process environment: environ minus anything
+// named like a credential, minus the explicitly named extras. Exported for
+// the script runner (internal/script, ADR 0030), which owes its children the
+// same discipline advisors get, from this one copy of the secret-name rules —
+// a second list would be the one that misses the next variable.
+func ScrubbedEnv(environ []string, extra []string) []string {
+	return scrubbedEnv(environ, extra)
+}
+
 // scrubbedEnv builds the child environment: the daemon's, minus anything
 // named like a credential, minus the explicitly named extras.
 func scrubbedEnv(environ []string, extra []string) []string {

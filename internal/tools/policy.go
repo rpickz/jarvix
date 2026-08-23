@@ -228,6 +228,17 @@ func (p *Policy) ToolDecision(name string) PolicyDecision {
 	if name == shellToolName || name == advisorToolName {
 		return PolicyAsk
 	}
+	if name == ScriptToolName {
+		// Arbitrary execution behind a spoken phrase: a global "allow" does
+		// not reach it (only naming the tool does), a global "deny" does —
+		// the same one-way exception the typing tools carry, and for the same
+		// reason stated at neverSilent: loosening must be explicit, tightening
+		// must always win.
+		if p.defaultDecision == PolicyDeny {
+			return PolicyDeny
+		}
+		return PolicyAsk
+	}
 	if neverSilent[name] {
 		if p.defaultDecision == PolicyDeny {
 			return PolicyDeny
@@ -276,6 +287,53 @@ const IntentToolName = "intent.run"
 // touching the other. Unlike every other identity it defaults to allow (see
 // builtinToolDefaults for the argument).
 const RoutineToolName = "routine.run"
+
+// ScriptToolName is the identity a configured script ([[scripts]], ADR 0030)
+// runs under. Its own name — not routine.run's and not intent.run's — because
+// the risk profiles differ and each must be tightenable alone: a routine is
+// validated launches and placements, a custom intent is a shell command
+// facing the classifier, and a script is an arbitrary executable run whole.
+// Unlike routine.run it defaults to ask, and unlike most tools the global
+// `default = "allow"` does not reach it (see ToolDecision): a phrase can be
+// misheard, and the one control that answers a misheard phrase is the
+// question. Only naming the tool explicitly
+// (`[tools.policy.tool]."script.run" = "allow"`) silences it — a sentence a
+// user has to mean. A stricter global default still wins: `default = "deny"`
+// denies scripts too, because tightening is never the thing to override.
+const ScriptToolName = "script.run"
+
+// DecideScript classifies running one named script. There is no command to
+// parse — the argv is the configured path and nothing else, fixed at load —
+// so the verdict is the script.run identity's tier, with the script's name
+// AND its absolute path as what the user is asked about. The path is the
+// point (ADR 0014: confirmations are generated daemon-side from ground
+// truth): a swapped or edited config cannot describe itself as something
+// harmless, and a substituted file is visible in the very sentence that asks.
+func (p *Policy) DecideScript(name, path string) Verdict {
+	v := Verdict{Tool: ScriptToolName, Command: name + " (" + path + ")"}
+	_, explicit := p.tools[ScriptToolName]
+	switch p.ToolDecision(ScriptToolName) {
+	case PolicyDeny:
+		v.Decision = PolicyDeny
+		if explicit {
+			v.Rule = fmt.Sprintf("tool %q is set to deny", ScriptToolName)
+		} else {
+			v.Rule = fmt.Sprintf("tool %q is denied by the policy default", ScriptToolName)
+		}
+	case PolicyAllow:
+		v.Decision = PolicyAllow
+		v.Rule = fmt.Sprintf("tool %q is set to allow", ScriptToolName)
+	default:
+		v.Decision = PolicyAsk
+		if explicit {
+			v.Rule = fmt.Sprintf("tool %q is set to ask", ScriptToolName)
+		} else {
+			v.Rule = fmt.Sprintf("tool %q asks unless the configuration names it", ScriptToolName)
+		}
+		v.Summary = fmt.Sprintf("I'm about to run your %s script, at %s. Should I go ahead?", name, path)
+	}
+	return v
+}
 
 // DecideRoutine classifies running one named routine. There is no command to
 // parse and no shell classifier to consult — a routine's steps were validated

@@ -74,6 +74,12 @@ type Options struct {
 	// configuration cannot produce that combination: the router only knows
 	// phrases the same config that builds the runner declared.
 	Routines RoutineRunner
+	// Scripts executes the named scripts the intent router matches
+	// (ADR 0030). Nil — a daemon with no [[scripts]] configured — makes a
+	// matched script phrase an honest spoken refusal, though validated
+	// configuration cannot produce that combination: the router only knows
+	// phrases the same config that builds the runner declared.
+	Scripts ScriptRunner
 	// Capture plans and writes "save this as <name>" layout captures (#62).
 	// Nil — a daemon built without the capture service — makes a matched
 	// capture phrase an honest spoken refusal rather than a silent drop.

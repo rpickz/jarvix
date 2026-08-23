@@ -30,7 +30,11 @@ type Config struct {
 	// Routines are the named app-placement sequences ([[routines]], ADR
 	// 0026), triggered through the intent router and executed by
 	// internal/routine.
-	Routines  []Routine `toml:"routines"`
+	Routines []Routine `toml:"routines"`
+	// Scripts are the user-authored executables behind spoken phrases
+	// ([[scripts]], ADR 0030), triggered through the intent router, gated
+	// under script.run, and executed by internal/script with zero arguments.
+	Scripts   []Script  `toml:"scripts"`
 	Tools     Tools     `toml:"tools"`
 	Artifacts Artifacts `toml:"artifacts"`
 	// Context is what Jarvix may look at on the desktop before answering
@@ -872,6 +876,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
 	problems = append(problems, c.routineProblems()...)
+	problems = append(problems, c.scriptProblems()...)
 	problems = append(problems, c.contextProblems()...)
 	problems = append(problems, c.memoryProblems()...)
 	problems = append(problems, c.voiceProblems()...)
