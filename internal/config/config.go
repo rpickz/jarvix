@@ -286,6 +286,15 @@ type Activation struct {
 	WakeRingMs int `toml:"wake_ring_ms"`
 	// MaxUtteranceSec bounds one hands-free request.
 	MaxUtteranceSec int `toml:"max_utterance_sec"`
+	// WakeAliases are words the transcript strip accepts as the wake word, in
+	// addition to the word itself. "Jarvix" is out-of-vocabulary for whisper,
+	// so even a correctly *detected* wake word is often *transcribed* as a
+	// nearby real word ("Jarvis", "JavaX") — and a strip that only knows the
+	// true spelling then leaves the summons in the transcript, where it breaks
+	// intent matching (issue #83). Aliases widen only the transcript strip;
+	// the acoustic wake gate (ADR 0024) never sees them, so false-activation
+	// behaviour is untouched. Setting the key replaces the shipped defaults.
+	WakeAliases []string `toml:"wake_aliases"`
 }
 
 // WakeWordEnabled reports whether background listening is configured.
@@ -344,6 +353,13 @@ func (e Endpoint) Key() string {
 type STT struct {
 	Provider string  `toml:"provider"` // "whisper"
 	Whisper  Whisper `toml:"whisper"`
+	// Vocabulary lists extra terms the recogniser is biased toward — project
+	// names, jargon, anything whisper keeps rounding to a nearby real word.
+	// They join the wake word in the bias prompt both transcription paths
+	// carry (issue #83). Input-side only: this is what the *user* says, where
+	// tts.lexicon respells what *Jarvix* says — different vocabularies on
+	// purpose.
+	Vocabulary []string `toml:"vocabulary"`
 }
 
 // Whisper configures the whisper.cpp adapter.
@@ -465,6 +481,10 @@ func Default() Config {
 			EndpointSilenceMs: 800,
 			WakeRingMs:        1200,
 			MaxUtteranceSec:   15,
+			// The mishearings whisper's English models actually produce for
+			// "jarvix" (observed with base.en): the transcript strip accepts
+			// any of them as the summons.
+			WakeAliases: []string{"jarvis", "javax", "jarvic", "jarvicks", "jarvex"},
 		},
 		AI: AI{
 			Provider:     "ollama",
@@ -725,6 +745,7 @@ func (c Config) Validate() error {
 		}
 	}
 	problems = append(problems, c.wakeProblems()...)
+	problems = append(problems, c.sttProblems()...)
 	if c.AI.Provider == "" {
 		problems = append(problems, "ai.provider is empty; set it to a provider such as \"ollama\" or \"openai\"")
 	} else if _, ok := c.AI.Endpoints[c.AI.Provider]; !ok {

@@ -41,6 +41,12 @@ type ServerTranscriber struct {
 	ModelPath string
 	// Language is the spoken language ("en", or "auto").
 	Language string
+	// Prompt is the vocabulary bias, exactly as on the cold Transcriber
+	// (issue #83). It travels as the `prompt` field of each /inference
+	// request rather than as a spawn flag, so the warm and cold paths cannot
+	// drift: both carry the prompt with the clip it applies to, and a config
+	// reload that changes a term never needs the model reloaded.
+	Prompt string
 	// Cold is the per-transcription fallback. Required.
 	Cold *Transcriber
 	// MemoryCap and IdleAfter configure the supervisor ([performance]).
@@ -169,7 +175,7 @@ func (s *ServerTranscriber) Transcribe(ctx context.Context, input stt.AudioInput
 	// Read the clip before handing the session a channel: a missing recording
 	// is the caller's bug and should surface as a start error, not a stream
 	// error, exactly as the cold path's missing-model check does.
-	body, contentType, err := multipartWAV(input.WAVPath)
+	body, contentType, err := multipartWAV(input.WAVPath, s.Prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +240,10 @@ func (s *ServerTranscriber) infer(ctx context.Context, child *serverChild, body 
 }
 
 // multipartWAV builds the /inference request body: the clip plus the two
-// fields that make whisper-server answer with a bare transcript.
-func multipartWAV(path string) (body []byte, contentType string, err error) {
+// fields that make whisper-server answer with a bare transcript, and the
+// bias prompt when there is one — whisper-server reads a `prompt` form field
+// per request, the same parameter --prompt sets for the whole process.
+func multipartWAV(path, prompt string) (body []byte, contentType string, err error) {
 	wav, err := os.ReadFile(path)
 	if err != nil {
 		return nil, "", fmt.Errorf("read recording: %w", err)
@@ -249,10 +257,14 @@ func multipartWAV(path string) (body []byte, contentType string, err error) {
 	if _, err := part.Write(wav); err != nil {
 		return nil, "", err
 	}
-	for field, value := range map[string]string{
+	fields := map[string]string{
 		"response_format": "text",
 		"temperature":     "0.0",
-	} {
+	}
+	if prompt != "" {
+		fields["prompt"] = prompt
+	}
+	for field, value := range fields {
 		if err := w.WriteField(field, value); err != nil {
 			return nil, "", err
 		}

@@ -45,6 +45,12 @@ type Transcriber struct {
 	Binary    string // whisper-cli executable
 	ModelPath string // absolute path to the ggml model file
 	Language  string // e.g. "en"; "auto" for detection
+	// Prompt is the initial prompt whisper decodes under (--prompt): a
+	// vocabulary bias, not a transcript prefix. It exists because "Jarvix" is
+	// an out-of-vocabulary word that otherwise rounds to "Jarvis" (issue #83);
+	// config.STTBiasPrompt composes it from the wake word and stt.vocabulary.
+	// Empty passes no prompt at all.
+	Prompt string
 }
 
 // ResolveModelPath turns a configured model value into a file path. Absolute
@@ -83,6 +89,9 @@ func (t *Transcriber) Transcribe(ctx context.Context, input stt.AudioInput) (<-c
 	}
 	if t.Language != "" {
 		args = append(args, "--language", t.Language)
+	}
+	if t.Prompt != "" {
+		args = append(args, "--prompt", t.Prompt)
 	}
 	cmd := exec.CommandContext(ctx, t.Binary, args...)
 	var stdout, stderr bytes.Buffer

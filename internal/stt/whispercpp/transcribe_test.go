@@ -64,6 +64,41 @@ func TestTranscribeEmitsTrimmedFinalTranscript(t *testing.T) {
 	}
 }
 
+// The bias prompt is the cold half of issue #83: without it, "Jarvix" is
+// out-of-vocabulary and whisper rounds it to "Jarvis". The exact argv matters —
+// --prompt is the flag whisper-cli documents for an initial prompt.
+func TestTranscribeCarriesTheBiasPrompt(t *testing.T) {
+	tr, dir := installWhisperStub(t)
+	tr.Prompt = "The assistant is called Jarvix."
+	ch, err := tr.Transcribe(context.Background(), stt.AudioInput{WAVPath: "/tmp/rec.wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	args, err := os.ReadFile(filepath.Join(dir, "whisper.args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--prompt\nThe assistant is called Jarvix.") {
+		t.Errorf("argv %q missing --prompt with the bias text", args)
+	}
+}
+
+func TestTranscribeOmitsThePromptWhenUnset(t *testing.T) {
+	tr, dir := installWhisperStub(t)
+	ch, err := tr.Transcribe(context.Background(), stt.AudioInput{WAVPath: "/tmp/rec.wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	args, _ := os.ReadFile(filepath.Join(dir, "whisper.args"))
+	if strings.Contains(string(args), "--prompt") {
+		t.Errorf("argv %q must not include --prompt when no bias is configured", args)
+	}
+}
+
 func TestTranscribeOmitsLanguageWhenUnset(t *testing.T) {
 	tr, dir := installWhisperStub(t)
 	tr.Language = ""

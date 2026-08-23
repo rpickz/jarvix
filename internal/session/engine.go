@@ -100,6 +100,11 @@ type Options struct {
 	// which matches strictly against the whole thing. Empty (the default)
 	// strips nothing.
 	WakeWord string
+	// WakeAliases are additional words the strip accepts as the wake word —
+	// whisper's known mishearings of it ("jarvis", "javax"; issue #83). They
+	// widen only what stripWakeWord removes from a wake transcript; the
+	// acoustic wake gate never sees them. Empty accepts the wake word alone.
+	WakeAliases []string
 	// Lexicon respells terms the voice mispronounces, term → spoken form
 	// ([tts.lexicon]). Merged over the shipped defaults; nil is the defaults
 	// alone. Spoken output only — the overlay shows the original text.
@@ -802,7 +807,7 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		// router matches whole utterances, the model reads it as the user
 		// addressing a third party, and the conversation history would carry
 		// it into every follow-up.
-		s.transcript = stripWakeWord(s.transcript, e.opts.WakeWord)
+		s.transcript = stripWakeWord(s.transcript, e.opts.WakeWord, e.opts.WakeAliases)
 	}
 	if strings.TrimSpace(s.transcript) == "" {
 		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))

@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,8 +250,48 @@ func TestStripWakeWord(t *testing.T) {
 		{"no wake word configured", "Jarvix, hello", "", "Jarvix, hello"},
 		{"empty transcript", "", "jarvix", ""},
 	} {
-		if got := stripWakeWord(c.in, c.word); got != c.want {
-			t.Errorf("%s: stripWakeWord(%q, %q) = %q, want %q", c.name, c.in, c.word, got, c.want)
+		if got := stripWakeWord(c.in, c.word, nil); got != c.want {
+			t.Errorf("%s: stripWakeWord(%q, %q, nil) = %q, want %q", c.name, c.in, c.word, got, c.want)
+		}
+	}
+}
+
+// shippedAliases mirrors config.Default()'s activation.wake_aliases: the words
+// whisper actually writes when it mishears "jarvix" (issue #83). Mirrored
+// rather than imported so the session package keeps not depending on config;
+// TestDefaultWakeAliasesAreTheKnownMishearings in internal/config pins the
+// same list from the other side.
+var shippedAliases = []string{"jarvis", "javax", "jarvic", "jarvicks", "jarvex"}
+
+// A mishearing of the summons is still the summons. Every shipped alias is
+// stripped under exactly the wake word's own discipline: leading whole word
+// only, case and punctuation ignored — and a mid-sentence "Jarvis" (a real
+// name that real sentences contain) is never touched.
+func TestStripWakeWordAcceptsMishearingAliases(t *testing.T) {
+	for _, alias := range shippedAliases {
+		upper := strings.ToUpper(alias[:1]) + alias[1:]
+		for _, c := range []struct{ name, in, want string }{
+			{"leading with a comma", upper + ", volume thirty", "volume thirty"},
+			{"lowercase no punctuation", alias + " stop", "stop"},
+			{"a filler in front", "Hey " + upper + ", volume thirty", "volume thirty"},
+			{"only the alias is left alone", upper + ".", upper + "."},
+			{"a substring is not the alias", upper + "es are great", upper + "es are great"},
+		} {
+			if got := stripWakeWord(c.in, "jarvix", shippedAliases); got != c.want {
+				t.Errorf("%s: stripWakeWord(%q, \"jarvix\", aliases) = %q, want %q",
+					c.name, c.in, got, c.want)
+			}
+		}
+	}
+	// Beyond the two-word filler window an alias is a word like any other:
+	// "Jarvis" is a name real sentences contain.
+	for _, in := range []string{
+		"tell me about Jarvis Cocker",
+		"what did JavaX compile to?",
+		"who is better, Jarvis or Jarvix?",
+	} {
+		if got := stripWakeWord(in, "jarvix", shippedAliases); got != in {
+			t.Errorf("non-leading occurrence was touched: stripWakeWord(%q) = %q", in, got)
 		}
 	}
 }
@@ -275,6 +316,28 @@ func TestWakeTranscriptReachesTheModelWithoutTheWakeWord(t *testing.T) {
 	last := asked.Messages[len(asked.Messages)-1]
 	if last.Content != "what's my disk usage?" {
 		t.Errorf("the model was asked %q; the wake word should have been stripped", last.Content)
+	}
+}
+
+// End to end for the mishearing path (issue #83): whisper wrote "Jarvis", the
+// user said "Jarvix", and what the model is asked is still just the request.
+func TestWakeTranscriptStripsAMisheardName(t *testing.T) {
+	h := newHarness(t, Options{WakeWord: "jarvix", WakeAliases: shippedAliases})
+	h.stt.Text = "Jarvis, what's my disk usage?"
+
+	id, err := h.engine.StartWake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.engine.FinishWake(id, wakeClip(t), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "session.finished")
+
+	asked := h.provider.LastRequest
+	last := asked.Messages[len(asked.Messages)-1]
+	if last.Content != "what's my disk usage?" {
+		t.Errorf("the model was asked %q; the misheard wake word should have been stripped", last.Content)
 	}
 }
 

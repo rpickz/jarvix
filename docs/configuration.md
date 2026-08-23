@@ -98,6 +98,14 @@ wake_ring_ms = 1200              # audio kept from *before* the wake word, so
                                  # can ever reach a transcript, so keep it
                                  # short. 0 keeps none.
 max_utterance_sec = 15           # longest hands-free request
+wake_aliases = ["jarvis", "javax", "jarvic", "jarvicks", "jarvex"]
+                                 # words the transcript strip accepts *as* the
+                                 # wake word — whisper's known mishearings of
+                                 # it. Leading whole word only, exactly like
+                                 # the wake word itself; a mid-sentence
+                                 # "Jarvis" is never touched. Transcript-side
+                                 # only: the acoustic wake gate never sees
+                                 # them. Setting the key replaces the list.
 
 [ai]
 provider = "ollama"              # endpoint name: a preset or your own [ai.<name>]
@@ -119,6 +127,13 @@ api_key_env = "MYSERVER_KEY"
 
 [stt]
 provider = "whisper"             # the only supported STT in V1
+vocabulary = []                  # extra terms speech recognition is biased
+                                 # toward — project names, jargon, anything
+                                 # whisper keeps rounding to a nearby real
+                                 # word. They join the wake word in the bias
+                                 # prompt both transcription paths carry.
+                                 # Input-side only; tts.lexicon fixes what
+                                 # Jarvix *says*, this fixes what it *hears*.
 
 [stt.whisper]
 model = "base.en"                # known name, or absolute path to a ggml file
@@ -594,6 +609,30 @@ Jarvix saying "Jarvix" in an answer can retrigger it (PipeWire's
 `module-echo-cancel` is the fix, and it belongs to your audio setup); and a
 wake word heard while the push-to-talk chord is held is ignored, because the
 deliberate gesture wins.
+
+### Hearing its own name
+
+"Jarvix" is not an English word, so whisper — which can only write words it
+knows — rounds it to the nearest real one: "Jarvis", "JavaX". The detector
+fires correctly (it listens to sound, not spelling), but the transcript then
+opens with a word the strip does not recognise, the summons stays in the
+request, and an intent like "Jarvix, volume thirty" never matches. Two
+mechanisms fix this, from both ends:
+
+- **The recogniser is biased toward the name.** Every transcription — warm
+  `whisper-server` request and cold `whisper-cli` run alike — carries an
+  initial prompt naming the wake word, plus anything you add to
+  `stt.vocabulary`. With the shipped `base.en` model this alone turns
+  "Jarvis, what time is it?" back into "Jarvix, what time is it?".
+- **The known mishearings are accepted anyway.** `activation.wake_aliases`
+  lists the words the wake-transcript strip treats as the wake word, under
+  exactly the same leading-whole-word rule. Ask about Jarvis Cocker
+  mid-sentence and every word survives.
+
+Both are visible in `jarvix doctor` ("name recognition"). The aliases widen
+only what is *stripped from a wake transcript* — they are never given to the
+acoustic detector, so false-activation behaviour is unchanged, and a
+push-to-talk transcript is never edited at all.
 
 ## Deterministic intents (`[intents]`)
 
