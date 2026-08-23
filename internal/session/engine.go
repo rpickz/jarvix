@@ -74,6 +74,12 @@ type Options struct {
 	// configuration cannot produce that combination: the router only knows
 	// phrases the same config that builds the runner declared.
 	Routines RoutineRunner
+	// Scripts executes the named scripts the intent router matches
+	// (ADR 0030). Nil — a daemon with no [[scripts]] configured — makes a
+	// matched script phrase an honest spoken refusal, though validated
+	// configuration cannot produce that combination: the router only knows
+	// phrases the same config that builds the runner declared.
+	Scripts ScriptRunner
 	// Capture plans and writes "save this as <name>" layout captures (#62).
 	// Nil — a daemon built without the capture service — makes a matched
 	// capture phrase an honest spoken refusal rather than a silent drop.
@@ -87,7 +93,7 @@ type Options struct {
 	// entirely: no consultation, no message, no cost.
 	Memory MemoryInjector
 	// Knowledge supplies the live feed values block — cached readings from
-	// the user's configured feeds (ADR 0030) — for turns that reach the
+	// the user's configured feeds (ADR 0031) — for turns that reach the
 	// model. Nil disables it entirely: no consultation, no message, no cost.
 	Knowledge KnowledgeInjector
 	// Archive is the durable conversation store (ADR 0027). Every completed
@@ -104,6 +110,11 @@ type Options struct {
 	// which matches strictly against the whole thing. Empty (the default)
 	// strips nothing.
 	WakeWord string
+	// WakeAliases are additional words the strip accepts as the wake word —
+	// whisper's known mishearings of it ("jarvis", "javax"; issue #83). They
+	// widen only what stripWakeWord removes from a wake transcript; the
+	// acoustic wake gate never sees them. Empty accepts the wake word alone.
+	WakeAliases []string
 	// Lexicon respells terms the voice mispronounces, term → spoken form
 	// ([tts.lexicon]). Merged over the shipped defaults; nil is the defaults
 	// alone. Spoken output only — the overlay shows the original text.
@@ -806,7 +817,7 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		// router matches whole utterances, the model reads it as the user
 		// addressing a third party, and the conversation history would carry
 		// it into every follow-up.
-		s.transcript = stripWakeWord(s.transcript, e.opts.WakeWord)
+		s.transcript = stripWakeWord(s.transcript, e.opts.WakeWord, e.opts.WakeAliases)
 	}
 	if strings.TrimSpace(s.transcript) == "" {
 		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))
@@ -888,7 +899,7 @@ func (e *Engine) think(s *sess) {
 	// The knowledge base is consulted on the same terms (ADR 0025): only a
 	// turn that reaches the provider pays, and what it pays is one stat(2).
 	remembered := e.gatherMemory(s)
-	// Feed values likewise (ADR 0030): cached readings only, never a fetch —
+	// Feed values likewise (ADR 0031): cached readings only, never a fetch —
 	// a turn must not wait on a feed command.
 	feeds := e.gatherKnowledge(s)
 	messages := e.conversationMessages(s.transcript, snapshot, remembered.Message, feeds.Message)
@@ -1107,7 +1118,7 @@ func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
 // stays adjacent to the question that moment belongs to. Like the capture,
 // the block is never committed to history: it is rebuilt fresh each turn, so
 // a hand-edit or a forget is reflected on the very next question.
-// Feed values (ADR 0030) sit with the capture, not with the remembered
+// Feed values (ADR 0031) sit with the capture, not with the remembered
 // facts: a feed reading describes "right now" — its whole content is a value
 // and an age measured at this turn — so like the capture it stays adjacent
 // to the question that moment belongs to, and like the capture it is never

@@ -286,7 +286,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	// Knowledge feeds are idle-class *once the service exists*: the tables
 	// swap through Reconfigure below. With no feeds at boot there is no
 	// service and no registered tool, so the section is pinned like memory —
-	// the first feed takes a restart, exactly as the docs say (ADR 0030).
+	// the first feed takes a restart, exactly as the docs say (ADR 0031).
 	if d.knowledge == nil {
 		merged.Knowledge = running.Knowledge
 	}
@@ -322,7 +322,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		return false, err.Error()
 	}
 	// The engine swap succeeded, so the feed schedules follow the same
-	// configuration (ADR 0030): the service keeps its cached values and its
+	// configuration (ADR 0031): the service keeps its cached values and its
 	// tracked group, only the feed set and timers rebuild — the old loops
 	// unwind into the same group shutdown drains, so a reload can never
 	// orphan one (the #74 lesson).
@@ -361,10 +361,10 @@ func (d *Daemon) restartPending(next config.Config) []string {
 
 // idleClassChanged reports whether any idle-class setting differs between the
 // running and candidate configurations. The structured tables the engine
-// compiles — [[routines]] and [[intents.custom]] — have no entry in the
-// settings registry, so they are compared directly: without this, a reload
-// after a hand edit or a layout capture (#62) would update the stored config
-// but never rebuild the router that makes the phrases work.
+// compiles — [[routines]], [[scripts]], and [[intents.custom]] — have no
+// entry in the settings registry, so they are compared directly: without
+// this, a reload after a hand edit or a layout capture (#62) would update the
+// stored config but never rebuild the router that makes the phrases work.
 func idleClassChanged(running, next config.Config) bool {
 	for _, s := range config.Settings() {
 		if s.Reload != config.ReloadIdle {
@@ -375,10 +375,11 @@ func idleClassChanged(running, next config.Config) bool {
 		}
 	}
 	return !reflect.DeepEqual(running.Routines, next.Routines) ||
+		!reflect.DeepEqual(running.Scripts, next.Scripts) ||
 		!reflect.DeepEqual(running.Intents.Custom, next.Intents.Custom) ||
 		// [knowledge] is a structured table on the same terms as [[routines]]:
 		// no settings-registry entry, compared directly so a hand edit plus
-		// reload actually reschedules the feeds (ADR 0030). With no service
+		// reload actually reschedules the feeds (ADR 0031). With no service
 		// the section was pinned above, so this can never fire spuriously.
 		!reflect.DeepEqual(running.Knowledge, next.Knowledge)
 }

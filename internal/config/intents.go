@@ -36,8 +36,9 @@ type CustomIntent struct {
 // intentProblems validates the intent table, naming any offending entry.
 // Compiling the real router is the check: there is no second, weaker set of
 // rules that configuration could pass and the daemon then reject. Routine
-// phrases compile here too, so a routine phrase colliding with a built-in or
-// custom intent is caught by the same rules that would route it.
+// and script phrases compile here too, so a phrase colliding across any of
+// the four families — built-ins, custom intents, routines, scripts — is
+// caught by the same rules that would route it.
 func (c Config) intentProblems() []string {
 	if !c.Intents.Enabled {
 		return nil
@@ -49,7 +50,8 @@ func (c Config) intentProblems() []string {
 }
 
 // IntentOptions builds the router options from configuration: the terminal,
-// the custom intents, and the routines' trigger phrases (ADR 0026).
+// the custom intents, and the routines' and scripts' trigger phrases
+// (ADR 0026, ADR 0030).
 func (c Config) IntentOptions() intent.Options {
 	custom := make([]intent.Custom, 0, len(c.Intents.Custom))
 	for _, e := range c.Intents.Custom {
@@ -61,5 +63,12 @@ func (c Config) IntentOptions() intent.Options {
 			Name: r.Name, Phrases: append([]string(nil), r.Phrases...),
 		})
 	}
-	return intent.Options{Terminal: c.Intents.Terminal, Custom: custom, Routines: routines}
+	scripts := make([]intent.ScriptPhrases, 0, len(c.Scripts))
+	for _, s := range c.Scripts {
+		scripts = append(scripts, intent.ScriptPhrases{
+			Name: s.Name, Phrases: append([]string(nil), s.Phrases...),
+		})
+	}
+	return intent.Options{Terminal: c.Intents.Terminal, Custom: custom,
+		Routines: routines, Scripts: scripts}
 }

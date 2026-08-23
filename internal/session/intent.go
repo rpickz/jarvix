@@ -36,6 +36,20 @@ type RoutineRunner interface {
 	Run(ctx context.Context, name string) (string, error)
 }
 
+// ScriptRunner executes one named script (ADR 0030). It is the engine's view
+// of internal/script's Runner, declared as an interface here so session tests
+// substitute a fake and never execute a file. The contract mirrors the
+// runner's: the returned string is what success says (empty for a silent
+// mode), and err covers everything else — could not run, cancelled, or
+// failed — which the engine speaks in every report mode, so a failure can
+// never be configured into silence. Path exists for the gate: the
+// confirmation must name the exact file about to run, from the same source
+// of truth that will run it.
+type ScriptRunner interface {
+	Run(ctx context.Context, name string) (string, error)
+	Path(name string) (string, bool)
+}
+
 // routeIntentLocked offers the transcript to the intent table. It reports
 // whether the router claimed the utterance; false means the caller proceeds
 // to the model exactly as it did before this feature existed.
@@ -106,6 +120,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		if !alive {
 			return // cancelled or superseded; that path owns the events
 		}
+	case m.Script != "":
+		var alive bool
+		ack, runErr, alive = e.runScript(s, m)
+		if !alive {
+			return // cancelled or superseded; that path owns the events
+		}
 	case m.CaptureName != "":
 		var alive bool
 		ack, runErr, alive = e.runCapture(s, m)
@@ -143,7 +163,15 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 	// purpose is an empty history — re-seeding it with the reset itself would
 	// undo the thing the user asked for.
 	if m.Control != intent.ControlNewConversation {
-		e.commitTurn(utterance, ack)
+		recorded := ack
+		if recorded == "" {
+			// A silent script success (ADR 0030) speaks nothing, but the
+			// record must not carry an empty assistant turn: providers reject
+			// empty messages, and the archive would hold a shrug where an
+			// action happened. The ear stays silent; the history says "Done."
+			recorded = "Done."
+		}
+		e.commitTurn(utterance, recorded)
 	}
 
 	e.mu.Lock()
@@ -283,6 +311,77 @@ func (e *Engine) runRoutine(s *sess, m intent.Match) (ack string, runErr error, 
 	return summary, err, true
 }
 
+// runScript carries out a matched script phrase (ADR 0030) through the
+// script runner, behind its own gate identity. The shape is runRoutine's —
+// same confirmation mechanism, same events, same audit trail — but the stance
+// is inverted where it matters: script.run defaults to ask, because a script
+// is an arbitrary executable behind a possibly-misheard phrase, and the
+// confirmation names both the script and the exact file about to run so a
+// substituted path is visible in the question itself.
+func (e *Engine) runScript(s *sess, m intent.Match) (ack string, runErr error, alive bool) {
+	if e.opts.Scripts == nil {
+		return "", fmt.Errorf("scripts are not available on this daemon"), true
+	}
+	path, known := e.opts.Scripts.Path(m.Script)
+	if !known {
+		return "", fmt.Errorf("no script is called %q", m.Script), true
+	}
+	verdict := e.scriptVerdict(m.Script, path)
+	switch verdict.Decision {
+	case tools.PolicyDeny:
+		e.log.Info("script denied", "component", "tools", "tool", tools.ScriptToolName,
+			"script", m.Script, "rule", verdict.Rule, "source", "policy")
+		e.publish(Event{Type: "tool.denied", Data: map[string]any{
+			"session_id": s.id, "tool": tools.ScriptToolName,
+			"command": verdict.Command, "rule": verdict.Rule}})
+		return "", fmt.Errorf("that script is not permitted (%s)", verdict.Rule), true
+	case tools.PolicyAsk:
+		outcome, ok := e.awaitConfirmation(s, confirmRequest{
+			tool:    tools.ScriptToolName,
+			command: verdict.Command,
+			summary: verdict.Summary,
+			rule:    verdict.Rule,
+			// The key carries name AND path (verdict.Command holds both), so
+			// a remembered approval reproduces exactly what was approved: the
+			// same entry pointing at the same file. Repoint the config and
+			// the remembered approval no longer applies.
+			key:          tools.ScriptToolName + "\x00" + verdict.Command,
+			rememberable: tools.RememberableApproval(tools.ScriptToolName),
+			resume:       StateActing,
+		})
+		if !ok {
+			return "", nil, false
+		}
+		if outcome == confirmUnavailable {
+			return "", errors.New("I could not ask you to confirm that, so I have not run it"), true
+		}
+		if outcome != confirmApproved {
+			return "", errIntentDeclined, true
+		}
+	default:
+		e.log.Info("script allowed", "component", "tools", "tool", tools.ScriptToolName,
+			"script", m.Script, "rule", verdict.Rule, "source", "policy")
+	}
+	line, err := e.opts.Scripts.Run(s.ctx, m.Script)
+	return line, err, true
+}
+
+// scriptVerdict classifies a script by name and path. With no registry wired
+// (tests) there is no gate to consult, and an ungated arbitrary executable
+// must not run silently — so the safe reading is "ask", the same stance
+// intentVerdict takes for a bare command and the opposite of routineVerdict's.
+func (e *Engine) scriptVerdict(name, path string) tools.Verdict {
+	if e.tools == nil {
+		return tools.Verdict{
+			Decision: tools.PolicyAsk, Tool: tools.ScriptToolName,
+			Command: name + " (" + path + ")",
+			Rule:    "no permission gate installed",
+			Summary: fmt.Sprintf("I'm about to run your %s script, at %s. Should I go ahead?", name, path),
+		}
+	}
+	return e.tools.CheckScript(name, path)
+}
+
 // routineVerdict classifies a routine by name. With no registry wired (tests)
 // the shipped default applies — allow — because unlike a bare shell command,
 // a routine's steps were validated at load and authored by the user.
@@ -353,6 +452,8 @@ func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error
 		source = "user"
 	case m.Routine != "":
 		source = "routine"
+	case m.Script != "":
+		source = "script"
 	}
 	elapsed := time.Since(started)
 	data := map[string]any{
@@ -376,6 +477,10 @@ func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error
 	if m.CaptureName != "" {
 		data["routine"] = m.CaptureName
 		attrs = append(attrs, "routine", m.CaptureName)
+	}
+	if m.Script != "" {
+		data["script"] = m.Script
+		attrs = append(attrs, "script", m.Script)
 	}
 	if runErr != nil {
 		data["status"] = "failed"

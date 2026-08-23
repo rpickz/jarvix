@@ -135,18 +135,31 @@ func (e *Engine) FinishWake(id string, rec audio.Recording, spoken time.Duration
 // ("hey Jarvix", "okay Jarvix") is handled by taking the wake word wherever
 // it appears in the first two words rather than only at index zero.
 //
+// aliases are the words the strip accepts *as* the wake word. "Jarvix" is
+// out-of-vocabulary for whisper, so the detector fires on the right sound and
+// the transcript still opens with "Jarvis" or "JavaX" (issue #83); a strip
+// that only knows the true spelling then leaves the summons in place and the
+// intent router never matches. Aliases get exactly the same leading-whole-word
+// discipline — "tell me about Jarvis Cocker" mid-sentence is never touched —
+// and they exist only here: the acoustic wake gate is unchanged.
+//
 // An utterance that is *only* the wake word is left alone: it becomes an
 // empty transcript otherwise, and "I didn't catch that" is a better answer
 // than a session that fails for no visible reason.
-func stripWakeWord(transcript, word string) string {
+func stripWakeWord(transcript, word string, aliases []string) string {
 	word = strings.TrimSpace(word)
 	if word == "" {
 		return transcript
 	}
+	targets := map[string]bool{strings.ToLower(word): true}
+	for _, alias := range aliases {
+		if alias = strings.TrimSpace(alias); alias != "" {
+			targets[strings.ToLower(alias)] = true
+		}
+	}
 	fields := strings.Fields(transcript)
-	target := strings.ToLower(word)
 	for i := 0; i < len(fields) && i < 2; i++ {
-		if strings.ToLower(trimWordPunctuation(fields[i])) != target {
+		if !targets[strings.ToLower(trimWordPunctuation(fields[i]))] {
 			continue
 		}
 		rest := strings.Join(fields[i+1:], " ")

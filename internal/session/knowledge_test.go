@@ -9,7 +9,7 @@ import (
 	"github.com/rpickz/jarvix/internal/knowledge"
 )
 
-// Engine-side feed cache (ADR 0030): where the feed block lands in the
+// Engine-side feed cache (ADR 0031): where the feed block lands in the
 // message list, that only provider turns consult it, and that the disclosure
 // event carries counts, never values.
 

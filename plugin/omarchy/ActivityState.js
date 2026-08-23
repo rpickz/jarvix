@@ -23,6 +23,7 @@ var glyphs = {
   "model": "󰧑",
   "refusal": "󰜺",
   "routine": "󰒪",
+  "script": "󰆍",
   "timings": "󰅐",
   "tool": "󰒓",
   "turn": "󰇘",

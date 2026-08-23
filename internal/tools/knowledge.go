@@ -11,7 +11,7 @@ import (
 	"github.com/rpickz/jarvix/internal/knowledge"
 )
 
-// This file is the model's hands on the feed cache (ADR 0030): one read
+// This file is the model's hands on the feed cache (ADR 0031): one read
 // verb over the knowledge service. The service owns the values — the
 // scheduler, the ttl, the persistence — while this file owns what the
 // *model* is told, which is where the honesty rules are actually made: every

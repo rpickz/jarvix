@@ -7,7 +7,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 )
 
-// The knowledge.refresh identity (ADR 0030): default allow because the user
+// The knowledge.refresh identity (ADR 0031): default allow because the user
 // authored every feed command, per-identity overrides both ways, and deny
 // always wins — checked against the same Decide path the engine uses.
 

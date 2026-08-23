@@ -570,3 +570,70 @@ func TestRunRoutinesEmptyPointsAtTheDocs(t *testing.T) {
 		t.Errorf("output = %q", stdout)
 	}
 }
+
+// TestRunScriptsListsOffline: `jarvix scripts` reads config.toml directly,
+// so "what have I given a phrase?" is answerable with the daemon down. The
+// listing always shows the path and says "no arguments" — the ADR 0030
+// visibility rule extends to every surface that names a script.
+func TestRunScriptsListsOffline(t *testing.T) {
+	hermeticEnv(t)
+	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "jarvix")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A real stub in the test's own temp tree: config validation stats the
+	// path, and the listing must print the one that will actually run.
+	scriptPath := filepath.Join(t.TempDir(), "backup-notes.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	doc := `
+[[scripts]]
+name = "backup notes"
+phrases = ["backup my notes", "back up my notes"]
+path = "` + scriptPath + `"
+report = "stdout"
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	stdout, _ := capture(t, func() { code = run([]string{"scripts"}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, output %q", code, stdout)
+	}
+	for _, want := range []string{
+		"backup notes", `"backup my notes" or "back up my notes"`,
+		scriptPath, "(no arguments)", "report stdout", "timeout 60s",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output %q missing %q", stdout, want)
+		}
+	}
+
+	stdout, _ = capture(t, func() { code = run([]string{"scripts", "--json"}) })
+	if code != 0 || !strings.Contains(stdout, `"name":"backup notes"`) ||
+		!strings.Contains(stdout, `"timeout_sec":60`) {
+		t.Errorf("json output = %q (exit %d)", stdout, code)
+	}
+
+	// Usage errors for the malformed shapes.
+	for _, args := range [][]string{{"scripts", "run"}, {"scripts", "bogus"}} {
+		_, stderr := capture(t, func() { code = run(args) })
+		if code != 1 || !strings.Contains(stderr, "usage:") {
+			t.Errorf("%v: exit %d, stderr %q", args, code, stderr)
+		}
+	}
+}
+
+// TestRunScriptsEmptyListingPointsAtTheDocs: nothing configured is a
+// sentence with a next step, not an empty screen.
+func TestRunScriptsEmptyListingPointsAtTheDocs(t *testing.T) {
+	hermeticEnv(t)
+	var code int
+	stdout, _ := capture(t, func() { code = run([]string{"scripts"}) })
+	if code != 0 || !strings.Contains(stdout, "no scripts configured") {
+		t.Errorf("exit %d, output %q", code, stdout)
+	}
+}

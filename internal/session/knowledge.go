@@ -4,7 +4,7 @@ import (
 	"github.com/rpickz/jarvix/internal/knowledge"
 )
 
-// This file is the engine half of the feed cache (ADR 0030), shaped exactly
+// This file is the engine half of the feed cache (ADR 0031), shaped exactly
 // like the engine half of the memory book (memory.go, ADR 0025).
 // internal/knowledge owns the values — the scheduler, the ttl, the
 // persistence — while the engine owns the same decisions it owns for memory:

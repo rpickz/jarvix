@@ -61,6 +61,7 @@ const (
 	ActivityKindRefusal   = "refusal"
 	ActivityKindIntent    = "intent"
 	ActivityKindRoutine   = "routine"
+	ActivityKindScript    = "script"
 	ActivityKindDesktop   = "desktop"
 	ActivityKindTyping    = "typing"
 	ActivityKindContext   = "context"
@@ -77,6 +78,7 @@ const (
 // Material Design range the shell's resolved monospace family ships.
 const (
 	glyphKeyboard = "\U000F030C" // md-keyboard
+	glyphConsole  = "\U000F018D" // md-console
 	glyphMonitor  = "\U000F0379" // md-monitor
 	glyphBook     = "\U000F00BA" // md-book
 	glyphClock    = "\U000F0150" // md-clock
@@ -97,6 +99,7 @@ var activityGlyphs = map[string]string{
 	ActivityKindRefusal:   glyphCancel,
 	ActivityKindIntent:    glyphFlash,
 	ActivityKindRoutine:   glyphDiagram,
+	ActivityKindScript:    glyphConsole,
 	ActivityKindDesktop:   glyphWindow,
 	ActivityKindTyping:    glyphKeyboard,
 	ActivityKindContext:   glyphMonitor,
@@ -190,6 +193,17 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 		return one(ActivityRow{Kind: ActivityKindRoutine,
 			Label:  "Routine finished: " + activityString(data, "routine"),
 			Detail: activityString(data, "summary")})
+	case "script.started":
+		// The path in the feed on purpose (ADR 0030): it is exactly what the
+		// gate's confirmation named, and the audit surface repeating it is
+		// what makes a substituted file visible after the fact too. Output
+		// never appears — the event does not carry it, and this row has no
+		// field that could.
+		return one(ActivityRow{Kind: ActivityKindScript,
+			Label:  "Script: " + activityString(data, "script"),
+			Detail: activityString(data, "path")})
+	case "script.finished":
+		return one(scriptFinishedRow(data))
 	case "artifact.created":
 		return one(ActivityRow{Kind: ActivityKindArtifact,
 			Label:  "Artifact created",
@@ -344,6 +358,9 @@ func intentRow(data map[string]any) ActivityRow {
 	if routine := activityString(data, "routine"); routine != "" {
 		name += " (routine " + routine + ")"
 	}
+	if script := activityString(data, "script"); script != "" {
+		name += " (script " + script + ")"
+	}
 	if activityString(data, "status") == "failed" {
 		return ActivityRow{Kind: ActivityKindIntent, Failed: true,
 			Label: "Intent failed: " + name, Detail: activityString(data, "error")}
@@ -355,6 +372,28 @@ func intentRow(data map[string]any) ActivityRow {
 	}
 	return ActivityRow{Kind: ActivityKindIntent, Label: label,
 		Detail: joinActivity(activityString(data, "acknowledgement"), dur)}
+}
+
+// scriptFinishedRow renders one script run's ending: exit status and
+// duration, always — a feed where only failures carried the exit code would
+// make "did my backup actually run?" answerable only by trusting silence.
+func scriptFinishedRow(data map[string]any) ActivityRow {
+	name := activityString(data, "script")
+	code, _ := activityInt(data, "exit_code")
+	var dur string
+	if ms, ok := activityInt(data, "duration_ms"); ok {
+		dur = formatActivityDuration(ms)
+	}
+	if activityString(data, "status") == "failed" {
+		detail := fmt.Sprintf("exit %d", code)
+		if b, ok := data["timed_out"].(bool); ok && b {
+			detail = "stopped at the timeout"
+		}
+		return ActivityRow{Kind: ActivityKindScript, Failed: true,
+			Label: "Script failed: " + name, Detail: joinActivity(detail, dur)}
+	}
+	return ActivityRow{Kind: ActivityKindScript,
+		Label: "Script finished: " + name, Detail: joinActivity("exit 0", dur)}
 }
 
 func routineStepRow(data map[string]any) ActivityRow {

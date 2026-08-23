@@ -98,6 +98,14 @@ wake_ring_ms = 1200              # audio kept from *before* the wake word, so
                                  # can ever reach a transcript, so keep it
                                  # short. 0 keeps none.
 max_utterance_sec = 15           # longest hands-free request
+wake_aliases = ["jarvis", "javax", "jarvic", "jarvicks", "jarvex"]
+                                 # words the transcript strip accepts *as* the
+                                 # wake word — whisper's known mishearings of
+                                 # it. Leading whole word only, exactly like
+                                 # the wake word itself; a mid-sentence
+                                 # "Jarvis" is never touched. Transcript-side
+                                 # only: the acoustic wake gate never sees
+                                 # them. Setting the key replaces the list.
 
 [ai]
 provider = "ollama"              # endpoint name: a preset or your own [ai.<name>]
@@ -119,6 +127,13 @@ api_key_env = "MYSERVER_KEY"
 
 [stt]
 provider = "whisper"             # the only supported STT in V1
+vocabulary = []                  # extra terms speech recognition is biased
+                                 # toward — project names, jargon, anything
+                                 # whisper keeps rounding to a nearby real
+                                 # word. They join the wake word in the bias
+                                 # prompt both transcription paths carry.
+                                 # Input-side only; tts.lexicon fixes what
+                                 # Jarvix *says*, this fixes what it *hears*.
 
 [stt.whisper]
 model = "base.en"                # known name, or absolute path to a ggml file
@@ -246,6 +261,15 @@ app = "firefox"                  # program to launch if not already running
 workspace = 2                    # where its window goes (1-99)
 tile = "master"                  # optional: "master" or "split"; or float =
                                  # true with size = [w, h], position = [x, y]
+
+[[scripts]]                      # your executables behind phrases; see "Scripts"
+name = "backup notes"            # what the confirmation names; unique
+phrases = ["backup my notes"]    # literal trigger phrases (intent grammar)
+path = "/home/you/bin/backup-notes.sh"  # absolute, executable; run with NO arguments
+timeout_sec = 60                 # optional; the run's whole process group is
+                                 # killed at expiry (default 60)
+report = "summary"               # optional: "summary" | "stdout" | "silent";
+                                 # failures are spoken in every mode
 
 [context]                        # what Jarvix may look at before it answers
 window = true                    # the focused window's app and title
@@ -595,6 +619,30 @@ Jarvix saying "Jarvix" in an answer can retrigger it (PipeWire's
 wake word heard while the push-to-talk chord is held is ignored, because the
 deliberate gesture wins.
 
+### Hearing its own name
+
+"Jarvix" is not an English word, so whisper — which can only write words it
+knows — rounds it to the nearest real one: "Jarvis", "JavaX". The detector
+fires correctly (it listens to sound, not spelling), but the transcript then
+opens with a word the strip does not recognise, the summons stays in the
+request, and an intent like "Jarvix, volume thirty" never matches. Two
+mechanisms fix this, from both ends:
+
+- **The recogniser is biased toward the name.** Every transcription — warm
+  `whisper-server` request and cold `whisper-cli` run alike — carries an
+  initial prompt naming the wake word, plus anything you add to
+  `stt.vocabulary`. With the shipped `base.en` model this alone turns
+  "Jarvis, what time is it?" back into "Jarvix, what time is it?".
+- **The known mishearings are accepted anyway.** `activation.wake_aliases`
+  lists the words the wake-transcript strip treats as the wake word, under
+  exactly the same leading-whole-word rule. Ask about Jarvis Cocker
+  mid-sentence and every word survives.
+
+Both are visible in `jarvix doctor` ("name recognition"). The aliases widen
+only what is *stripped from a wake transcript* — they are never given to the
+acoustic detector, so false-activation behaviour is unchanged, and a
+push-to-talk transcript is never edited at all.
+
 ## Deterministic intents (`[intents]`)
 
 Some things are not questions. "Volume thirty" has exactly one right outcome,
@@ -806,6 +854,99 @@ trigger phrases while the steps are replaced wholesale. A captured routine
 is immediately runnable: the daemon reloads its intent table as soon as the
 capture's own session finishes.
 
+## Scripts (`[[scripts]]`)
+
+Give a script a phrase: any executable you have written can run by voice.
+"Jarvix, backup my notes" matches in the deterministic intent router — **no
+model is involved in deciding what runs** — and executes your file behind the
+permission gate. This is the escape hatch for "can Jarvix do X?": write a
+script that does X, give it a phrase.
+
+The worked example:
+
+```toml
+[[scripts]]
+name = "backup notes"
+phrases = ["backup my notes", "back up my notes"]
+path = "/home/you/bin/backup-notes.sh"
+timeout_sec = 120                # killed (whole process group) at expiry
+report = "summary"               # what success says; see below
+```
+
+How a run behaves:
+
+- **It asks first, by default.** Running a script is gated under its own
+  permission identity, **`script.run`, default "ask"** — the opposite of
+  `routine.run`'s allow, because a script is an arbitrary executable behind a
+  phrase that can be misheard. The spoken confirmation names the script *and
+  its full path* ("I'm about to run your backup notes script, at
+  /home/you/bin/backup-notes.sh. Should I go ahead?"), so what is about to
+  run is in the question itself. Promote a specific setup you trust, or
+  disable scripts outright:
+
+  ```toml
+  [tools.policy.tool]
+  "script.run" = "allow"         # or "deny"; deny always wins
+  ```
+
+  A global `[tools.policy] default = "allow"` deliberately does **not**
+  reach scripts — only naming `script.run` does. A global `default = "deny"`
+  denies them, like everything else.
+- **Zero arguments, always (v1).** The script is executed as its path and
+  nothing else: no arguments, no shell, no extra environment. Nothing you say
+  — and nothing the assistant generates — can reach the script's argv or
+  environment, because the configuration has no field to put it in and the
+  runner passes none. Phrases with `{placeholders}` are refused at load.
+  Spoken parameters are future work with their own validation design; for
+  now, a script that needs variants gets one entry per variant.
+- **What success says is yours to choose** with `report`:
+  - `summary` (the default): "Backup notes finished."
+  - `stdout`: the first line your script printed, so it can compose its own
+    acknowledgement ("Notes backed up: 12 files."). Capped and normalised
+    for speech.
+  - `silent`: nothing.
+
+  **Failures are spoken in every mode** — "Backup notes failed — exit 2:
+  disk full" (stderr's first line, when there is one), or "backup notes did
+  not finish within 120 seconds and was stopped". Silent means quiet
+  success, never invisible breakage.
+- **Bounded and stoppable.** The run is killed — its whole process group, so
+  children die too — at `timeout_sec`, and "Jarvix, stop" (or any
+  interruption) aborts it mid-run. One run at a time: a script phrase spoken
+  while any script is still running is refused with one line. Output is
+  captured with hard caps; the daemon's environment is passed with
+  credential-shaped variables (API keys, tokens, passwords) scrubbed.
+- **Every run is on the record.** The activity feed gets a row when a script
+  starts (with its path) and when it finishes (exit status and duration,
+  success included), and the journal logs the same. Output is never in
+  events or logs.
+
+The path must be **absolute, present, and executable** — checked at config
+load (a relative path, a missing file, or a `chmod -x` is a startup message
+naming the entry, and `jarvix doctor` reports the same per script), and
+re-checked at run time, so a file that changed under a running daemon is a
+spoken sentence rather than a surprise. Absolute-only is deliberate: a bare
+name resolved on PATH would let whatever shadows it first own your phrase.
+
+Phrases are validated at load against the built-in intents, your
+`[[intents.custom]]` phrases, your routines, and each other — a collision is
+a startup message naming both owners, never a coin toss at match time.
+Because the router is the trigger, `intents.enabled = false` with scripts
+configured is a validation error.
+
+`jarvix scripts` lists what is configured (offline, from the file, path
+included); `jarvix scripts run "backup notes"` triggers one through the same
+gate the spoken phrase uses, and the conversation window shows each script
+with its path and a Run button. Like `[[routines]]`, the tables are
+hand-edited TOML — outside `jarvix config set` and read-only over IPC — and
+land on the next `config.reload` or restart.
+
+Scripts and routines stay distinct on purpose: a routine step launches and
+places apps and can never be a command (ADR 0026); a script runs a command
+and never places windows. The full threat model — what a misheard phrase, a
+malicious config edit, or a swapped script file could do, and which control
+answers each — is ADR 0030.
+
 ## Desktop context (`[context]`)
 
 Ask "what does this error mean?" with a stack trace selected and Jarvix
@@ -950,7 +1091,7 @@ What the design guarantees:
 
 Memory holds facts you *stated*; feeds hold values that **change** — a stock
 price, the weather, a build status
-([ADR 0030](adr/0030-knowledge-feeds.md)). You write a command that prints
+([ADR 0031](adr/0031-knowledge-feeds.md)). You write a command that prints
 the current value; Jarvix runs it on a schedule (or on first use), keeps the
 latest output warm in the daemon, and answers from it instantly — with the
 value's age spoken honestly:

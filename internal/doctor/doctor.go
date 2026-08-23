@@ -50,6 +50,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkOutput,
 		checkWhisperBinary,
 		checkWhisperModel,
+		checkNameRecognition,
 		checkTTS,
 		checkVoiceLanguage,
 		checkSpeechLanguage,
@@ -77,7 +78,10 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 	// One result per configured advisor, so a CLI that moved is visible
 	// before someone asks Jarvix to consult it (ADR 0016).
 	results = append(results, advisorChecks(cfg)...)
-	// The feed cache (ADR 0030): per-feed command availability, plus the
+	// And one per configured script, so a file that moved or lost its
+	// execute bit is named here before its phrase is ever spoken (ADR 0030).
+	results = append(results, scriptChecks(cfg)...)
+	// The feed cache (ADR 0031): per-feed command availability, plus the
 	// running scheduler's health — fresh, stale, failing since when.
 	return append(results, knowledgeChecks(cfg, paths)...)
 }

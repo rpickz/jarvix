@@ -17,7 +17,7 @@ import (
 	"github.com/rpickz/jarvix/internal/tts"
 )
 
-// The daemon half of the feed cache (ADR 0030): the wiring — tool
+// The daemon half of the feed cache (ADR 0031): the wiring — tool
 // registration, the knowledge.status method, the reload path — over a fully
 // wired daemon with all engines faked. The feeds here are lazy and never
 // asked, so no test ever runs a feed command; the scheduler's own behaviour

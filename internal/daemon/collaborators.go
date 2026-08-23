@@ -14,6 +14,7 @@ import (
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/routine"
+	"github.com/rpickz/jarvix/internal/script"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
@@ -88,6 +89,10 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger
 			Binary:    cfg.STT.Whisper.Binary,
 			ModelPath: whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
 			Language:  cfg.STT.Whisper.Language,
+			// One prompt, composed once, for both paths: the warm request and
+			// the cold fallback must bias identically or a fallback would
+			// change what Jarvix's own name transcribes as (issue #83).
+			Prompt: cfg.STTBiasPrompt(),
 		}
 		if cfg.Performance.WarmEngines {
 			server := &whispercpp.ServerTranscriber{
@@ -97,6 +102,7 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger
 				Binary:    whispercpp.ServerBinaryFor(cfg.STT.Whisper.Binary),
 				ModelPath: cold.ModelPath,
 				Language:  cold.Language,
+				Prompt:    cold.Prompt,
 				Cold:      cold,
 				MemoryCap: memCap,
 				IdleAfter: idle,
@@ -187,13 +193,36 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 	})
 }
 
+// scriptRunner builds the script runner (ADR 0030), or nil when nothing is
+// configured. The explicit nil matters for the same reason routineRunner's
+// does: a typed-nil *script.Runner in the interface field would read as
+// "scripts exist" to the engine. Rebuilt on config reload alongside the
+// intent router, so a hand-edited [[scripts]] entry and the phrase that
+// triggers it always come from the same file read.
+func scriptRunner(cfg config.Config, bus *session.Bus, logger *slog.Logger) session.ScriptRunner {
+	defs := cfg.ScriptDefinitions()
+	if len(defs) == 0 {
+		return nil
+	}
+	return script.New(script.Options{
+		Definitions: defs,
+		Log:         logger,
+		// script.started / script.finished go out on the bus so the activity
+		// feed records every run with its exit status and duration; the user
+		// only ever *hears* the configured report.
+		Publish: func(event string, data map[string]any) {
+			bus.Publish(session.Event{Type: event, Data: data})
+		},
+	})
+}
+
 // engineOptions maps configuration onto engine options, shared by New and by
 // config reloads so both always agree on the translation. The bus is here for
 // the routine runner, which publishes its progress events through it. book is
 // the daemon's knowledge base (ADR 0025), nil when memory is disabled — it is
 // a parameter rather than rebuilt from cfg because the store is
 // construction-wired (restart-class) and must stay the same instance the
-// memory tools write through. feeds is the feed cache (ADR 0030) on the same
+// memory tools write through. feeds is the feed cache (ADR 0031) on the same
 // terms: one instance serves the scheduler, the knowledge.get tool, and the
 // injection, and a reload swaps its feed set through Reconfigure rather than
 // ever rebuilding the service. bus carries the routine progress events
@@ -217,12 +246,14 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
 		Intents:           intentRouter(cfg),
 		Routines:          routineRunner(cfg, compositor, bus, logger),
+		Scripts:           scriptRunner(cfg, bus, logger),
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Memory:            memoryInjector(book),
 		Knowledge:         knowledgeInjector(feeds),
 		Archive:           conversationArchive(cfg, archive),
 		WakeWord:          cfg.Activation.WakeWord,
+		WakeAliases:       cfg.Activation.WakeAliases,
 		Lexicon:           cfg.TTS.Lexicon,
 	}
 }

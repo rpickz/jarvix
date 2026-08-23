@@ -30,7 +30,11 @@ type Config struct {
 	// Routines are the named app-placement sequences ([[routines]], ADR
 	// 0026), triggered through the intent router and executed by
 	// internal/routine.
-	Routines  []Routine `toml:"routines"`
+	Routines []Routine `toml:"routines"`
+	// Scripts are the user-authored executables behind spoken phrases
+	// ([[scripts]], ADR 0030), triggered through the intent router, gated
+	// under script.run, and executed by internal/script with zero arguments.
+	Scripts   []Script  `toml:"scripts"`
 	Tools     Tools     `toml:"tools"`
 	Artifacts Artifacts `toml:"artifacts"`
 	// Context is what Jarvix may look at on the desktop before answering
@@ -41,7 +45,7 @@ type Config struct {
 	Memory Memory `toml:"memory"`
 	// Knowledge is the feed section — user-configured fetchers whose latest
 	// value the daemon keeps warm so changing facts answer instantly (see
-	// knowledge.go, ADR 0030). Empty feeds disable the feature.
+	// knowledge.go, ADR 0031). Empty feeds disable the feature.
 	Knowledge Knowledge `toml:"knowledge"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
@@ -290,6 +294,15 @@ type Activation struct {
 	WakeRingMs int `toml:"wake_ring_ms"`
 	// MaxUtteranceSec bounds one hands-free request.
 	MaxUtteranceSec int `toml:"max_utterance_sec"`
+	// WakeAliases are words the transcript strip accepts as the wake word, in
+	// addition to the word itself. "Jarvix" is out-of-vocabulary for whisper,
+	// so even a correctly *detected* wake word is often *transcribed* as a
+	// nearby real word ("Jarvis", "JavaX") — and a strip that only knows the
+	// true spelling then leaves the summons in the transcript, where it breaks
+	// intent matching (issue #83). Aliases widen only the transcript strip;
+	// the acoustic wake gate (ADR 0024) never sees them, so false-activation
+	// behaviour is untouched. Setting the key replaces the shipped defaults.
+	WakeAliases []string `toml:"wake_aliases"`
 }
 
 // WakeWordEnabled reports whether background listening is configured.
@@ -348,6 +361,13 @@ func (e Endpoint) Key() string {
 type STT struct {
 	Provider string  `toml:"provider"` // "whisper"
 	Whisper  Whisper `toml:"whisper"`
+	// Vocabulary lists extra terms the recogniser is biased toward — project
+	// names, jargon, anything whisper keeps rounding to a nearby real word.
+	// They join the wake word in the bias prompt both transcription paths
+	// carry (issue #83). Input-side only: this is what the *user* says, where
+	// tts.lexicon respells what *Jarvix* says — different vocabularies on
+	// purpose.
+	Vocabulary []string `toml:"vocabulary"`
 }
 
 // Whisper configures the whisper.cpp adapter.
@@ -469,6 +489,10 @@ func Default() Config {
 			EndpointSilenceMs: 800,
 			WakeRingMs:        1200,
 			MaxUtteranceSec:   15,
+			// The mishearings whisper's English models actually produce for
+			// "jarvix" (observed with base.en): the transcript strip accepts
+			// any of them as the summons.
+			WakeAliases: []string{"jarvis", "javax", "jarvic", "jarvicks", "jarvex"},
 		},
 		AI: AI{
 			Provider:     "ollama",
@@ -526,7 +550,7 @@ func Default() Config {
 		// not per install (ADR 0025).
 		Memory: Memory{Enabled: true, MaxFacts: 200, MaxInjectedTokens: 500},
 		// No feeds by default: a feed runs a command on a schedule, and that
-		// is a decision the user makes by writing the command (ADR 0030).
+		// is a decision the user makes by writing the command (ADR 0031).
 		Knowledge: Knowledge{MaxInjectedTokens: DefaultKnowledgeInjectedTokens},
 		Audio:     Audio{MaxRecordingSec: 60, MinRecordingMs: 300},
 		// Warm by default: presence is the product, and the memory is
@@ -738,6 +762,7 @@ func (c Config) Validate() error {
 		}
 	}
 	problems = append(problems, c.wakeProblems()...)
+	problems = append(problems, c.sttProblems()...)
 	if c.AI.Provider == "" {
 		problems = append(problems, "ai.provider is empty; set it to a provider such as \"ollama\" or \"openai\"")
 	} else if _, ok := c.AI.Endpoints[c.AI.Provider]; !ok {
@@ -864,6 +889,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)
 	problems = append(problems, c.routineProblems()...)
+	problems = append(problems, c.scriptProblems()...)
 	problems = append(problems, c.contextProblems()...)
 	problems = append(problems, c.memoryProblems()...)
 	problems = append(problems, c.knowledgeProblems()...)

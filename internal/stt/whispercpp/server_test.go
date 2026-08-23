@@ -25,7 +25,6 @@ import (
 // is a real long-lived child (so pids, reuse, and killing are real) and an
 // in-process HTTP server standing in for whisper-server's /inference.
 const whisperServerStub = `#!/bin/sh
-echo SPAWN >> "$WHISPER_STUB_DIR/spawns"
 while IFS= read -r _; do :; done
 `
 
@@ -114,19 +113,6 @@ func (fx *warmFixture) transcribe(t *testing.T, ctx context.Context) (string, er
 	return text, streamErr
 }
 
-// stubSpawns counts how many whisper-server stubs were started.
-func stubSpawns(t *testing.T, dir string) int {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, "spawns"))
-	if os.IsNotExist(err) {
-		return 0
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Count(string(data), "SPAWN")
-}
-
 func okTranscript(text string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
@@ -159,8 +145,12 @@ func TestWarmTranscribeReusesOneServerAcrossQuestions(t *testing.T) {
 			t.Fatalf("question %d transcript = %q", i, text)
 		}
 	}
-	// The point of the warm path: three questions, one model load.
-	if got := stubSpawns(t, fx.dir); got != 1 {
+	// The point of the warm path: three questions, one model load. The
+	// fixture's own spawn counter is the measure — the stub process's SPAWN
+	// marker file is written by a shell that races this read (it flaked under
+	// -count=2), and "how many times did the supervisor spawn" is the claim
+	// anyway.
+	if got := fx.spawns.Load(); got != 1 {
 		t.Errorf("whisper-server spawns = %d, want 1 — the model would reload per question", got)
 	}
 	if got := fx.inference.Load(); got != 3 {
@@ -169,6 +159,50 @@ func TestWarmTranscribeReusesOneServerAcrossQuestions(t *testing.T) {
 	// And whisper-cli was never run: the stub records its argv when it is.
 	if _, err := os.Stat(filepath.Join(fx.dir, "whisper.args")); err == nil {
 		t.Error("the cold whisper-cli path ran while a warm worker was healthy")
+	}
+}
+
+// The bias prompt is the warm half of issue #83. It rides in each /inference
+// request as the `prompt` form field — whisper-server's per-request name for
+// the same parameter --prompt sets process-wide — so warm and cold cannot
+// bias differently, and a reloaded vocabulary needs no model reload.
+func TestWarmTranscribeCarriesTheBiasPromptPerRequest(t *testing.T) {
+	prompts := make(chan string, 1)
+	fx := newWarmFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		prompts <- r.FormValue("prompt")
+		_, _ = fmt.Fprintln(w, "what time is it")
+	})
+	fx.tr.Prompt = "The assistant is called Jarvix."
+
+	if _, err := fx.transcribe(t, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-prompts; got != "The assistant is called Jarvix." {
+		t.Errorf("/inference prompt field = %q, want the bias prompt", got)
+	}
+}
+
+func TestWarmTranscribeOmitsThePromptFieldWhenUnset(t *testing.T) {
+	fields := make(chan bool, 1)
+	fx := newWarmFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, present := r.MultipartForm.Value["prompt"]
+		fields <- present
+		_, _ = fmt.Fprintln(w, "ok")
+	})
+
+	if _, err := fx.transcribe(t, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if <-fields {
+		t.Error("/inference carried a prompt field with no bias configured")
 	}
 }
 

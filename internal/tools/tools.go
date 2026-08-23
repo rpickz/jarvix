@@ -187,6 +187,19 @@ func (r *Registry) CheckRoutine(name string) Verdict {
 	return r.policy.DecideRoutine(name)
 }
 
+// CheckScript classifies running one named script under the script.run
+// identity (ADR 0030). Like Check, no policy means everything is allowed —
+// but note the session engine never takes that reading for scripts: with no
+// registry at all it asks, because an ungated arbitrary executable must not
+// run silently.
+func (r *Registry) CheckScript(name, path string) Verdict {
+	if r.policy == nil {
+		return Verdict{Decision: PolicyAllow, Tool: ScriptToolName,
+			Command: name + " (" + path + ")", Rule: "no policy installed"}
+	}
+	return r.policy.DecideScript(name, path)
+}
+
 // Names returns registered tool names in registration order.
 func (r *Registry) Names() []string {
 	return append([]string(nil), r.order...)

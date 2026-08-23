@@ -66,7 +66,7 @@ type Daemon struct {
 	// read it — so every surface always agrees on what is remembered.
 	memory *memory.Book
 
-	// knowledge is the feed cache (ADR 0030), nil when no [[knowledge.feeds]]
+	// knowledge is the feed cache (ADR 0031), nil when no [[knowledge.feeds]]
 	// are configured. One instance for the daemon's life, like the memory
 	// book: the knowledge.get tool reads through it, the engine injects from
 	// it, and knowledge.status reports it. Its scheduler goroutines are
@@ -406,6 +406,17 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("routines enabled", "component", "routine",
 			"routines", strings.Join(names, ","))
 	}
+	// Scripts (ADR 0030) likewise: names only, never paths — the journal
+	// should say what phrases exist, not map the user's filesystem. The path
+	// is logged per run, where it is the fact being audited.
+	if len(cfg.Scripts) > 0 {
+		names := make([]string, 0, len(cfg.Scripts))
+		for _, s := range cfg.Scripts {
+			names = append(names, s.Name)
+		}
+		logger.Info("scripts enabled", "component", "script",
+			"scripts", strings.Join(names, ","))
+	}
 
 	// What Jarvix may look at is stated at startup, once, in the journal: an
 	// ambient-capture feature should never be something a user discovers by
@@ -435,7 +446,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger.Info("memory disabled", "component", "memory")
 	}
 
-	// The feed cache (ADR 0030): commands the user configured whose latest
+	// The feed cache (ADR 0031): commands the user configured whose latest
 	// value the daemon keeps warm. Nil when no [[knowledge.feeds]] exist —
 	// disabled means absent, like memory. Built after the policy because the
 	// background-refresh decision is the knowledge.refresh identity's tier,
@@ -501,7 +512,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			"tools", strings.Join(mem.Names(), ","))
 	}
 
-	// The knowledge.get tool (ADR 0030), registered only when feeds exist:
+	// The knowledge.get tool (ADR 0031), registered only when feeds exist:
 	// a tool with an empty enum would spend every turn's context describing
 	// a feature that cannot be used. Its description and schema read the
 	// live service, so a reload that edits the feed tables is reflected on
@@ -586,7 +597,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// it, dropped for like any slow client rather than ever wedging a session.
 	activityEvents, unsubscribeActivity := d.bus.Subscribe()
 	d.post.Go(func() { d.watchActivity(ctx, activityEvents, unsubscribeActivity) })
-	// The feed scheduler (ADR 0030) starts with the daemon's own context:
+	// The feed scheduler (ADR 0031) starts with the daemon's own context:
 	// its cancellation reaches every loop and every in-flight fetch, and the
 	// service's tracked group is what the knowledge shutdown stage drains.
 	if d.knowledge != nil {
@@ -646,7 +657,7 @@ func (d *Daemon) shutdown() {
 		// timeout) before this stage is reached. The drain kills any fetch
 		// still in flight — the process group dies with the context — and
 		// waits for the loops to unwind, so a stopping daemon never abandons
-		// a values-file write (ADR 0030, the #74 lesson).
+		// a values-file write (ADR 0031, the #74 lesson).
 		{"knowledge", d.knowledgeDrain, d.knowledgeInFlight},
 	} {
 		if err := stage.wait(ctx); err != nil {
@@ -913,6 +924,7 @@ func (d *Daemon) registerMethods() {
 	d.registerTextMethods()
 	d.registerWakeMethods()
 	d.registerRoutineMethods()
+	d.registerScriptMethods()
 }
 
 // promptBudgetReport measures what one turn sends before the user has said

@@ -55,7 +55,7 @@ func (p Paths) HistoryFile() string { return filepath.Join(p.State, "history.jso
 // but unlike history it is a file the user is invited to open and edit.
 func (p Paths) MemoryFile() string { return filepath.Join(p.State, "memory.toml") }
 
-// FeedsFile returns where cached feed values live (ADR 0030). State, like
+// FeedsFile returns where cached feed values live (ADR 0031). State, like
 // history: it is a machine-written cache the user may delete at will — the
 // next fetch simply rebuilds it — but it may hold sensitive values, so it is
 // written 0600 like everything else here.

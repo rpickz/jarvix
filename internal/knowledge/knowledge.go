@@ -2,7 +2,7 @@
 // latest value the daemon fetches on a schedule (or on first use) and holds,
 // so a question about changing data — a stock price, the weather — is
 // answered from a value already sitting in memory, with its age spoken
-// honestly (ADR 0030).
+// honestly (ADR 0031).
 //
 // It is the moving counterpart of the memory book (ADR 0025). Memory holds
 // facts the user *stated*, edited by hand and injected each turn; feeds hold

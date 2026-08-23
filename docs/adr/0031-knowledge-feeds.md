@@ -1,4 +1,4 @@
-# ADR 0030 — Knowledge feeds: changing facts, kept fetched, aged out loud
+# ADR 0031 — Knowledge feeds: changing facts, kept fetched, aged out loud
 
 **Status:** accepted
 

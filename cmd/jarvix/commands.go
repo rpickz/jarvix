@@ -900,6 +900,61 @@ func describeRoutineStep(s config.RoutineStep) string {
 	return desc
 }
 
+// cmdScripts lists the configured scripts offline, from config.toml — like
+// `jarvix routines`, "what have I set up?" should not need a running daemon.
+// The path is always shown: it is what the permission gate's confirmation
+// names, and a listing that hid it would hide exactly the fact the ADR 0030
+// threat model wants visible.
+func cmdScripts(cfg config.Config, asJSON bool) error {
+	type scriptListing struct {
+		Name       string   `json:"name"`
+		Phrases    []string `json:"phrases"`
+		Path       string   `json:"path"`
+		Report     string   `json:"report"`
+		TimeoutSec int      `json:"timeout_sec"`
+	}
+	listing := make([]scriptListing, 0, len(cfg.Scripts))
+	for _, d := range cfg.ScriptDefinitions() {
+		listing = append(listing, scriptListing{Name: d.Name, Phrases: d.Phrases,
+			Path: d.Path, Report: string(d.Report), TimeoutSec: int(d.Timeout.Seconds())})
+	}
+	if asJSON {
+		out, err := json.Marshal(map[string]any{"scripts": listing})
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+	if len(listing) == 0 {
+		fmt.Println("no scripts configured (add [[scripts]] tables to config.toml; see docs/configuration.md)")
+		return nil
+	}
+	for i, s := range listing {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("%s — say \"%s\"\n", s.Name, strings.Join(s.Phrases, `" or "`))
+		fmt.Printf("  runs %s (no arguments) · report %s · timeout %ds\n", s.Path, s.Report, s.TimeoutSec)
+	}
+	return nil
+}
+
+// cmdScriptRun triggers one script through the daemon and follows the
+// session — the same gated path the spoken phrase takes, so the terminal
+// carries the confirmation question and the outcome exactly as the ear would.
+func cmdScriptRun(paths config.Paths, name string) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	if err := client.Call("scripts.run", map[string]string{"name": name}, nil); err != nil {
+		return err
+	}
+	return followSession(client, false)
+}
+
 // cmdRoutineRun triggers one routine through the daemon and follows the
 // session, so the summary — and anything that failed — lands in the terminal
 // the way it lands in the ear.

@@ -9,7 +9,7 @@ import (
 // entries: user-configured fetchers whose latest value the daemon keeps warm,
 // so a question about changing data ("what's the AMD price?") is answered
 // from a value already sitting in the daemon rather than by a slow round trip
-// per ask (ADR 0030). It is the moving counterpart of the memory book (ADR
+// per ask (ADR 0031). It is the moving counterpart of the memory book (ADR
 // 0025): memory holds facts the user *stated*, feeds hold values a command
 // the user *wrote* keeps current.
 //

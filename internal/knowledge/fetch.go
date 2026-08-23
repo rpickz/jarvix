@@ -118,6 +118,11 @@ func resolveFeedBinary(binary string) (string, error) {
 // feed command. Matching by name fragment rather than an allow list, because
 // a missed variable leaks a secret while a wrongly-dropped one at worst costs
 // the script a setting it can read from its own file instead.
+//
+// This is a deliberate copy of tools.ScrubbedEnv's rules (advisor.go): tools
+// imports this package for the knowledge.get tool, so sharing the one
+// exported copy would cycle. A change to the secret-name rules there must be
+// mirrored here, and vice versa — both packages test the same cases.
 var secretEnvFragments = []string{
 	"API_KEY", "APIKEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "SESSION_KEY",
 }

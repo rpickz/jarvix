@@ -1,6 +1,6 @@
 package daemon
 
-// This file wires the feed cache (ADR 0030) into jarvixd: the config → spec
+// This file wires the feed cache (ADR 0031) into jarvixd: the config → spec
 // conversion, the knowledge.status IPC method (doctor's window into the
 // scheduler, and the read-only feed listing — feeds are hand-edited TOML like
 // [[routines]], outside the config.set surface), and the reload hook that

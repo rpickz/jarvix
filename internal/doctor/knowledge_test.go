@@ -8,7 +8,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 )
 
-// The offline half of the feed checks (ADR 0030): command presence and the
+// The offline half of the feed checks (ADR 0031): command presence and the
 // no-daemon degradation. The live summary's numbers come from
 // knowledge.status, whose composition is the daemon's and is tested there.
 

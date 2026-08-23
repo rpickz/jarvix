@@ -9,7 +9,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
-// knowledgeChecks reports the feed cache (ADR 0030): per feed, is the command
+// knowledgeChecks reports the feed cache (ADR 0031): per feed, is the command
 // it names actually here — the same LookPath-or-stat probe the fetcher makes,
 // so doctor's answer is the one the daemon will get — and, from the running
 // daemon, one summary of the scheduler's health ("2 fresh, 1 failing since
