@@ -43,6 +43,14 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 				}
 			case "assistant.finished":
 				answer, _ = ev.Data["content"].(string)
+			case "intent.executed":
+				// An intent turn has no assistant.finished; its acknowledgement
+				// is the outcome. Retaining it gives the finish notification a
+				// body — which for a quiet schedule-fired run (ADR 0032) is the
+				// one place the summary lands besides the activity feed.
+				if ack, _ := ev.Data["acknowledgement"].(string); ack != "" {
+					answer = ack
+				}
 			case "error":
 				errStage, _ = ev.Data["stage"].(string)
 				errMessage, _ = ev.Data["message"].(string)

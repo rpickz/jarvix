@@ -61,6 +61,12 @@ func (p Paths) MemoryFile() string { return filepath.Join(p.State, "memory.toml"
 // written 0600 like everything else here.
 func (p Paths) FeedsFile() string { return filepath.Join(p.State, "feeds.toml") }
 
+// AutomationsFile returns where the schedule trail lives (ADR 0032). State,
+// like the feed cache: a machine-written record — when each scheduled routine
+// or script last fired — the user may delete at will; the only cost is one
+// boot's missed-while-down report.
+func (p Paths) AutomationsFile() string { return filepath.Join(p.State, "automations.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

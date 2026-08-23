@@ -259,6 +259,15 @@ type sess struct {
 	// begins with the wake word, which is stripped before anything reads it.
 	wake bool
 
+	// quiet marks a session whose turn must not be spoken aloud — a
+	// schedule's clockfire with announce off (ADR 0032). Every speech exit
+	// (the streaming speaker, the intent acknowledgement, the confirmation
+	// prompt) checks it; everything else — events, activity rows, history,
+	// the archive — behaves exactly as for a spoken turn. Set before the
+	// session's first submit and immutable after, so it is read without the
+	// lock like wake.
+	quiet bool
+
 	// speaker is the turn's streaming speaker, registered at construction so
 	// CancelSpeech can ask the component that actually owns playback whether
 	// audio is live, instead of inferring it from the session state — the
@@ -409,6 +418,27 @@ func (e *Engine) startSessionLocked() (string, error) {
 	}
 	e.log.Info("session started", "component", "session", "session_id", e.current.id)
 	return e.current.id, nil
+}
+
+// StartScheduledSession begins a session for a schedule's clockfire (ADR
+// 0032). Two deliberate differences from StartSession, both consequences of
+// nobody having spoken: a clockfire must never interrupt — an active session
+// is a refusal here (the caller reports a skipped firing), where a spoken
+// activation would cancel it — and with announce false the session is marked
+// quiet, so its outcome lands in the activity feed and the finish
+// notification rather than as a voice at whatever hour the schedule names.
+func (e *Engine) StartScheduledSession(announce bool) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.current != nil {
+		return "", fmt.Errorf("a session is already active")
+	}
+	id, err := e.startSessionLocked()
+	if err != nil {
+		return "", err
+	}
+	e.current.quiet = !announce
+	return id, nil
 }
 
 // StartVoice begins microphone capture for the active session. While a tool
@@ -910,7 +940,7 @@ func (e *Engine) think(s *sess) {
 	}
 
 	var speaker *streamingSpeaker
-	if e.opts.SpeakResponses && e.tts != nil {
+	if e.opts.SpeakResponses && e.tts != nil && !s.quiet {
 		speaker = newStreamingSpeaker(e, s)
 	}
 	// What this turn has committed to saying out loud, carried through the tool

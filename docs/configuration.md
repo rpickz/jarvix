@@ -256,6 +256,8 @@ say = "Locking."                 # spoken acknowledgement (default: "Done.")
 [[routines]]                     # named app-placement sequences; see "Routines"
 name = "morning setup"           # what summaries open with; unique
 phrases = ["morning setup"]      # literal trigger phrases (intent grammar)
+schedule = "08:30 mon-fri"       # optional clock trigger; see "Schedules"
+announce = false                 # speak a scheduled run's summary (default false)
 [[routines.steps]]               # repeat per step, run in order
 app = "firefox"                  # program to launch if not already running
 workspace = 2                    # where its window goes (1-99)
@@ -270,6 +272,8 @@ timeout_sec = 60                 # optional; the run's whole process group is
                                  # killed at expiry (default 60)
 report = "summary"               # optional: "summary" | "stdout" | "silent";
                                  # failures are spoken in every mode
+schedule = "02:00"               # optional clock trigger; see "Schedules"
+announce = false                 # speak a scheduled run's report (default false)
 
 [context]                        # what Jarvix may look at before it answers
 window = true                    # the focused window's app and title
@@ -946,6 +950,75 @@ places apps and can never be a command (ADR 0026); a script runs a command
 and never places windows. The full threat model — what a misheard phrase, a
 malicious config edit, or a swapped script file could do, and which control
 answers each — is ADR 0030.
+
+## Schedules (`schedule` on routines and scripts)
+
+Any routine or script can also fire on a clock: add a `schedule` key to its
+table and the daemon runs it through the **exact same gated path** the
+spoken phrase takes — router, permission gate, events, activity rows, and
+"Jarvix, stop" all behave identically ([ADR 0032](adr/0032-scheduled-automations.md)).
+
+The syntax is one friendly form (there is no cron): a 24-hour time,
+optionally followed by days.
+
+```
+"08:30"                # every day at 08:30
+"02:00 daily"          # the same, spelled out
+"08:30 mon-fri"        # weekdays (also: "08:30 weekdays")
+"10:00 weekends"       # sat and sun
+"22:15 mon,wed,fri"    # a list; ranges may wrap ("fri-mon")
+```
+
+A bad schedule is refused at load with the accepted forms in the message.
+Times are your local wall clock; a firing lands within the minute.
+
+The worked nightly-backup example — the backup script from above, run every
+night at two:
+
+```toml
+[[scripts]]
+name = "backup notes"
+phrases = ["backup my notes"]
+path = "/home/you/bin/backup-notes.sh"
+timeout_sec = 120
+report = "stdout"
+schedule = "02:00"               # nightly; nobody is awake, so —
+# announce = false               # — the default: nothing is spoken
+
+[tools.policy.tool]
+"script.run" = "allow"           # required for the schedule to execute:
+                                 # a schedule cannot answer "should I go
+                                 # ahead?", so only allow runs unattended
+```
+
+What a scheduled firing does, and does not do:
+
+- **Only allow-tier entries execute unattended.** `script.run` defaults to
+  ask, and a schedule has nobody to ask at 2am — so without the policy line
+  above, the scheduled moment produces a **refusal**: an activity row plus a
+  notification ("backup notes was scheduled but needs your confirmation —
+  run it now?") whose click opens the conversation window. Configuring a
+  schedule on an ask-tier entry is warned about at load, so you learn at
+  noon, not at 2am. Routines default to allow and run unattended as
+  configured.
+- **Nothing is spoken, by default.** A scheduled run's outcome lands in the
+  activity feed and the finish notification; `report` still decides what
+  that outcome *says*. Set `announce = true` on the entry if you really want
+  the summary spoken aloud at the scheduled hour.
+- **Overlap skips.** A firing that arrives while the previous run (or any
+  conversation) is still going is skipped and reported — never queued, and
+  never an interruption of a session in flight.
+- **Missed firings report, never replay.** A firing that fell while the
+  daemon was off produces one activity row at the next boot ("missed while
+  off") and is not re-run — say the phrase if you still want it. The only
+  state behind this is a small machine-written trail
+  (`$XDG_STATE_HOME/jarvix/automations.toml`); deleting it costs one boot's
+  report, nothing else.
+
+`automations.schedules` over IPC lists every schedule with its next-fire
+time, last run, and whether it would currently be refused — the Automations
+tab's read surface. Schedule keys are part of the hand-edited tables and
+land on the next `config.reload` or restart, like the tables themselves.
 
 ## Desktop context (`[context]`)
 
