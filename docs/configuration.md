@@ -1240,10 +1240,35 @@ What the design guarantees:
   feeds outright; `"ask"` confirms each tool read and also stops the
   background schedules (a scheduled fetch has no way to ask).
 
-Feed tables are hand-edited TOML like `[[routines]]` — outside `config.set`,
-listed read-only over IPC (`knowledge.status`). Edits to existing feeds apply
-on the next `jarvix config reload` (idle-class); adding the *first* feed
-registers the tool, which takes a daemon restart.
+Every feed also takes an **`enabled`** switch:
+
+```toml
+[[knowledge.feeds]]
+name = "amd"
+command = ["/home/you/bin/amd-price"]
+enabled = false   # parked: nothing fetches, the entry and its last value stay
+```
+
+This is the one convention for switching any `[[…]]` entry off (issue #92),
+and every table-array family follows it: the field is named `enabled`,
+**absent means true** (every existing config keeps working unchanged), and a
+disabled entry is still fully validated — a broken command is reported even
+while parked, so re-enabling can never surprise. Feeds implement it today; a
+disabled feed is never fetched (scheduled, lazy, or manual), never injected,
+answers "switched off" through the tool, and keeps its cached value visible —
+with its honest age — in `knowledge.status` and the window's Knowledge tab.
+`[[routines]]` and `[[scripts]]` adopt the same key with #93.
+
+Feed tables are hand-edited TOML like `[[routines]]` — outside `config.set`
+and listed over IPC (`knowledge.status`). Two operations are available from
+the conversation window's Knowledge tab (#92): **Refresh now**
+(`knowledge.refresh_now`, an immediate fetch through the scheduled path) and
+**Enable/Disable** (`knowledge.set_enabled`, which writes only that entry's
+`enabled` key — your comments and every other byte of the file are
+preserved, and a file edited by hand underneath an open window is a refused
+conflict, never a clobber). Other edits apply on the next
+`jarvix config reload` (idle-class); adding the *first* feed registers the
+tool, which takes a daemon restart.
 
 ## Tools (assistant actions)
 

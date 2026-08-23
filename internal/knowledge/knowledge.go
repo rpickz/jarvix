@@ -63,6 +63,11 @@ type Feed struct {
 	// Inject opts the cached value into every model turn, under the shared
 	// injection budget.
 	Inject bool
+	// Enabled false parks the feed (issue #92): no scheduled, lazy, or manual
+	// fetch runs, nothing is injected, and the tool answers "disabled" — but
+	// the cached value is kept, shown with its honest age, and survives in
+	// the values file, because the feed is still configured.
+	Enabled bool
 }
 
 // maxFeedBackoff caps the failure backoff: a feed whose command is broken is
@@ -93,6 +98,11 @@ type Options struct {
 	Timer func(d time.Duration) (<-chan time.Time, func())
 	// Runner overrides fetch execution in tests; the real path is runFeed.
 	Runner func(ctx context.Context, feed Feed, env []string) FetchResult
+	// Notify is called (off the lock) with a feed's name each time a fetch
+	// attempt for it completes, success or failure — the daemon publishes it
+	// as the knowledge.updated event so open windows refresh. Names only,
+	// never values (values travel over knowledge.status on request).
+	Notify func(name string)
 }
 
 // Service owns the feeds: the cached values, the persistence, and the eager
@@ -105,6 +115,7 @@ type Service struct {
 	now            func() time.Time
 	timer          func(d time.Duration) (<-chan time.Time, func())
 	runner         func(ctx context.Context, feed Feed, env []string) FetchResult
+	notify         func(name string)
 	log            *slog.Logger
 
 	// group tracks every scheduler goroutine from the moment it starts —
@@ -121,8 +132,12 @@ type Service struct {
 	// cancels it and starts a new generation; the old goroutines unwind into
 	// the same tracked group, so a reload can never orphan one.
 	cancelGen context.CancelFunc
-	closed    bool
-	loaded    bool
+	// genCtx is the current generation's context. Manual refreshes
+	// (RefreshNow) run their fetch under it, so a reload or drain cancels
+	// them exactly as it cancels the scheduled loops.
+	genCtx context.Context
+	closed bool
+	loaded bool
 }
 
 // feedState is everything remembered about one feed between fetches. Value
@@ -173,13 +188,21 @@ type Reading struct {
 // FeedStatus is one feed's operational snapshot for doctor and the
 // knowledge.status IPC method.
 type FeedStatus struct {
-	Name         string
-	Mode         Mode
-	Inject       bool
-	HasValue     bool
-	Value        string
-	FetchedAt    time.Time
-	Age          time.Duration
+	Name    string
+	Mode    Mode
+	Enabled bool
+	// Interval and TTL restate the feed's configured cadence so the window
+	// can show it without a second config read.
+	Interval  time.Duration
+	TTL       time.Duration
+	Inject    bool
+	HasValue  bool
+	Value     string
+	FetchedAt time.Time
+	Age       time.Duration
+	// AgeSpoken is Age in the spoken wording every surface shares ("four
+	// minutes ago"), computed here so no client invents its own scale.
+	AgeSpoken    string
 	Stale        bool
 	Failing      bool
 	FailingSince time.Time
@@ -201,6 +224,7 @@ func NewService(path string, opts Options, log *slog.Logger) *Service {
 		now:            opts.Now,
 		timer:          opts.Timer,
 		runner:         opts.Runner,
+		notify:         opts.Notify,
 		log:            log,
 		feeds:          append([]Feed(nil), opts.Feeds...),
 		states:         make(map[string]*feedState),
@@ -264,6 +288,7 @@ func (s *Service) Reconfigure(feeds []Feed) {
 	if s.cancelGen != nil {
 		s.cancelGen()
 		s.cancelGen = nil
+		s.genCtx = nil
 	}
 	s.startLocked()
 	s.log.Info("knowledge feeds reconfigured", "component", "knowledge",
@@ -279,6 +304,7 @@ func (s *Service) Drain(ctx context.Context) error {
 	if s.cancelGen != nil {
 		s.cancelGen()
 		s.cancelGen = nil
+		s.genCtx = nil
 	}
 	s.mu.Unlock()
 	return s.group.Wait(ctx)
@@ -288,32 +314,34 @@ func (s *Service) Drain(ctx context.Context) error {
 // shutdown log when a drain gives up.
 func (s *Service) InFlight() int { return s.group.InFlight() }
 
-// startLocked spawns one loop per eager feed under a fresh generation
-// context. Callers hold s.mu and have set s.base.
+// startLocked spawns one loop per enabled eager feed under a fresh
+// generation context. The generation exists even with no eager feeds, because
+// manual refreshes (RefreshNow) of lazy feeds run under it too. Callers hold
+// s.mu and have set s.base.
 func (s *Service) startLocked() {
 	eager := 0
 	for _, f := range s.feeds {
-		if f.Mode == ModeEager {
+		if f.Mode == ModeEager && f.Enabled {
 			eager++
 		}
 	}
-	if eager == 0 {
-		return
-	}
 	if !s.refreshAllowed {
-		// Said once, at Warn: the user configured eager feeds and a policy
-		// entry quietly disabling them must never be something they discover
-		// by noticing every value is stale.
-		s.log.Warn("eager feeds configured but background refresh is not allowed; "+
-			"values will only be fetched when the knowledge.get tool asks",
-			"component", "knowledge", "eager_feeds", eager,
-			"fix", `set [tools.policy.tool]."knowledge.refresh" = "allow"`)
+		if eager > 0 {
+			// Said once, at Warn: the user configured eager feeds and a policy
+			// entry quietly disabling them must never be something they discover
+			// by noticing every value is stale.
+			s.log.Warn("eager feeds configured but background refresh is not allowed; "+
+				"values will only be fetched when the knowledge.get tool asks",
+				"component", "knowledge", "eager_feeds", eager,
+				"fix", `set [tools.policy.tool]."knowledge.refresh" = "allow"`)
+		}
 		return
 	}
 	ctx, cancel := context.WithCancel(s.base)
 	s.cancelGen = cancel
+	s.genCtx = ctx
 	for _, f := range s.feeds {
-		if f.Mode != ModeEager {
+		if f.Mode != ModeEager || !f.Enabled {
 			continue
 		}
 		feed := f
@@ -321,6 +349,51 @@ func (s *Service) startLocked() {
 		// between the two would otherwise return while a loop was starting.
 		s.group.Go(func() { s.runEager(ctx, feed) })
 	}
+}
+
+// RefreshNow starts an immediate fetch of one feed, on the user's explicit
+// ask (issue #92). It is not a second fetch path: the fetch runs through
+// fetchNow — the same runner, the same single-flight latch, the same failure
+// bookkeeping and Notify as a scheduled refresh — on a goroutine tracked in
+// the same group, under the current generation's context, so drains and
+// reloads treat it exactly like a scheduled one. The failure backoff is
+// deliberately not consulted: "refresh now" is how a user checks a command
+// they just fixed.
+//
+// A fetch already in flight for the feed is success, not work: the
+// single-flight latch holds and that fetch's completion is the answer.
+func (s *Service) RefreshNow(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("the daemon is shutting down")
+	}
+	feed, ok := s.feedLocked(name)
+	if !ok {
+		return fmt.Errorf("no feed is named %q", name)
+	}
+	if !feed.Enabled {
+		return fmt.Errorf("the %s feed is disabled (enabled = false); enable it first", name)
+	}
+	if !s.refreshAllowed {
+		// The gate identity is the scheduler's own (ADR 0031): a background
+		// fetch has no way to ask a confirmation question, so anything short
+		// of allow on knowledge.refresh means no manual refresh either.
+		return fmt.Errorf("background refresh is not allowed; " +
+			`set [tools.policy.tool]."knowledge.refresh" = "allow" and restart`)
+	}
+	if s.genCtx == nil {
+		return fmt.Errorf("the feed scheduler has not started")
+	}
+	s.loadLocked()
+	st := s.stateLocked(feed.Name)
+	if st.fetching {
+		return nil // already fetching; that fetch's completion will land
+	}
+	st.fetching = true
+	ctx := s.genCtx
+	s.group.Go(func() { s.fetchNow(ctx, feed) })
+	return nil
 }
 
 // runEager is one eager feed's loop: wait out the next delay, refresh,
@@ -430,6 +503,9 @@ func (s *Service) Get(ctx context.Context, name string) (Reading, bool) {
 // background refresh is not allowed and a gate-approved tool call is the only
 // fetch path there is. Callers hold s.mu.
 func (s *Service) shouldSyncFetchLocked(feed Feed) bool {
+	if !feed.Enabled {
+		return false // parked: never fetch, serve the kept value as it stands
+	}
 	st := s.states[feed.Name]
 	if st != nil && st.fetching {
 		return false // a fetch is already in flight; serve what stands
@@ -506,6 +582,13 @@ func (s *Service) fetchNow(ctx context.Context, feed Feed) {
 	}
 	s.saveLocked()
 	s.mu.Unlock()
+	// Completion is announced whatever the outcome — a window showing a
+	// failing feed must learn about the failure too. Never on a cancelled
+	// fetch: shutdown and reload own their own silence. Name only, off the
+	// lock; the value stays where it is.
+	if s.notify != nil && ctx.Err() == nil {
+		s.notify(feed.Name)
+	}
 }
 
 // fetchErrText summarises a failed fetch for the journal and doctor — exit
@@ -562,10 +645,14 @@ func (s *Service) Status() []FeedStatus {
 	for _, f := range s.feeds {
 		r := s.readingLocked(f)
 		st := FeedStatus{
-			Name: f.Name, Mode: f.Mode, Inject: f.Inject,
+			Name: f.Name, Mode: f.Mode, Enabled: f.Enabled,
+			Interval: f.Interval, TTL: f.TTL, Inject: f.Inject,
 			HasValue: r.HasValue, Value: r.Value, FetchedAt: r.FetchedAt,
 			Age: r.Age, Stale: r.Stale,
 			Failing: r.Failing, FailingSince: r.FailingSince, Attempts: r.Attempts,
+		}
+		if r.HasValue {
+			st.AgeSpoken = SpokenAge(s.now(), r.FetchedAt)
 		}
 		if state := s.states[f.Name]; state != nil {
 			st.LastErr = state.LastErr

@@ -263,14 +263,24 @@ FloatingWindow {
   }
 
   // --- knowledge feeds ----------------------------------------------------
-  // The Knowledge tab (issue #91): the daemon's feed cache, read-only —
-  // knowledge.status is the whole surface (ADR 0031). Feed management is a
-  // sibling ticket's job; this listing only shows what the daemon reports:
-  // each feed's mode, whether it is offered to the model, and its
-  // freshness/failing state, all worded here from the daemon's own facts.
+  // The Knowledge tab (issues #91/#92): the daemon's feed cache as cards —
+  // knowledge.status for everything shown, knowledge.refresh_now and
+  // knowledge.set_enabled for the two per-feed operations. Every decision is
+  // the daemon's (ADR 0013): the single-flight on a refresh, the surgical
+  // config write and its fingerprint check, the scheduler drop/readopt — this
+  // window renders the status, calls the verbs, and words the daemon's own
+  // facts. Cards refresh on knowledge.updated (a fetch completed) and
+  // config.changed (the tables moved); feed values appear on screen but are
+  // never logged or forwarded anywhere else.
   property var knowledgeFeeds: []
   property bool knowledgeEnabled: true
+  // The config file's fingerprint as of the last status, passed back on
+  // set_enabled so a hand edit made while the window sat open is a refused
+  // conflict, never a clobber.
+  property string knowledgeFingerprint: ""
   property int knowledgeRequestId: 0
+  property int knowledgeRefreshRequestId: 0
+  property int knowledgeEnableRequestId: 0
 
   function requestKnowledge() {
     if (!daemon.connected) return
@@ -282,12 +292,61 @@ FloatingWindow {
 
   function loadKnowledge(result) {
     knowledgeEnabled = result.enabled !== false
+    knowledgeFingerprint = String(result.fingerprint || "")
     knowledgeFeeds = result.feeds || []
   }
 
+  // refreshFeed asks for an immediate fetch. The reply only acknowledges the
+  // start; the card updates when the daemon's knowledge.updated event says
+  // the fetch — this one or one already in flight (single-flight, decided
+  // daemon-side) — completed.
+  function refreshFeed(name) {
+    if (!daemon.connected) return
+    knowledgeRefreshRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeRefreshRequestId,
+      method: "knowledge.refresh_now", params: { name: name } }) + "\n")
+  }
+
+  // setFeedEnabled persists the switch through the daemon's surgical config
+  // write. The card flips when config.changed triggers the status refresh —
+  // the daemon's word, not the click's.
+  function setFeedEnabled(name, enabled) {
+    if (!daemon.connected) return
+    knowledgeEnableRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeEnableRequestId,
+      method: "knowledge.set_enabled",
+      params: { name: name, enabled: enabled, fingerprint: knowledgeFingerprint } }) + "\n")
+  }
+
+  // handleKnowledgeActionReply surfaces a refused refresh or switch in the
+  // tab (via the shared banner, which the tab anchors around). A conflict —
+  // the config changed on disk underneath us — also re-requests the status,
+  // so the cards and the fingerprint are fresh for the retry the message
+  // suggests.
+  function handleKnowledgeActionReply(frame) {
+    if (frame.error) {
+      errorStage = "knowledge"
+      errorMessage = String(frame.error.message || "the feed action failed")
+      if (frame.error.data && frame.error.data.fingerprint) requestKnowledge()
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) knowledgeFingerprint = String(result.fingerprint)
+    if (result.applied === false) {
+      // Written but not yet live — the daemon said why (a session is busy);
+      // honesty beats a card that pretends the scheduler already moved.
+      errorStage = "knowledge"
+      errorMessage = "Saved to config.toml, but not applied yet: "
+        + String(result.reason || "the daemon is busy") + ". It applies on the next reload."
+    }
+  }
+
   // feedFreshness words one feed's state — presentation, like stateLabel:
-  // every fact in the sentence is the daemon's own report, and a failing
-  // feed always carries its reason in words.
+  // every fact in the sentence is the daemon's own report (the spoken-style
+  // age included), a stale value is marked STALE in words, and a failing
+  // feed always carries failing-since and its reason.
   function feedFreshness(feed) {
     if (feed.failing) {
       var line = "failing since "
@@ -296,34 +355,85 @@ FloatingWindow {
       return line
     }
     if (!feed.has_value) return "no value fetched yet"
-    return (feed.stale ? "stale — fetched " : "fresh — fetched ")
-      + feedAge(Number(feed.age_sec || 0)) + " ago"
+    var fetched = "fetched " + String(feed.age_spoken || "some time ago")
+    return feed.stale ? "STALE — " + fetched : fetched
   }
 
-  function feedAge(sec) {
+  // feedCadence words the card's second line: mode, cadence, freshness
+  // window, injection — and says "disabled" first when the feed is parked,
+  // because the flag colour never carries that alone.
+  function feedCadence(feed) {
+    var parts = []
+    if (feed.enabled === false) parts.push("disabled — kept, not fetched")
+    if (feed.mode === "eager") {
+      parts.push("eager · refreshes every " + feedSpan(Number(feed.interval_sec || 0)))
+    } else {
+      parts.push("lazy · fetched when asked")
+    }
+    parts.push("fresh for " + feedSpan(Number(feed.ttl_sec || 0)))
+    if (feed.inject) parts.push("offered to the model each turn")
+    return parts.join(" · ")
+  }
+
+  function feedSpan(sec) {
     if (sec < 60) return sec + "s"
     if (sec < 3600) return Math.floor(sec / 60) + "m"
     if (sec < 86400) return Math.floor(sec / 3600) + "h"
     return Math.floor(sec / 86400) + "d"
   }
 
+  // newFeedTOML is the copyable hint block (issue #92): creating a feed
+  // stays a hand edit in v1 — definitions are code-adjacent — so the tab
+  // hands over the exact TOML to paste into config.toml instead of a form.
+  readonly property string newFeedTOML: "[[knowledge.feeds]]\n"
+    + "name = \"amd\"\n"
+    + "description = \"AMD share price in dollars\"\n"
+    + "command = [\"/home/you/bin/amd-price\"]\n"
+    + "mode = \"eager\"     # or \"lazy\": fetch on first use\n"
+    + "interval_sec = 300 # eager refresh cadence\n"
+
   // --- memory -------------------------------------------------------------
-  // The Memory tab (issue #91): the fact store, read-only, straight from
-  // memory.list (ADR 0025) — each fact with its stored date and how many
-  // earlier versions its supersede trail holds. Forgetting and editing are
-  // a sibling ticket's job.
+  // The Memory tab (issues #91/#92): the fact store from memory.list (ADR
+  // 0025) — each fact with its dates, its supersede trail expandable in
+  // place, a filter-as-you-type box whose matching is the daemon's (the same
+  // query memory.list has always taken), and a per-fact Forget that routes
+  // through the gated tool path (memory.forget_gated): the standard
+  // confirmation card appears in Chat naming the exact fact, and this list
+  // refreshes when the daemon's own events say the question was resolved.
   property var memoryFacts: []
   property bool memoryEnabled: true
   property int memoryFactCount: 0
   property int memoryFactMax: 0
+  property string memoryQuery: ""
   property int memoryRequestId: 0
+  property int memoryForgetRequestId: 0
 
   function requestMemory() {
     if (!daemon.connected) return
     memoryRequestId = nextRequestId
     nextRequestId++
-    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: memoryRequestId,
-      method: "memory.list" }) + "\n")
+    var frame = { jsonrpc: "2.0", id: memoryRequestId, method: "memory.list" }
+    if (memoryQuery.trim() !== "") frame.params = { query: memoryQuery }
+    daemon.write(JSON.stringify(frame) + "\n")
+  }
+
+  // filterMemory is the box's every-keystroke hook: remember the query and
+  // ask the daemon — matching is its job (ADR 0013), and a local socket
+  // round trip per keystroke costs nothing.
+  function filterMemory(query) {
+    memoryQuery = query
+    requestMemory()
+  }
+
+  // forgetFact starts the gated forget. Nothing changes here on the reply:
+  // the confirmation card appears in Chat via the ordinary events (the tab
+  // badge points there), and the resolution events refresh this list.
+  function forgetFact(id) {
+    if (!daemon.connected) return
+    memoryForgetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: memoryForgetRequestId,
+      method: "memory.forget_gated", params: { id: id } }) + "\n")
   }
 
   function loadMemory(result) {
@@ -705,6 +815,20 @@ FloatingWindow {
       break
     case "tool.declined":
       resolveConfirmationCard(declineOutcome(String(params.source || "")))
+      // A declined forget resolves the Memory tab's pending question: the
+      // list is unchanged, but re-requesting it is how this window stays a
+      // mirror rather than a guesser (ADR 0013).
+      if (params.tool === "memory.forget") requestMemory()
+      break
+    case "tool.finished":
+      // The gated forget executed (from this window's button or the model's
+      // own call — the store changed either way): refresh the listing.
+      if (params.tool === "memory.forget") requestMemory()
+      break
+    case "knowledge.updated":
+      // A fetch completed — scheduled or Refresh now. The event carries the
+      // feed's name only; the fresh value rides the status reply.
+      requestKnowledge()
       break
     case "error":
       errorStage = String(params.stage || "")
@@ -771,6 +895,17 @@ FloatingWindow {
           if (frame.result) win.loadActivity(frame.result)
         } else if (frame.id !== undefined && frame.id === win.knowledgeRequestId) {
           if (frame.result) win.loadKnowledge(frame.result)
+        } else if (frame.id !== undefined && (frame.id === win.knowledgeRefreshRequestId ||
+                   frame.id === win.knowledgeEnableRequestId)) {
+          win.handleKnowledgeActionReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.memoryForgetRequestId) {
+          // Success needs no handling — the confirmation card's events carry
+          // the flow from here — but a refusal (unknown id, memory disabled)
+          // must be seen.
+          if (frame.error) {
+            win.errorStage = "memory"
+            win.errorMessage = String(frame.error.message || "the fact could not be forgotten")
+          }
         } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
           if (frame.result) win.loadMemory(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
@@ -1455,11 +1590,14 @@ FloatingWindow {
       }
     }
 
-    // The Knowledge tab: the feed cache, read-only (ADR 0031) — each
-    // configured feed with its mode, whether it is offered to the model, and
-    // its freshness or failing state, worded from knowledge.status's own
-    // facts. Values stay out of the listing; the sibling detail work decides
-    // what more to show.
+    // The Knowledge tab (issue #92): the feed cache as cards — name, mode
+    // and cadence, the current value (or "not fetched yet") with its
+    // spoken-style age, STALE marked in words, failing-since with the error —
+    // and the two operations: Refresh now (knowledge.refresh_now, through
+    // the daemon's scheduled-fetch path) and Enable/Disable
+    // (knowledge.set_enabled, the surgical config write). A disabled feed's
+    // card says so and keeps its last value. The footer hands over the TOML
+    // for a new feed — creation stays a hand edit in v1.
     Item {
       id: knowledgeScreen
       visible: win.socketReady && win.currentTab === "knowledge"
@@ -1475,14 +1613,18 @@ FloatingWindow {
         anchors.centerIn: parent
         width: parent.width
         text: win.knowledgeEnabled
-          ? "No knowledge feeds yet — add [[knowledge.feeds]] tables to config.toml."
+          ? "No knowledge feeds yet — copy the block below into config.toml to add one."
           : "Knowledge feeds are switched off (knowledge.enabled = false)."
       }
 
       ListView {
         id: knowledgeList
         visible: win.knowledgeFeeds.length > 0
-        anchors.fill: parent
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: knowledgeHint.top
+        anchors.bottomMargin: Style.space(8)
         clip: true
         spacing: Style.space(10)
         model: win.knowledgeFeeds
@@ -1491,18 +1633,142 @@ FloatingWindow {
           required property var modelData
           width: knowledgeList.width
           title: modelData.name
-          subtitle: String(modelData.mode || "") + " feed · "
-            + (modelData.inject ? "offered to the model each turn" : "fetched, not injected")
+          subtitle: win.feedCadence(modelData)
+          // The value itself, verbatim (the user's own data on the user's
+          // own screen — shown here, never logged; the daemon holds the
+          // same rule).
+          detail: modelData.has_value ? String(modelData.value) : "not fetched yet"
           meta: win.feedFreshness(modelData)
+          // Failing and stale both flag the title; the words are already in
+          // meta, so the colour is never the only carrier.
           flagged: Boolean(modelData.failing)
+            || (Boolean(modelData.stale) && modelData.enabled !== false)
+          // A parked feed cannot be refreshed — the daemon would refuse —
+          // so the card does not offer it; Enable is the way back.
+          actionLabel: modelData.enabled === false ? "" : "Refresh now"
+          actionName: "Refresh the " + modelData.name + " feed now"
+          onActionTriggered: win.refreshFeed(modelData.name)
+          action2Label: modelData.enabled === false ? "Enable" : "Disable"
+          action2Name: (modelData.enabled === false ? "Enable" : "Disable")
+            + " the " + modelData.name + " feed"
+          onAction2Triggered: win.setFeedEnabled(modelData.name, modelData.enabled === false)
+        }
+      }
+
+      // The new-feed hint (issue #92): a collapsed block that unfolds into
+      // the exact TOML to copy. Selectable text plus a Copy button — the
+      // window offers the block; the paste is the user's, in their editor,
+      // because feed definitions are code-adjacent and stay hand-edited.
+      Column {
+        id: knowledgeHint
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Style.space(6)
+
+        Rectangle {
+          id: knowledgeHintToggle
+          width: knowledgeHintToggleLabel.width + Style.space(20)
+          height: knowledgeHintToggleLabel.height + Style.space(8)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text, knowledgeHintToggle.activeFocus ? 0.16 : 0.06)
+          border.color: knowledgeHintToggle.activeFocus
+            ? Color.accent : Util.alpha(Color.popups.text, 0.4)
+          border.width: knowledgeHintToggle.activeFocus ? 2 : 1
+          activeFocusOnTab: true
+          property bool open: false
+          Accessible.role: Accessible.Button
+          Accessible.name: open ? "Hide the new-feed TOML" : "Show the TOML for adding a feed"
+          Keys.onReturnPressed: knowledgeHintToggle.open = !knowledgeHintToggle.open
+          Keys.onSpacePressed: knowledgeHintToggle.open = !knowledgeHintToggle.open
+          Text {
+            id: knowledgeHintToggleLabel
+            anchors.centerIn: parent
+            text: knowledgeHintToggle.open ? "Hide the TOML" : "Add a feed…"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+          MouseArea { anchors.fill: parent; onClicked: knowledgeHintToggle.open = !knowledgeHintToggle.open }
+        }
+
+        Rectangle {
+          visible: knowledgeHintToggle.open
+          width: parent.width
+          height: knowledgeHintBody.height + Style.space(20)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text, 0.06)
+
+          Column {
+            id: knowledgeHintBody
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Style.space(10)
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Copy this into config.toml, point the command at something that "
+                + "prints the value, then reload — the new card appears here."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+            TextEdit {
+              id: knowledgeHintTOML
+              width: parent.width
+              readOnly: true
+              selectByMouse: true
+              wrapMode: TextEdit.WrapAnywhere
+              text: win.newFeedTOML
+              font.family: "monospace"
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+              selectionColor: Util.alpha(Color.accent, 0.4)
+              Accessible.role: Accessible.StaticText
+              Accessible.name: "The TOML block for a new feed"
+            }
+            Rectangle {
+              id: knowledgeHintCopy
+              width: knowledgeHintCopyLabel.width + Style.space(20)
+              height: knowledgeHintCopyLabel.height + Style.space(8)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.accent, knowledgeHintCopy.activeFocus ? 0.35 : 0.18)
+              border.color: Color.accent
+              border.width: knowledgeHintCopy.activeFocus ? 2 : 1
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Copy the TOML block"
+              function copyTOML() {
+                knowledgeHintTOML.selectAll()
+                knowledgeHintTOML.copy()
+                knowledgeHintTOML.deselect()
+              }
+              Keys.onReturnPressed: knowledgeHintCopy.copyTOML()
+              Keys.onSpacePressed: knowledgeHintCopy.copyTOML()
+              Text {
+                id: knowledgeHintCopyLabel
+                anchors.centerIn: parent
+                text: "Copy"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea { anchors.fill: parent; onClicked: knowledgeHintCopy.copyTOML() }
+            }
+          }
         }
       }
     }
 
-    // The Memory tab: the fact store, read-only (ADR 0025) — every
-    // remembered fact with its stored date, straight from memory.list (disk
-    // truth, hand-edits included). Refreshed each time the tab is opened;
-    // forgetting is the sibling ticket's job.
+    // The Memory tab (issue #92): the fact store from memory.list (ADR 0025)
+    // — dates, an expandable supersede trail rendered from the existing
+    // `previous` data, filter-as-you-type whose matching is the daemon's own
+    // query, and per-fact Forget through the gated tool path: the standard
+    // confirmation card appears in Chat (the tab badge points there), and
+    // this list refreshes when the daemon's events resolve it.
     Item {
       id: memoryScreen
       visible: win.socketReady && win.currentTab === "memory"
@@ -1513,21 +1779,71 @@ FloatingWindow {
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
+      Rectangle {
+        id: memoryFilterBox
+        visible: win.memoryEnabled && (win.memoryFacts.length > 0 || win.memoryQuery !== "")
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: memoryFilterInput.height + Style.space(16)
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, 0.06)
+        // The focus ring: a colour *and* a thicker border, like the composer.
+        border.color: memoryFilterInput.activeFocus ? Color.accent : Util.alpha(Color.popups.text, 0.4)
+        border.width: memoryFilterInput.activeFocus ? 2 : 1
+
+        TextInput {
+          id: memoryFilterInput
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.margins: Style.space(10)
+          activeFocusOnTab: true
+          clip: true
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+          selectByMouse: true
+          Accessible.role: Accessible.EditableText
+          Accessible.name: "Filter remembered facts"
+          Accessible.description: "The list narrows as you type; clear the box to see everything"
+          // Every keystroke asks the daemon: the matching lives there, once
+          // (the same query the CLI's memory list takes), and this box only
+          // relays it.
+          onTextChanged: win.filterMemory(text)
+
+          Text {
+            visible: memoryFilterInput.text === ""
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Filter facts as you type"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.45)
+          }
+        }
+      }
+
       JarvixEmptyState {
         visible: win.memoryFacts.length === 0
         anchors.centerIn: parent
         width: parent.width
-        text: win.memoryEnabled
-          ? "Nothing remembered yet — say “remember …” and it will be kept here."
-          : "Memory is switched off (memory.enabled = false)."
+        text: !win.memoryEnabled
+          ? "Memory is switched off (memory.enabled = false)."
+          : win.memoryQuery.trim() !== ""
+            ? "No remembered fact matches “" + win.memoryQuery + "” — clear the box to see everything."
+            : "Nothing remembered yet — say “remember …” and it will be kept here."
       }
 
       Text {
         id: memoryCountLine
         visible: win.memoryFacts.length > 0
-        anchors.top: parent.top
+        anchors.top: memoryFilterBox.visible ? memoryFilterBox.bottom : parent.top
+        anchors.topMargin: memoryFilterBox.visible ? Style.space(8) : 0
         width: parent.width
-        text: win.memoryFactCount + " of " + win.memoryFactMax + " facts remembered"
+        text: win.memoryQuery.trim() !== ""
+          ? win.memoryFacts.length + " of " + win.memoryFactCount + " facts match"
+          : win.memoryFactCount + " of " + win.memoryFactMax + " facts remembered"
         font.family: Style.font.family
         font.pixelSize: Style.font.subtitle
         color: Util.alpha(Color.popups.text, 0.7)
@@ -1545,11 +1861,52 @@ FloatingWindow {
         spacing: Style.space(10)
         model: win.memoryFacts
 
-        delegate: JarvixCollectionRow {
+        // One fact: the shared row plus, when expanded, the supersede trail
+        // — the values this fact held before, straight from the `previous`
+        // the daemon already serves. Expansion is presentation state; it
+        // resets when the list reloads, and nothing is fetched for it.
+        delegate: Column {
+          id: factDelegate
           required property var modelData
+          property bool expanded: false
           width: memoryList.width
-          title: modelData.content
-          meta: win.factMeta(modelData)
+          spacing: Style.space(4)
+
+          JarvixCollectionRow {
+            width: parent.width
+            title: factDelegate.modelData.content
+            meta: win.factMeta(factDelegate.modelData)
+              + ((factDelegate.modelData.previous || []).length > 0
+                ? (factDelegate.expanded ? " · press to fold the history" : " · press to unfold the history")
+                : "")
+            interactive: (factDelegate.modelData.previous || []).length > 0
+            onActivated: factDelegate.expanded = !factDelegate.expanded
+            actionLabel: "Forget"
+            actionName: "Forget: " + factDelegate.modelData.content
+            onActionTriggered: win.forgetFact(String(factDelegate.modelData.id))
+          }
+
+          Column {
+            visible: factDelegate.expanded
+            width: parent.width
+            spacing: Style.space(2)
+
+            Repeater {
+              model: factDelegate.expanded ? (factDelegate.modelData.previous || []) : []
+              delegate: Text {
+                required property var modelData
+                width: factDelegate.width - Style.space(16)
+                x: Style.space(16)
+                wrapMode: Text.Wrap
+                text: "was: “" + String(modelData.content) + "” — "
+                  + String(modelData.stored || "").substring(0, 10)
+                  + " until " + String(modelData.superseded || "").substring(0, 10)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Util.alpha(Color.popups.text, 0.7)
+              }
+            }
+          }
         }
       }
     }

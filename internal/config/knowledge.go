@@ -28,6 +28,17 @@ type KnowledgeFeed struct {
 	// Name is what the model asks for and what every surface calls the feed.
 	// Unique across feeds, case-insensitively.
 	Name string `toml:"name"`
+	// Enabled parks the feed without deleting it: false stops every fetch —
+	// scheduled, lazy, or manual — while the entry, its comments, and its
+	// last cached value all stay. A pointer because absent means true: the
+	// key only appears in config.toml when someone (hand or window) chose to
+	// write it, and every existing config keeps working unchanged.
+	//
+	// This is THE `enabled` convention for [[family]] tables (issue #92):
+	// the field is named `enabled`, it defaults to true, and a disabled
+	// entry is still fully validated — so re-enabling can never surprise.
+	// [[routines]] and [[scripts]] adopt the same key with #93.
+	Enabled *bool `toml:"enabled"`
 	// Description tells the model what this feed watches, so "what's the AMD
 	// price?" reaches for the right one. It appears in the tool schema.
 	Description string `toml:"description"`
@@ -99,6 +110,10 @@ const (
 // name, description and command is complete and usable.
 func applyKnowledgeDefaults(cfg *Config) {
 	for i, f := range cfg.Knowledge.Feeds {
+		if f.Enabled == nil {
+			enabled := true
+			f.Enabled = &enabled
+		}
 		if f.Mode == "" {
 			f.Mode = FeedModeEager
 		}
@@ -186,6 +201,12 @@ func (c Config) knowledgeProblems() []string {
 		}
 	}
 	return problems
+}
+
+// IsEnabled reads the enabled switch with its default applied, for callers
+// that may see a feed before applyKnowledgeDefaults ran (absent means true).
+func (f KnowledgeFeed) IsEnabled() bool {
+	return f.Enabled == nil || *f.Enabled
 }
 
 // KnowledgeFeedNames lists the configured feed names in declaration order —

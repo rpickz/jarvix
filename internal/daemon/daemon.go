@@ -464,7 +464,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// background-refresh decision is the knowledge.refresh identity's tier,
 	// consulted once here: the tools section is restart-class, so the answer
 	// holds for the daemon's life.
-	feeds := newKnowledgeService(cfg, paths, policy, logger)
+	feeds := newKnowledgeService(cfg, paths, policy, bus, logger)
 
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).

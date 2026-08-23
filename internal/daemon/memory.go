@@ -105,6 +105,51 @@ func (d *Daemon) registerMemoryMethods() {
 		}
 		return map[string]any{"forgotten": true, "fact": factReport(forgotten)}, nil
 	})
+
+	// The window's per-fact Forget button (issue #92). Where memory.forget
+	// above is the CLI's direct line — the user typed the id, deliberately —
+	// a button in a listing deserves the same second look the model gets, so
+	// this routes through the gated tool path instead: the engine runs the
+	// memory.forget identity through the permission gate, the standard
+	// confirmation card appears (naming the exact fact, resolved from the
+	// store), and only an approval deletes. The reply carries the session id;
+	// resolution arrives as the ordinary tool.* events.
+	d.server.Handle("memory.forget_gated", func(params json.RawMessage) (any, error) {
+		if d.memory == nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams,
+				"memory is disabled (memory.enabled = false)")
+		}
+		p := struct {
+			ID string `json:"id"`
+		}{}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "memory.forget_gated params: %v", err)
+			}
+		}
+		if p.ID == "" {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "memory.forget_gated needs an id")
+		}
+		// Resolved here so an unknown id is a crisp error to the caller, not
+		// a session that starts only to apologise — and so the conversation
+		// record can name the fact being forgotten.
+		var content string
+		for _, f := range d.memory.List("") {
+			if f.ID == p.ID {
+				content = f.Content
+				break
+			}
+		}
+		if content == "" {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams,
+				"no remembered fact has id %q; memory.list shows what is stored", p.ID)
+		}
+		id, err := d.engine.ForgetFact(p.ID, content)
+		if err != nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return map[string]string{"session_id": id}, nil
+	})
 }
 
 // factReport renders one fact for the wire, trail included, timestamps in

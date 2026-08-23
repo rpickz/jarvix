@@ -14,9 +14,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -41,6 +43,7 @@ func feedSpecs(cfg config.Config) []knowledge.Feed {
 			TTL:         time.Duration(f.TTLSec) * time.Second,
 			Timeout:     time.Duration(f.TimeoutSec) * time.Second,
 			Inject:      f.Inject,
+			Enabled:     f.IsEnabled(),
 		})
 	}
 	return specs
@@ -51,7 +54,7 @@ func feedSpecs(cfg config.Config) []knowledge.Feed {
 // gate is consulted here, once: the tools section is restart-class, so the
 // background-refresh decision holds for the daemon's life.
 func newKnowledgeService(cfg config.Config, paths config.Paths, policy *tools.Policy,
-	log *slog.Logger) *knowledge.Service {
+	bus *session.Bus, log *slog.Logger) *knowledge.Service {
 	if len(cfg.Knowledge.Feeds) == 0 {
 		return nil
 	}
@@ -61,6 +64,13 @@ func newKnowledgeService(cfg config.Config, paths config.Paths, policy *tools.Po
 		MaxInjectedTokens: cfg.Knowledge.MaxInjectedTokens,
 		RefreshAllowed:    refreshAllowed,
 		ScrubEnv:          providerKeyEnvNames(cfg),
+		// Every completed fetch — scheduled or RefreshNow — is announced so
+		// open windows refresh their cards. Names only, never values: the
+		// value is fetched with knowledge.status, over the socket, on request.
+		Notify: func(name string) {
+			bus.Publish(session.Event{Type: "knowledge.updated",
+				Data: map[string]any{"feed": name}})
+		},
 	}, log)
 	log.Info("knowledge feeds enabled", "component", "knowledge",
 		"feeds", cfg.KnowledgeFeedNames(), "path", paths.FeedsFile(),
@@ -95,29 +105,46 @@ func (d *Daemon) knowledgeInFlight() int {
 	return d.knowledge.InFlight()
 }
 
-// registerKnowledgeMethods adds the feed status IPC surface. Registered even
-// with feeds disabled, answering enabled=false, so a client can tell
-// "switched off" from "old daemon" — the memory.* precedent.
+// registerKnowledgeMethods adds the feed IPC surface: the status listing, and
+// the two admin verbs the window's cards call (issue #92) — refresh_now
+// (fetch this feed, now, through the scheduled path) and set_enabled (park or
+// resume this feed, persisted into config.toml through the surgical entry
+// editor). Registered even with feeds disabled, answering enabled=false, so a
+// client can tell "switched off" from "old daemon" — the memory.* precedent.
 func (d *Daemon) registerKnowledgeMethods() {
 	d.server.Handle("knowledge.status", func(json.RawMessage) (any, error) {
 		if d.knowledge == nil {
 			return map[string]any{"enabled": false}, nil
 		}
+		// The config file's fingerprint travels with the listing so a
+		// set_enabled built from these cards can detect an external edit —
+		// the config.get/config.set contract, restated for this surface.
+		fp, err := config.FingerprintFile(d.paths.ConfigFile())
+		if err != nil {
+			return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+		}
 		statuses := d.knowledge.Status()
 		feeds := make([]map[string]any, 0, len(statuses))
 		for _, st := range statuses {
 			entry := map[string]any{
-				"name":      st.Name,
-				"mode":      string(st.Mode),
-				"inject":    st.Inject,
-				"has_value": st.HasValue,
-				"stale":     st.Stale,
-				"failing":   st.Failing,
+				"name":         st.Name,
+				"mode":         string(st.Mode),
+				"enabled":      st.Enabled,
+				"interval_sec": int(st.Interval / time.Second),
+				"ttl_sec":      int(st.TTL / time.Second),
+				"inject":       st.Inject,
+				"has_value":    st.HasValue,
+				"stale":        st.Stale,
+				"failing":      st.Failing,
 			}
 			if st.HasValue {
 				entry["value"] = st.Value
 				entry["fetched"] = st.FetchedAt.Format(time.RFC3339)
 				entry["age_sec"] = int(st.Age / time.Second)
+				// The spoken-style age every surface shares (ADR 0031's
+				// honesty contract, carried to the eyes): worded here so the
+				// window never invents its own scale.
+				entry["age_spoken"] = st.AgeSpoken
 			}
 			if st.Failing {
 				entry["failing_since"] = st.FailingSince.Format(time.RFC3339)
@@ -127,9 +154,115 @@ func (d *Daemon) registerKnowledgeMethods() {
 			feeds = append(feeds, entry)
 		}
 		return map[string]any{
-			"enabled": true,
-			"path":    d.knowledge.Path(),
-			"feeds":   feeds,
+			"enabled":     true,
+			"path":        d.knowledge.Path(),
+			"fingerprint": fp,
+			"feeds":       feeds,
 		}, nil
 	})
+
+	// knowledge.refresh_now: an immediate fetch through the exact scheduled
+	// path — same runner, same single-flight latch per feed, same gate
+	// identity (knowledge.refresh must be allow, the decision the scheduler
+	// itself runs under). The fetch is asynchronous; completion arrives as
+	// the knowledge.updated event, like any scheduled fetch's.
+	d.server.Handle("knowledge.refresh_now", func(params json.RawMessage) (any, error) {
+		if d.knowledge == nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams,
+				"no knowledge feeds are configured ([[knowledge.feeds]] in config.toml)")
+		}
+		var p struct {
+			Name string `json:"name"`
+		}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "knowledge.refresh_now params: %v", err)
+			}
+		}
+		if err := d.knowledge.RefreshNow(p.Name); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+		}
+		return map[string]any{"started": true}, nil
+	})
+
+	// knowledge.set_enabled: park or resume one feed, persisted. The write is
+	// the settings discipline end to end (ADR 0015): fingerprint-checked
+	// against external edits, applied through the surgical entry editor so
+	// comments and sibling entries survive byte-for-byte, validated as a
+	// whole configuration before anything lands, written atomically, and
+	// picked up by the same reload path a hand edit uses — the scheduler
+	// drops or readopts the feed through Reconfigure, values kept.
+	d.server.Handle("knowledge.set_enabled", d.handleKnowledgeSetEnabled)
+}
+
+// handleKnowledgeSetEnabled is the set_enabled body; see the registration
+// comment for the contract.
+func (d *Daemon) handleKnowledgeSetEnabled(params json.RawMessage) (any, error) {
+	if d.knowledge == nil {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams,
+			"no knowledge feeds are configured ([[knowledge.feeds]] in config.toml)")
+	}
+	var p struct {
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
+		// Fingerprint is the config fingerprint from the client's
+		// knowledge.status (or config.get). When present, a mismatch with
+		// the file on disk fails the set — hand edits are never clobbered.
+		Fingerprint string `json:"fingerprint"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "knowledge.set_enabled params: %v", err)
+		}
+	}
+
+	path := d.paths.ConfigFile()
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	fp := config.FingerprintMissing
+	if raw != nil {
+		fp = config.Fingerprint(raw)
+	}
+	if p.Fingerprint != "" && p.Fingerprint != fp {
+		return nil, &ipc.Error{
+			Code: ipc.CodeConfigConflict,
+			Message: "config.toml changed on disk since it was read; " +
+				"the feed list has been refreshed — try the switch again",
+			Data: map[string]any{"fingerprint": fp},
+		}
+	}
+
+	newRaw, err := config.SetEntryField(raw, "knowledge.feeds", p.Name, "enabled", p.Enabled)
+	if err != nil {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+	}
+	fileCfg, err := config.ParseBytes(newRaw)
+	if err != nil {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "rewrite config: %v", err)
+	}
+	fileCfg.Voices = fileCfg.InstalledVoices(d.paths)
+	if err := fileCfg.Validate(); err != nil {
+		return nil, &ipc.Error{
+			Code:    ipc.CodeConfigInvalid,
+			Message: "the change was rejected by validation; nothing was written",
+			Data:    map[string]any{"problems": validationProblems(err)},
+		}
+	}
+	if err := config.WriteFileAtomic(path, newRaw); err != nil {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "write config: %v", err)
+	}
+
+	applied, reason := d.applyRuntime(fileCfg)
+	newFP := config.Fingerprint(newRaw)
+	d.publishConfigChanged(newFP)
+	result := map[string]any{
+		"fingerprint": newFP,
+		"applied":     applied,
+	}
+	if reason != "" {
+		result["reason"] = reason
+	}
+	return result, nil
 }
