@@ -220,6 +220,15 @@ func (w *WarmSynthesizer) stream(ctx context.Context, child *kokoroChild, id str
 	frames, readErr := readFrames(child.proc.Stdout, id)
 
 	forward := func(f frame) bool {
+		// Checked, not selected: select chooses uniformly among ready cases,
+		// so a cancel that had already landed could lose to a receiver that
+		// is also ready and let a cancelled utterance play (#89, found in the
+		// piper adapter's identical window). The explicit check makes the
+		// delivered cancel win, so "cancelled before the first chunk" always
+		// aborts instead of speaking.
+		if ctx.Err() != nil {
+			return false
+		}
 		select {
 		case out <- tts.Chunk{PCM: f.payload}:
 			spoken = true
