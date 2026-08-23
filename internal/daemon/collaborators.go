@@ -11,6 +11,7 @@ import (
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/session"
@@ -192,13 +193,17 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 // the daemon's knowledge base (ADR 0025), nil when memory is disabled — it is
 // a parameter rather than rebuilt from cfg because the store is
 // construction-wired (restart-class) and must stay the same instance the
-// memory tools write through. bus carries the routine progress events
+// memory tools write through. feeds is the feed cache (ADR 0030) on the same
+// terms: one instance serves the scheduler, the knowledge.get tool, and the
+// injection, and a reload swaps its feed set through Reconfigure rather than
+// ever rebuilding the service. bus carries the routine progress events
 // (ADR 0026). archive is the durable conversation store (ADR 0027), a
 // parameter for the same reason as book: one instance serves the engine's
 // appends and the conversation.* IPC methods, and only the retention switch
 // here decides whether the engine writes to it.
 func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
-	book *memory.Book, archive conversations.Store, logger *slog.Logger) session.Options {
+	book *memory.Book, feeds *knowledge.Service, archive conversations.Store,
+	logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -215,6 +220,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Memory:            memoryInjector(book),
+		Knowledge:         knowledgeInjector(feeds),
 		Archive:           conversationArchive(cfg, archive),
 		WakeWord:          cfg.Activation.WakeWord,
 		Lexicon:           cfg.TTS.Lexicon,

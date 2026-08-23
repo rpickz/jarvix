@@ -76,7 +76,10 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 	}
 	// One result per configured advisor, so a CLI that moved is visible
 	// before someone asks Jarvix to consult it (ADR 0016).
-	return append(results, advisorChecks(cfg)...)
+	results = append(results, advisorChecks(cfg)...)
+	// The feed cache (ADR 0030): per-feed command availability, plus the
+	// running scheduler's health — fresh, stale, failing since when.
+	return append(results, knowledgeChecks(cfg, paths)...)
 }
 
 // Healthy reports whether no check failed (warnings are tolerated).

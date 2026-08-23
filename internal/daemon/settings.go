@@ -283,6 +283,13 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	// Memory is restart-class with the rest of the tool registry: the store
 	// and the memory tools are wired at construction (ADR 0025).
 	merged.Memory = running.Memory
+	// Knowledge feeds are idle-class *once the service exists*: the tables
+	// swap through Reconfigure below. With no feeds at boot there is no
+	// service and no registered tool, so the section is pinned like memory —
+	// the first feed takes a restart, exactly as the docs say (ADR 0030).
+	if d.knowledge == nil {
+		merged.Knowledge = running.Knowledge
+	}
 	merged.Log = running.Log
 
 	if !idleClassChanged(running, merged) {
@@ -299,7 +306,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	}
 	capture := newLayoutCapturer(d.paths, d.compositor, d.log)
 	capture.committed = d.captureCommitted
-	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.conversations, d.log)
+	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.knowledge, d.conversations, d.log)
 	opts.Capture = capture
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, opts); err != nil {
@@ -313,6 +320,14 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		d.cfg.UI = merged.UI
 		d.cfgMu.Unlock()
 		return false, err.Error()
+	}
+	// The engine swap succeeded, so the feed schedules follow the same
+	// configuration (ADR 0030): the service keeps its cached values and its
+	// tracked group, only the feed set and timers rebuild — the old loops
+	// unwind into the same group shutdown drains, so a reload can never
+	// orphan one (the #74 lesson).
+	if d.knowledge != nil && !reflect.DeepEqual(running.Knowledge, merged.Knowledge) {
+		d.knowledge.Reconfigure(feedSpecs(merged))
 	}
 	// The swap succeeded: the previous configuration's engine processes are
 	// nobody's children now, so kill them. Without this a reload leaks a
@@ -360,7 +375,12 @@ func idleClassChanged(running, next config.Config) bool {
 		}
 	}
 	return !reflect.DeepEqual(running.Routines, next.Routines) ||
-		!reflect.DeepEqual(running.Intents.Custom, next.Intents.Custom)
+		!reflect.DeepEqual(running.Intents.Custom, next.Intents.Custom) ||
+		// [knowledge] is a structured table on the same terms as [[routines]]:
+		// no settings-registry entry, compared directly so a hand edit plus
+		// reload actually reschedules the feeds (ADR 0030). With no service
+		// the section was pinned above, so this can never fire spuriously.
+		!reflect.DeepEqual(running.Knowledge, next.Knowledge)
 }
 
 // publishConfigChanged tells every connected client (overlay, windows, CLIs)
