@@ -1,0 +1,13 @@
+# parked feeds stay in the file, values kept
+[[knowledge.feeds]]
+name = "amd"
+description = "AMD share price"
+command = ["/home/me/bin/amd-price"]
+enabled = true # switched off from the window
+ttl_sec = 900
+
+[[knowledge.feeds]]
+name = "weather"
+description = "Local weather"
+command = ["/home/me/bin/weather"]
+mode = "lazy"

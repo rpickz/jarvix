@@ -154,6 +154,7 @@ func eagerFeed(name string) Feed {
 		Name: name, Description: name + " test feed",
 		Argv: []string{"/bin/false"}, Mode: ModeEager,
 		Interval: 5 * time.Minute, TTL: 10 * time.Minute, Timeout: 30 * time.Second,
+		Enabled: true,
 	}
 }
 

@@ -163,7 +163,17 @@ func (k *KnowledgeGet) Execute(ctx context.Context, input json.RawMessage) (stri
 	}
 
 	log.Info("feed read", "component", "tools", "tool", k.Name(), "feed", name,
-		"has_value", reading.HasValue, "stale", reading.Stale, "failing", reading.Failing)
+		"enabled", reading.Feed.Enabled, "has_value", reading.HasValue,
+		"stale", reading.Stale, "failing", reading.Failing)
+
+	if !reading.Feed.Enabled {
+		// Parked means parked everywhere the model looks (issue #92): the
+		// cached value stays visible in the user's own window, but a feed the
+		// user switched off must not keep answering through the tool.
+		return fmt.Sprintf("The %s feed is disabled in the configuration, so you have no "+
+			"current value for it. Tell the user in one short sentence that their %s feed "+
+			"is switched off, and do not guess a value.", name, name), nil
+	}
 
 	if !reading.HasValue {
 		if reading.Failing {

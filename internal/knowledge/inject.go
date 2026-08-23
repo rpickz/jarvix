@@ -45,7 +45,10 @@ func (s *Service) Inject() Injection {
 	now := s.now()
 	lines := make([]string, 0, len(s.feeds))
 	for _, f := range s.feeds {
-		if !f.Inject {
+		// A disabled feed keeps its value but leaves the model's context: the
+		// user parked it, and injecting an ageing value would un-park it in
+		// the one place they cannot see.
+		if !f.Inject || !f.Enabled {
 			continue
 		}
 		r := s.readingLocked(f)

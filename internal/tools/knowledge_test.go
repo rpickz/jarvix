@@ -42,7 +42,7 @@ func askKnowledge(t *testing.T, k *KnowledgeGet, feed string) string {
 
 func amdFeed() knowledge.Feed {
 	return knowledge.Feed{Name: "amd", Description: "AMD share price in dollars",
-		Mode: knowledge.ModeEager, TTL: 10 * time.Minute}
+		Mode: knowledge.ModeEager, TTL: 10 * time.Minute, Enabled: true}
 }
 
 func TestKnowledgeGetSpeaksTheValueWithItsAge(t *testing.T) {
@@ -104,7 +104,7 @@ func TestKnowledgeGetFailingWithNoValue(t *testing.T) {
 }
 
 func TestKnowledgeGetUnknownFeedListsWhatItCanWatch(t *testing.T) {
-	weather := knowledge.Feed{Name: "weather", Description: "local weather"}
+	weather := knowledge.Feed{Name: "weather", Description: "local weather", Enabled: true}
 	f := &fakeFeeds{feeds: []knowledge.Feed{amdFeed(), weather}}
 	out := askKnowledge(t, knowledgeTool(f), "tesla")
 	if !strings.Contains(out, `No feed is named "tesla"`) {

@@ -45,6 +45,37 @@ command = ["/home/me/bin/amd-price"]
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("a minimal feed table failed validation: %v", err)
 	}
+	if f.Enabled == nil || !*f.Enabled {
+		t.Error("enabled did not default to true — the [[family]] convention (issue #92)")
+	}
+}
+
+// TestKnowledgeFeedEnabledSwitch: `enabled = false` parks a feed, the entry
+// stays fully validated, and a disabled feed still fails validation when it
+// is broken — re-enabling must never surprise.
+func TestKnowledgeFeedEnabledSwitch(t *testing.T) {
+	cfg := parseKnowledge(t, `
+[[knowledge.feeds]]
+name = "amd"
+description = "AMD share price"
+command = ["/home/me/bin/amd-price"]
+enabled = false
+`)
+	if cfg.Knowledge.Feeds[0].IsEnabled() {
+		t.Error("enabled = false was not honoured")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("a disabled feed failed validation: %v", err)
+	}
+	broken := parseKnowledge(t, `
+[[knowledge.feeds]]
+name = "amd"
+command = []
+enabled = false
+`)
+	if err := broken.Validate(); err == nil {
+		t.Error("a disabled feed skipped validation; re-enabling it could then surprise")
+	}
 }
 
 func TestKnowledgeLazyTTLDefault(t *testing.T) {
