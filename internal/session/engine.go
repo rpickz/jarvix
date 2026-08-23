@@ -86,6 +86,10 @@ type Options struct {
 	// base (ADR 0025) — for turns that reach the model. Nil disables it
 	// entirely: no consultation, no message, no cost.
 	Memory MemoryInjector
+	// Knowledge supplies the live feed values block — cached readings from
+	// the user's configured feeds (ADR 0030) — for turns that reach the
+	// model. Nil disables it entirely: no consultation, no message, no cost.
+	Knowledge KnowledgeInjector
 	// Archive is the durable conversation store (ADR 0027). Every completed
 	// exchange is appended to it *before* HistoryTurns trims the in-memory
 	// head: the cap governs what the model is sent, never what is kept. Nil
@@ -884,7 +888,10 @@ func (e *Engine) think(s *sess) {
 	// The knowledge base is consulted on the same terms (ADR 0025): only a
 	// turn that reaches the provider pays, and what it pays is one stat(2).
 	remembered := e.gatherMemory(s)
-	messages := e.conversationMessages(s.transcript, snapshot, remembered.Message)
+	// Feed values likewise (ADR 0030): cached readings only, never a fetch —
+	// a turn must not wait on a feed command.
+	feeds := e.gatherKnowledge(s)
+	messages := e.conversationMessages(s.transcript, snapshot, remembered.Message, feeds.Message)
 
 	var toolDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
@@ -1100,7 +1107,13 @@ func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
 // stays adjacent to the question that moment belongs to. Like the capture,
 // the block is never committed to history: it is rebuilt fresh each turn, so
 // a hand-edit or a forget is reflected on the very next question.
-func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot, remembered string) []ai.Message {
+// Feed values (ADR 0030) sit with the capture, not with the remembered
+// facts: a feed reading describes "right now" — its whole content is a value
+// and an age measured at this turn — so like the capture it stays adjacent
+// to the question that moment belongs to, and like the capture it is never
+// committed to history: rebuilt fresh each turn, so an answer can never
+// quote last turn's price with this turn's confidence.
+func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot, remembered, feeds string) []ai.Message {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.opts.FollowUpWindow > 0 && !e.lastTurn.IsZero() &&
@@ -1130,6 +1143,9 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 	msgs = append(msgs, e.history...)
 	if captured := snapshot.Message(); captured != "" {
 		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: captured})
+	}
+	if feeds != "" {
+		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: feeds})
 	}
 	msgs = append(msgs, ai.Message{Role: ai.RoleUser, Content: userText})
 	return msgs
