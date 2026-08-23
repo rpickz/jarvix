@@ -211,6 +211,16 @@ func (w *WarmSynthesizer) stream(ctx context.Context, child *piperChild, req tts
 		}
 		w.supervisor().Release()
 		for start := 0; start < len(pcm); start += pcmChunk {
+			// Checked, not selected: select chooses uniformly among ready
+			// cases, so a cancel that had already landed could lose to a
+			// receiver that is also ready — under scheduler delay, an
+			// utterance cancelled before any audio played in full (#89).
+			// The explicit check makes the delivered cancel win, so
+			// "cancelled before the first chunk" always ends Canceled.
+			if err := ctx.Err(); err != nil {
+				sendErr(ctx, out, err)
+				return
+			}
 			end := min(start+pcmChunk, len(pcm))
 			select {
 			case out <- tts.Chunk{PCM: pcm[start:end]}:
