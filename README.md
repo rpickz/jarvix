@@ -148,7 +148,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Save the desktop you already arranged | **"Jarvix, save this as my morning setup"** — the live window layout is read once and written as a `[[routines]]` entry (comment-preserving, provenance-stamped), immediately runnable and hand-editable; an existing name asks before it is replaced. See [docs/configuration.md](docs/configuration.md#capturing-a-routine-from-the-live-desktop-save-this-as-) |
 | Run your own script by voice | **Say a script's phrase** ("Jarvix, backup my notes") — a `[[scripts]]` entry in config.toml names an executable and its trigger phrases; it runs behind the permission gate (asks first by default, naming the script and its path), with zero arguments, and speaks the outcome. `jarvix scripts` lists them, `jarvix scripts run "backup notes"` triggers one, the window has a Run button — see [docs/configuration.md](docs/configuration.md#scripts-scripts) |
 | Fresh conversation | `jarvix new` — the current thread is archived, not destroyed |
-| Past conversations | `jarvix conversations` lists them; `show`, `open`, `delete <id>`/`--all` — or the window's **History** button |
+| Past conversations | `jarvix conversations` lists them; `show`, `open`, `delete <id>`/`--all` — or the window's **Library** tab |
 | Change the accent | `jarvix voices` lists what is installed, by language and gender |
 | Health check | `jarvix doctor` |
 | Daemon state | `jarvix status` |
@@ -297,7 +297,7 @@ Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive
 `jarvix new` archives the thread instead of destroying it, whole — the
 `history_turns` cap only limits what the model is sent, never what is kept.
 `jarvix conversations` lists the archive newest-first (the window's
-**History** button shows the same library), `show` prints one read-only,
+**Library** tab shows the same library), `show` prints one read-only,
 `open` continues one as the active thread with its context, and
 `delete <id>` / `delete --all` actually remove the files — the archive lives
 under your XDG state dir, private (0600), and never leaves the machine. Set
@@ -309,7 +309,7 @@ ask Jarvix "what did we decide about the deployment approach?" and it
 searches past conversations with the `conversations.search` tool, quotes
 what it finds, and says when it was said in words ("last Tuesday") — and if
 nothing matches, it says it found nothing rather than inventing a
-recollection. The same search is yours directly: type in the History view's
+recollection. The same search is yours directly: type in the Library tab's
 search box, or run `jarvix conversations search <query>` (which works with
 the daemon stopped, straight off the files). Results are ranked — exact
 phrase first, then recency — and distinguish "earlier in this conversation"

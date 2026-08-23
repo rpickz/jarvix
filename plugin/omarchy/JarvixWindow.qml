@@ -26,28 +26,92 @@ FloatingWindow {
   id: win
   visible: false
   title: "Jarvix"
-  implicitWidth: 520
+  // Wide enough for the tab strip to sit on one line at the default font
+  // scale; the strip is a Flow, so a narrower window wraps it rather than
+  // clipping tabs out of reach.
+  implicitWidth: 600
   implicitHeight: 640
   color: Color.background
 
-  // The settings screen replaces the conversation while open (issue #9);
-  // Escape closes it before closing the window.
-  property bool settingsOpen: false
+  // The window's surfaces are tabs (issue #91): one strip across the top,
+  // one content pane below it, Chat first and default. Tab selection is
+  // presentation state and nothing else (ADR 0013) — every data flow below
+  // is unchanged by which tab is showing, so Chat keeps streaming and a
+  // pending confirmation keeps counting down behind whatever tab is open.
+  //
+  // The surfaces the tabs show:
+  //   chat        — the conversation, composer, and confirmation card.
+  //   activity    — the daemon's activity feed (issue #70): every row
+  //                 arrives already worded — assembled daemon-side from bus
+  //                 events, served by activity.get plus activity.row pushes —
+  //                 so the screen renders text, looks up glyphs
+  //                 (ActivityState.js, generated from Go), and decides
+  //                 nothing (ADR 0013).
+  //   library     — archived conversations (ADR 0027), one read-only with a
+  //                 Resume button: conversation.list / conversation.read, and
+  //                 Resume is one conversation.open call — the daemon owns
+  //                 what reopening means.
+  //   automations — the configured routines (ADR 0026) and scripts
+  //                 (ADR 0030), read-only listings with Run.
+  //   knowledge   — the feed cache (ADR 0031), read-only from
+  //                 knowledge.status.
+  //   memory      — the fact store (ADR 0025), read-only from memory.list.
+  //   settings    — the settings screen (issue #9), unchanged inside its tab.
+  readonly property var tabs: [
+    { id: "chat", label: "Chat" },
+    { id: "activity", label: "Activity" },
+    { id: "library", label: "Library" },
+    { id: "automations", label: "Automations" },
+    { id: "knowledge", label: "Knowledge" },
+    { id: "memory", label: "Memory" },
+    { id: "settings", label: "Settings" }
+  ]
+  property string currentTab: "chat"
 
-  // The history screen lists archived conversations and shows one read-only
-  // (ADR 0027); like settings it replaces the conversation while open. It
-  // holds no decisions of its own (ADR 0013): it renders conversation.list /
-  // conversation.read, and Resume is one conversation.open call — the daemon
-  // owns what reopening means.
-  property bool historyOpen: false
-  property string historyDetailId: "" // "" shows the listing; an id shows that record
+  property string historyDetailId: "" // "" shows the Library listing; an id shows that record
 
-  // The Activity screen (issue #70) shows what Jarvix is doing and has done:
-  // the daemon's activity feed, live. Every row arrives already worded —
-  // assembled daemon-side from bus events and served by activity.get plus
-  // activity.row pushes — so this screen renders text and looks up glyphs
-  // (ActivityState.js, generated from Go) and decides nothing (ADR 0013).
-  property bool activityOpen: false
+  function tabIndexOf(id) {
+    for (var i = 0; i < tabs.length; i++) {
+      if (tabs[i].id === id) return i
+    }
+    return 0
+  }
+
+  // openTab switches the content pane. Each tab keeps its own scroll and
+  // state for the life of the window — the surfaces stay instantiated and
+  // only visibility changes — so switching refreshes data where it could be
+  // stale but never resets what the user was looking at.
+  function openTab(id) {
+    currentTab = id
+    if (id === "library") requestHistory()
+    else if (id === "knowledge") requestKnowledge()
+    else if (id === "memory") requestMemory()
+    else if (id === "chat" && pendingCardIndex >= 0) {
+      // A permission question must never be hidden by tab state: coming back
+      // to Chat lands on the card, wherever the list had been scrolled.
+      Qt.callLater(function() {
+        if (win.pendingCardIndex >= 0) list.positionViewAtIndex(win.pendingCardIndex, ListView.End)
+      })
+    }
+  }
+
+  // stepTab selects the tab `delta` places along the strip, wrapping. The
+  // arrow keys also move focus with the selection so the strip behaves like
+  // one control; Ctrl+Tab cycles without stealing focus from the content.
+  function stepTab(delta, moveFocus) {
+    var next = (tabIndexOf(currentTab) + delta + tabs.length) % tabs.length
+    openTab(tabs[next].id)
+    if (moveFocus) {
+      var item = tabRepeater.itemAt(next)
+      if (item) item.forceActiveFocus()
+    }
+  }
+
+  function focusComposer() {
+    Qt.callLater(function() {
+      if (win.currentTab === "chat") composerInput.forceActiveFocus()
+    })
+  }
 
   // --- daemon state -------------------------------------------------------
   property bool socketReady: false
@@ -74,14 +138,13 @@ FloatingWindow {
   function closeWindow() { visible = false }
   function toggleWindow() { visible = !visible }
 
-  // Open straight onto the settings screen. Settings live inside this window
+  // Open straight onto the Settings tab. Settings live inside this window
   // rather than in a window of their own (issue #9), so "open settings" is
   // "open the window, already showing settings" — what the bar widget's
-  // Settings action asks for. Escape still steps back to the conversation
-  // before closing, so the shortcut cannot strand anyone.
+  // Settings action asks for. Escape still steps back to Chat before
+  // closing, so the shortcut cannot strand anyone.
   function openSettings() {
-    activityOpen = false
-    settingsOpen = true
+    openTab("settings")
     visible = true
   }
 
@@ -94,15 +157,11 @@ FloatingWindow {
       // typed into without reaching for the mouse first. Deferred, because
       // this runs before the toplevel is mapped and focus given to an
       // unmapped window goes nowhere.
-      Qt.callLater(function() { composerInput.forceActiveFocus() })
+      focusComposer()
     } else {
       daemon.connected = false
     }
   }
-
-  // Leaving the settings screen returns to the conversation — and to the
-  // composer, for the same reason.
-  onSettingsOpenChanged: { if (visible && !settingsOpen) composerInput.forceActiveFocus() }
 
   // Events are delivered on the same connection as the conversation.get
   // response, and the daemon writes notifications and responses
@@ -128,13 +187,6 @@ FloatingWindow {
   // that raced the snapshot is deduplicated because seq never repeats.
   property int activityLimit: 400
   property int activityRequestId: 0
-
-  function openActivity() {
-    settingsOpen = false
-    historyOpen = false
-    historyDetailId = ""
-    activityOpen = true
-  }
 
   function requestActivity() {
     if (!daemon.connected) return
@@ -208,6 +260,93 @@ FloatingWindow {
     daemon.write(JSON.stringify({
       jsonrpc: "2.0", id: 18, method: "scripts.run", params: { name: name }
     }) + "\n")
+  }
+
+  // --- knowledge feeds ----------------------------------------------------
+  // The Knowledge tab (issue #91): the daemon's feed cache, read-only —
+  // knowledge.status is the whole surface (ADR 0031). Feed management is a
+  // sibling ticket's job; this listing only shows what the daemon reports:
+  // each feed's mode, whether it is offered to the model, and its
+  // freshness/failing state, all worded here from the daemon's own facts.
+  property var knowledgeFeeds: []
+  property bool knowledgeEnabled: true
+  property int knowledgeRequestId: 0
+
+  function requestKnowledge() {
+    if (!daemon.connected) return
+    knowledgeRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeRequestId,
+      method: "knowledge.status" }) + "\n")
+  }
+
+  function loadKnowledge(result) {
+    knowledgeEnabled = result.enabled !== false
+    knowledgeFeeds = result.feeds || []
+  }
+
+  // feedFreshness words one feed's state — presentation, like stateLabel:
+  // every fact in the sentence is the daemon's own report, and a failing
+  // feed always carries its reason in words.
+  function feedFreshness(feed) {
+    if (feed.failing) {
+      var line = "failing since "
+        + String(feed.failing_since || "").substring(0, 16).replace("T", " ")
+      if (feed.last_error) line += " — " + String(feed.last_error)
+      return line
+    }
+    if (!feed.has_value) return "no value fetched yet"
+    return (feed.stale ? "stale — fetched " : "fresh — fetched ")
+      + feedAge(Number(feed.age_sec || 0)) + " ago"
+  }
+
+  function feedAge(sec) {
+    if (sec < 60) return sec + "s"
+    if (sec < 3600) return Math.floor(sec / 60) + "m"
+    if (sec < 86400) return Math.floor(sec / 3600) + "h"
+    return Math.floor(sec / 86400) + "d"
+  }
+
+  // --- memory -------------------------------------------------------------
+  // The Memory tab (issue #91): the fact store, read-only, straight from
+  // memory.list (ADR 0025) — each fact with its stored date and how many
+  // earlier versions its supersede trail holds. Forgetting and editing are
+  // a sibling ticket's job.
+  property var memoryFacts: []
+  property bool memoryEnabled: true
+  property int memoryFactCount: 0
+  property int memoryFactMax: 0
+  property int memoryRequestId: 0
+
+  function requestMemory() {
+    if (!daemon.connected) return
+    memoryRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: memoryRequestId,
+      method: "memory.list" }) + "\n")
+  }
+
+  function loadMemory(result) {
+    memoryEnabled = result.enabled !== false
+    memoryFacts = result.facts || []
+    memoryFactCount = Number(result.count || 0)
+    memoryFactMax = Number(result.max || 0)
+  }
+
+  // factMeta words one fact's dates for its row: stored, confirmed (when a
+  // later turn re-confirmed it), and the length of its supersede trail.
+  function factMeta(fact) {
+    var meta = "stored " + String(fact.stored || "").substring(0, 10)
+    var updated = String(fact.updated || "").substring(0, 10)
+    if (updated !== "" && updated !== String(fact.stored || "").substring(0, 10)) {
+      meta += " · confirmed " + updated
+    }
+    var previous = fact.previous || []
+    if (previous.length > 0) {
+      meta += " · " + previous.length
+        + (previous.length === 1 ? " earlier version" : " earlier versions")
+    }
+    return meta
   }
 
   // --- typed turns --------------------------------------------------------
@@ -352,16 +491,6 @@ FloatingWindow {
   // screen; cleared by emptying the search box or reopening history.
   property bool searchActive: false
 
-  function openHistory() {
-    settingsOpen = false
-    activityOpen = false
-    historyOpen = true
-    historyDetailId = ""
-    searchActive = false
-    historySearchInput.text = ""
-    requestHistory()
-  }
-
   function requestHistory() {
     if (!daemon.connected) return
     historyListRequestId = nextRequestId
@@ -468,10 +597,11 @@ FloatingWindow {
         errorMessage = String(frame.error.message || "the conversation could not be reopened")
         return
       }
-      // Reopened: back to the conversation view, whose snapshot is the
-      // authoritative account of what the thread now is.
-      historyOpen = false
+      // Reopened: back to the Chat tab, whose snapshot is the authoritative
+      // account of what the thread now is.
       historyDetailId = ""
+      openTab("chat")
+      focusComposer()
       requestConversation()
     }
   }
@@ -601,12 +731,14 @@ FloatingWindow {
       // re-request the authoritative snapshot rather than guessing what the
       // change meant, and refresh the library if it is on screen.
       requestConversation()
-      if (historyOpen) requestHistory()
+      if (currentTab === "library") requestHistory()
       break
     case "config.changed":
-      // A saved config may have added or renamed routines or scripts.
+      // A saved config may have added or renamed routines, scripts, or
+      // knowledge feeds — all three collections live in config.toml.
       requestRoutines()
       requestScripts()
+      requestKnowledge()
       break
     }
   }
@@ -637,6 +769,10 @@ FloatingWindow {
           // moment late" would alarm without informing.
         } else if (frame.id !== undefined && frame.id === win.activityRequestId) {
           if (frame.result) win.loadActivity(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.knowledgeRequestId) {
+          if (frame.result) win.loadKnowledge(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
+          if (frame.result) win.loadMemory(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
                    frame.id === win.historyReadRequestId ||
                    frame.id === win.historyOpenRequestId ||
@@ -673,6 +809,14 @@ FloatingWindow {
         // honest), so a reconnect — possibly to a restarted daemon — always
         // converges on what the daemon actually holds.
         win.requestActivity()
+        // The collection tabs are populated on connect too, so whichever tab
+        // the window reopens on shows data, not a stale blank. The Library
+        // listing is only fetched while its tab is the one showing — it can
+        // be large, and every route to it refreshes it (openTab,
+        // conversation.changed, here).
+        win.requestKnowledge()
+        win.requestMemory()
+        if (win.currentTab === "library") win.requestHistory()
       } else {
         win.sessionState = "idle"
         win.assistantStreaming = false
@@ -755,104 +899,98 @@ FloatingWindow {
         font.pixelSize: Style.font.subtitle
         color: Util.alpha(Color.popups.text, 0.7)
       }
+    }
 
-      // Activity toggle: the live feed of what Jarvix is doing (issue #70).
-      // Same shape as the other header toggles — keyboard-reachable, state
-      // as text.
-      Rectangle {
-        id: activityButton
-        visible: win.socketReady
-        width: activityButtonText.width + Style.space(20)
-        height: activityButtonText.height + Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-        radius: Style.cornerRadius
-        color: Util.alpha(Color.popups.text, activityButton.activeFocus ? 0.18 : 0.08)
-        border.color: Util.alpha(Color.popups.text, 0.5)
-        border.width: activityButton.activeFocus ? 2 : 1
-        activeFocusOnTab: true
-        Accessible.role: Accessible.Button
-        Accessible.name: win.activityOpen ? "Back to conversation" : "Open the activity feed"
-        function toggle() {
-          if (win.activityOpen) win.activityOpen = false
-          else win.openActivity()
-        }
-        Keys.onReturnPressed: activityButton.toggle()
-        Keys.onSpacePressed: activityButton.toggle()
-        Text {
-          id: activityButtonText
-          anchors.centerIn: parent
-          text: win.activityOpen ? "Conversation" : "Activity"
-          font.family: Style.font.family
-          font.pixelSize: Style.font.subtitle
-          color: Color.popups.text
-        }
-        MouseArea { anchors.fill: parent; onClicked: activityButton.toggle() }
-      }
+    // The tab strip (issue #91): every surface in its place. Each tab is
+    // focusable (Tab walks the strip, Left/Right move between tabs,
+    // Enter/Space select, Ctrl+Tab cycles from anywhere); the active tab is
+    // conveyed by bold text and an underline, never colour alone. A pending
+    // permission question badges the Chat tab in text — it must never be
+    // hidden by tab state. A Flow rather than a Row, so a narrow window
+    // wraps the strip instead of clipping tabs out of reach.
+    Flow {
+      id: tabStrip
+      anchors.top: header.bottom
+      anchors.topMargin: Style.space(10)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      spacing: Style.space(4)
+      Accessible.role: Accessible.PageTabList
+      Accessible.name: "Jarvix window tabs"
 
-      // History toggle: the archived-conversation library (ADR 0027). Same
-      // shape as the settings toggle — keyboard-reachable, state as text.
-      Rectangle {
-        id: historyButton
-        visible: win.socketReady
-        width: historyButtonText.width + Style.space(20)
-        height: historyButtonText.height + Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-        radius: Style.cornerRadius
-        color: Util.alpha(Color.popups.text, historyButton.activeFocus ? 0.18 : 0.08)
-        border.color: Util.alpha(Color.popups.text, 0.5)
-        border.width: historyButton.activeFocus ? 2 : 1
-        activeFocusOnTab: true
-        Accessible.role: Accessible.Button
-        Accessible.name: win.historyOpen ? "Back to conversation" : "Open past conversations"
-        function toggle() {
-          if (win.historyOpen) { win.historyOpen = false; win.historyDetailId = "" }
-          else win.openHistory()
-        }
-        Keys.onReturnPressed: historyButton.toggle()
-        Keys.onSpacePressed: historyButton.toggle()
-        Text {
-          id: historyButtonText
-          anchors.centerIn: parent
-          text: win.historyOpen ? "Conversation" : "History"
-          font.family: Style.font.family
-          font.pixelSize: Style.font.subtitle
-          color: Color.popups.text
-        }
-        MouseArea { anchors.fill: parent; onClicked: historyButton.toggle() }
-      }
+      Repeater {
+        id: tabRepeater
+        model: win.tabs
 
-      // Settings toggle: keyboard-reachable, state as text. The screen is a
-      // thin client of the daemon, so it is only offered while connected.
-      Rectangle {
-        id: settingsButton
-        visible: win.socketReady
-        width: settingsButtonText.width + Style.space(20)
-        height: settingsButtonText.height + Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-        radius: Style.cornerRadius
-        color: Util.alpha(Color.popups.text, settingsButton.activeFocus ? 0.18 : 0.08)
-        border.color: Util.alpha(Color.popups.text, 0.5)
-        border.width: settingsButton.activeFocus ? 2 : 1
-        activeFocusOnTab: true
-        Accessible.role: Accessible.Button
-        Accessible.name: win.settingsOpen ? "Back to conversation" : "Open settings"
-        function toggle() {
-          win.historyOpen = false
-          win.historyDetailId = ""
-          win.activityOpen = false
-          win.settingsOpen = !win.settingsOpen
+        delegate: Rectangle {
+          id: tabButton
+          required property var modelData
+          required property int index
+          readonly property bool selected: win.currentTab === modelData.id
+          // The confirmation badge: text first — the accessible name says
+          // what it means, the urgent colour only underlines it.
+          readonly property bool badge: modelData.id === "chat" && win.pendingCardIndex >= 0
+
+          width: tabBody.width + Style.space(16)
+          height: tabBody.height + Style.space(10)
+          radius: Style.cornerRadius
+          color: Util.alpha(Color.popups.text,
+            tabButton.activeFocus ? 0.18 : (tabButton.selected ? 0.10 : 0.04))
+          border.color: Util.alpha(Color.popups.text, 0.5)
+          border.width: tabButton.activeFocus ? 2 : 0
+          activeFocusOnTab: true
+          Accessible.role: Accessible.PageTab
+          Accessible.name: modelData.label
+            + (tabButton.selected ? ", current tab" : "")
+            + (tabButton.badge ? " — a permission question is waiting" : "")
+
+          function choose() {
+            win.openTab(tabButton.modelData.id)
+            if (tabButton.modelData.id === "chat") win.focusComposer()
+          }
+          Keys.onReturnPressed: tabButton.choose()
+          Keys.onSpacePressed: tabButton.choose()
+          Keys.onLeftPressed: win.stepTab(-1, true)
+          Keys.onRightPressed: win.stepTab(1, true)
+
+          Column {
+            id: tabBody
+            anchors.centerIn: parent
+            spacing: Style.space(2)
+
+            Row {
+              id: tabLabelRow
+              spacing: Style.space(4)
+
+              Text {
+                text: tabButton.modelData.label
+                font.family: Style.font.family
+                font.bold: tabButton.selected
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              Text {
+                visible: tabButton.badge
+                text: "!"
+                font.family: Style.font.family
+                font.bold: true
+                font.pixelSize: Style.font.subtitle
+                color: Color.urgent
+              }
+            }
+
+            // The underline half of the active state — the second non-colour
+            // signal beside the bold label.
+            Rectangle {
+              width: tabLabelRow.width
+              height: Math.max(2, Style.space(2))
+              radius: 1
+              color: tabButton.selected ? Color.accent : "transparent"
+            }
+          }
+
+          MouseArea { anchors.fill: parent; onClicked: tabButton.choose() }
         }
-        Keys.onReturnPressed: settingsButton.toggle()
-        Keys.onSpacePressed: settingsButton.toggle()
-        Text {
-          id: settingsButtonText
-          anchors.centerIn: parent
-          text: win.settingsOpen ? "Conversation" : "Settings"
-          font.family: Style.font.family
-          font.pixelSize: Style.font.subtitle
-          color: Color.popups.text
-        }
-        MouseArea { anchors.fill: parent; onClicked: settingsButton.toggle() }
       }
     }
 
@@ -880,21 +1018,19 @@ FloatingWindow {
       }
     }
 
-    Text {
-      visible: win.socketReady && !win.settingsOpen && !win.historyOpen && !win.activityOpen && turns.count === 0
+    JarvixEmptyState {
+      visible: win.socketReady && win.currentTab === "chat" && turns.count === 0
       anchors.centerIn: parent
+      width: parent.width
       text: "No conversation yet — hold Super+Alt+V and speak, or type below."
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
-      color: Util.alpha(Color.popups.text, 0.7)
     }
 
-    // The settings screen shares the conversation's content area.
+    // The settings screen fills the content pane while its tab is current.
     JarvixSettings {
       id: settingsScreen
-      visible: win.settingsOpen
-      active: win.visible && win.settingsOpen && win.socketReady
-      anchors.top: header.bottom
+      visible: win.currentTab === "settings"
+      active: win.visible && win.currentTab === "settings" && win.socketReady
+      anchors.top: tabStrip.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
       anchors.right: parent.right
@@ -902,29 +1038,23 @@ FloatingWindow {
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
     }
 
-    // The history screen shares the conversation's content area, exactly as
-    // settings does: the listing, or one record read-only with a Resume
-    // button.
+    // The Library tab: the archived-conversation listing, or one record
+    // read-only with a Resume button.
     Item {
       id: historyScreen
-      visible: win.socketReady && win.historyOpen && !win.settingsOpen
-      anchors.top: header.bottom
+      visible: win.socketReady && win.currentTab === "library"
+      anchors.top: tabStrip.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
-      Text {
+      JarvixEmptyState {
         visible: win.historyDetailId === "" && !win.searchActive && pastConversations.count === 0
         anchors.centerIn: parent
         width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.Wrap
         text: "No archived conversations yet — they appear here after jarvix new."
-        font.family: Style.font.family
-        font.pixelSize: Style.font.subtitle
-        color: Util.alpha(Color.popups.text, 0.7)
       }
 
       // The search box (issue #59): type what you are looking for, press
@@ -980,16 +1110,11 @@ FloatingWindow {
         }
       }
 
-      Text {
+      JarvixEmptyState {
         visible: win.historyDetailId === "" && win.searchActive && searchResults.count === 0
         anchors.centerIn: parent
         width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.Wrap
         text: "Nothing in your past conversations mentions that."
-        font.family: Style.font.family
-        font.pixelSize: Style.font.subtitle
-        color: Util.alpha(Color.popups.text, 0.7)
       }
 
       // Search results, ranked best first by the daemon. Clicking one opens
@@ -1100,78 +1225,21 @@ FloatingWindow {
         }
       }
 
-      // One record, read-only. Resume is the explicit action that makes it
-      // the active thread again (conversation.open); everything else here
-      // only displays.
-      Column {
+      // One record, read-only, on the shared detail scaffold (issue #91).
+      // Resume is the explicit action that makes it the active thread again
+      // (conversation.open); everything else here only displays.
+      JarvixDetailPane {
         visible: win.historyDetailId !== ""
         anchors.fill: parent
-        spacing: Style.space(8)
-
-        Row {
-          spacing: Style.space(8)
-
-          Rectangle {
-            id: backButton
-            width: backButtonText.width + Style.space(20)
-            height: backButtonText.height + Style.space(8)
-            radius: Style.cornerRadius
-            color: Util.alpha(Color.popups.text, backButton.activeFocus ? 0.18 : 0.08)
-            border.color: Util.alpha(Color.popups.text, 0.5)
-            border.width: backButton.activeFocus ? 2 : 1
-            activeFocusOnTab: true
-            Accessible.role: Accessible.Button
-            Accessible.name: "Back to the conversation list"
-            Keys.onReturnPressed: win.historyDetailId = ""
-            Keys.onSpacePressed: win.historyDetailId = ""
-            Text {
-              id: backButtonText
-              anchors.centerIn: parent
-              text: "Back"
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-              color: Color.popups.text
-            }
-            MouseArea { anchors.fill: parent; onClicked: win.historyDetailId = "" }
-          }
-
-          Rectangle {
-            id: resumeButton
-            width: resumeButtonText.width + Style.space(20)
-            height: resumeButtonText.height + Style.space(8)
-            radius: Style.cornerRadius
-            color: Util.alpha(Color.accent, resumeButton.activeFocus ? 0.3 : 0.15)
-            border.color: Color.accent
-            border.width: resumeButton.activeFocus ? 2 : 1
-            activeFocusOnTab: true
-            Accessible.role: Accessible.Button
-            Accessible.name: "Continue this conversation"
-            Keys.onReturnPressed: win.resumeConversation(win.historyDetailId)
-            Keys.onSpacePressed: win.resumeConversation(win.historyDetailId)
-            Text {
-              id: resumeButtonText
-              anchors.centerIn: parent
-              text: "Continue this conversation"
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-              color: Color.popups.text
-            }
-            MouseArea { anchors.fill: parent; onClicked: win.resumeConversation(win.historyDetailId) }
-          }
-
-          Text {
-            text: "Read-only"
-            anchors.verticalCenter: parent.verticalCenter
-            font.family: Style.font.family
-            font.pixelSize: Style.font.subtitle
-            color: Util.alpha(Color.popups.text, 0.6)
-          }
-        }
+        backName: "Back to the conversation list"
+        actionLabel: "Continue this conversation"
+        note: "Read-only"
+        onBackRequested: win.historyDetailId = ""
+        onActionTriggered: win.resumeConversation(win.historyDetailId)
 
         ListView {
           id: pastTurnList
-          width: parent.width
-          height: parent.height - parent.spacing - backButton.height
+          anchors.fill: parent
           clip: true
           spacing: Style.space(14)
           model: pastTurns
@@ -1202,32 +1270,27 @@ FloatingWindow {
       }
     }
 
-    // The activity screen: what Jarvix is doing right now and has done
+    // The Activity tab: what Jarvix is doing right now and has done
     // recently, one rendered row per daemon decision (issue #70). A turn
     // that acted shows its tool rows; a turn that only talked shows the
     // explicit text-only marker; every refusal carries the daemon's reason.
     // With the daemon down, the window's standard not-running panel stands
-    // in — this screen, like the others, only exists while connected.
+    // in — this tab, like the others, only renders while connected.
     Item {
       id: activityScreen
-      visible: win.socketReady && win.activityOpen && !win.settingsOpen && !win.historyOpen
-      anchors.top: header.bottom
+      visible: win.socketReady && win.currentTab === "activity"
+      anchors.top: tabStrip.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
-      Text {
+      JarvixEmptyState {
         visible: activityRows.count === 0
         anchors.centerIn: parent
         width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.Wrap
         text: "Nothing yet — everything Jarvix does will appear here as it happens."
-        font.family: Style.font.family
-        font.pixelSize: Style.font.subtitle
-        color: Util.alpha(Color.popups.text, 0.7)
       }
 
       ListView {
@@ -1300,10 +1363,201 @@ FloatingWindow {
       }
     }
 
+    // The Automations tab: the configured routines (ADR 0026) and scripts
+    // (ADR 0030), each with its phrases — the panels that used to sit above
+    // the composer, moved to their own tab on the shared collection rows.
+    // Run is display-and-trigger exactly as before: routines.run /
+    // scripts.run replay the entry's phrase through the daemon's ordinary
+    // session path, so the router, the permission gates, and the spoken
+    // outcome behave identically however it is triggered (ADR 0013).
+    // Managing the entries is the sibling tickets' job — the TOML tables in
+    // config.toml stay the source of truth.
+    Item {
+      id: automationsScreen
+      visible: win.socketReady && win.currentTab === "automations"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      JarvixEmptyState {
+        visible: win.routines.length === 0 && win.scripts.length === 0
+        anchors.centerIn: parent
+        width: parent.width
+        text: "No routines or scripts yet — add [[routines]] or [[scripts]] tables to config.toml."
+      }
+
+      Flickable {
+        visible: win.routines.length > 0 || win.scripts.length > 0
+        anchors.fill: parent
+        contentHeight: automationsColumn.height
+        clip: true
+
+        Column {
+          id: automationsColumn
+          width: parent.width
+          spacing: Style.space(8)
+
+          Text {
+            visible: win.routines.length > 0
+            text: "Routines"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.7)
+          }
+
+          Repeater {
+            model: win.routines
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: automationsColumn.width
+              title: modelData.name
+              subtitle: "Say “" + (modelData.phrases || []).join("” or “") + "”"
+              meta: Number(modelData.steps || 0) + " steps"
+                + (modelData.incomplete
+                  ? " · incomplete — a launch command still needs filling in" : "")
+              flagged: Boolean(modelData.incomplete)
+              actionLabel: "Run"
+              actionName: "Run routine " + modelData.name
+              onActionTriggered: win.runRoutine(modelData.name)
+            }
+          }
+
+          Text {
+            visible: win.scripts.length > 0
+            topPadding: win.routines.length > 0 ? Style.space(8) : 0
+            text: "Scripts"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.7)
+          }
+
+          Repeater {
+            model: win.scripts
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: automationsColumn.width
+              title: modelData.name
+              subtitle: "Say “" + (modelData.phrases || []).join("” or “") + "”"
+              // The path is deliberately shown — it is exactly what the
+              // script.run gate's confirmation names (ADR 0030).
+              meta: String(modelData.path || "")
+              actionLabel: "Run"
+              actionName: "Run script " + modelData.name
+              onActionTriggered: win.runScript(modelData.name)
+            }
+          }
+        }
+      }
+    }
+
+    // The Knowledge tab: the feed cache, read-only (ADR 0031) — each
+    // configured feed with its mode, whether it is offered to the model, and
+    // its freshness or failing state, worded from knowledge.status's own
+    // facts. Values stay out of the listing; the sibling detail work decides
+    // what more to show.
+    Item {
+      id: knowledgeScreen
+      visible: win.socketReady && win.currentTab === "knowledge"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      JarvixEmptyState {
+        visible: win.knowledgeFeeds.length === 0
+        anchors.centerIn: parent
+        width: parent.width
+        text: win.knowledgeEnabled
+          ? "No knowledge feeds yet — add [[knowledge.feeds]] tables to config.toml."
+          : "Knowledge feeds are switched off (knowledge.enabled = false)."
+      }
+
+      ListView {
+        id: knowledgeList
+        visible: win.knowledgeFeeds.length > 0
+        anchors.fill: parent
+        clip: true
+        spacing: Style.space(10)
+        model: win.knowledgeFeeds
+
+        delegate: JarvixCollectionRow {
+          required property var modelData
+          width: knowledgeList.width
+          title: modelData.name
+          subtitle: String(modelData.mode || "") + " feed · "
+            + (modelData.inject ? "offered to the model each turn" : "fetched, not injected")
+          meta: win.feedFreshness(modelData)
+          flagged: Boolean(modelData.failing)
+        }
+      }
+    }
+
+    // The Memory tab: the fact store, read-only (ADR 0025) — every
+    // remembered fact with its stored date, straight from memory.list (disk
+    // truth, hand-edits included). Refreshed each time the tab is opened;
+    // forgetting is the sibling ticket's job.
+    Item {
+      id: memoryScreen
+      visible: win.socketReady && win.currentTab === "memory"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      JarvixEmptyState {
+        visible: win.memoryFacts.length === 0
+        anchors.centerIn: parent
+        width: parent.width
+        text: win.memoryEnabled
+          ? "Nothing remembered yet — say “remember …” and it will be kept here."
+          : "Memory is switched off (memory.enabled = false)."
+      }
+
+      Text {
+        id: memoryCountLine
+        visible: win.memoryFacts.length > 0
+        anchors.top: parent.top
+        width: parent.width
+        text: win.memoryFactCount + " of " + win.memoryFactMax + " facts remembered"
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+
+      ListView {
+        id: memoryList
+        visible: win.memoryFacts.length > 0
+        anchors.top: memoryCountLine.bottom
+        anchors.topMargin: Style.space(8)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        clip: true
+        spacing: Style.space(10)
+        model: win.memoryFacts
+
+        delegate: JarvixCollectionRow {
+          required property var modelData
+          width: memoryList.width
+          title: modelData.content
+          meta: win.factMeta(modelData)
+        }
+      }
+    }
+
     ListView {
       id: list
-      visible: win.socketReady && !win.settingsOpen && !win.historyOpen && !win.activityOpen
-      anchors.top: header.bottom
+      visible: win.socketReady && win.currentTab === "chat"
+      anchors.top: tabStrip.bottom
       anchors.topMargin: Style.space(12)
       anchors.left: parent.left
       anchors.right: parent.right
@@ -1518,7 +1772,7 @@ FloatingWindow {
     // answer to a pending tool confirmation.
     Column {
       id: composer
-      visible: !win.settingsOpen && !win.historyOpen && !win.activityOpen
+      visible: win.currentTab === "chat"
       // A daemon that is down disables the field rather than swallowing the
       // keystrokes; the panel above says why, and the label says it again
       // here, where the caret is.
@@ -1528,137 +1782,6 @@ FloatingWindow {
       anchors.left: parent.left
       anchors.right: parent.right
       spacing: Style.space(4)
-
-      // Routines panel: each configured routine, its phrases, and a Run
-      // button. Sits with the composer because both are ways to start a turn.
-      Column {
-        id: routinesPanel
-        visible: win.socketReady && win.routines.length > 0
-        width: parent.width
-        spacing: Style.space(4)
-        bottomPadding: Style.space(8)
-
-        Text {
-          text: "Routines"
-          font.family: Style.font.family
-          font.bold: true
-          font.pixelSize: Style.font.subtitle
-          color: Util.alpha(Color.popups.text, 0.7)
-        }
-
-        Repeater {
-          model: win.routines
-          delegate: Row {
-            id: routineRow
-            required property var modelData
-            width: routinesPanel.width
-            spacing: Style.space(8)
-
-            Rectangle {
-              id: runButton
-              width: runLabel.width + Style.space(20)
-              height: runLabel.height + Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              radius: Style.cornerRadius
-              color: Util.alpha(Color.accent, runButton.activeFocus ? 0.35 : 0.18)
-              border.color: Color.accent
-              border.width: runButton.activeFocus ? 2 : 1
-              activeFocusOnTab: true
-              Accessible.role: Accessible.Button
-              Accessible.name: "Run routine " + routineRow.modelData.name
-              Keys.onReturnPressed: win.runRoutine(routineRow.modelData.name)
-              Keys.onSpacePressed: win.runRoutine(routineRow.modelData.name)
-              Text {
-                id: runLabel
-                anchors.centerIn: parent
-                text: "Run"
-                font.family: Style.font.family
-                font.pixelSize: Style.font.subtitle
-                color: Color.popups.text
-              }
-              MouseArea { anchors.fill: parent; onClicked: win.runRoutine(routineRow.modelData.name) }
-            }
-
-            Text {
-              width: routineRow.width - runButton.width - Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              wrapMode: Text.Wrap
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-              color: Color.popups.text
-              text: routineRow.modelData.name
-                + "  —  say “" + (routineRow.modelData.phrases || []).join("” or “") + "”"
-            }
-          }
-        }
-      }
-
-      // Scripts panel (ADR 0030): each configured script with its phrases
-      // and the path it runs — shown here for the same reason the gate's
-      // confirmation names it: what a click would execute must be visible
-      // before the click. Run takes the identical gated path as speech.
-      Column {
-        id: scriptsPanel
-        visible: win.socketReady && win.scripts.length > 0
-        width: parent.width
-        spacing: Style.space(4)
-        bottomPadding: Style.space(8)
-
-        Text {
-          text: "Scripts"
-          font.family: Style.font.family
-          font.bold: true
-          font.pixelSize: Style.font.subtitle
-          color: Util.alpha(Color.popups.text, 0.7)
-        }
-
-        Repeater {
-          model: win.scripts
-          delegate: Row {
-            id: scriptRow
-            required property var modelData
-            width: scriptsPanel.width
-            spacing: Style.space(8)
-
-            Rectangle {
-              id: scriptRunButton
-              width: scriptRunLabel.width + Style.space(20)
-              height: scriptRunLabel.height + Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              radius: Style.cornerRadius
-              color: Util.alpha(Color.accent, scriptRunButton.activeFocus ? 0.35 : 0.18)
-              border.color: Color.accent
-              border.width: scriptRunButton.activeFocus ? 2 : 1
-              activeFocusOnTab: true
-              Accessible.role: Accessible.Button
-              Accessible.name: "Run script " + scriptRow.modelData.name
-              Keys.onReturnPressed: win.runScript(scriptRow.modelData.name)
-              Keys.onSpacePressed: win.runScript(scriptRow.modelData.name)
-              Text {
-                id: scriptRunLabel
-                anchors.centerIn: parent
-                text: "Run"
-                font.family: Style.font.family
-                font.pixelSize: Style.font.subtitle
-                color: Color.popups.text
-              }
-              MouseArea { anchors.fill: parent; onClicked: win.runScript(scriptRow.modelData.name) }
-            }
-
-            Text {
-              width: scriptRow.width - scriptRunButton.width - Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              wrapMode: Text.Wrap
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-              color: Color.popups.text
-              text: scriptRow.modelData.name
-                + "  —  say “" + (scriptRow.modelData.phrases || []).join("” or “") + "”"
-                + "  ·  " + scriptRow.modelData.path
-            }
-          }
-        }
-      }
 
       Text {
         id: composerLabel
@@ -1763,17 +1886,34 @@ FloatingWindow {
     }
   }
 
+  // Escape steps back one layer at a time: record → listing, search →
+  // library, any tab → Chat, Chat → closed. Returning to Chat also returns
+  // the caret to the composer, so the shortcut cannot strand anyone.
   Shortcut {
     sequences: ["Escape"]
     onActivated: {
-      if (win.settingsOpen) win.settingsOpen = false
-      else if (win.historyDetailId !== "") win.historyDetailId = ""
-      // Clearing the box also clears the results (onTextChanged), so Escape
-      // steps search → library → conversation → closed, one layer at a time.
-      else if (win.searchActive) historySearchInput.text = ""
-      else if (win.historyOpen) win.historyOpen = false
-      else if (win.activityOpen) win.activityOpen = false
-      else win.closeWindow()
+      if (win.currentTab === "library" && win.historyDetailId !== "") {
+        win.historyDetailId = ""
+      } else if (win.currentTab === "library" && win.searchActive) {
+        // Clearing the box also clears the results (onTextChanged).
+        historySearchInput.text = ""
+      } else if (win.currentTab !== "chat") {
+        win.openTab("chat")
+        win.focusComposer()
+      } else {
+        win.closeWindow()
+      }
     }
+  }
+
+  // Ctrl+Tab / Ctrl+Shift+Tab cycle the tabs from anywhere in the window —
+  // the keyboard path that needs no journey through the strip.
+  Shortcut {
+    sequences: ["Ctrl+Tab"]
+    onActivated: win.stepTab(1, false)
+  }
+  Shortcut {
+    sequences: ["Ctrl+Shift+Tab"]
+    onActivated: win.stepTab(-1, false)
   }
 }
