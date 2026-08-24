@@ -153,6 +153,21 @@ func TestActivityRowVocabulary(t *testing.T) {
 			"schedule": "02:00", "due": "2026-08-21T02:00:00+01:00"},
 			ActivityRow{Kind: ActivityKindAutomation, Label: "Missed while off: backup notes",
 				Detail: "was due 2026-08-21T02:00:00+01:00 · reported, never re-fired"}},
+		// Form saves in the window (#99): create, edit, and delete each name
+		// the entry, under its kind's own glyph, so a schedule that appears or
+		// stops is traceable to the save that did it.
+		{"config.entry_changed", map[string]any{"action": "created", "family": "routines",
+			"kind": "routine", "name": "morning setup"},
+			ActivityRow{Kind: ActivityKindRoutine, Label: "Routine created: morning setup",
+				Detail: "config.toml, saved from the window"}},
+		{"config.entry_changed", map[string]any{"action": "edited", "family": "scripts",
+			"kind": "script", "name": "backup notes"},
+			ActivityRow{Kind: ActivityKindScript, Label: "Script edited: backup notes",
+				Detail: "config.toml, saved from the window"}},
+		{"config.entry_changed", map[string]any{"action": "deleted", "family": "scripts",
+			"kind": "script", "name": "backup notes"},
+			ActivityRow{Kind: ActivityKindScript, Label: "Script deleted: backup notes",
+				Detail: "config.toml, removed from the window"}},
 		{"artifact.created", map[string]any{"type": "diagram", "path": "/home/u/Documents/Jarvix/flow.png"},
 			ActivityRow{Kind: ActivityKindArtifact, Label: "Artifact created",
 				Detail: "diagram · /home/u/Documents/Jarvix/flow.png"}},

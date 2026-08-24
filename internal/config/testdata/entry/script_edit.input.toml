@@ -1,0 +1,17 @@
+# my config, hand-written
+[context]
+window = false
+
+# the scripts I trust with a phrase
+[[scripts]]
+name = "backup notes"
+phrases = ["backup my notes"]
+path = "/home/me/bin/backup-notes.sh" # this inline comment is inside the entry
+schedule = "02:00"
+
+# still experimenting with this one
+[[scripts]]
+name = "rotate wallpaper"
+phrases = ["rotate the wallpaper"]
+path = "/home/me/bin/rotate-wallpaper.sh"
+report = "silent"

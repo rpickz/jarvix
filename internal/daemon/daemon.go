@@ -962,6 +962,7 @@ func (d *Daemon) registerMethods() {
 	d.registerScriptMethods()
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
+	d.registerEntryAdminMethods()
 }
 
 // promptBudgetReport measures what one turn sends before the user has said

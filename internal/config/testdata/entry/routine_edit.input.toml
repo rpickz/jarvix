@@ -1,0 +1,27 @@
+# my config, hand-written
+[context]
+window = false
+
+# the routines I curated by hand
+[[routines]]
+name = "evening"
+phrases = ["evening mode"]
+schedule = "18:00" # wind down after work
+
+  # the film screen
+  [[routines.steps]]
+  app = "mpv"
+  workspace = 5
+
+  [[routines.steps]]
+  app = "spotify"
+  workspace = 6
+
+# the neighbour must not move
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup"]
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 1
