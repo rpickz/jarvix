@@ -58,6 +58,28 @@ type Confirmable interface {
 	Confirmation(input json.RawMessage) (command, summary string, ok bool)
 }
 
+// Refusing is optionally implemented by a tool part of whose argument space
+// is structurally off limits — not deny-by-default but unreachable, whatever
+// the [tools] policy says (issue #105, ADR 0036). The gate consults it before
+// the policy, so a refusal wins over an explicit allow, a global allow, and
+// even over having no policy installed at all: there is nothing a user can
+// write in configuration that softens it, which is the point — the excluded
+// space is the configuration that governs the assistant itself, and a gate
+// must not be able to loosen itself on request.
+//
+// The reason is spoken-ready and precise: it is the rule on the tool.denied
+// event and the sentence the model relays, so "I can't do that" always says
+// what exactly is off limits. ok is false for the ordinary case — arguments
+// entirely inside the tool's writable space — where the policy decides as
+// usual. The tool's Execute re-checks the same wall (nothing is written even
+// if a refusing call is somehow executed), but the gate is where the refusal
+// is visible, audited, and cheap.
+type Refusing interface {
+	// Refuse reports that this call addresses configuration no policy may
+	// expose, and why.
+	Refuse(input json.RawMessage) (reason string, ok bool)
+}
+
 // Escalating is optionally implemented by a tool that can tell, from live
 // state, that *this* call is more dangerous than its configured tier assumes.
 //
@@ -116,6 +138,18 @@ func (r *Registry) Policy() *Policy { return r.policy }
 // executing anything. With no policy installed everything is allowed —
 // the pre-gate behaviour tests rely on.
 func (r *Registry) Check(call ai.ToolCall) Verdict {
+	// The structural wall first, before any policy is consulted — including
+	// the no-policy case below, because "no gate installed" must not mean
+	// "the excluded configuration became writable" (Refusing).
+	if t, registered := r.tools[call.Name]; registered {
+		if ref, refusing := t.(Refusing); refusing {
+			if reason, refuse := ref.Refuse(json.RawMessage(call.Arguments)); refuse {
+				r.log.Info("tool call refused by exclusion", "component", "tools",
+					"tool", call.Name, "rule", reason)
+				return Verdict{Decision: PolicyDeny, Tool: call.Name, Rule: reason}
+			}
+		}
+	}
 	if r.policy == nil {
 		return Verdict{Decision: PolicyAllow, Tool: call.Name, Rule: "no policy installed"}
 	}
