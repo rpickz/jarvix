@@ -148,7 +148,7 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall, turn spokenTurn) (res
 	default:
 		e.log.Debug("tool call allowed", "component", "tools", "tool", call.Name,
 			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
-		return e.executeTool(s, call, turn.speaker), true
+		return e.executeTool(s, call, turn.speaker)
 	}
 }
 
@@ -162,7 +162,31 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall, turn spokenTurn) (res
 // speaker is the turn's voice, passed through so that reassurance queues
 // behind whatever is playing rather than over it — a slow tool can perfectly
 // well be running while the sentence that introduced it is still being said.
-func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeaker) string {
+//
+// ok is false only when the session ended before execution could begin, in
+// which case nothing ran and the tool loop must stop without reporting
+// anything — the path that ended the session owns the events.
+func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeaker) (result string, ok bool) {
+	// A tool call must never *begin* on a session that has already ended. The
+	// tool loop's own guard reads s.ctx between calls without the lock, and
+	// every session-ending path (failure, cancel, interruption, speech cancel)
+	// runs on some other goroutine — so a session could fail after the loop's
+	// check and before execution started, and the tool would then run for a
+	// turn that had already published its failure. That is exactly what the
+	// #111 incident log shows: "session failed", and then the tool executing
+	// into the void. Checking e.current and the context *under the lock*
+	// orders this decision against those paths, which all clear e.current and
+	// cancel the context while holding mu: once a session's end is published,
+	// no tool call of its can start. Work already inside Execute when the
+	// session ends is a different matter, and handled the way the drain
+	// discipline always has (#29/#54): it runs under s.ctx, which those paths
+	// cancel, and unwinds at its next check.
+	e.mu.Lock()
+	live := e.current == s && s.ctx.Err() == nil
+	e.mu.Unlock()
+	if !live {
+		return "", false
+	}
 	started := map[string]any{"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}
 	label, waiting, slow := e.tools.Activity(call)
 	if slow {
@@ -180,7 +204,7 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	// session's tool time, tool.finished's duration_ms belongs to this call.
 	s.timings.beginExcluded(StageToolRuns)
 	start := time.Now()
-	result := e.tools.Execute(s.ctx, call)
+	result = e.tools.Execute(s.ctx, call)
 	s.timings.endExcluded()
 	stopProgress()
 
@@ -198,7 +222,7 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	e.publish(Event{Type: "tool.finished", Data: map[string]any{
 		"session_id": s.id, "tool": call.Name,
 		"duration_ms": time.Since(start).Milliseconds(), "outcome": outcome}})
-	return result
+	return result, true
 }
 
 // confirmAndExecute runs the ask tier for a model tool call: ask, then
@@ -234,7 +258,7 @@ func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verd
 				"executed. Do not retry it; tell the user it did not run and ask "+
 				"them again if they still want it."), true
 	}
-	return e.executeTool(s, call, turn.speaker), true
+	return e.executeTool(s, call, turn.speaker)
 }
 
 // confirmRequest is one thing that needs the user's go-ahead. Model tool
