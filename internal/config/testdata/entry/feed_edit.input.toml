@@ -1,0 +1,21 @@
+# my config, hand-written
+[knowledge]
+max_injected_tokens = 400
+
+# watches the AMD price
+[[knowledge.feeds]]
+name = "amd"
+description = "AMD share price"
+command = ["/home/me/bin/amd-price"]
+mode = "eager"
+interval_sec = 300 # five minutes is plenty
+
+# the neighbour must not move
+[[knowledge.feeds]]
+name = "weather"
+description = "Local weather"
+command = ["/home/me/bin/weather", "--short"]
+mode = "lazy"
+
+[tts]
+provider = "piper"

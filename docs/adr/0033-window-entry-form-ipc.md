@@ -97,4 +97,7 @@ comment separated by a blank line — a section header — stays.
 - #100 adds knowledge feeds/memory by registering their families and building
   their forms from the same components; if a family ever needs per-family
   behaviour beyond schema, that pressure should produce a registry field, not
-  a family-specific verb.
+  a family-specific verb. (As landed: feeds are the registry row, and the
+  restart-class first-feed boundary became exactly such a registry field;
+  memory proved not to be a config family at all and got its own two verbs
+  on the book's write path — ADR 0034 records why.)

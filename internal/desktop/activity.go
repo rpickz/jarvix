@@ -71,6 +71,7 @@ const (
 	ActivityKindError      = "error"
 	ActivityKindCancelled  = "cancelled"
 	ActivityKindAutomation = "automation"
+	ActivityKindKnowledge  = "knowledge"
 )
 
 // Glyphs for the kinds barstatus.go does not already name, written as escapes
@@ -85,6 +86,7 @@ const (
 	glyphClock    = "\U000F0150" // md-clock
 	glyphStop     = "\U000F04DB" // md-stop
 	glyphCalClock = "\U000F00F0" // md-calendar-clock
+	glyphRss      = "\U000F046B" // md-rss
 )
 
 // activityGlyphs maps each row kind to its icon. Kinds reuse the bar's
@@ -111,6 +113,7 @@ var activityGlyphs = map[string]string{
 	ActivityKindError:      glyphAlert,
 	ActivityKindCancelled:  glyphStop,
 	ActivityKindAutomation: glyphCalClock,
+	ActivityKindKnowledge:  glyphRss,
 }
 
 // ActivityGlyph resolves a row kind to its icon. An unknown kind — a newer
@@ -227,11 +230,18 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Label:  "Missed while off: " + activityString(data, "name"),
 			Detail: joinActivity("was due "+activityString(data, "due"), "reported, never re-fired")})
 	case "config.entry_changed":
-		// A form save in the window (#99): one routine or script created,
-		// edited, or deleted through config.upsert_entry / config.delete_entry.
-		// The feed names the entry — configuration changes are actions too,
-		// and a schedule that appears or stops must be traceable to its save.
+		// A form save in the window (#99/#100): one routine, script, or
+		// knowledge feed created, edited, or deleted through
+		// config.upsert_entry / config.delete_entry. The feed names the entry
+		// — configuration changes are actions too, and a schedule that
+		// appears or stops must be traceable to its save.
 		return one(entryChangedRow(data))
+	case "memory.entry_changed":
+		// A fact added or edited from the window's Memory tab (#100), through
+		// the memory book's own write path. Id and size only, never the words
+		// — the memory privacy contract (counts, not content) holds for
+		// window saves exactly as for the memory.remember tool.
+		return one(memoryEntryChangedRow(data))
 	case "artifact.created":
 		return one(ActivityRow{Kind: ActivityKindArtifact,
 			Label:  "Artifact created",
@@ -424,10 +434,11 @@ func scriptFinishedRow(data map[string]any) ActivityRow {
 		Label: "Script finished: " + name, Detail: joinActivity("exit 0", dur)}
 }
 
-// entryChangedRow words one form save (#99): a routine or script created,
-// edited, or deleted from the window. The label names the entry — a schedule
-// that appears or stops must be traceable to the save that did it — and the
-// glyph follows the entry's kind so the row sits beside that entry's runs.
+// entryChangedRow words one form save (#99, #100): a routine, script, or
+// knowledge feed created, edited, or deleted from the window. The label
+// names the entry — a schedule that appears or stops must be traceable to
+// the save that did it — and the glyph follows the entry's kind so the row
+// sits beside that entry's runs.
 func entryChangedRow(data map[string]any) ActivityRow {
 	kind := activityString(data, "kind")
 	row := ActivityRow{Kind: ActivityKindAutomation}
@@ -437,6 +448,8 @@ func entryChangedRow(data map[string]any) ActivityRow {
 		row.Kind, word = ActivityKindRoutine, "Routine"
 	case "script":
 		row.Kind, word = ActivityKindScript, "Script"
+	case "feed":
+		row.Kind, word = ActivityKindKnowledge, "Feed"
 	}
 	action := activityString(data, "action")
 	switch action {
@@ -450,6 +463,23 @@ func entryChangedRow(data map[string]any) ActivityRow {
 		row.Detail = "config.toml, removed from the window"
 	}
 	return row
+}
+
+// memoryEntryChangedRow words one memory-form save (#100): the fact named by
+// its stable id ("m3" — the handle every memory surface shares), the action,
+// and the content's size in place of the content itself.
+func memoryEntryChangedRow(data map[string]any) ActivityRow {
+	action := activityString(data, "action")
+	switch action {
+	case "added", "edited":
+	default:
+		action = "changed"
+	}
+	chars, _ := activityInt(data, "chars")
+	return ActivityRow{Kind: ActivityKindMemory,
+		Label: "Fact " + action + ": " + activityString(data, "id"),
+		Detail: fmt.Sprintf("memory.toml, saved from the window · %d %s (content not shown)",
+			chars, pluralActivity(chars, "character", "characters"))}
 }
 
 func routineStepRow(data map[string]any) ActivityRow {

@@ -3,10 +3,13 @@ package daemon
 import (
 	"errors"
 	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
@@ -53,6 +56,71 @@ func problemOn(problems []map[string]any, field string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// tomlKeys lists a struct's toml tags — the loader's own key set for one
+// [[family]] table.
+func tomlKeys(t *testing.T, v any) []string {
+	t.Helper()
+	typ := reflect.TypeOf(v)
+	keys := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		tag := strings.Split(typ.Field(i).Tag.Get("toml"), ",")[0]
+		if tag == "" || tag == "-" {
+			t.Fatalf("%s.%s carries no toml tag", typ.Name(), typ.Field(i).Name)
+		}
+		keys = append(keys, tag)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestEntryAdminFamiliesMirrorConfigStructs is the drift guard the registry
+// comment promises: each family's key whitelist (and its keyOrder) is
+// exactly the config struct's toml tag set. A field added to a struct
+// without a registry row entry would silently block form-saving any entry a
+// hand edit gave that key — this test makes the drift loud instead.
+func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
+	structs := map[string]any{
+		"routines":        config.Routine{},
+		"scripts":         config.Script{},
+		"knowledge.feeds": config.KnowledgeFeed{},
+	}
+	if len(structs) != len(entryAdminFamilies) {
+		t.Fatalf("registry has %d families, this test knows %d — extend both together",
+			len(entryAdminFamilies), len(structs))
+	}
+	for family, example := range structs {
+		spec, ok := entryAdminFamilies[family]
+		if !ok {
+			t.Errorf("family %q is not in the registry", family)
+			continue
+		}
+		want := tomlKeys(t, example)
+		keys := make([]string, 0, len(spec.keys))
+		for k := range spec.keys {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if !reflect.DeepEqual(keys, want) {
+			t.Errorf("%s registry keys = %v, want the struct's %v", family, keys, want)
+		}
+		order := append([]string{}, spec.keyOrder...)
+		sort.Strings(order)
+		if !reflect.DeepEqual(order, want) {
+			t.Errorf("%s keyOrder = %v, want every struct key exactly once", family, spec.keyOrder)
+		}
+	}
+	steps := entryAdminFamilies["routines"].subKeys["steps"]
+	want := tomlKeys(t, config.RoutineStep{})
+	keys := make([]string, 0, len(steps))
+	for k := range steps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("routines steps keys = %v, want the struct's %v", keys, want)
+	}
 }
 
 // TestConfigGetEntryOverSocket: the form's read — the whole entry as the

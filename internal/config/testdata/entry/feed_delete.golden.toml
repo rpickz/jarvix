@@ -1,0 +1,15 @@
+# my config, hand-written
+[knowledge]
+max_injected_tokens = 400
+
+# --- the feeds section ---
+
+# the neighbour must not move
+[[knowledge.feeds]]
+name = "weather"
+description = "Local weather"
+command = ["/home/me/bin/weather", "--short"]
+mode = "lazy"
+
+[tts]
+provider = "piper"

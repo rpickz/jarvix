@@ -1296,16 +1296,20 @@ phrase — so re-enabling recompiles the grammar and can fail with the same
 collision error a config load gives, naming both owners. The switch surfaces
 that error and writes nothing: never a silent half-enable.
 
-Feed tables are hand-edited TOML like `[[routines]]` — outside `config.set`
-and listed over IPC (`knowledge.status`). Two operations are available from
-the conversation window's Knowledge tab (#92): **Refresh now**
-(`knowledge.refresh_now`, an immediate fetch through the scheduled path) and
-**Enable/Disable** (`knowledge.set_enabled`, which writes only that entry's
-`enabled` key — your comments and every other byte of the file are
-preserved, and a file edited by hand underneath an open window is a refused
-conflict, never a clobber). Other edits apply on the next
+Feed tables stay plain TOML you can hand-edit like `[[routines]]` — outside
+`config.set` and listed over IPC (`knowledge.status`). The conversation
+window's Knowledge tab operates them (#92, extended by #100): **Refresh
+now** (`knowledge.refresh_now`, an immediate fetch through the scheduled
+path), **Enable/Disable** (`knowledge.set_enabled`), and **New/Edit/Delete**
+in a form dialog (the generic entry verbs of ADR 0033 with `family:
+"knowledge.feeds"` — the loader's own validation shown inline per field
+before anything is written). Every write shares one discipline: only the
+entry being written moves — your comments and every other byte of the file
+are preserved — and a file edited by hand underneath an open window is a
+refused conflict, never a clobber. Hand edits apply on the next
 `jarvix config reload` (idle-class); adding the *first* feed registers the
-tool, which takes a daemon restart.
+tool, which takes a daemon restart — the form's save says so honestly
+(`applied: false` with the restart reason) when it writes that first feed.
 
 ## Tools (assistant actions)
 

@@ -42,6 +42,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,8 +79,10 @@ const (
 // entryFamilySpec declares one editable [[family]]: its wire keys with their
 // shapes, the rendering order (matching the documentation's worked examples),
 // and the word activity rows use for one of its entries. This registry is the
-// only family-specific code on the surface — #100 adds knowledge feeds and
-// memory entries by adding rows, not verbs.
+// only family-specific code on the surface — #100 added knowledge feeds as a
+// row here, exactly as ADR 0033 planned. (Memory entries are NOT a row:
+// memory.toml is not config.toml, and the memory book's own write path
+// serves the window instead — memory_admin.go.)
 type entryFamilySpec struct {
 	family   string
 	kind     string
@@ -86,11 +90,20 @@ type entryFamilySpec struct {
 	keyOrder []string
 	subKeys  map[string]map[string]entryKeyKind
 	subOrder map[string][]string
+	// pending, when set, reports why a validly written entry cannot go live
+	// on this daemon ("" when it can). It exists for the one family with a
+	// restart-class boundary: with zero feeds at boot there is no knowledge
+	// service to adopt the first one (ADR 0031), and the save's reply must
+	// say so rather than let the window show a saved feed that never fetches.
+	// A registry field, not a family-specific branch in the flow — the
+	// pressure valve ADR 0033 prescribed.
+	pending func(d *Daemon) string
 }
 
 // entryAdminFamilies lists the families the window may edit (#99: the
-// Automations tab's two). The key set mirrors the config structs exactly —
-// config.Routine/RoutineStep/Script — and a drift test pins that.
+// Automations tab's two; #100: knowledge feeds). The key sets mirror the
+// config structs exactly — config.Routine/RoutineStep/Script/KnowledgeFeed —
+// and a drift test pins that.
 var entryAdminFamilies = map[string]entryFamilySpec{
 	"routines": {
 		family: "routines", kind: "routine",
@@ -117,6 +130,34 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 		},
 		keyOrder: []string{"name", "phrases", "path", "timeout_sec", "report", "schedule", "announce", "enabled"},
 	},
+	// The Knowledge tab's feeds (#100, ADR 0031). The command is a string
+	// list on the wire like phrases — the fixed argv, never a shell line —
+	// and writing it never runs it: the pipeline below has no exec, and the
+	// whole-document validation only inspects the value. Fetching stays
+	// behind the existing knowledge.refresh gate, untouched by how the entry
+	// got into the file.
+	"knowledge.feeds": {
+		family: "knowledge.feeds", kind: "feed",
+		keys: map[string]entryKeyKind{
+			"name": entryKeyString, "enabled": entryKeyBool,
+			"description": entryKeyString, "command": entryKeyStringList,
+			"mode": entryKeyString, "interval_sec": entryKeyInt,
+			"ttl_sec": entryKeyInt, "timeout_sec": entryKeyInt,
+			"inject": entryKeyBool,
+		},
+		keyOrder: []string{"name", "description", "command", "mode",
+			"interval_sec", "ttl_sec", "timeout_sec", "inject", "enabled"},
+		// With zero feeds at boot there is no service, no registered tool,
+		// and applyRuntime pins the [knowledge] section (settings.go) — the
+		// first feed takes a restart (ADR 0031), and the save must say so.
+		pending: func(d *Daemon) string {
+			if d.knowledge == nil {
+				return "the first knowledge feed needs a daemon restart to start fetching " +
+					"(restart jarvixd; every later feed change applies on the standard reload)"
+			}
+			return ""
+		},
+	},
 }
 
 // entryFamily resolves a wire family name against the registry.
@@ -124,9 +165,14 @@ func entryFamily(family string) (entryFamilySpec, *ipc.Error) {
 	if spec, ok := entryAdminFamilies[family]; ok {
 		return spec, nil
 	}
+	names := make([]string, 0, len(entryAdminFamilies))
+	for name := range entryAdminFamilies {
+		names = append(names, strconv.Quote(name))
+	}
+	sort.Strings(names)
 	return entryFamilySpec{}, ipc.Errorf(ipc.CodeInvalidParams,
-		"family %q is not editable from the window; the editable families are %q and %q",
-		family, "routines", "scripts")
+		"family %q is not editable from the window; the editable families are %s",
+		family, strings.Join(names, ", "))
 }
 
 // registerEntryAdminMethods adds the form dialog surface (#99).
@@ -318,6 +364,16 @@ func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, crea
 	}
 
 	applied, reason := d.applyRuntime(fileCfg)
+	// A family behind a restart-class boundary (the first knowledge feed)
+	// was written and "applied" only in the sense that nothing else changed;
+	// the entry itself is not live, and honesty beats a row that pretends the
+	// scheduler already knows it (the applied=false contract the window
+	// already words).
+	if applied && spec.pending != nil {
+		if note := spec.pending(d); note != "" {
+			applied, reason = false, note
+		}
+	}
 	newFP := config.Fingerprint(newRaw)
 	d.publishConfigChanged(newFP)
 	if draft != nil {
@@ -590,6 +646,13 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases 
 				return entryProblem{Field: field, Message: msg}
 			}
 		}
+		if strings.Contains(msg, "duplicate feed name") {
+			// The asymmetric duplicate (#100's twin of the phrase collision):
+			// a rename that steals a later feed's name makes the OTHER entry
+			// carry the label, but the field where the fix happens is still
+			// the draft's own name.
+			return entryProblem{Field: "name", Message: msg}
+		}
 		return entryProblem{Message: msg}
 	}
 
@@ -615,6 +678,12 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases 
 		return entryProblem{Field: "phrases", Message: labelled}
 	case strings.Contains(labelled, "no steps"):
 		return entryProblem{Field: "steps", Message: labelled}
+	case strings.Contains(labelled, "duplicate feed name"):
+		// The knowledge validator's collision case (#100) words the clash
+		// without leading with the key — "duplicate feed name; each feed
+		// needs its own" — so the token match below would miss it. The name
+		// field is where the fix happens.
+		return entryProblem{Field: "name", Message: labelled}
 	}
 	token := strings.TrimSuffix(strings.SplitN(labelled, " ", 2)[0], ":")
 	if token == "it" || token == "" {

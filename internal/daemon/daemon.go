@@ -955,6 +955,7 @@ func (d *Daemon) registerMethods() {
 	d.registerContextMethods()
 	d.registerConversationMethods()
 	d.registerMemoryMethods()
+	d.registerMemoryAdminMethods()
 	d.registerKnowledgeMethods()
 	d.registerTextMethods()
 	d.registerWakeMethods()

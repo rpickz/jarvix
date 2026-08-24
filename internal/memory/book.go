@@ -34,6 +34,23 @@ const (
 // warning, so the refusal at the cap is never the first anyone hears of it.
 const nearCapFraction = 0.9
 
+// The Book's refusals, as matchable sentinels. The window's memory form
+// (issue #100) must place each refusal — empty content under its text field,
+// a full store in the form's general area, an unknown id as a crisp
+// parameter error — and matching wrapped sentinels with errors.Is keeps that
+// placement decision from becoming a second copy of the rule's wording
+// (ADR 0013: the rule lives here; callers only place its message). The
+// messages themselves are unchanged: each sentinel is the sentence's own
+// opening words, and the dynamic detail is wrapped around it.
+var (
+	// ErrNoContent refuses a fact with nothing in it.
+	ErrNoContent = errors.New("a fact needs content")
+	// ErrStoreFull refuses a store past memory.max_facts.
+	ErrStoreFull = errors.New("the memory store is full")
+	// ErrUnknownID refuses an id no stored fact carries.
+	ErrUnknownID = errors.New("no remembered fact has id")
+)
+
 // BookOptions configure a Book. Zero values take the defaults.
 type BookOptions struct {
 	// MaxFacts caps how many facts the store holds.
@@ -228,15 +245,15 @@ func (b *Book) saveLocked(facts []Fact) error {
 func (b *Book) Add(content, source string) (Fact, string, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return Fact{}, "", errors.New("a fact needs content")
+		return Fact{}, "", ErrNoContent
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.refreshLocked()
 	if len(b.facts) >= b.maxFacts {
 		return Fact{}, "", fmt.Errorf(
-			"the memory store is full (%d facts); forget something stale, or raise memory.max_facts",
-			b.maxFacts)
+			"%w (%d facts); forget something stale, or raise memory.max_facts",
+			ErrStoreFull, b.maxFacts)
 	}
 	now := b.now()
 	fact := Fact{
@@ -263,14 +280,14 @@ func (b *Book) Add(content, source string) (Fact, string, error) {
 func (b *Book) Update(id, content, source string) (Fact, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return Fact{}, errors.New("a fact needs content")
+		return Fact{}, ErrNoContent
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.refreshLocked()
 	i := b.indexLocked(id)
 	if i < 0 {
-		return Fact{}, fmt.Errorf("no remembered fact has id %q", id)
+		return Fact{}, fmt.Errorf("%w %q", ErrUnknownID, id)
 	}
 	next := append([]Fact(nil), b.facts...)
 	f := next[i]
@@ -298,7 +315,7 @@ func (b *Book) Forget(id string) (Fact, error) {
 	b.refreshLocked()
 	i := b.indexLocked(id)
 	if i < 0 {
-		return Fact{}, fmt.Errorf("no remembered fact has id %q", id)
+		return Fact{}, fmt.Errorf("%w %q", ErrUnknownID, id)
 	}
 	forgotten := b.facts[i]
 	next := append(append([]Fact(nil), b.facts[:i]...), b.facts[i+1:]...)
