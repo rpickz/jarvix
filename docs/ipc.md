@@ -181,7 +181,7 @@ matters, because the window and the widget must work with jarvixd stopped.
 
 | Target | Function | Effect |
 |---|---|---|
-| `jarvix` | `openWindow` / `closeWindow` / `toggleWindow` | Show, hide, or toggle the conversation window. `jarvix window`, a clicked notification, and the bar widget all go through here — there is only ever one window |
+| `jarvix` | `openWindow` / `closeWindow` / `toggleWindow` | Show, hide, or toggle the conversation window. `jarvix window`, a clicked notification, and the bar widget all go through here — there is only ever one window. A compositor-killed window (super+W) is rebuilt on the next open rather than re-shown; `scripts/verify-window-kill.sh` checks that live (issue #106) |
 | `jarvix` | `openSettings` | Open the window already showing the Settings tab (the bar widget's Settings action) |
 | `jarvix` | `state` / `ping` | The overlay's view of the session state; liveness |
 | `jarvix.bar` | `open` / `close` / `toggle` / `show` / `hide` | The bar widget's panel |
