@@ -256,7 +256,44 @@ func TestStripWakeWord(t *testing.T) {
 	}
 }
 
-// shippedAliases mirrors config.Default()'s activation.wake_aliases: the words
+// The name is the user's to choose (issue #103): whatever [assistant] name
+// and aliases hold flows through the strip under exactly the discipline the
+// default name gets — leading whole words only, case and punctuation
+// ignored, a following filler tolerated, and a name-only utterance left
+// alone. Multi-word names ("Mister Smith") match as a word sequence, and so
+// do multi-word aliases, because whisper mishears a two-word name two words
+// at a time.
+func TestStripWakeWordFollowsAConfiguredName(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		in      string
+		word    string
+		aliases []string
+		want    string
+	}{
+		{"custom name leading", "Hal, open the window", "Hal", nil, "open the window"},
+		{"custom name case variant", "hal open the window", "HAL", nil, "open the window"},
+		{"custom alias leading", "Howl, open the window", "Hal", []string{"hal", "howl"}, "open the window"},
+		{"custom alias with a filler", "Hey howl, open the window", "Hal", []string{"howl"}, "open the window"},
+		{"custom name mid-sentence stays", "please tell Hal I said hi", "Hal", []string{"howl"}, "please tell Hal I said hi"},
+		{"only the custom name is left alone", "Hal.", "Hal", []string{"howl"}, "Hal."},
+		{"multi-word name leading", "Mister Smith, what's the time?", "Mister Smith", nil, "what's the time?"},
+		{"multi-word name case and punctuation", "mister smith. what's the time?", "Mister Smith", nil, "what's the time?"},
+		{"multi-word name with a filler", "Hey Mister Smith, what's the time?", "Mister Smith", nil, "what's the time?"},
+		{"multi-word alias", "Mr Smith, what's the time?", "Mister Smith", []string{"mr smith"}, "what's the time?"},
+		{"half a multi-word name stays", "Mister, what's the time?", "Mister Smith", nil, "Mister, what's the time?"},
+		{"multi-word name mid-sentence stays", "please could you call Mister Smith", "Mister Smith", nil, "please could you call Mister Smith"},
+		{"only the multi-word name is left alone", "Mister Smith.", "Mister Smith", nil, "Mister Smith."},
+		{"an alias that is a prefix strips the whole name", "Mister Smith, open it", "Mister Smith", []string{"mister"}, "open it"},
+	} {
+		if got := stripWakeWord(c.in, c.word, c.aliases); got != c.want {
+			t.Errorf("%s: stripWakeWord(%q, %q, %v) = %q, want %q",
+				c.name, c.in, c.word, c.aliases, got, c.want)
+		}
+	}
+}
+
+// shippedAliases mirrors config.Default()'s assistant aliases: the words
 // whisper actually writes when it mishears "jarvix" (issue #83). Mirrored
 // rather than imported so the session package keeps not depending on config;
 // TestDefaultWakeAliasesAreTheKnownMishearings in internal/config pins the

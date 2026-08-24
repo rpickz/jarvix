@@ -12,8 +12,9 @@ import (
 // different word lists.
 
 // STTBiasPrompt composes the initial prompt both transcription paths carry:
-// the wake word plus every [stt] vocabulary term. Empty when there is nothing
-// to bias toward, which switches the mechanism off entirely.
+// the assistant's name ([assistant], issue #103) plus every [stt] vocabulary
+// term. Empty when there is nothing to bias toward, which switches the
+// mechanism off entirely.
 //
 // The shape is deliberate, and was chosen against the real base.en model
 // rather than on theory. whisper.cpp conditions its decoder on this text as
@@ -28,8 +29,8 @@ import (
 // is case-insensitive.
 func (c Config) STTBiasPrompt() string {
 	var parts []string
-	if word := capitalise(strings.TrimSpace(c.Activation.WakeWord)); word != "" {
-		parts = append(parts, "The assistant is called "+word+".")
+	if name := capitalise(strings.TrimSpace(c.Assistant.Name)); name != "" {
+		parts = append(parts, "The assistant is called "+name+".")
 	}
 	var terms []string
 	for _, t := range c.STT.Vocabulary {
@@ -43,9 +44,10 @@ func (c Config) STTBiasPrompt() string {
 	return strings.Join(parts, " ")
 }
 
-// capitalise upper-cases the first rune. The bias prompt presents the wake
-// word as a name, and the capitalised token is the one whisper renders a
-// sentence-leading proper noun with — see STTBiasPrompt for the evidence.
+// capitalise upper-cases the first rune. The bias prompt presents the
+// assistant's name as the proper noun it is, and the capitalised token is the
+// one whisper renders a sentence-leading proper noun with — see STTBiasPrompt
+// for the evidence.
 func capitalise(s string) string {
 	r := []rune(s)
 	if len(r) == 0 {

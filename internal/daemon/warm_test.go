@@ -155,3 +155,34 @@ func TestLastTimingsSurviveTheSessionThatProducedThem(t *testing.T) {
 		t.Errorf("last timings = %v; the event's map was retained by reference", got)
 	}
 }
+
+// A configured assistant name (issue #103) reaches both transcription paths
+// as the same capitalised sentence — the shape that stops whisper absorbing
+// the bias (issue #83). The warm server request and the cold whisper-cli
+// fallback must bias identically, or a fallback would change what the
+// assistant's own name transcribes as; the whispercpp package's own tests
+// pin that each path forwards its Prompt verbatim (`--prompt` and the
+// multipart "prompt" field), so equality here closes the loop from config to
+// wire.
+func TestBothSTTPathsCarryTheConfiguredNameBiasSentence(t *testing.T) {
+	cfg := config.Default()
+	cfg.Assistant.Name = "Hal"
+	deps, _, err := fillDeps(cfg, testPaths(t), Deps{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, ok := deps.Transcriber.(*whispercpp.ServerTranscriber)
+	if !ok {
+		t.Fatalf("transcriber = %T, want the warm whisper adapter", deps.Transcriber)
+	}
+	const want = "The assistant is called Hal."
+	if server.Prompt != want {
+		t.Errorf("warm path prompt = %q, want %q", server.Prompt, want)
+	}
+	if server.Cold == nil {
+		t.Fatal("the warm adapter has no cold fallback wired")
+	}
+	if server.Cold.Prompt != want {
+		t.Errorf("cold path prompt = %q, want %q", server.Cold.Prompt, want)
+	}
+}

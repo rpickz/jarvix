@@ -39,7 +39,7 @@ func checkWakeWord(cfg config.Config, paths config.Paths) Result {
 	}
 
 	settings := fmt.Sprintf("word %q, sensitivity %.2f, submits after %dms of silence, %dms kept before the wake word",
-		cfg.Activation.WakeWord, cfg.Activation.WakeSensitivity,
+		cfg.WakeDetectorWord(), cfg.Activation.WakeSensitivity,
 		cfg.Activation.EndpointSilenceMs, cfg.Activation.WakeRingMs)
 
 	// The daemon is the only thing that knows whether a capture process is

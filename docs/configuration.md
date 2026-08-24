@@ -50,8 +50,8 @@ to each field in the settings screen:
 | Class | Options | When it takes effect |
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new) | Immediately on save, even mid-session |
-| **idle** | `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
-| **restart** | `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
+| **idle** | `assistant.aliases`, `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **restart** | `assistant.name`, `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
 
 A reload that fails validation keeps the running configuration and reports
 why — the daemon never hot-swaps into a broken state. `[[intents.custom]]`
@@ -70,6 +70,24 @@ not set up, Whisper model missing, input access not granted), reusing
 ## Full reference
 
 ```toml
+[assistant]                      # the assistant's identity (see "Naming your
+                                 # assistant" below)
+name = "Jarvix"                  # what it answers to and calls itself. One
+                                 # source of truth: speech recognition biases
+                                 # toward it, wake matching and stripping
+                                 # accept it, and the default prompt
+                                 # self-refers by it. May be multi-word
+                                 # ("Mister Smith").
+aliases = ["jarvis", "javax", "jarvic", "jarvicks", "jarvex"]
+                                 # spellings transcripts mishear the name as;
+                                 # the wake-transcript strip accepts any of
+                                 # them as the summons, leading whole words
+                                 # only. Unset, the shipped list above covers
+                                 # the default name — a custom name starts
+                                 # with none (jarvix doctor will nudge).
+                                 # Transcript-side only: the acoustic wake
+                                 # gate never sees them.
+
 [activation]
 mode = "push_to_talk"            # "push_to_talk" (default) or "wake_word".
                                  # "wake_word" *adds* background listening;
@@ -83,9 +101,12 @@ ptt_chord = ["leftmeta", "leftalt", "v"]
 
 # Background listening (only used when mode = "wake_word").
 # See "Background listening" below before turning it on.
-wake_word = "jarvix"             # passed to the detector; Jarvix does not
-                                 # match it itself. May also be a path to a
-                                 # model you trained yourself.
+# wake_word = "hey_jarvis"       # detector override: a bundled model word or
+                                 # a path to a model you trained yourself.
+                                 # Unset (the default), the detector is
+                                 # handed the assistant's name, lowercased.
+                                 # Detector-only: the bias prompt, the strip,
+                                 # and the prompt follow [assistant].
 wake_command = ["jarvix-wake"]   # the detector helper, run directly (not
                                  # through a shell): one argument per entry.
                                  # Installed by scripts/setup-wake.sh.
@@ -98,14 +119,9 @@ wake_ring_ms = 1200              # audio kept from *before* the wake word, so
                                  # can ever reach a transcript, so keep it
                                  # short. 0 keeps none.
 max_utterance_sec = 15           # longest hands-free request
-wake_aliases = ["jarvis", "javax", "jarvic", "jarvicks", "jarvex"]
-                                 # words the transcript strip accepts *as* the
-                                 # wake word — whisper's known mishearings of
-                                 # it. Leading whole word only, exactly like
-                                 # the wake word itself; a mid-sentence
-                                 # "Jarvis" is never touched. Transcript-side
-                                 # only: the acoustic wake gate never sees
-                                 # them. Setting the key replaces the list.
+# wake_aliases moved to [assistant] aliases; a config still setting it here
+# is refused at load with directions, so a tuned list can never be silently
+# dropped.
 
 [ai]
 provider = "ollama"              # endpoint name: a preset or your own [ai.<name>]
@@ -537,6 +553,47 @@ model change at all.
 > change will reject it. Re-run `scripts/setup-kokoro.sh` after upgrading;
 > `jarvix doctor` checks the installed helper and says so if it is stale.
 
+## Naming your assistant (`[assistant]`)
+
+Naming is the most personal knob an assistant has, so it is one setting —
+editable in the window's Settings tab and via `jarvix config set
+assistant.name=…` — and the whole pipeline follows it:
+
+- **Speech recognition biases toward it.** Both transcription paths carry the
+  sentence `The assistant is called <Name>.` (the sentence form matters — see
+  "Hearing its own name" below).
+- **Wake matching and stripping accept it**, and its `aliases`, as the
+  summons at the front of a hands-free transcript.
+- **It refers to itself by it.** The default system prompt opens
+  "You are <Name>, …". A hand-written `ai.system_prompt` is sent verbatim —
+  your words are yours.
+
+```toml
+[assistant]
+name = "Hal"
+aliases = ["howl", "hull"]   # what transcripts actually wrote when you said "Hal"
+```
+
+Two things deliberately do **not** follow the name:
+
+- **Product branding.** The window title, the bar tooltip, the docs, and the
+  binary/socket/service names stay Jarvix — they name the software on disk,
+  not the persona you talk to.
+- **The acoustic wake model.** openWakeWord only detects words it has a model
+  for, so background listening keeps using the nearest model (`hey_jarvis` by
+  default). Set `activation.wake_word` to a bundled word or your own `.onnx`
+  to change what the *detector* listens for; everything else follows
+  `assistant.name` regardless.
+
+Give a custom name aliases. Whisper only writes words it knows, so a novel
+name arrives as a nearby real word — the default name shipped with five
+aliases because that is what transcripts actually produced — and the strip
+only accepts spellings it is told about. Say the name, read what the
+transcript wrote (`jarvix doctor` warns and shows the shape while a custom
+name has none), and accept those spellings. Validation refuses a blank or
+duplicate alias, and an alias equal to the name itself: the name is always
+accepted, in any case, so listing it again adds nothing.
+
 ## Background listening (`activation.mode = "wake_word"`)
 
 Say "Jarvix, what's my disk usage?" and it answers — no keyboard, no chord.
@@ -634,13 +691,13 @@ mechanisms fix this, from both ends:
 
 - **The recogniser is biased toward the name.** Every transcription — warm
   `whisper-server` request and cold `whisper-cli` run alike — carries an
-  initial prompt naming the wake word, plus anything you add to
-  `stt.vocabulary`. With the shipped `base.en` model this alone turns
+  initial prompt naming the assistant (`assistant.name`), plus anything you
+  add to `stt.vocabulary`. With the shipped `base.en` model this alone turns
   "Jarvis, what time is it?" back into "Jarvix, what time is it?".
-- **The known mishearings are accepted anyway.** `activation.wake_aliases`
-  lists the words the wake-transcript strip treats as the wake word, under
-  exactly the same leading-whole-word rule. Ask about Jarvis Cocker
-  mid-sentence and every word survives.
+- **The known mishearings are accepted anyway.** `assistant.aliases` lists
+  the spellings the wake-transcript strip treats as the name, under exactly
+  the same leading-whole-word rule. Ask about Jarvis Cocker mid-sentence and
+  every word survives.
 
 Both are visible in `jarvix doctor` ("name recognition"). The aliases widen
 only what is *stripped from a wake transcript* — they are never given to the
