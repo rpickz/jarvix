@@ -196,7 +196,7 @@ func TestConversationSearchArgumentErrors(t *testing.T) {
 
 func TestConversationSearchIsAllowTier(t *testing.T) {
 	// The gate treats the search like the other reads (desktop.list_windows,
-	// memory.recall): silent under the default policy, with per-tool config
+	// memory.search): silent under the default policy, with per-tool config
 	// still able to override it.
 	p, err := NewPolicy(PolicyConfig{})
 	if err != nil {

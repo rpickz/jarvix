@@ -210,7 +210,7 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	ListWindowsToolName:         PolicyAllow,
 	FocusWindowToolName:         PolicyAllow,
 	MemoryRememberToolName:      PolicyAllow,
-	MemoryRecallToolName:        PolicyAllow,
+	MemorySearchToolName:        PolicyAllow,
 	RoutineToolName:             PolicyAllow,
 	ConversationsSearchToolName: PolicyAllow,
 	KnowledgeRefreshToolName:    PolicyAllow,

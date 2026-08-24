@@ -11,19 +11,21 @@ import (
 )
 
 // This file is the model's hands on the knowledge base (ADR 0025): three
-// verbs over one memory.Book. Remember stores or supersedes, recall lists in
-// words, forget deletes from disk. The store itself — the file, the caps,
-// the hand-edit pickup — lives in internal/memory; this file owns what the
-// *model* is told, which is where the supersede behaviour is actually made:
-// when a remember looks like an existing fact, the tool refuses to guess and
-// hands the candidates back, so the model decides update-versus-new
-// deliberately and contradictions never accumulate by default.
+// verbs over one memory.Book. Remember stores or supersedes, search finds
+// (ADR 0037 renamed it from memory.recall, and gave it the deterministic
+// ranking and the retrieval stats), forget deletes from disk. The store
+// itself — the file, the caps, the hand-edit pickup — lives in
+// internal/memory; this file owns what the *model* is told, which is where
+// the supersede behaviour is actually made: when a remember looks like an
+// existing fact, the tool refuses to guess and hands the candidates back, so
+// the model decides update-versus-new deliberately and contradictions never
+// accumulate by default.
 
 // Memory tool names, exported so the policy's built-in tiers and the status
 // surfaces can name them without guessing.
 const (
 	MemoryRememberToolName = "memory.remember"
-	MemoryRecallToolName   = "memory.recall"
+	MemorySearchToolName   = "memory.search"
 	MemoryForgetToolName   = "memory.forget"
 )
 
@@ -61,14 +63,14 @@ func NewMemory(opts MemoryOptions) *Memory {
 func (m *Memory) Tools() []Tool {
 	return []Tool{
 		&memoryRemember{m},
-		&memoryRecall{m},
+		&memorySearch{m},
 		&memoryForget{m},
 	}
 }
 
 // Names lists the family's tool names, for the startup log.
 func (m *Memory) Names() []string {
-	return []string{MemoryRememberToolName, MemoryRecallToolName, MemoryForgetToolName}
+	return []string{MemoryRememberToolName, MemorySearchToolName, MemoryForgetToolName}
 }
 
 // sourceTurn resolves the current turn reference, "" when unknown.
@@ -126,7 +128,7 @@ func (t *memoryRemember) Schema() json.RawMessage {
 			},
 			"update_id": {
 				"type": "string",
-				"description": "Id of an existing fact this content supersedes (from a previous result or memory.recall)"
+				"description": "Id of an existing fact this content supersedes (from a previous result or memory.search)"
 			},
 			"force_new": {
 				"type": "boolean",
@@ -156,7 +158,7 @@ func (t *memoryRemember) Execute(_ context.Context, input json.RawMessage) (stri
 	if args.UpdateID != "" {
 		fact, err := t.m.book.Update(args.UpdateID, args.Content, t.m.sourceTurn())
 		if err != nil {
-			return fmt.Sprintf("error: %v — use memory.recall to see what is stored", err), nil
+			return fmt.Sprintf("error: %v — use memory.search to see what is stored", err), nil
 		}
 		return fmt.Sprintf("Updated the remembered fact. It now reads:\n%s\n"+
 			"Confirm to the user in one sentence what you now remember.", describeFact(fact)), nil
@@ -187,24 +189,35 @@ func (t *memoryRemember) Execute(_ context.Context, input json.RawMessage) (stri
 	return result, nil
 }
 
-// ------------------------------------------------------------ memory.recall
+// ------------------------------------------------------------ memory.search
 
-type memoryRecall struct{ m *Memory }
+// memorySearch is the retrieval half of the pin/search split (ADR 0037,
+// formerly memory.recall). A query goes through the book's deterministic
+// ranking and *records the retrieval* — each returned fact's stats move,
+// which is what makes the Memory tab's "retrieved N times" line true. An
+// omitted query is enumeration, not retrieval: it lists everything (the
+// forget flow needs that) and moves no stats, so browsing can never inflate
+// the usefulness signal.
+type memorySearch struct{ m *Memory }
 
 // Name implements Tool.
-func (t *memoryRecall) Name() string { return MemoryRecallToolName }
+func (t *memorySearch) Name() string { return MemorySearchToolName }
 
-// Description implements Tool.
-func (t *memoryRecall) Description() string {
+// Description implements Tool. The honesty framing lives here as much as in
+// the system prompt: the facts already injected are in front of the model,
+// and everything else is only knowable by searching.
+func (t *memorySearch) Description() string {
 	return "Search your long-term memory of facts the user asked you to remember. Use it when " +
-		"the user asks what you know or remember about something, before forgetting or updating " +
-		"a fact you need the id of, or when the remembered-facts list in your context says " +
-		"entries were left out. Answer the user in plain words — never read ids or timestamps " +
-		"aloud unless asked when something changed."
+		"the remembered-facts block in your context says facts are not shown and the user's " +
+		"question might touch one, when the user asks what you know or remember about something, " +
+		"or before forgetting or updating a fact you need the id of. Do not search for facts " +
+		"already shown in your context, and never claim to remember something you have neither " +
+		"been shown nor found here. Answer the user in plain words — never read ids or " +
+		"timestamps aloud unless asked when something changed."
 }
 
 // Schema implements Tool.
-func (t *memoryRecall) Schema() json.RawMessage {
+func (t *memorySearch) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -217,21 +230,26 @@ func (t *memoryRecall) Schema() json.RawMessage {
 }
 
 // Execute implements Tool.
-func (t *memoryRecall) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *memorySearch) Execute(_ context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Query string `json:"query"`
 	}
 	if len(input) > 0 {
 		if err := json.Unmarshal(input, &args); err != nil {
-			return "", fmt.Errorf("invalid memory.recall arguments: %w", err)
+			return "", fmt.Errorf("invalid memory.search arguments: %w", err)
 		}
 	}
-	facts := t.m.book.List(args.Query)
-	if len(facts) == 0 {
-		if strings.TrimSpace(args.Query) == "" {
+	var facts []memory.Fact
+	if strings.TrimSpace(args.Query) == "" {
+		facts = t.m.book.List("")
+		if len(facts) == 0 {
 			return "Nothing is stored in memory yet.", nil
 		}
-		return fmt.Sprintf("No remembered fact matches %q.", args.Query), nil
+	} else {
+		facts = t.m.book.Search(args.Query)
+		if len(facts) == 0 {
+			return fmt.Sprintf("No remembered fact matches %q.", args.Query), nil
+		}
 	}
 	lines := make([]string, 0, len(facts))
 	for _, f := range facts {
@@ -267,7 +285,7 @@ func (t *memoryForget) Schema() json.RawMessage {
 		"properties": {
 			"id": {
 				"type": "string",
-				"description": "Id of the fact to forget (from memory.recall or a remember result)"
+				"description": "Id of the fact to forget (from memory.search or a remember result)"
 			},
 			"query": {
 				"type": "string",
@@ -297,7 +315,7 @@ func (t *memoryForget) resolve(input json.RawMessage) (fact memory.Fact, reason 
 			}
 		}
 		return memory.Fact{}, fmt.Sprintf("error: no remembered fact has id %q — "+
-			"use memory.recall to see what is stored", args.ID), false
+			"use memory.search to see what is stored", args.ID), false
 	}
 	if strings.TrimSpace(args.Query) == "" {
 		return memory.Fact{}, "error: memory.forget needs an id or a query", false

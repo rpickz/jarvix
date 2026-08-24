@@ -95,7 +95,7 @@ func (t *ConversationSearch) Description() string {
 	return "Search the user's past conversations with you for something said earlier — \"what did " +
 		"we decide about X?\", \"when did I mention Y?\". Use it only when the answer was said in " +
 		"an earlier conversation: never search for things the current conversation already " +
-		"contains, and use memory.recall, not this, for facts you were asked to remember. Quote " +
+		"contains, and use memory.search, not this, for facts you were asked to remember. Quote " +
 		"what it returns instead of answering from your own impression, and say when each thing " +
 		"was said using the day wording the result gives you."
 }

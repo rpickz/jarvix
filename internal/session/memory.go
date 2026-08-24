@@ -61,6 +61,7 @@ func (e *Engine) gatherMemory(s *sess) memory.Injection {
 		"session_id": s.id,
 		"facts":      len(inj.Facts),
 		"trimmed":    inj.Trimmed,
+		"searchable": inj.Searchable,
 		"total":      inj.Total,
 		"est_tokens": inj.EstTokens,
 	}})

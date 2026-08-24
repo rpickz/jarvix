@@ -645,14 +645,19 @@ const DesktopSystemPrompt = " You can act on the user's desktop: list their open
 // base is enabled (ADR 0025). The trust boundary is stated here, once, as
 // model behaviour: memory is written only on the user's explicit word.
 // Everything mechanical — supersede candidates, ids, cap warnings — is
-// carried by the tool descriptions and results instead.
+// carried by the tool descriptions and results instead. The ambient-versus-
+// searchable honesty rule (ADR 0037) is the one addition that must ride the
+// prompt itself: it governs whether the model reaches for memory.search at
+// all, a judgement made before any tool description is read.
 const MemorySystemPrompt = " You have a long-term memory of facts, injected above as remembered " +
-	"facts when any exist. Store a fact with memory.remember only when the user explicitly asks " +
-	"you to remember something — never decide on your own that something is worth keeping. When " +
-	"the user corrects a remembered fact, update the existing fact rather than adding a new one. " +
-	"When they ask what you know or remember, answer from the remembered facts or memory.recall, " +
-	"in plain words. When they ask you to forget something, use memory.forget. After remembering " +
-	"or forgetting, confirm what changed in one short sentence."
+	"facts when any exist. Facts shown there are already in front of you; facts it says are not " +
+	"shown are found only with memory.search — never claim to remember something you have " +
+	"neither been shown nor searched for. Store a fact with memory.remember only when the user " +
+	"explicitly asks you to remember something — never decide on your own that something is " +
+	"worth keeping. When the user corrects a remembered fact, update the existing fact rather " +
+	"than adding a new one. When they ask what you know or remember, answer from the remembered " +
+	"facts and memory.search, in plain words. When they ask you to forget something, use " +
+	"memory.forget. After remembering or forgetting, confirm what changed in one short sentence."
 
 // ConfigSystemPrompt is appended to the system prompt for the always-present
 // self-configuration tools (issue #105, ADR 0036). Deliberately terse — the
