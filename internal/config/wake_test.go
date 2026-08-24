@@ -98,7 +98,6 @@ func TestWakeRequirementsApplyOnlyWhenEnabled(t *testing.T) {
 		edit func(*Config)
 		want string
 	}{
-		{"no wake word", func(c *Config) { c.Activation.WakeWord = "  " }, "wake_word"},
 		{"no detector", func(c *Config) { c.Activation.WakeCommand = nil }, "wake_command"},
 		{"detector with a shell string", func(c *Config) {
 			c.Activation.WakeCommand = []string{"jarvix-wake --model x"}

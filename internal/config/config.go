@@ -21,6 +21,12 @@ import (
 
 // Config is the root configuration document.
 type Config struct {
+	// Assistant is the assistant's identity (issue #103): the name it
+	// answers to and the spellings transcripts mishear it as. The STT bias
+	// sentence, the wake-transcript strip, the wake detector's word, and
+	// the default prompt's self-reference all derive from this one table
+	// (see assistant.go).
+	Assistant    Assistant    `toml:"assistant"`
 	Activation   Activation   `toml:"activation"`
 	AI           AI           `toml:"ai"`
 	STT          STT          `toml:"stt"`
@@ -270,9 +276,15 @@ type Activation struct {
 	// disables the daemon-side watcher.
 	PTTChord []string `toml:"ptt_chord"`
 
-	// WakeWord is what has to be said, e.g. "jarvix". Jarvix does not match
-	// it itself — it is passed to the detector, which is the thing that owns
-	// what a wake word sounds like.
+	// WakeWord overrides what is handed to the wake detector — a bundled
+	// model word or a path to a model you trained yourself. Empty (the
+	// default) derives the assistant's name, lowercased (see
+	// Config.WakeDetectorWord). It exists because the detector's vocabulary
+	// is whatever models exist, not whatever names people choose: keeping
+	// the chosen name everywhere while pointing the detector at the nearest
+	// real model is the documented custom-name setup. Only the detector
+	// reads it; the bias prompt, the transcript strip, and the system
+	// prompt follow [assistant] (issue #103).
 	WakeWord string `toml:"wake_word"`
 	// WakeCommand is the detector helper's argv (ADR 0002: engines are
 	// external processes). Missing or unrunnable degrades to push-to-talk
@@ -294,14 +306,13 @@ type Activation struct {
 	WakeRingMs int `toml:"wake_ring_ms"`
 	// MaxUtteranceSec bounds one hands-free request.
 	MaxUtteranceSec int `toml:"max_utterance_sec"`
-	// WakeAliases are words the transcript strip accepts as the wake word, in
-	// addition to the word itself. "Jarvix" is out-of-vocabulary for whisper,
-	// so even a correctly *detected* wake word is often *transcribed* as a
-	// nearby real word ("Jarvis", "JavaX") — and a strip that only knows the
-	// true spelling then leaves the summons in the transcript, where it breaks
-	// intent matching (issue #83). Aliases widen only the transcript strip;
-	// the acoustic wake gate (ADR 0024) never sees them, so false-activation
-	// behaviour is untouched. Setting the key replaces the shipped defaults.
+	// WakeAliases moved to [assistant] aliases (issue #103). The field is
+	// kept decode-only so a configuration still setting it is *refused with
+	// directions* (wakeProblems) instead of silently reverting to the
+	// shipped list — a strip that quietly stopped accepting a tuned alias
+	// would look exactly like the mishearing bug it existed to fix.
+	//
+	// Deprecated: set [assistant] aliases instead.
 	WakeAliases []string `toml:"wake_aliases"`
 }
 
@@ -363,8 +374,8 @@ type STT struct {
 	Whisper  Whisper `toml:"whisper"`
 	// Vocabulary lists extra terms the recogniser is biased toward — project
 	// names, jargon, anything whisper keeps rounding to a nearby real word.
-	// They join the wake word in the bias prompt both transcription paths
-	// carry (issue #83). Input-side only: this is what the *user* says, where
+	// They join the assistant's name in the bias prompt both transcription
+	// paths carry (issue #83). Input-side only: this is what the *user* says, where
 	// tts.lexicon respells what *Jarvix* says — different vocabularies on
 	// purpose.
 	Vocabulary []string `toml:"vocabulary"`
@@ -474,6 +485,11 @@ type Log struct {
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
+		// The identity ships with no aliases *stored*: the tuned mishearing
+		// list is derived while the name is the default one (see
+		// Assistant.EffectiveAliases), so choosing a new name never inherits
+		// another name's mishearings.
+		Assistant: Assistant{Name: defaultAssistantName},
 		Activation: Activation{
 			// Push-to-talk stays the default. Background listening is a
 			// microphone that is open when nobody asked it to be, and that is
@@ -482,22 +498,19 @@ func Default() Config {
 			Mode:     ModePushToTalk,
 			PTTChord: []string{"leftmeta", "leftalt", "v"},
 			// The wake settings carry working values regardless, so switching
-			// the mode on is one edit rather than six.
-			WakeWord:          "jarvix",
+			// the mode on is one edit rather than six. The detector's word is
+			// not among them: it derives from assistant.name unless
+			// wake_word overrides it.
 			WakeCommand:       []string{"jarvix-wake"},
 			WakeSensitivity:   0.5,
 			EndpointSilenceMs: 800,
 			WakeRingMs:        1200,
 			MaxUtteranceSec:   15,
-			// The mishearings whisper's English models actually produce for
-			// "jarvix" (observed with base.en): the transcript strip accepts
-			// any of them as the summons.
-			WakeAliases: []string{"jarvis", "javax", "jarvic", "jarvicks", "jarvex"},
 		},
 		AI: AI{
 			Provider:     "ollama",
 			Model:        "llama3.2:3b",
-			SystemPrompt: defaultSystemPrompt,
+			SystemPrompt: DefaultSystemPrompt(defaultAssistantName),
 			MaxTokens:    1024,
 			Temperature:  0.7,
 			Endpoints: map[string]Endpoint{
@@ -566,17 +579,20 @@ func Default() Config {
 	}
 }
 
-// defaultSystemPrompt carries the honesty rule alongside the speech style
-// because it binds even with every tool switched off: a session that cannot
-// act must say so, never narrate an action it has no way to perform. The
-// wording is pinned by TestSystemPromptPinsTheHonestyRule — a live session
-// narrated launches and window moves with tool_calls=0 (issue #71), and this
-// sentence is the standing instruction against that.
-const defaultSystemPrompt = "You are Jarvix, a voice assistant built into the user's Linux computer. " +
-	"Your responses are spoken aloud, so answer concisely in plain prose: no markdown, " +
-	"no lists, no code blocks, no preamble. Get straight to the point. " +
-	"Never say you have done something, or are doing it, unless you really did it; if you cannot " +
-	"do something, say so plainly instead of describing it as done."
+// The assistant's shipped identity. These are deliberately the ONLY places
+// the default name and its tuned mishearing list are written down — every
+// call-site that hears, strips, or speaks the name derives from the
+// [assistant] table (assistant.go), and the grep-guard test in this package
+// fails if a copy creeps back into one of them.
+const defaultAssistantName = "Jarvix"
+
+// defaultAssistantAliases returns the mishearings whisper's English models
+// actually produce for the default name (observed with base.en, issue #83):
+// the transcript strip accepts any of them as the summons. A fresh slice per
+// call, so no caller can mutate the shipped tuning for the rest of a process.
+func defaultAssistantAliases() []string {
+	return []string{"jarvis", "javax", "jarvic", "jarvicks", "jarvex"}
+}
 
 // ToolSystemPrompt is appended to the system prompt when tools are enabled.
 // It tells the model to act on its own rather than instruct the user, and to
@@ -637,38 +653,6 @@ const MemorySystemPrompt = " You have a long-term memory of facts, injected abov
 	"When they ask what you know or remember, answer from the remembered facts or memory.recall, " +
 	"in plain words. When they ask you to forget something, use memory.forget. After remembering " +
 	"or forgetting, confirm what changed in one short sentence."
-
-// AssistantSystemPrompt is the system prompt the engine runs with: the
-// configured base plus the instructions for each enabled tool. The tool
-// flags decide the suffixes because the tool registry is built from them —
-// on a reload the running (booted) tool flags are what matter, not the file.
-// It lives here rather than in the daemon so doctor's context-floor check
-// (issue #71) measures the same prompt the daemon sends, from one copy.
-func AssistantSystemPrompt(cfg Config) string {
-	prompt := cfg.AI.SystemPrompt
-	if cfg.Tools.Shell {
-		prompt += ToolSystemPrompt
-	}
-	if cfg.Tools.Artifacts {
-		prompt += ArtifactSystemPrompt
-	}
-	if cfg.Tools.Desktop {
-		prompt += DesktopSystemPrompt
-	}
-	if cfg.Tools.Typing.Enable {
-		prompt += TypingSystemPrompt
-	}
-	if len(cfg.Advisors) > 0 {
-		prompt += AdvisorSystemPrompt
-	}
-	if cfg.Memory.Enabled {
-		prompt += MemorySystemPrompt
-	}
-	if len(cfg.Knowledge.Feeds) > 0 {
-		prompt += KnowledgeSystemPrompt
-	}
-	return prompt
-}
 
 // minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
 // warm (whisper base.en alone is ~165 MB resident). A cap below it would
@@ -761,6 +745,7 @@ func (c Config) Validate() error {
 			problems = append(problems, err.Error())
 		}
 	}
+	problems = append(problems, c.assistantProblems()...)
 	problems = append(problems, c.wakeProblems()...)
 	problems = append(problems, c.sttProblems()...)
 	if c.AI.Provider == "" {

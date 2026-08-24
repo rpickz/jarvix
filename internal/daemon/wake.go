@@ -64,14 +64,17 @@ func (d *Daemon) startWake(ctx context.Context) {
 	spawn := d.injected.WakeDetector
 	if spawn == nil {
 		argv := append([]string(nil), cfg.Activation.WakeCommand...)
-		word := cfg.Activation.WakeWord
+		// The assistant's name, lowercased — or the activation.wake_word
+		// override, for a detector pointed at a bundled word or a
+		// self-trained model (issue #103).
+		word := cfg.WakeDetectorWord()
 		spawn = func(ctx context.Context) (wake.Detector, error) {
 			return wake.StartDetector(ctx, argv, word, d.log)
 		}
 	}
 
 	listener := wake.New(source, spawn, wake.Options{
-		Word:         cfg.Activation.WakeWord,
+		Word:         cfg.WakeDetectorWord(),
 		Sensitivity:  cfg.Activation.WakeSensitivity,
 		Silence:      cfg.Activation.EndpointSilence(),
 		RingDuration: cfg.Activation.WakeRing(),
@@ -88,7 +91,7 @@ func (d *Daemon) startWake(ctx context.Context) {
 	// follows (ADR 0019). A microphone that opens itself must never be
 	// something a user discovers by reading the source.
 	d.log.Info("background listening enabled", "component", "wake",
-		"word", cfg.Activation.WakeWord,
+		"word", cfg.WakeDetectorWord(),
 		"sensitivity", cfg.Activation.WakeSensitivity,
 		"pre_roll_ms", cfg.Activation.WakeRingMs,
 		"endpoint_silence_ms", cfg.Activation.EndpointSilenceMs)
@@ -242,7 +245,7 @@ func (d *Daemon) wakeReport() map[string]any {
 			"muted":       false,
 			"capturing":   false,
 			"pid":         0,
-			"word":        cfg.Activation.WakeWord,
+			"word":        cfg.WakeDetectorWord(),
 			"last_reason": reason,
 		}
 	}

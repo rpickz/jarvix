@@ -103,17 +103,18 @@ type Options struct {
 	// staged, nothing written, `jarvix new` behaves as before the archive
 	// existed.
 	Archive conversations.Store
-	// WakeWord is the word background listening triggers on (ADR 0024). It
-	// is here because the wake word is *in* the transcript: the pre-roll
+	// WakeWord is the assistant's configured name ([assistant] name, issue
+	// #103) — the summons background listening answers to (ADR 0024). It is
+	// here because the name is *in* the transcript: the pre-roll
 	// deliberately includes it, so whisper returns "Jarvix, volume thirty".
 	// Left in place, that utterance would never match the intent router,
-	// which matches strictly against the whole thing. Empty (the default)
-	// strips nothing.
+	// which matches strictly against the whole thing. It may be multi-word
+	// ("Mister Smith"); empty (the default) strips nothing.
 	WakeWord string
-	// WakeAliases are additional words the strip accepts as the wake word —
-	// whisper's known mishearings of it ("jarvis", "javax"; issue #83). They
-	// widen only what stripWakeWord removes from a wake transcript; the
-	// acoustic wake gate never sees them. Empty accepts the wake word alone.
+	// WakeAliases are additional spellings the strip accepts as the name —
+	// whisper's known mishearings of it ([assistant] aliases; issue #83).
+	// They widen only what stripWakeWord removes from a wake transcript; the
+	// acoustic wake gate never sees them. Empty accepts the name alone.
 	WakeAliases []string
 	// Lexicon respells terms the voice mispronounces, term → spoken form
 	// ([tts.lexicon]). Merged over the shipped defaults; nil is the defaults

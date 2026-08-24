@@ -105,6 +105,29 @@ func (s Setting) Apply(cfg *Config, v any) error {
 // TOML, and API keys never travel through the settings surface at all.
 func Settings() []Setting {
 	return []Setting{
+		// The assistant's identity (issue #103) leads the list: the name is
+		// the most personal knob there is, and the STT bias, the transcript
+		// strip, the detector's word, and the default prompt all follow it.
+		// Restart class because the wake detector is construction-wired and
+		// its word derives from the name: everything else about a rename
+		// (bias, strip, prompt) reloads idle, and applying those while the
+		// detector still listened under the old word would be a half-rename
+		// that answers to neither name reliably.
+		{Key: "assistant.name", Label: "Assistant name", Type: TypeString, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Assistant.Name },
+			set: func(c *Config, v any) { c.Assistant.Name = v.(string) }},
+		// Idle class, unlike the name, and deliberately so: aliases live only
+		// in the engine's transcript strip, which is rebuilt with the
+		// engine's options — the wake listener and its supervised children
+		// never see them, so nothing needs a restart. The settings screen's
+		// generic string_list widget renders this as a comma-separated field
+		// and the daemon parses that form (Setting.Coerce); Get resolves the
+		// *effective* list so the shipped mishearings are visible rather
+		// than an implicit blank.
+		{Key: "assistant.aliases", Label: "Name aliases (spellings transcripts mishear it as)", Type: TypeStringList, Reload: ReloadIdle,
+			Get: func(c Config) any { return append([]string(nil), c.Assistant.EffectiveAliases()...) },
+			set: func(c *Config, v any) { c.Assistant.Aliases = v.([]string) }},
+
 		{Key: "ai.provider", Label: "AI provider", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.AI.Provider },
 			set: func(c *Config, v any) { c.AI.Provider = v.(string) }},
@@ -181,7 +204,10 @@ func Settings() []Setting {
 			Enum: []string{ModePushToTalk, ModeWakeWord},
 			Get:  func(c Config) any { return c.Activation.Mode },
 			set:  func(c *Config, v any) { c.Activation.Mode = v.(string) }},
-		{Key: "activation.wake_word", Label: "Wake word", Type: TypeString, Reload: ReloadRestart,
+		// Empty (the default) derives the detector's word from the
+		// assistant's name; set it to a bundled model word or a model path
+		// when no acoustic model exists for the chosen name (issue #103).
+		{Key: "activation.wake_word", Label: "Wake detector word or model (empty: the assistant's name)", Type: TypeString, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Activation.WakeWord },
 			set: func(c *Config, v any) { c.Activation.WakeWord = v.(string) }},
 		{Key: "activation.wake_command", Label: "Wake detector command", Type: TypeStringList, Reload: ReloadRestart,
@@ -199,14 +225,6 @@ func Settings() []Setting {
 		{Key: "activation.max_utterance_sec", Label: "Longest hands-free request (seconds)", Type: TypeInt, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Activation.MaxUtteranceSec },
 			set: func(c *Config, v any) { c.Activation.MaxUtteranceSec = v.(int) }},
-		// Idle class, unlike the wake keys above, and deliberately so: aliases
-		// live only in the engine's transcript strip (issue #83), which is
-		// rebuilt with the engine's options — the wake listener and its
-		// supervised children never see them, so nothing needs a restart.
-		{Key: "activation.wake_aliases", Label: "Wake word aliases", Type: TypeStringList, Reload: ReloadIdle,
-			Get: func(c Config) any { return append([]string(nil), c.Activation.WakeAliases...) },
-			set: func(c *Config, v any) { c.Activation.WakeAliases = v.([]string) }},
-
 		{Key: "conversation.speak_responses", Label: "Speak responses aloud", Type: TypeBool, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Conversation.SpeakResponses },
 			set: func(c *Config, v any) { c.Conversation.SpeakResponses = v.(bool) }},

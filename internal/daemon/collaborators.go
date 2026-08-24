@@ -252,9 +252,13 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Memory:            memoryInjector(book),
 		Knowledge:         knowledgeInjector(feeds),
 		Archive:           conversationArchive(cfg, archive),
-		WakeWord:          cfg.Activation.WakeWord,
-		WakeAliases:       cfg.Activation.WakeAliases,
-		Lexicon:           cfg.TTS.Lexicon,
+		// The transcript strip follows the assistant's identity (issue
+		// #103): the configured name and its mishearing aliases, not the
+		// detector's word — the detector may be pointed at a different
+		// acoustic model entirely (activation.wake_word).
+		WakeWord:    cfg.Assistant.Name,
+		WakeAliases: cfg.Assistant.EffectiveAliases(),
+		Lexicon:     cfg.TTS.Lexicon,
 	}
 }
 

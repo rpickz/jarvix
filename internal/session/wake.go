@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -125,50 +126,95 @@ func (e *Engine) FinishWake(id string, rec audio.Recording, spoken time.Duration
 	return false, nil
 }
 
-// stripWakeWord removes the wake word from the front of a hands-free
+// stripWakeWord removes the assistant's name from the front of a hands-free
 // transcript.
 //
 // It is deliberately narrow. Only a *leading* occurrence goes, and only when
-// it stands as its own word — "Jarvix, what's my disk usage?" loses its first
-// word, "what did Jarvix say?" keeps all of them. Punctuation and case are
-// whatever whisper decided, so both are ignored, and a filler that follows
-// ("hey Jarvix", "okay Jarvix") is handled by taking the wake word wherever
-// it appears in the first two words rather than only at index zero.
+// it stands as its own word(s) — "Jarvix, what's my disk usage?" loses its
+// first word, "what did Jarvix say?" keeps all of them. Punctuation and case
+// are whatever whisper decided, so both are ignored, and a filler that
+// precedes the name ("hey Jarvix", "okay Jarvix") is handled by taking the
+// name wherever it starts in the first two words rather than only at index
+// zero.
 //
-// aliases are the words the strip accepts *as* the wake word. "Jarvix" is
-// out-of-vocabulary for whisper, so the detector fires on the right sound and
-// the transcript still opens with "Jarvis" or "JavaX" (issue #83); a strip
+// word is the configured assistant name (issue #103), and it may be more than
+// one word ("Mister Smith"): a target is matched as a sequence of
+// whitespace-delimited transcript words, each compared with punctuation and
+// case ignored, so "Mister Smith, open the window" loses its first two words
+// under the same leading-whole-word discipline a single-word name gets.
+//
+// aliases are the spellings the strip accepts *as* the name. The default name
+// is out-of-vocabulary for whisper, so the detector fires on the right sound
+// and the transcript still opens with a nearby real word (issue #83); a strip
 // that only knows the true spelling then leaves the summons in place and the
 // intent router never matches. Aliases get exactly the same leading-whole-word
 // discipline — "tell me about Jarvis Cocker" mid-sentence is never touched —
 // and they exist only here: the acoustic wake gate is unchanged.
 //
-// An utterance that is *only* the wake word is left alone: it becomes an
-// empty transcript otherwise, and "I didn't catch that" is a better answer
-// than a session that fails for no visible reason.
+// An utterance that is *only* the name is left alone: it becomes an empty
+// transcript otherwise, and "I didn't catch that" is a better answer than a
+// session that fails for no visible reason.
 func stripWakeWord(transcript, word string, aliases []string) string {
-	word = strings.TrimSpace(word)
-	if word == "" {
+	targets := make([][]string, 0, 1+len(aliases))
+	if w := foldedWords(word); len(w) > 0 {
+		targets = append(targets, w)
+	}
+	if len(targets) == 0 {
 		return transcript
 	}
-	targets := map[string]bool{strings.ToLower(word): true}
 	for _, alias := range aliases {
-		if alias = strings.TrimSpace(alias); alias != "" {
-			targets[strings.ToLower(alias)] = true
+		if w := foldedWords(alias); len(w) > 0 {
+			targets = append(targets, w)
 		}
 	}
+	// Longest target first, so when one is a prefix of another ("Mister"
+	// alongside "Mister Smith") the whole summons is stripped, not half of
+	// it — leaving "Smith, open the window" would be worse than either.
+	sort.SliceStable(targets, func(i, j int) bool { return len(targets[i]) > len(targets[j]) })
+
 	fields := strings.Fields(transcript)
-	for i := 0; i < len(fields) && i < 2; i++ {
-		if !targets[strings.ToLower(trimWordPunctuation(fields[i]))] {
-			continue
+	for start := 0; start < len(fields) && start < 2; start++ {
+		for _, target := range targets {
+			if !wordsMatchAt(fields, start, target) {
+				continue
+			}
+			rest := strings.Join(fields[start+len(target):], " ")
+			if strings.TrimSpace(rest) == "" {
+				return transcript
+			}
+			return rest
 		}
-		rest := strings.Join(fields[i+1:], " ")
-		if strings.TrimSpace(rest) == "" {
-			return transcript
-		}
-		return rest
 	}
 	return transcript
+}
+
+// wordsMatchAt reports whether the target's words appear in fields starting
+// at start, comparing each transcript word with case and surrounding
+// punctuation ignored — the same folding foldedWords applied to the target.
+func wordsMatchAt(fields []string, start int, target []string) bool {
+	if start+len(target) > len(fields) {
+		return false
+	}
+	for k, want := range target {
+		if strings.ToLower(trimWordPunctuation(fields[start+k])) != want {
+			return false
+		}
+	}
+	return true
+}
+
+// foldedWords splits a configured name or alias into the lowercased,
+// punctuation-trimmed words the matcher compares — nil when nothing usable
+// remains, so a blank entry can never match anything.
+func foldedWords(s string) []string {
+	fields := strings.Fields(s)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.ToLower(trimWordPunctuation(f)); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // trimWordPunctuation strips the punctuation whisper puts around a word, so a

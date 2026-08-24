@@ -39,30 +39,22 @@ func (c Config) wakeProblems() []string {
 	if a.MaxUtteranceSec < 0 {
 		problems = append(problems, "activation.max_utterance_sec must not be negative")
 	}
-	// Aliases are checked in every mode: a broken entry must not sit unnoticed
-	// until the day wake_word mode is switched on. The strip compares one
-	// whitespace-delimited transcript word at a time, so an alias containing
-	// whitespace could never match anything — reject it rather than let it
-	// silently do nothing.
-	for _, alias := range a.WakeAliases {
-		switch {
-		case strings.TrimSpace(alias) == "":
-			problems = append(problems,
-				"activation.wake_aliases contains an empty entry; each one must be a single word the wake word is misheard as (e.g. \"jarvis\")")
-		case strings.ContainsAny(alias, " \t"):
-			problems = append(problems, fmt.Sprintf(
-				"activation.wake_aliases entry %q contains whitespace; the transcript strip matches single words, so a multi-word alias can never match", alias))
-		}
+	// The alias list moved to [assistant] (issue #103). A file still setting
+	// the old key is refused with directions, in every mode, rather than
+	// silently reverting to the shipped list: a strip that quietly stopped
+	// accepting a tuned alias would look exactly like the mishearing bug the
+	// aliases exist to fix. wake_word is not refused the same way because it
+	// kept a (narrower) meaning — it still names the detector's word or
+	// model, it just no longer feeds the bias, the strip, or the prompt.
+	if len(a.WakeAliases) > 0 {
+		problems = append(problems,
+			"activation.wake_aliases has moved; put the list in the [assistant] table instead (aliases = [...]) — see docs/configuration.md")
 	}
 
 	if !a.WakeWordEnabled() {
 		return problems
 	}
 
-	if strings.TrimSpace(a.WakeWord) == "" {
-		problems = append(problems,
-			"activation.wake_word is empty; set the word that should summon Jarvix (e.g. \"jarvix\")")
-	}
 	if len(a.WakeCommand) == 0 || strings.TrimSpace(a.WakeCommand[0]) == "" {
 		problems = append(problems,
 			"activation.wake_command is empty; background listening needs a detector helper (default: [\"jarvix-wake\"], installed by scripts/setup-wake.sh)")
