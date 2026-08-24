@@ -12,7 +12,13 @@ type Fake struct {
 	Chunks [][]byte
 	// Fail, when set, ends the stream with an error chunk.
 	Fail error
-	// LastRequest records the most recent request for assertions.
+	// LastRequest records the most recent request for assertions — written
+	// under mu, because two Speak calls can now be in flight at once: an
+	// interrupted session's speaker can still be inside Speak when the
+	// interrupting session's speaker calls it (the answer's tts.started no
+	// longer waits for the first Speak to have returned; issue #111). Tests
+	// read the field only from a quiesced engine, which the session-finished
+	// events they wait on already order.
 	LastRequest Request
 
 	mu     sync.Mutex
@@ -46,8 +52,8 @@ func (f *Fake) Speak(ctx context.Context, req Request) (Format, <-chan Chunk, er
 	f.mu.Lock()
 	f.speaks++
 	hold := f.hold
-	f.mu.Unlock()
 	f.LastRequest = req
+	f.mu.Unlock()
 	chunks := f.Chunks
 	if len(chunks) == 0 {
 		chunks = [][]byte{make([]byte, 32)}

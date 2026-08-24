@@ -126,7 +126,13 @@ func (e *Engine) gatedForget(s *sess, call ai.ToolCall) (ack string, runErr erro
 		e.log.Info("forget allowed", "component", "tools", "tool", call.Name,
 			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
 	}
-	result := e.executeTool(s, call, nil)
+	result, ok := e.executeTool(s, call, nil)
+	if !ok {
+		// The session ended before execution could begin (cancelled or
+		// superseded between the approval and here); that path owns the
+		// events, exactly as an abandoned confirmation does.
+		return "", nil, false
+	}
 	if strings.HasPrefix(result, "error: ") {
 		// The tool's own refusal (fact vanished between the click and the
 		// approval, a store write failure) — the detail lives in the events

@@ -231,6 +231,13 @@ func TestStopWhileSpeakingIsSilent(t *testing.T) {
 	first, _ := h.engine.StartSession()
 	_ = h.engine.Submit("explain recursion")
 	h.waitFor(t, "tts.started")
+	// tts.started reports the sentence committed to the playback queue, not
+	// the synthesizer reached — it is published at enqueue, with the Speaking
+	// claim (issue #111) — so wait for the held synthesis to actually begin
+	// before sampling the count, or the first answer's own Speak call lands
+	// after the sample and masquerades as the acknowledgement this test
+	// forbids.
+	waitUntil(t, "the held answer reaches the synthesizer", func() bool { return h.tts.Speaks() > 0 })
 	speaksBefore := h.tts.Speaks()
 
 	// The user interrupts and says "stop".

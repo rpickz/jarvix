@@ -197,8 +197,11 @@ type streamingSpeaker struct {
 	// (issue #80).
 	accepted bool
 	// announced is set once the answer has claimed Speaking and published
-	// tts.started. Tracked here (not only in run's locals) so a cancel knows
-	// whether a tts.finished bookend is owed.
+	// tts.started — by announce, at enqueue, on the goroutine that commits
+	// the answer's first sentence to the voice (see announce for why that
+	// placement is the issue #111 fix). A cancel reads it to know whether a
+	// tts.finished bookend is owed, and run reads it back for the same
+	// bookend on a clean drain.
 	announced bool
 	// drained is set once run() has finished: nothing is playing and nothing
 	// ever will be again on this speaker.
@@ -233,11 +236,19 @@ func (sp *streamingSpeaker) speaking() (live, announced bool) {
 	return sp.accepted && !sp.drained, sp.announced
 }
 
-// noteAnnounced records that the answer has claimed the Speaking state.
+// noteAnnounced records that the answer has claimed Speaking and published
+// tts.started.
 func (sp *streamingSpeaker) noteAnnounced() {
 	sp.mu.Lock()
 	sp.announced = true
 	sp.mu.Unlock()
+}
+
+// wasAnnounced reports whether the answer has announced itself.
+func (sp *streamingSpeaker) wasAnnounced() bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.announced
 }
 
 // deliver marks the speaker fully drained and hands the result to close().
@@ -284,22 +295,31 @@ func (sp *streamingSpeaker) interject(text string) {
 
 // enqueue puts one utterance on the queue, reporting whether it got there.
 func (sp *streamingSpeaker) enqueue(u utterance) bool {
-	if strings.TrimSpace(u.text) == "" {
+	if sp.e.spokenForm(u.text) == "" {
+		// Nothing would be said for this text (run() skips it on the same
+		// test), so it must not claim the Speaking state below either: a turn
+		// whose every sentence normalizes to silence announces nothing.
 		return false
 	}
 	// accepted is recorded before the utterance is handed over, never after.
 	// The moment run() can see it, everything downstream — synthesis,
-	// claiming Speaking, publishing tts.started — can happen before this
-	// goroutine is scheduled again, and a stop arriving on that event must
-	// find speaking() live (issue #80: a CI runner parked exactly here and
-	// CancelSpeech read accepted == false while held audio sat in the
-	// synthesizer). If the handoff then loses to session teardown, the stale
-	// mark is unobservable: every path that cancels the session context also
-	// clears Engine.current under the lock, so CancelSpeech bails before it
-	// would ask this speaker.
+	// publishing tts.started, playback — can happen before this goroutine is
+	// scheduled again, and a stop arriving on that event must find speaking()
+	// live (issue #80: a CI runner parked exactly here and CancelSpeech read
+	// accepted == false while held audio sat in the synthesizer). If the
+	// handoff then loses to session teardown, the stale mark is unobservable:
+	// every path that cancels the session context also clears Engine.current
+	// under the lock, so CancelSpeech bails before it would ask this speaker.
 	sp.mu.Lock()
 	sp.accepted = true
+	needsAnnounce := !u.aside && !sp.announced
 	sp.mu.Unlock()
+	if needsAnnounce && !sp.announce() {
+		// The session ended underneath the turn (superseded, cancelled, or a
+		// refused transition that failLocked has already reported): there is
+		// no one to speak to and nothing further to queue.
+		return false
+	}
 	select {
 	case sp.in <- u:
 		if queued := sp.e.speakerQueued; queued != nil {
@@ -309,6 +329,56 @@ func (sp *streamingSpeaker) enqueue(u utterance) bool {
 	case <-sp.s.ctx.Done():
 		return false
 	}
+}
+
+// announce moves the session to Speaking for the answer's first sentence and
+// publishes tts.started, reporting whether the claim landed (false only when
+// the session has ended).
+//
+// It runs on the *enqueueing* goroutine — synchronously inside speak() — and
+// that placement is the whole fix for issue #111, the third state wedge of the
+// #52/#63 family. The claim used to live in run()'s synth, on the speaker
+// goroutine, which made "a committed sentence has claimed Speaking" a race
+// rather than an invariant: the tool loop reads the state the instant
+// streamOnce returns (backToThinking), and when a round's only sentence
+// reached the speaker at end-of-stream — a short narration followed by tool
+// calls, the exact shape the #109 config tools invite — backToThinking would
+// force Responding → Thinking before the speaker got scheduled, the speaker
+// would then request Thinking → Speaking, and the table refused it (rightly:
+// speech legally goes Thinking → Responding → Speaking) — killing a live
+// session mid-turn.
+//
+// Claiming here means the claim is ordered before anything the turn does
+// next: by the time streamOnce returns, every sentence it committed to the
+// voice has already moved the session to Speaking, so backToThinking's
+// "Speaking stays put while audio drains" reading (#52) holds by
+// construction, and a still-Responding state really does mean nothing was
+// committed to the voice this round. No new table edge, exactly as #52/#53
+// and #63 resolved: route the speech through the legal path rather than
+// widen the table for a caller.
+//
+// tts.started moves with the claim rather than staying behind on the run
+// loop, and deliberately so: the two have been published together since the
+// event existed, and everything that reasons about the pair — the state
+// waits in this package's tests, CancelSpeech's bookend, any client treating
+// the event and the state as one moment — assumes a session observed in
+// Speaking has announced itself. Splitting them would open a window in which
+// that assumption fails. Nothing is owed to "synthesis has begun" by this
+// event: real synthesizers hand their stream channel back immediately, so
+// tts.started has always fired before any audio existed — committing the
+// sentence to the one playback queue is the moment it reports.
+//
+// The check-then-act on sp.announced in enqueue is single-goroutine by
+// construction: every non-aside utterance of a speaker is enqueued from the
+// one goroutine that owns its turn (think() for an answer, runIntent for an
+// acknowledgement), which is the same reason spokenTurn needs no lock.
+func (sp *streamingSpeaker) announce() bool {
+	if !sp.e.advance(sp.s, StateSpeaking) {
+		return false
+	}
+	sp.noteAnnounced()
+	sp.e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": sp.s.id}})
+	return true
 }
 
 // close signals no more sentences and waits for playback to drain, returning
@@ -324,17 +394,13 @@ func (sp *streamingSpeaker) run() {
 		playDone chan error
 		format   tts.Format
 		synthErr error
-		// announced is set once the answer has claimed the Speaking state and
-		// published tts.started. It is tracked separately from pcm because a
-		// confirmation question can open the stream before the answer does
-		// (the model asked for a tool before saying anything), and the answer
-		// that follows must still announce itself — the overlay's tts.started
-		// belongs to the answer, not to the question.
-		announced bool
 	)
 
 	// synth renders one utterance and forwards its PCM into the shared stream,
-	// starting playback lazily on the first audio.
+	// starting playback lazily on the first audio. The answer's Speaking claim
+	// and tts.started do not happen here: they happened on the enqueueing
+	// goroutine, before the utterance was ever visible to this loop — see
+	// announce for why that ordering is load-bearing (issue #111).
 	synth := func(u utterance) error {
 		spoken := sp.e.spokenForm(u.text)
 		if spoken == "" {
@@ -343,16 +409,6 @@ func (sp *streamingSpeaker) run() {
 		f, chunks, err := sp.e.tts.Speak(sp.s.ctx, tts.Request{Text: spoken})
 		if err != nil {
 			return err
-		}
-		if !u.aside && !announced {
-			if !sp.e.advance(sp.s, StateSpeaking) {
-				for range chunks { // superseded/cancelled: let the synth exit
-				}
-				return sp.s.ctx.Err()
-			}
-			announced = true
-			sp.noteAnnounced()
-			sp.e.publish(Event{Type: "tts.started", Data: map[string]any{"session_id": sp.s.id}})
 		}
 		if pcm == nil {
 			format = f
@@ -426,7 +482,7 @@ func (sp *streamingSpeaker) run() {
 	// tts.finished is the answer's bookend, so it is published only when
 	// tts.started was: a turn whose only audio was an aside emits neither,
 	// exactly as the direct prompt path always did.
-	if synthErr == nil && announced {
+	if synthErr == nil && sp.wasAnnounced() {
 		sp.e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": sp.s.id}})
 	}
 	sp.deliver(synthErr)
