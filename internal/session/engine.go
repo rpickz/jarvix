@@ -1108,6 +1108,18 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 // opened with speech off or a preamble too short for the sentencer — and then
 // the turn died silently, which is how it went unnoticed (issues #52/#55).
 //
+// "A complete sentence moves the state on to Speaking before the tool call
+// lands" is an invariant, not a race, and it is held by the speaker's
+// announce running synchronously on the goroutine that enqueues the
+// sentence (streamOnce, this same goroutine). It used to be a race — the
+// claim lived on the speaker's run loop — and losing it was issue #111: a
+// round whose
+// only sentence reached the speaker at end-of-stream would be yanked
+// Responding → Thinking here first, and the speaker's late claim then died as
+// Thinking → Speaking. By construction now, Responding here means nothing was
+// committed to the voice this round, which is exactly when going back to
+// Thinking is right.
+//
 // Speaking deliberately stays put: audio from the round's sentences is still
 // draining, and #52 established that the session remains Speaking while it
 // does — the next round re-enters Responding from there. Thinking needs no

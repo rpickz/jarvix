@@ -49,6 +49,18 @@ var transitions = map[State][]State{
 	StateActing: {StateSpeaking, StateAwaitingConfirmation, StateIdle, StateCancelling, StateError},
 	// Thinking → AwaitingConfirmation: the model requested a tool the
 	// policy classifies as ask; execution pauses for the user.
+	//
+	// Thinking → Speaking is deliberately absent, and stays absent: nothing
+	// the session says begins in Thinking. The answer's speech is committed
+	// from Responding (a streamed sentence claims Speaking synchronously with
+	// its enqueue — speaker.go's announce), and everything else a turn says
+	// from Thinking — a confirmation question, a "still working" reassurance —
+	// is an aside on the speaker's queue, which claims no state at all
+	// (#52/#53). The one caller that ever requested this edge was the
+	// speaker's run loop announcing an answer late, after the tool loop had
+	// legitimately returned the session to Thinking; that was a routing bug
+	// (issue #111, fixed by making the claim synchronous), not a missing
+	// entry.
 	StateThinking: {StateResponding, StateAwaitingConfirmation, StateCancelling, StateError},
 	// Responding → Thinking happens when the model streamed some text and
 	// then asked to call a tool: it goes back to working before answering.
