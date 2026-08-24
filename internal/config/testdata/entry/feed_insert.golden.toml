@@ -1,0 +1,22 @@
+# my config, hand-written
+[knowledge]
+max_injected_tokens = 400
+
+# watches the AMD price
+[[knowledge.feeds]]
+name = "amd"
+description = "AMD share price"
+command = ["/home/me/bin/amd-price"]
+mode = "eager"
+interval_sec = 300 # five minutes is plenty
+
+[tts]
+provider = "piper"
+
+[[knowledge.feeds]]
+name = "nvda"
+description = "NVDA share price"
+command = ["/home/me/bin/nvda-price", "--short"]
+mode = "lazy"
+ttl_sec = 600
+inject = true

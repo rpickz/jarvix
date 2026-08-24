@@ -127,6 +127,8 @@ var (
 		"steps": {"app", "match", "workspace", "float", "size", "position", "tile"},
 	}
 	scriptKeyOrder = []string{"name", "phrases", "path", "timeout_sec", "report", "schedule", "announce", "enabled"}
+	feedKeyOrder   = []string{"name", "description", "command", "mode",
+		"interval_sec", "ttl_sec", "timeout_sec", "inject", "enabled"}
 )
 
 // TestUpsertEntryTOMLGolden drives the whole-entry writer over hand-written
@@ -184,6 +186,28 @@ func TestUpsertEntryTOMLGolden(t *testing.T) {
 			"schedule":    "03:30",
 			"announce":    true,
 		}, scriptKeyOrder, nil},
+		// The #100 shapes, on the dotted family the editor was built for in
+		// #92: a new [[knowledge.feeds]] lands at the end of the document —
+		// after the [tts] table that follows the existing feeds — and an
+		// in-place edit replaces exactly one feed's block, its glued header
+		// comment, both neighbours, and the [tts] table byte-identical.
+		{"feed_insert", "knowledge.feeds", "", map[string]any{
+			"name":        "nvda",
+			"description": "NVDA share price",
+			"command":     []string{"/home/me/bin/nvda-price", "--short"},
+			"mode":        "lazy",
+			"ttl_sec":     600,
+			"inject":      true,
+		}, feedKeyOrder, nil},
+		{"feed_edit", "knowledge.feeds", "amd", map[string]any{
+			"name":         "amd",
+			"description":  "AMD share price in dollars",
+			"command":      []string{"/home/me/bin/amd-price", "--currency", "usd"},
+			"mode":         "eager",
+			"interval_sec": 120,
+			"ttl_sec":      600,
+			"inject":       true,
+		}, feedKeyOrder, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -264,6 +288,9 @@ func TestDeleteEntryTOMLGolden(t *testing.T) {
 		{"routine_delete", "routines", "evening"},
 		// The last entry of the document: no trailing blank lines left behind.
 		{"script_delete", "scripts", "rotate wallpaper"},
+		// A feed (#100): the glued comment goes with its entry, the feeds
+		// section header stays, and the [tts] table below is untouched.
+		{"feed_delete", "knowledge.feeds", "amd"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

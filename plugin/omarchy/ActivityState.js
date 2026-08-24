@@ -20,6 +20,7 @@ var glyphs = {
   "error": "󰀦",
   "gate": "󰋗",
   "intent": "󰉁",
+  "knowledge": "󰑫",
   "memory": "󰂺",
   "model": "󰧑",
   "refusal": "󰜺",

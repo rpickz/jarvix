@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -436,5 +437,38 @@ func writeHandEdit(t *testing.T, path, content string) {
 	}
 	if err := os.Chtimes(path, time.Time{}, info.ModTime().Add(2*time.Second)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRefusalsMatchTheirSentinels pins the contract the daemon's memory form
+// surface places refusals by (issue #100): each refusal wraps its sentinel —
+// matchable with errors.Is — while the message keeps its exact actionable
+// wording, id and cap numbers included.
+func TestRefusalsMatchTheirSentinels(t *testing.T) {
+	book, _, _ := newTestBook(t, BookOptions{MaxFacts: 1})
+
+	if _, _, err := book.Add("   ", ""); !errors.Is(err, ErrNoContent) {
+		t.Errorf("empty add err = %v, want ErrNoContent", err)
+	}
+	if _, err := book.Update("m1", "", ""); !errors.Is(err, ErrNoContent) {
+		t.Errorf("empty update err = %v, want ErrNoContent", err)
+	}
+	if _, _, err := book.Add("the only fact", ""); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := book.Add("one too many", "")
+	if !errors.Is(err, ErrStoreFull) {
+		t.Errorf("cap err = %v, want ErrStoreFull", err)
+	}
+	if err == nil || !strings.Contains(err.Error(),
+		"the memory store is full (1 facts); forget something stale, or raise memory.max_facts") {
+		t.Errorf("cap err = %v, want the actionable sentence intact", err)
+	}
+	_, err = book.Update("m9", "x", "")
+	if !errors.Is(err, ErrUnknownID) || !strings.Contains(err.Error(), `no remembered fact has id "m9"`) {
+		t.Errorf("unknown id err = %v, want ErrUnknownID naming it", err)
+	}
+	if _, err := book.Forget("m9"); !errors.Is(err, ErrUnknownID) {
+		t.Errorf("unknown forget err = %v, want ErrUnknownID", err)
 	}
 }

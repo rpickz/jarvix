@@ -60,9 +60,13 @@ FloatingWindow {
   //                 (config.get_entry / validate_entry / upsert_entry /
   //                 delete_entry — validation and the byte-preserving
   //                 rewrite are entirely the daemon's).
-  //   knowledge   — the feed cache (ADR 0031), read-only from
-  //                 knowledge.status.
-  //   memory      — the fact store (ADR 0025), read-only from memory.list.
+  //   knowledge   — the feed cache (ADR 0031): knowledge.status for
+  //                 everything shown, refresh/enable through the existing
+  //                 verbs, and New/Edit/Delete through the same entry form
+  //                 dialog as automations (family knowledge.feeds, #100).
+  //   memory      — the fact store (ADR 0025): memory.list for the listing,
+  //                 the gated forget, and Add/Edit through memory.add /
+  //                 memory.update — the book's own write path (#100).
   //   settings    — the settings screen (issue #9), unchanged inside its tab.
   readonly property var tabs: [
     { id: "chat", label: "Chat" },
@@ -785,15 +789,198 @@ FloatingWindow {
     return Math.floor(sec / 86400) + "d"
   }
 
-  // newFeedTOML is the copyable hint block (issue #92): creating a feed
-  // stays a hand edit in v1 — definitions are code-adjacent — so the tab
-  // hands over the exact TOML to paste into config.toml instead of a form.
-  readonly property string newFeedTOML: "[[knowledge.feeds]]\n"
-    + "name = \"amd\"\n"
-    + "description = \"AMD share price in dollars\"\n"
-    + "command = [\"/home/you/bin/amd-price\"]\n"
-    + "mode = \"eager\"     # or \"lazy\": fetch on first use\n"
-    + "interval_sec = 300 # eager refresh cadence\n"
+  // --- knowledge feed forms -----------------------------------------------
+  // The feed New/Edit/Delete dialog (issue #100), replacing #92's copyable
+  // TOML hint: feeds are created and edited in place, in a form, through the
+  // exact entry-admin verbs the automations forms use (#99/ADR 0033) with
+  // family "knowledge.feeds" — the daemon's registry row, not new window
+  // logic. Every rule (name uniqueness, mode vocabulary, cadence floors, the
+  // command shape) is judged daemon-side against the whole rewritten
+  // document; this form renders fields, ships drafts, and pins returned
+  // problems (ADR 0013). Saving never fetches: the command is written, and
+  // only a refresh — scheduled or the row's button, behind the existing
+  // gate — ever runs it.
+  property bool knowledgeFormOpen: false
+  property string knowledgeFormOriginalName: "" // "" while creating
+  property var knowledgeDraft: ({})
+  property var knowledgeFormOriginal: ({}) // keys the loaded entry carried
+  property var knowledgeFormProblems: [] // [{field, message}] from the daemon
+  property string knowledgeFormError: "" // transport/conflict line, verbatim
+  property bool knowledgeDeleteConfirm: false
+  property int knowledgeEntryGetRequestId: 0
+  property int knowledgeValidateRequestId: 0
+  property int knowledgeSaveRequestId: 0
+  property int knowledgeDeleteRequestId: 0
+
+  // openKnowledgeCreate opens an empty feed form. The fingerprint is the
+  // status listing's — the file version the New button was rendered from.
+  function openKnowledgeCreate() {
+    knowledgeFormOriginalName = ""
+    knowledgeFormOriginal = {}
+    knowledgeDraft = { name: "", description: "", command: [""], mode: "eager" }
+    knowledgeFormProblems = []
+    knowledgeFormError = ""
+    knowledgeDeleteConfirm = false
+    knowledgeFormOpen = true
+  }
+
+  // openKnowledgeEdit asks the daemon for the whole entry — the status cards
+  // never carry the command — and opens when it answers.
+  function openKnowledgeEdit(name) {
+    if (!daemon.connected) return
+    knowledgeEntryGetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeEntryGetRequestId,
+      method: "config.get_entry",
+      params: { family: "knowledge.feeds", name: name } }) + "\n")
+  }
+
+  function loadKnowledgeEntry(frame) {
+    if (frame.error) {
+      errorStage = "knowledge"
+      errorMessage = String(frame.error.message || "the feed could not be read")
+      requestKnowledge()
+      return
+    }
+    var result = frame.result || {}
+    knowledgeDraft = result.entry || {}
+    knowledgeFormOriginal = result.entry || {}
+    knowledgeFormOriginalName = String((result.entry || {}).name || "")
+    knowledgeFingerprint = String(result.fingerprint || knowledgeFingerprint)
+    knowledgeFormProblems = []
+    knowledgeFormError = ""
+    knowledgeDeleteConfirm = false
+    knowledgeFormOpen = true
+    validateKnowledgeDraft()
+  }
+
+  function closeKnowledgeForm() {
+    knowledgeFormOpen = false
+    knowledgeDeleteConfirm = false
+    requestKnowledge()
+  }
+
+  // reassignKnowledgeDraft clones the draft so the Repeaters see a
+  // structural change — the automations pattern, one reassignment per
+  // add/remove/toggle.
+  function reassignKnowledgeDraft() {
+    var clone = {}
+    for (var key in knowledgeDraft) clone[key] = knowledgeDraft[key]
+    knowledgeDraft = clone
+    validateKnowledgeDraft()
+  }
+
+  // knowledgeDraftEntry serialises the draft for the wire: shown fields as
+  // typed (trimmed; numbers passed through so the daemon judges a bad one),
+  // unshown keys carried verbatim. Command indices are preserved exactly as
+  // displayed so a returned "command" problem sits under the right list.
+  function knowledgeDraftEntry() {
+    var d = knowledgeDraft
+    var entry = { name: String(d.name || "").trim() }
+    var description = String(d.description || "").trim()
+    if (description !== "" || "description" in knowledgeFormOriginal) {
+      entry.description = description
+    }
+    var command = []
+    var list = d.command || []
+    for (var i = 0; i < list.length; i++) command.push(String(list[i] || "").trim())
+    entry.command = command
+    entry.mode = d.mode === "lazy" ? "lazy" : "eager"
+    var numbers = ["interval_sec", "ttl_sec", "timeout_sec"]
+    for (var j = 0; j < numbers.length; j++) {
+      var key = numbers[j]
+      var value = String(d[key] === undefined ? "" : d[key]).trim()
+      if (value !== "") entry[key] = automationFormNumber(value)
+    }
+    if (d.inject === true || "inject" in knowledgeFormOriginal) {
+      entry.inject = d.inject === true
+    }
+    if (d.enabled === false || "enabled" in knowledgeFormOriginal) {
+      entry.enabled = d.enabled !== false
+    }
+    return entry
+  }
+
+  // validateKnowledgeDraft is the dry run: field problems from the daemon,
+  // nothing written. Called when a field commits and after every structural
+  // change.
+  function validateKnowledgeDraft() {
+    if (!daemon.connected || !knowledgeFormOpen) return
+    knowledgeValidateRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeValidateRequestId,
+      method: "config.validate_entry",
+      params: { family: "knowledge.feeds", name: knowledgeFormOriginalName,
+        entry: knowledgeDraftEntry() } }) + "\n")
+  }
+
+  function handleKnowledgeValidateReply(frame) {
+    if (frame.error) {
+      knowledgeFormError = String(frame.error.message || "validation failed")
+      return
+    }
+    knowledgeFormProblems = (frame.result || {}).problems || []
+    knowledgeFormError = ""
+  }
+
+  function saveKnowledgeForm() {
+    if (!daemon.connected) return
+    knowledgeSaveRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeSaveRequestId,
+      method: "config.upsert_entry",
+      params: { family: "knowledge.feeds", name: knowledgeFormOriginalName,
+        entry: knowledgeDraftEntry(), fingerprint: knowledgeFingerprint } }) + "\n")
+  }
+
+  function deleteKnowledgeEntry() {
+    if (!daemon.connected) return
+    knowledgeDeleteRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: knowledgeDeleteRequestId,
+      method: "config.delete_entry",
+      params: { family: "knowledge.feeds", name: knowledgeFormOriginalName,
+        fingerprint: knowledgeFingerprint } }) + "\n")
+  }
+
+  // handleKnowledgeFormReply lands a save or delete: refused validation pins
+  // the daemon's problems to their fields, a fingerprint conflict shows the
+  // daemon's "changed outside the window" sentence verbatim, success closes
+  // the form (the refreshed status shows the result — including the honest
+  // applied=false reason when the first feed needs a restart to fetch).
+  function handleKnowledgeFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) {
+        knowledgeFormProblems = data.problems || []
+      }
+      knowledgeFormError = String(frame.error.message || "the save failed")
+      knowledgeDeleteConfirm = false
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) knowledgeFingerprint = String(result.fingerprint)
+    knowledgeFormOpen = false
+    knowledgeDeleteConfirm = false
+    requestKnowledge()
+    if (result.applied === false) {
+      errorStage = "knowledge"
+      errorMessage = "Saved to config.toml, but not applied yet: "
+        + String(result.reason || "the daemon is busy") + "."
+    }
+  }
+
+  // knowledgeProblemFor collects the daemon's messages for one field key,
+  // joined for the field's problem line. Field "" is the form-level area.
+  function knowledgeProblemFor(field) {
+    var out = []
+    for (var i = 0; i < knowledgeFormProblems.length; i++) {
+      if (String(knowledgeFormProblems[i].field || "") === field) {
+        out.push(String(knowledgeFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
 
   // --- memory -------------------------------------------------------------
   // The Memory tab (issues #91/#92): the fact store from memory.list (ADR
@@ -844,6 +1031,94 @@ FloatingWindow {
     memoryFacts = result.facts || []
     memoryFactCount = Number(result.count || 0)
     memoryFactMax = Number(result.max || 0)
+  }
+
+  // --- memory entry form --------------------------------------------------
+  // Add and Edit for remembered facts (issue #100). Deliberately NOT the
+  // config entry dialog: memory.toml is not config.toml, so these calls go
+  // to memory.add / memory.update — the memory book's own write path, the
+  // same one the memory.remember tool takes — and the daemon's refusals
+  // arrive in the same {field, message} wire shape the config forms pin, so
+  // this pane shares the form components and the placement logic. Ungated,
+  // per ADR 0025's reversibility split: an add is undone with one forget and
+  // an edit supersedes onto the fact's trail, while Forget — the destructive
+  // verb — keeps its confirmation card.
+  property bool memoryFormOpen: false
+  property string memoryFormId: "" // "" while adding
+  property string memoryFormContent: ""
+  property var memoryFormProblems: [] // [{field, message}] from the daemon
+  property string memoryFormError: ""
+  property int memorySaveRequestId: 0
+
+  function openMemoryAdd() {
+    memoryFormId = ""
+    memoryFormContent = ""
+    memoryFormProblems = []
+    memoryFormError = ""
+    memoryFormOpen = true
+  }
+
+  // openMemoryEdit opens the form on one fact. The listing already carries
+  // the full content (memory.list serves it), so no round trip is needed.
+  function openMemoryEdit(id, content) {
+    memoryFormId = String(id)
+    memoryFormContent = String(content)
+    memoryFormProblems = []
+    memoryFormError = ""
+    memoryFormOpen = true
+  }
+
+  function closeMemoryForm() {
+    memoryFormOpen = false
+    requestMemory()
+  }
+
+  function saveMemoryForm() {
+    if (!daemon.connected) return
+    memorySaveRequestId = nextRequestId
+    nextRequestId++
+    var frame = { jsonrpc: "2.0", id: memorySaveRequestId }
+    if (memoryFormId === "") {
+      frame.method = "memory.add"
+      frame.params = { content: memoryFormContent }
+    } else {
+      frame.method = "memory.update"
+      frame.params = { id: memoryFormId, content: memoryFormContent }
+    }
+    daemon.write(JSON.stringify(frame) + "\n")
+  }
+
+  // handleMemoryFormReply lands a save: a refusal pins the daemon's problems
+  // exactly like a config form's (empty text on the content field, a full
+  // store in the general area), success closes the form and re-requests the
+  // listing — and the book's near-cap warning, when it sends one, lands in
+  // the shared banner so the cap is never a surprise.
+  function handleMemoryFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) {
+        memoryFormProblems = data.problems || []
+      }
+      memoryFormError = String(frame.error.message || "the save failed")
+      return
+    }
+    memoryFormOpen = false
+    requestMemory()
+    var warning = String((frame.result || {}).warning || "")
+    if (warning !== "") {
+      errorStage = "memory"
+      errorMessage = warning
+    }
+  }
+
+  function memoryProblemFor(field) {
+    var out = []
+    for (var i = 0; i < memoryFormProblems.length; i++) {
+      if (String(memoryFormProblems[i].field || "") === field) {
+        out.push(String(memoryFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
   }
 
   // factMeta words one fact's dates for its row: stored, confirmed (when a
@@ -1230,6 +1505,12 @@ FloatingWindow {
       // feed's name only; the fresh value rides the status reply.
       requestKnowledge()
       break
+    case "memory.entry_changed":
+      // A fact was added or edited — from this window's form or another
+      // client's. The event carries id and size only; the listing reply is
+      // where content travels (ADR 0025's privacy split).
+      requestMemory()
+      break
     case "routine.started":
       // Live progress for the Automations tab (issue #93): the run events
       // carry the facts; these lines only relay them, and the finish always
@@ -1328,6 +1609,15 @@ FloatingWindow {
         } else if (frame.id !== undefined && (frame.id === win.knowledgeRefreshRequestId ||
                    frame.id === win.knowledgeEnableRequestId)) {
           win.handleKnowledgeActionReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.knowledgeEntryGetRequestId) {
+          win.loadKnowledgeEntry(frame)
+        } else if (frame.id !== undefined && frame.id === win.knowledgeValidateRequestId) {
+          win.handleKnowledgeValidateReply(frame)
+        } else if (frame.id !== undefined && (frame.id === win.knowledgeSaveRequestId ||
+                   frame.id === win.knowledgeDeleteRequestId)) {
+          win.handleKnowledgeFormReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.memorySaveRequestId) {
+          win.handleMemoryFormReply(frame)
         } else if (frame.id !== undefined && frame.id === win.memoryForgetRequestId) {
           // Success needs no handling — the confirmation card's events carry
           // the flow from here — but a refusal (unknown id, memory disabled)
@@ -2419,14 +2709,14 @@ FloatingWindow {
       }
     }
 
-    // The Knowledge tab (issue #92): the feed cache as cards — name, mode
-    // and cadence, the current value (or "not fetched yet") with its
+    // The Knowledge tab (issues #92/#100): the feed cache as cards — name,
+    // mode and cadence, the current value (or "not fetched yet") with its
     // spoken-style age, STALE marked in words, failing-since with the error —
-    // and the two operations: Refresh now (knowledge.refresh_now, through
-    // the daemon's scheduled-fetch path) and Enable/Disable
-    // (knowledge.set_enabled, the surgical config write). A disabled feed's
-    // card says so and keeps its last value. The footer hands over the TOML
-    // for a new feed — creation stays a hand edit in v1.
+    // and the operations: Refresh now (knowledge.refresh_now, through the
+    // daemon's scheduled-fetch path), Enable/Disable (knowledge.set_enabled,
+    // the surgical config write), and New/Edit/Delete through the entry form
+    // dialog (#100) — clicking a card opens it, the footer's New button
+    // opens an empty one, and every rule the form enforces is the daemon's.
     Item {
       id: knowledgeScreen
       visible: win.socketReady && win.currentTab === "knowledge"
@@ -2438,21 +2728,21 @@ FloatingWindow {
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
       JarvixEmptyState {
-        visible: win.knowledgeFeeds.length === 0
+        visible: win.knowledgeFeeds.length === 0 && !win.knowledgeFormOpen
         anchors.centerIn: parent
         width: parent.width
         text: win.knowledgeEnabled
-          ? "No knowledge feeds yet — copy the block below into config.toml to add one."
-          : "Knowledge feeds are switched off (knowledge.enabled = false)."
+          ? "No knowledge feeds yet — the New feed button below creates one."
+          : "No knowledge feeds are configured yet — the New feed button below creates one (the first feed needs a daemon restart to start fetching)."
       }
 
       ListView {
         id: knowledgeList
-        visible: win.knowledgeFeeds.length > 0
+        visible: win.knowledgeFeeds.length > 0 && !win.knowledgeFormOpen
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: knowledgeHint.top
+        anchors.bottom: knowledgeNewRow.top
         anchors.bottomMargin: Style.space(8)
         clip: true
         spacing: Style.space(10)
@@ -2472,6 +2762,10 @@ FloatingWindow {
           // meta, so the colour is never the only carrier.
           flagged: Boolean(modelData.failing)
             || (Boolean(modelData.stale) && modelData.enabled !== false)
+          // The card itself opens the edit form (#100) — name, command,
+          // cadence, and Delete live there.
+          interactive: true
+          onActivated: win.openKnowledgeEdit(modelData.name)
           // A parked feed cannot be refreshed — the daemon would refuse —
           // so the card does not offer it; Enable is the way back.
           actionLabel: modelData.enabled === false ? "" : "Refresh now"
@@ -2484,120 +2778,299 @@ FloatingWindow {
         }
       }
 
-      // The new-feed hint (issue #92): a collapsed block that unfolds into
-      // the exact TOML to copy. Selectable text plus a Copy button — the
-      // window offers the block; the paste is the user's, in their editor,
-      // because feed definitions are code-adjacent and stay hand-edited.
-      Column {
-        id: knowledgeHint
+      // The New button (#100), replacing #92's copyable TOML hint: creation
+      // is a form now.
+      Row {
+        id: knowledgeNewRow
+        visible: !win.knowledgeFormOpen
         anchors.bottom: parent.bottom
         anchors.left: parent.left
-        anchors.right: parent.right
-        spacing: Style.space(6)
+        spacing: Style.space(8)
 
-        Rectangle {
-          id: knowledgeHintToggle
-          width: knowledgeHintToggleLabel.width + Style.space(20)
-          height: knowledgeHintToggleLabel.height + Style.space(8)
-          radius: Style.cornerRadius
-          color: Util.alpha(Color.popups.text, knowledgeHintToggle.activeFocus ? 0.16 : 0.06)
-          border.color: knowledgeHintToggle.activeFocus
-            ? Color.accent : Util.alpha(Color.popups.text, 0.4)
-          border.width: knowledgeHintToggle.activeFocus ? 2 : 1
-          activeFocusOnTab: true
-          property bool open: false
-          Accessible.role: Accessible.Button
-          Accessible.name: open ? "Hide the new-feed TOML" : "Show the TOML for adding a feed"
-          Keys.onReturnPressed: knowledgeHintToggle.open = !knowledgeHintToggle.open
-          Keys.onSpacePressed: knowledgeHintToggle.open = !knowledgeHintToggle.open
+        JarvixFormButton {
+          label: "New feed…"
+          name: "Create a new knowledge feed"
+          accent: true
+          onClicked: win.openKnowledgeCreate()
+        }
+      }
+
+      // The feed form (#100): a pane that replaces the listing, on the
+      // shared detail scaffold — Back cancels, the accent action saves.
+      // Loaded fresh per open so every input initialises from the draft.
+      JarvixDetailPane {
+        id: knowledgeFormPane
+        visible: win.knowledgeFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the feeds"
+        actionLabel: "Save"
+        actionName: "Save the feed"
+        note: (win.knowledgeFormOriginalName === ""
+          ? "New feed"
+          : "Editing feed “" + win.knowledgeFormOriginalName + "”")
+        onBackRequested: win.closeKnowledgeForm()
+        onActionTriggered: win.saveKnowledgeForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.knowledgeFormOpen
+          sourceComponent: knowledgeFormBody
+        }
+      }
+    }
+
+    // The feed form body, built per open (see the Loader above). Every field
+    // pins the daemon's own message for its key — knowledgeProblemFor — and
+    // the general area shows whole-entry problems and conflicts, so a
+    // refused save is never silent and never colour-only.
+    Component {
+      id: knowledgeFormBody
+
+      Flickable {
+        id: feedFormScroll
+        contentHeight: feedFormColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: feedFormColumn
+          width: feedFormScroll.width
+          spacing: Style.space(10)
+
+          // The form-level area: transport errors, the fingerprint
+          // conflict's "changed outside the window" sentence, and problems
+          // the daemon could not pin to a field — all verbatim.
           Text {
-            id: knowledgeHintToggleLabel
-            anchors.centerIn: parent
-            text: knowledgeHintToggle.open ? "Hide the TOML" : "Add a feed…"
+            visible: win.knowledgeFormError !== "" || win.knowledgeProblemFor("") !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: (win.knowledgeFormError !== "" ? win.knowledgeFormError + "\n" : "")
+              + win.knowledgeProblemFor("")
             font.family: Style.font.family
             font.pixelSize: Style.font.subtitle
-            color: Color.popups.text
+            color: Color.urgent
           }
-          MouseArea { anchors.fill: parent; onClicked: knowledgeHintToggle.open = !knowledgeHintToggle.open }
-        }
 
-        Rectangle {
-          visible: knowledgeHintToggle.open
-          width: parent.width
-          height: knowledgeHintBody.height + Style.space(20)
-          radius: Style.cornerRadius
-          color: Util.alpha(Color.popups.text, 0.06)
+          JarvixFormField {
+            width: parent.width
+            label: "Name (what you and the model call this feed)"
+            placeholder: "amd"
+            problem: win.knowledgeProblemFor("name")
+            Component.onCompleted: text = String(win.knowledgeDraft.name || "")
+            onEdited: function(value) { win.knowledgeDraft.name = value }
+            onCommitted: win.validateKnowledgeDraft()
+          }
 
+          JarvixFormField {
+            width: parent.width
+            label: "Description (tells the model what this feed watches)"
+            placeholder: "AMD share price in dollars"
+            problem: win.knowledgeProblemFor("description")
+            Component.onCompleted: text = String(win.knowledgeDraft.description || "")
+            onEdited: function(value) { win.knowledgeDraft.description = value }
+            onCommitted: win.validateKnowledgeDraft()
+          }
+
+          // The command: one row per argv element, so the fixed program and
+          // its arguments read exactly as they will run — never a shell
+          // line, and nothing typed here runs on save.
           Column {
-            id: knowledgeHintBody
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.margins: Style.space(10)
+            width: parent.width
             spacing: Style.space(6)
 
             Text {
+              text: "Command (the program that prints the value, one argument per row)"
               width: parent.width
               wrapMode: Text.Wrap
-              text: "Copy this into config.toml, point the command at something that "
-                + "prints the value, then reload — the new card appears here."
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
-              color: Util.alpha(Color.popups.text, 0.7)
+              color: Color.popups.text
             }
-            TextEdit {
-              id: knowledgeHintTOML
+            Repeater {
+              model: (win.knowledgeDraft.command || []).length
+              delegate: Row {
+                required property int index
+                width: parent.width
+                spacing: Style.space(8)
+
+                JarvixFormField {
+                  width: parent.width - commandRemove.width - Style.space(8)
+                  label: index === 0 ? "Program" : "Argument " + index
+                  placeholder: index === 0 ? "/home/you/bin/amd-price" : ""
+                  monospace: true
+                  Component.onCompleted: text = String((win.knowledgeDraft.command || [])[index] || "")
+                  onEdited: function(value) { win.knowledgeDraft.command[index] = value }
+                  onCommitted: win.validateKnowledgeDraft()
+                }
+                JarvixFormButton {
+                  id: commandRemove
+                  label: "Remove"
+                  name: index === 0 ? "Remove the program row" : "Remove argument " + index
+                  onClicked: {
+                    win.knowledgeDraft.command.splice(index, 1)
+                    win.reassignKnowledgeDraft()
+                  }
+                }
+              }
+            }
+            Text {
+              visible: win.knowledgeProblemFor("command") !== ""
               width: parent.width
-              readOnly: true
-              selectByMouse: true
-              wrapMode: TextEdit.WrapAnywhere
-              text: win.newFeedTOML
-              font.family: "monospace"
+              wrapMode: Text.Wrap
+              text: "Problem: " + win.knowledgeProblemFor("command")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.urgent
+            }
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Saving never runs the command — it only runs when the feed refreshes."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.6)
+            }
+            JarvixFormButton {
+              label: "Add argument"
+              name: "Add another command argument"
+              onClicked: {
+                if (!win.knowledgeDraft.command) win.knowledgeDraft.command = []
+                win.knowledgeDraft.command.push("")
+                win.reassignKnowledgeDraft()
+              }
+            }
+          }
+
+          JarvixFormToggle {
+            width: parent.width
+            label: "Eager — refreshed on a schedule"
+            detail: "Off means lazy: fetched on first use, then cached until it goes stale."
+            problem: win.knowledgeProblemFor("mode")
+            checked: win.knowledgeDraft.mode !== "lazy"
+            onToggled: function(state) {
+              win.knowledgeDraft.mode = state ? "eager" : "lazy"
+              win.reassignKnowledgeDraft()
+            }
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Refresh cadence in seconds (empty for the default; eager feeds only)"
+            placeholder: "300"
+            problem: win.knowledgeProblemFor("interval_sec")
+            Component.onCompleted: text = win.knowledgeDraft.interval_sec === undefined
+              ? "" : String(win.knowledgeDraft.interval_sec)
+            onEdited: function(value) {
+              if (value.trim() === "") delete win.knowledgeDraft.interval_sec
+              else win.knowledgeDraft.interval_sec = value.trim()
+            }
+            onCommitted: win.validateKnowledgeDraft()
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Fresh for, in seconds (empty for the default)"
+            placeholder: "600"
+            problem: win.knowledgeProblemFor("ttl_sec")
+            Component.onCompleted: text = win.knowledgeDraft.ttl_sec === undefined
+              ? "" : String(win.knowledgeDraft.ttl_sec)
+            onEdited: function(value) {
+              if (value.trim() === "") delete win.knowledgeDraft.ttl_sec
+              else win.knowledgeDraft.ttl_sec = value.trim()
+            }
+            onCommitted: win.validateKnowledgeDraft()
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Fetch timeout in seconds (empty for the default)"
+            placeholder: "30"
+            problem: win.knowledgeProblemFor("timeout_sec")
+            Component.onCompleted: text = win.knowledgeDraft.timeout_sec === undefined
+              ? "" : String(win.knowledgeDraft.timeout_sec)
+            onEdited: function(value) {
+              if (value.trim() === "") delete win.knowledgeDraft.timeout_sec
+              else win.knowledgeDraft.timeout_sec = value.trim()
+            }
+            onCommitted: win.validateKnowledgeDraft()
+          }
+
+          JarvixFormToggle {
+            width: parent.width
+            label: "Offer the value to the model every turn"
+            detail: "On injects the cached value into each conversation turn, under the knowledge budget."
+            problem: win.knowledgeProblemFor("inject")
+            checked: win.knowledgeDraft.inject === true
+            onToggled: function(state) {
+              win.knowledgeDraft.inject = state
+              win.reassignKnowledgeDraft()
+            }
+          }
+
+          JarvixFormToggle {
+            width: parent.width
+            label: "Enabled"
+            detail: "Off keeps the feed and its last value but stops every fetch."
+            problem: win.knowledgeProblemFor("enabled")
+            checked: win.knowledgeDraft.enabled !== false
+            onToggled: function(state) {
+              win.knowledgeDraft.enabled = state
+              win.reassignKnowledgeDraft()
+            }
+          }
+
+          // Delete, behind its confirm (#100): byte-preserving removal — the
+          // cached value stops serving — only after the question is answered.
+          Column {
+            visible: win.knowledgeFormOriginalName !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            JarvixFormButton {
+              visible: !win.knowledgeDeleteConfirm
+              label: "Delete this feed…"
+              name: "Delete the " + win.knowledgeFormOriginalName + " feed"
+              onClicked: win.knowledgeDeleteConfirm = true
+            }
+            Text {
+              visible: win.knowledgeDeleteConfirm
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Delete “" + win.knowledgeFormOriginalName + "”? Its fetches stop and its cached"
+                + " value no longer serves. Everything else in config.toml stays as it is."
+              font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               color: Color.popups.text
-              selectionColor: Util.alpha(Color.accent, 0.4)
-              Accessible.role: Accessible.StaticText
-              Accessible.name: "The TOML block for a new feed"
             }
-            Rectangle {
-              id: knowledgeHintCopy
-              width: knowledgeHintCopyLabel.width + Style.space(20)
-              height: knowledgeHintCopyLabel.height + Style.space(8)
-              radius: Style.cornerRadius
-              color: Util.alpha(Color.accent, knowledgeHintCopy.activeFocus ? 0.35 : 0.18)
-              border.color: Color.accent
-              border.width: knowledgeHintCopy.activeFocus ? 2 : 1
-              activeFocusOnTab: true
-              Accessible.role: Accessible.Button
-              Accessible.name: "Copy the TOML block"
-              function copyTOML() {
-                knowledgeHintTOML.selectAll()
-                knowledgeHintTOML.copy()
-                knowledgeHintTOML.deselect()
+            Row {
+              visible: win.knowledgeDeleteConfirm
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                label: "Delete"
+                name: "Confirm deleting " + win.knowledgeFormOriginalName
+                accent: true
+                onClicked: win.deleteKnowledgeEntry()
               }
-              Keys.onReturnPressed: knowledgeHintCopy.copyTOML()
-              Keys.onSpacePressed: knowledgeHintCopy.copyTOML()
-              Text {
-                id: knowledgeHintCopyLabel
-                anchors.centerIn: parent
-                text: "Copy"
-                font.family: Style.font.family
-                font.pixelSize: Style.font.subtitle
-                color: Color.popups.text
+              JarvixFormButton {
+                label: "Keep it"
+                name: "Keep " + win.knowledgeFormOriginalName
+                onClicked: win.knowledgeDeleteConfirm = false
               }
-              MouseArea { anchors.fill: parent; onClicked: knowledgeHintCopy.copyTOML() }
             }
           }
         }
       }
     }
 
-    // The Memory tab (issue #92): the fact store from memory.list (ADR 0025)
-    // — dates, an expandable supersede trail rendered from the existing
-    // `previous` data, filter-as-you-type whose matching is the daemon's own
-    // query, and per-fact Forget through the gated tool path: the standard
-    // confirmation card appears in Chat (the tab badge points there), and
-    // this list refreshes when the daemon's events resolve it.
+    // The Memory tab (issues #92/#100): the fact store from memory.list (ADR
+    // 0025) — dates, an expandable supersede trail rendered from the
+    // existing `previous` data, filter-as-you-type whose matching is the
+    // daemon's own query, and per-fact Forget through the gated tool path:
+    // the standard confirmation card appears in Chat (the tab badge points
+    // there), and this list refreshes when the daemon's events resolve it.
+    // Add and Edit (#100) open a form pane whose saves go to memory.add /
+    // memory.update — the book's own write path, never the config editor —
+    // ungated because nothing they do destroys (Forget keeps its card).
     Item {
       id: memoryScreen
       visible: win.socketReady && win.currentTab === "memory"
@@ -2610,7 +3083,8 @@ FloatingWindow {
 
       Rectangle {
         id: memoryFilterBox
-        visible: win.memoryEnabled && (win.memoryFacts.length > 0 || win.memoryQuery !== "")
+        visible: win.memoryEnabled && !win.memoryFormOpen
+          && (win.memoryFacts.length > 0 || win.memoryQuery !== "")
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
@@ -2654,19 +3128,19 @@ FloatingWindow {
       }
 
       JarvixEmptyState {
-        visible: win.memoryFacts.length === 0
+        visible: win.memoryFacts.length === 0 && !win.memoryFormOpen
         anchors.centerIn: parent
         width: parent.width
         text: !win.memoryEnabled
           ? "Memory is switched off (memory.enabled = false)."
           : win.memoryQuery.trim() !== ""
             ? "No remembered fact matches “" + win.memoryQuery + "” — clear the box to see everything."
-            : "Nothing remembered yet — say “remember …” and it will be kept here."
+            : "Nothing remembered yet — say “remember …”, or add a fact with the button below."
       }
 
       Text {
         id: memoryCountLine
-        visible: win.memoryFacts.length > 0
+        visible: win.memoryFacts.length > 0 && !win.memoryFormOpen
         anchors.top: memoryFilterBox.visible ? memoryFilterBox.bottom : parent.top
         anchors.topMargin: memoryFilterBox.visible ? Style.space(8) : 0
         width: parent.width
@@ -2680,12 +3154,13 @@ FloatingWindow {
 
       ListView {
         id: memoryList
-        visible: win.memoryFacts.length > 0
+        visible: win.memoryFacts.length > 0 && !win.memoryFormOpen
         anchors.top: memoryCountLine.bottom
         anchors.topMargin: Style.space(8)
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: parent.bottom
+        anchors.bottom: memoryNewRow.top
+        anchors.bottomMargin: Style.space(8)
         clip: true
         spacing: Style.space(10)
         model: win.memoryFacts
@@ -2710,9 +3185,15 @@ FloatingWindow {
                 : "")
             interactive: (factDelegate.modelData.previous || []).length > 0
             onActivated: factDelegate.expanded = !factDelegate.expanded
-            actionLabel: "Forget"
-            actionName: "Forget: " + factDelegate.modelData.content
-            onActionTriggered: win.forgetFact(String(factDelegate.modelData.id))
+            // Edit opens the form (#100): the correction path for a fact
+            // whose wording is wrong, superseding rather than destroying.
+            actionLabel: "Edit"
+            actionName: "Edit: " + factDelegate.modelData.content
+            onActionTriggered: win.openMemoryEdit(String(factDelegate.modelData.id),
+              String(factDelegate.modelData.content))
+            action2Label: "Forget"
+            action2Name: "Forget: " + factDelegate.modelData.content
+            onAction2Triggered: win.forgetFact(String(factDelegate.modelData.id))
           }
 
           Column {
@@ -2736,6 +3217,80 @@ FloatingWindow {
               }
             }
           }
+        }
+      }
+
+      // The Add button (#100). Hidden with memory disabled — the daemon
+      // would refuse, and the empty state already says why.
+      Row {
+        id: memoryNewRow
+        visible: win.memoryEnabled && !win.memoryFormOpen
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        spacing: Style.space(8)
+
+        JarvixFormButton {
+          label: "Add a fact…"
+          name: "Add a new remembered fact"
+          accent: true
+          onClicked: win.openMemoryAdd()
+        }
+      }
+
+      // The fact form (#100): one text field on the shared scaffold. Back
+      // cancels, Save goes to the memory book's own write path.
+      JarvixDetailPane {
+        id: memoryFormPane
+        visible: win.memoryFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the facts"
+        actionLabel: "Save"
+        actionName: "Save the fact"
+        note: (win.memoryFormId === ""
+          ? "New fact"
+          : "Editing fact " + win.memoryFormId)
+        onBackRequested: win.closeMemoryForm()
+        onActionTriggered: win.saveMemoryForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.memoryFormOpen
+          sourceComponent: memoryFormBody
+        }
+      }
+    }
+
+    // The fact form body, built per open. The field pins the daemon's
+    // content problems; the general area carries whole-store refusals (the
+    // cap) and transport errors — all verbatim, never colour alone.
+    Component {
+      id: memoryFormBody
+
+      Column {
+        spacing: Style.space(10)
+
+        Text {
+          visible: win.memoryFormError !== "" || win.memoryProblemFor("") !== ""
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: (win.memoryFormError !== "" ? win.memoryFormError + "\n" : "")
+            + win.memoryProblemFor("")
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.urgent
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "The fact, in words"
+          placeholder: "the staging server is called atlas"
+          problem: win.memoryProblemFor("content")
+          hint: win.memoryFormId === ""
+            ? "Kept until you forget it, and offered to the model on every turn."
+            : "Saving keeps the old wording on the fact's history."
+          Component.onCompleted: text = win.memoryFormContent
+          onEdited: function(value) { win.memoryFormContent = value }
+          onCommitted: {}
         }
       }
     }
