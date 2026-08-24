@@ -33,3 +33,27 @@ func TestToolSystemPromptPinsTheHonestyRule(t *testing.T) {
 			ToolSystemPrompt, want)
 	}
 }
+
+func TestConfigSystemPromptPinsTheContract(t *testing.T) {
+	// Pinned verbatim (issue #105): the self-configuration honesty rule — a
+	// validation failure is corrected or reported, never papered over with a
+	// claimed success — and the off-limits statement, so the model refuses
+	// the excluded space in words instead of discovering it by calling.
+	for _, want := range []string{
+		"fix exactly what they name and retry, or tell the user " +
+			"the real problem — never claim a change you did not make",
+		"The tool permission policy, advisors, and AI provider settings are off limits to you",
+		"confirm in one short sentence what actually changed, using the values the tool result " +
+			"reports — never a paraphrase of the request",
+		"read it with config.get_entry",
+	} {
+		if !strings.Contains(ConfigSystemPrompt, want) {
+			t.Errorf("config system prompt lost its contract:\n%q\nmust contain\n%q",
+				ConfigSystemPrompt, want)
+		}
+	}
+	// Always present: the tools are always registered, so the prompt is too.
+	if got := AssistantSystemPrompt(Default()); !strings.Contains(got, ConfigSystemPrompt) {
+		t.Error("the assembled system prompt does not carry the config tool guidance")
+	}
+}

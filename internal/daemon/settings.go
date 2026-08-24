@@ -42,9 +42,21 @@ func (d *Daemon) previewEnabled() bool {
 	return d.cfg.UI.NotificationPreview
 }
 
+// Setting-change sources, mirroring the entry-change sources in
+// entry_admin.go: config.set over the socket is the settings screen or the
+// CLI (settingSourceUser — a person, either way), while the assistant's
+// config.write_setting tool (issue #105) lands with its own label so the
+// activity feed can say who changed what.
+const (
+	settingSourceUser      = "user"
+	settingSourceAssistant = "assistant"
+)
+
 func (d *Daemon) registerConfigMethods() {
 	d.server.Handle("config.get", d.handleConfigGet)
-	d.server.Handle("config.set", d.handleConfigSet)
+	d.server.Handle("config.set", func(params json.RawMessage) (any, error) {
+		return d.configSet(params, settingSourceUser)
+	})
 	d.server.Handle("config.reload", d.handleConfigReload)
 	d.server.Handle("doctor.get", d.handleDoctorGet)
 }
@@ -110,11 +122,14 @@ type configSetParams struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-// handleConfigSet validates and writes field changes into config.toml —
-// preserving hand-edited content — then applies them to the running daemon
-// per each setting's reload class. Nothing is written unless the whole
-// resulting configuration validates.
-func (d *Daemon) handleConfigSet(params json.RawMessage) (any, error) {
+// configSet validates and writes field changes into config.toml — preserving
+// hand-edited content — then applies them to the running daemon per each
+// setting's reload class. Nothing is written unless the whole resulting
+// configuration validates. A named method with a source rather than a
+// handler closure because the assistant's config.write_setting tool (issue
+// #105) drives the very same function in-process — one settings write path,
+// with only the source label differing.
+func (d *Daemon) configSet(params json.RawMessage, source string) (map[string]any, error) {
 	var p configSetParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -195,6 +210,20 @@ func (d *Daemon) handleConfigSet(params json.RawMessage) (any, error) {
 	applied, reason := d.applyRuntime(fileCfg)
 	newFP := config.Fingerprint(newRaw)
 	d.publishConfigChanged(newFP)
+	// One event per changed key, in stable order (issue #105's observability):
+	// the activity feed's "settings equivalent" of config.entry_changed. Keys
+	// only, never values — a value can be a whole system prompt, and the row
+	// exists to say what moved and who moved it, not to republish content.
+	keys := make([]string, 0, len(native))
+	for key := range native {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		d.bus.Publish(session.Event{Type: "config.setting_changed", Data: map[string]any{
+			"key": key, "source": source,
+		}})
+	}
 
 	result := map[string]any{
 		"fingerprint":   newFP,

@@ -196,6 +196,15 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // `[tools.policy.tool]."knowledge.refresh" = "ask"` (which also stops the
 // background schedules — a scheduled fetch has no way to ask), and deny
 // disables feeds outright.
+// The three config.* read verbs (issue #105) are allow for the reads' reason:
+// they look at the user's own config.toml — entries and registry settings the
+// user wrote or the settings screen shows — and change nothing. Asking "may I
+// look at your morning setup routine?" before editing it would put a toll
+// booth in front of the read the write discipline *requires* (an edit must
+// start from what the entry actually contains). Secrets never enter the
+// registry (ADR 0015) and the [ai] space is pruned from the settings view
+// before the tool sees it, so there is nothing here a read could leak that
+// the prompt does not already carry.
 var builtinToolDefaults = map[string]PolicyDecision{
 	"artifact.create":           PolicyAllow,
 	ListWindowsToolName:         PolicyAllow,
@@ -205,6 +214,9 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	RoutineToolName:             PolicyAllow,
 	ConversationsSearchToolName: PolicyAllow,
 	KnowledgeRefreshToolName:    PolicyAllow,
+	ConfigListEntriesToolName:   PolicyAllow,
+	ConfigGetEntryToolName:      PolicyAllow,
+	ConfigReadSettingsToolName:  PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
@@ -250,6 +262,21 @@ func (p *Policy) ToolDecision(name string) PolicyDecision {
 		// the same one-way exception the typing tools carry, and for the same
 		// reason stated at neverSilent: loosening must be explicit, tightening
 		// must always win.
+		if p.defaultDecision == PolicyDeny {
+			return PolicyDeny
+		}
+		return PolicyAsk
+	}
+	if name == ConfigWriteEntryToolName || name == ConfigDeleteEntryToolName {
+		// script.run's floor, restated at authoring time (issue #105, ADR
+		// 0036). Every entry these tools can write is command-bearing: a
+		// script IS a command, a feed carries the argv it fetches with, and a
+		// routine's steps launch applications — so writing (or removing) one
+		// is arranging for something to run later, and a global "allow" must
+		// not make that silent. Only naming the tool explicitly
+		// (`[tools.policy.tool]."config.write_entry" = "allow"`) does — a
+		// sentence a user has to mean — and `default = "deny"` still wins,
+		// because tightening is never the thing to override.
 		if p.defaultDecision == PolicyDeny {
 			return PolicyDeny
 		}
@@ -447,6 +474,10 @@ func (p *Policy) Decide(call ai.ToolCall) Verdict {
 				v.Rule = fmt.Sprintf("tool %q is set to ask", call.Name)
 			case neverSilent[call.Name]:
 				v.Rule = fmt.Sprintf("tool %q always asks unless the configuration names it", call.Name)
+			case call.Name == ConfigWriteEntryToolName || call.Name == ConfigDeleteEntryToolName:
+				// The authoring floor above: same audit wording as script.run's,
+				// because it is the same rule.
+				v.Rule = fmt.Sprintf("tool %q asks unless the configuration names it", call.Name)
 			default:
 				v.Rule = "unknown tool defaults to ask"
 			}

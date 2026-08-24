@@ -230,12 +230,25 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Label:  "Missed while off: " + activityString(data, "name"),
 			Detail: joinActivity("was due "+activityString(data, "due"), "reported, never re-fired")})
 	case "config.entry_changed":
-		// A form save in the window (#99/#100): one routine, script, or
-		// knowledge feed created, edited, or deleted through
-		// config.upsert_entry / config.delete_entry. The feed names the entry
-		// — configuration changes are actions too, and a schedule that
+		// A save through the entry pipeline (#99/#100/#105): one routine,
+		// script, or knowledge feed created, edited, or deleted through
+		// config.upsert_entry / config.delete_entry — by the window's form or
+		// by the assistant's tool, and the row says which. The feed names the
+		// entry — configuration changes are actions too, and a schedule that
 		// appears or stops must be traceable to its save.
 		return one(entryChangedRow(data))
+	case "config.setting_changed":
+		// One registry setting changed (issue #105): the settings equivalent
+		// of the entry row above, from the settings screen, the CLI, or the
+		// assistant's config.write_setting. Key and source only, never the
+		// value — a value can be a whole system prompt, and the row exists to
+		// say what moved and who moved it, not to republish content. The tool
+		// kind (a cog) rather than a new kind: an older plugin would render
+		// an unknown kind with the fallback glyph, and a settings turn *is*
+		// the machinery being adjusted.
+		return one(ActivityRow{Kind: ActivityKindTool,
+			Label:  "Setting changed: " + activityString(data, "key"),
+			Detail: "config.toml, " + configChangeSource(data)})
 	case "memory.entry_changed":
 		// A fact added or edited from the window's Memory tab (#100), through
 		// the memory book's own write path. Id and size only, never the words
@@ -458,11 +471,30 @@ func entryChangedRow(data map[string]any) ActivityRow {
 		action = "changed"
 	}
 	row.Label = word + " " + action + ": " + activityString(data, "name")
-	row.Detail = "config.toml, saved from the window"
+	verb := "saved"
 	if action == "deleted" {
-		row.Detail = "config.toml, removed from the window"
+		verb = "removed"
+	}
+	// Who did it matters (issue #105): a self-administered change must be
+	// auditable as such at a glance, so the assistant's saves say so, while
+	// everything else keeps the window wording — the forms are the only other
+	// client of these verbs.
+	if activityString(data, "source") == "assistant" {
+		row.Detail = "config.toml, " + verb + " by the assistant"
+	} else {
+		row.Detail = "config.toml, " + verb + " from the window"
 	}
 	return row
+}
+
+// configChangeSource words a settings change's source for the feed: the
+// assistant's config.write_setting says so; every other writer of config.set
+// — the settings screen, the CLI — is the user acting directly.
+func configChangeSource(data map[string]any) string {
+	if activityString(data, "source") == "assistant" {
+		return "changed by the assistant"
+	}
+	return "changed by you"
 }
 
 // memoryEntryChangedRow words one memory-form save (#100): the fact named by
@@ -644,6 +676,34 @@ func SummariseToolArgs(tool, arguments string) string {
 		// out of logs, and the feed follows it (ADR 0028 / issue #59).
 		n := runes("query")
 		return fmt.Sprintf("query of %d %s (not shown)", n, pluralActivity(n, "character", "characters"))
+	case "config.list_entries":
+		return str("family")
+	case "config.get_entry", "config.delete_entry":
+		// Family and entry name — what is being read or removed; the entry's
+		// content never travels in arguments for these two.
+		return joinActivity(str("family"), str("name"))
+	case "config.write_entry":
+		// Family and name only, never the draft: the entry body carries
+		// command-bearing fields, and the confirmation gate is the surface
+		// that shows those verbatim (issue #105) — the feed's tool row just
+		// says which entry was being written.
+		name := str("name")
+		if name == "" {
+			var nested struct {
+				Entry map[string]any `json:"entry"`
+			}
+			if json.Unmarshal([]byte(arguments), &nested) == nil {
+				name = activityString(nested.Entry, "name")
+			}
+		}
+		return joinActivity(str("family"), name)
+	case "config.read_settings":
+		return str("prefix")
+	case "config.write_setting":
+		// The key only, never the value: a value can be a whole system
+		// prompt, and the gate's card already showed it verbatim where the
+		// approval happened.
+		return str("key")
 	}
 	return ""
 }
