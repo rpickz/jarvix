@@ -32,7 +32,7 @@ func TestActivityToolSummariesMatchRealToolNames(t *testing.T) {
 		{tools.TypeTextToolName, `{"text":"ab"}`, "2 characters (text not shown)"},
 		{tools.PressKeyToolName, `{"key":"enter"}`, "enter"},
 		{tools.MemoryRememberToolName, `{"content":"abc"}`, "a fact of 3 characters (content not shown)"},
-		{tools.MemoryRecallToolName, `{"query":"abc"}`, "query not shown"},
+		{tools.MemorySearchToolName, `{"query":"abc"}`, "query not shown"},
 		{tools.MemoryForgetToolName, `{"query":"abc"}`, "query not shown"},
 		{tools.ConversationsSearchToolName, `{"query":"abcd"}`, "query of 4 characters (not shown)"},
 		{tools.ConfigListEntriesToolName, `{"family":"scripts"}`, "scripts"},

@@ -88,7 +88,7 @@ func TestMemoryToolsAreRegisteredWithTheirTiers(t *testing.T) {
 	tools := status["policy"].(map[string]any)["tools"].(map[string]any)
 	for name, tier := range map[string]string{
 		"memory.remember": "allow",
-		"memory.recall":   "allow",
+		"memory.search":   "allow",
 		"memory.forget":   "ask",
 	} {
 		if got := tools[name]; got != tier {

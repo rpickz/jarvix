@@ -250,7 +250,7 @@ func TestActivityRowsNeverLeakPrivateContent(t *testing.T) {
 		{"memory fact in remember args", "tool.started", map[string]any{
 			"tool": "memory.remember", "arguments": `{"content":"` + secret + `"}`}},
 		{"memory query in recall args", "tool.started", map[string]any{
-			"tool": "memory.recall", "arguments": `{"query":"` + secret + `"}`}},
+			"tool": "memory.search", "arguments": `{"query":"` + secret + `"}`}},
 		{"memory query in forget args", "tool.started", map[string]any{
 			"tool": "memory.forget", "arguments": `{"query":"` + secret + `"}`}},
 		{"memory.injected with rogue content fields", "memory.injected", map[string]any{

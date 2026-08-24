@@ -121,12 +121,12 @@ func TestRememberForceNewStoresBesideSimilar(t *testing.T) {
 	}
 }
 
-func TestRememberUnknownUpdateIDPointsAtRecall(t *testing.T) {
+func TestRememberUnknownUpdateIDPointsAtSearch(t *testing.T) {
 	m, book, _ := testMemory(t)
 	remember := memoryTool(t, m, MemoryRememberToolName)
 	result := execute(t, remember, `{"content":"something","update_id":"m9"}`)
-	if !strings.Contains(result, "error") || !strings.Contains(result, "memory.recall") {
-		t.Errorf("result = %q, want an error naming memory.recall", result)
+	if !strings.Contains(result, "error") || !strings.Contains(result, "memory.search") {
+		t.Errorf("result = %q, want an error naming memory.search", result)
 	}
 	if facts := book.List(""); len(facts) != 0 {
 		t.Errorf("a failed update wrote: %+v", facts)
@@ -159,39 +159,77 @@ func TestRememberNearCapWarns(t *testing.T) {
 	}
 }
 
-func TestRecallListsInWordsWithTrail(t *testing.T) {
+func TestSearchListsInWordsWithTrail(t *testing.T) {
 	m, _, advance := testMemory(t)
 	remember := memoryTool(t, m, MemoryRememberToolName)
-	recall := memoryTool(t, m, MemoryRecallToolName)
+	search := memoryTool(t, m, MemorySearchToolName)
 	execute(t, remember, `{"content":"the staging server is called atlas"}`)
 	advance(time.Hour)
 	execute(t, remember, `{"content":"the staging server is called helios","update_id":"m1"}`)
 	execute(t, remember, `{"content":"the user's editor is neovim","force_new":true}`)
 
-	result := execute(t, recall, `{"query":"staging server"}`)
+	result := execute(t, search, `{"query":"staging server"}`)
 	for _, want := range []string{"m1", "helios", "previously", "atlas"} {
 		if !strings.Contains(result, want) {
-			t.Errorf("recall missing %q:\n%s", want, result)
+			t.Errorf("search missing %q:\n%s", want, result)
 		}
 	}
 	if strings.Contains(result, "neovim") {
-		t.Errorf("recall leaked an unrelated fact:\n%s", result)
+		t.Errorf("search leaked an unrelated fact:\n%s", result)
 	}
 
 	// Empty query lists everything; empty store says so plainly.
-	if all := execute(t, recall, `{}`); !strings.Contains(all, "neovim") {
-		t.Errorf("recall of everything missing a fact:\n%s", all)
+	if all := execute(t, search, `{}`); !strings.Contains(all, "neovim") {
+		t.Errorf("search of everything missing a fact:\n%s", all)
 	}
-	if none := execute(t, recall, `{"query":"kubernetes"}`); !strings.Contains(none, "No remembered fact") {
-		t.Errorf("no-match recall = %q", none)
+	if none := execute(t, search, `{"query":"kubernetes"}`); !strings.Contains(none, "No remembered fact") {
+		t.Errorf("no-match search = %q", none)
 	}
 }
 
-func TestRecallOnEmptyStore(t *testing.T) {
+// TestSearchRecordsRetrievalOnlyForQueries pins the tool half of the stats
+// contract (#104): a queried search moves each returned fact's counter, an
+// empty-query enumeration (the forget flow's listing) moves nothing —
+// browsing must never inflate the usefulness signal.
+func TestSearchRecordsRetrievalOnlyForQueries(t *testing.T) {
+	m, book, _ := testMemory(t)
+	execute(t, memoryTool(t, m, MemoryRememberToolName), `{"content":"the staging server is called atlas"}`)
+	search := memoryTool(t, m, MemorySearchToolName)
+
+	execute(t, search, `{}`)
+	if f := book.List("")[0]; f.TimesRetrieved != 0 {
+		t.Errorf("enumeration recorded a retrieval: %+v", f)
+	}
+	execute(t, search, `{"query":"staging"}`)
+	f := book.List("")[0]
+	if f.TimesRetrieved != 1 || f.LastRetrieved.IsZero() {
+		t.Errorf("queried search stats = {%d, %v}, want the retrieval recorded",
+			f.TimesRetrieved, f.LastRetrieved)
+	}
+}
+
+// TestSearchRanksBestMatchFirst: the tool answers through the book's ranked
+// search, not the loose listing — the exact-word fact leads even though the
+// vocabulary-sharing one was confirmed later.
+func TestSearchRanksBestMatchFirst(t *testing.T) {
+	m, _, advance := testMemory(t)
+	remember := memoryTool(t, m, MemoryRememberToolName)
+	execute(t, remember, `{"content":"ssh to the staging server as deploy"}`)
+	advance(time.Hour)
+	execute(t, remember, `{"content":"the atlas of servers lives on the staging shelf","force_new":true}`)
+
+	result := execute(t, memoryTool(t, m, MemorySearchToolName), `{"query":"staging server"}`)
+	first := strings.SplitN(result, "\n", 2)[0]
+	if !strings.Contains(first, "ssh to the staging server") {
+		t.Errorf("first result = %q, want the phrase match ranked on top:\n%s", first, result)
+	}
+}
+
+func TestSearchOnEmptyStore(t *testing.T) {
 	m, _, _ := testMemory(t)
-	recall := memoryTool(t, m, MemoryRecallToolName)
-	if result := execute(t, recall, `{}`); !strings.Contains(result, "Nothing is stored") {
-		t.Errorf("empty recall = %q", result)
+	search := memoryTool(t, m, MemorySearchToolName)
+	if result := execute(t, search, `{}`); !strings.Contains(result, "Nothing is stored") {
+		t.Errorf("empty search = %q", result)
 	}
 }
 
@@ -273,7 +311,7 @@ func TestForgetConfirmationNamesTheFact(t *testing.T) {
 	}
 }
 
-// TestMemoryPolicyTiers pins the gate: remember and recall run silently
+// TestMemoryPolicyTiers pins the gate: remember and search run silently
 // (bounded blast radius, spoken confirmation, reversible), forget takes the
 // policy default because deletion is the one irreversible verb.
 func TestMemoryPolicyTiers(t *testing.T) {
@@ -284,8 +322,8 @@ func TestMemoryPolicyTiers(t *testing.T) {
 	if got := policy.ToolDecision(MemoryRememberToolName); got != PolicyAllow {
 		t.Errorf("memory.remember tier = %s, want allow", got)
 	}
-	if got := policy.ToolDecision(MemoryRecallToolName); got != PolicyAllow {
-		t.Errorf("memory.recall tier = %s, want allow", got)
+	if got := policy.ToolDecision(MemorySearchToolName); got != PolicyAllow {
+		t.Errorf("memory.search tier = %s, want allow", got)
 	}
 	if got := policy.ToolDecision(MemoryForgetToolName); got != PolicyAsk {
 		t.Errorf("memory.forget tier = %s, want the ask default", got)

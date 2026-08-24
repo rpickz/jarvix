@@ -995,8 +995,14 @@ FloatingWindow {
   property int memoryFactCount: 0
   property int memoryFactMax: 0
   property string memoryQuery: ""
+  // The daemon's over-budget sentence (#104): non-empty when facts are
+  // being left out of the prompt against the user's intent. Rendered as
+  // words in the tab — the never-silent contract — and decided entirely
+  // daemon-side; this window only relays it.
+  property string memoryWarning: ""
   property int memoryRequestId: 0
   property int memoryForgetRequestId: 0
+  property int memoryPinRequestId: 0
 
   function requestMemory() {
     if (!daemon.connected) return
@@ -1031,6 +1037,18 @@ FloatingWindow {
     memoryFacts = result.facts || []
     memoryFactCount = Number(result.count || 0)
     memoryFactMax = Number(result.max || 0)
+    memoryWarning = String(result.warning || "")
+  }
+
+  // setFactPinned is the card's Pin/Unpin button (#104): one ungated verb,
+  // the exact inverse a second press. The reply refreshes the listing, which
+  // also brings back any over-budget warning the new pin state created.
+  function setFactPinned(id, pinned) {
+    if (!daemon.connected) return
+    memoryPinRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: memoryPinRequestId,
+      method: "memory.set_pinned", params: { id: id, pinned: pinned } }) + "\n")
   }
 
   // --- memory entry form --------------------------------------------------
@@ -1046,6 +1064,7 @@ FloatingWindow {
   property bool memoryFormOpen: false
   property string memoryFormId: "" // "" while adding
   property string memoryFormContent: ""
+  property bool memoryFormPinned: false
   property var memoryFormProblems: [] // [{field, message}] from the daemon
   property string memoryFormError: ""
   property int memorySaveRequestId: 0
@@ -1053,16 +1072,19 @@ FloatingWindow {
   function openMemoryAdd() {
     memoryFormId = ""
     memoryFormContent = ""
+    memoryFormPinned = false
     memoryFormProblems = []
     memoryFormError = ""
     memoryFormOpen = true
   }
 
   // openMemoryEdit opens the form on one fact. The listing already carries
-  // the full content (memory.list serves it), so no round trip is needed.
-  function openMemoryEdit(id, content) {
+  // the full content and pin state (memory.list serves them), so no round
+  // trip is needed.
+  function openMemoryEdit(id, content, pinned) {
     memoryFormId = String(id)
     memoryFormContent = String(content)
+    memoryFormPinned = pinned === true
     memoryFormProblems = []
     memoryFormError = ""
     memoryFormOpen = true
@@ -1080,10 +1102,13 @@ FloatingWindow {
     var frame = { jsonrpc: "2.0", id: memorySaveRequestId }
     if (memoryFormId === "") {
       frame.method = "memory.add"
-      frame.params = { content: memoryFormContent }
+      frame.params = { content: memoryFormContent, pinned: memoryFormPinned }
     } else {
+      // Content and pin travel together; the daemon compares against the
+      // stored fact and writes only what actually changed — a pin-only save
+      // must not manufacture a revision of unchanged text.
       frame.method = "memory.update"
-      frame.params = { id: memoryFormId, content: memoryFormContent }
+      frame.params = { id: memoryFormId, content: memoryFormContent, pinned: memoryFormPinned }
     }
     daemon.write(JSON.stringify(frame) + "\n")
   }
@@ -1121,10 +1146,15 @@ FloatingWindow {
     return out.join("\n")
   }
 
-  // factMeta words one fact's dates for its row: stored, confirmed (when a
-  // later turn re-confirmed it), and the length of its supersede trail.
+  // factMeta words one fact's dates for its row: the pin state (words, not
+  // colour), stored, confirmed (when a later turn re-confirmed it), the
+  // length of its supersede trail, and — only when a retrieval has actually
+  // happened — the retrieval stats (#104). The daemon omits the stats keys
+  // for never-retrieved facts, and this function follows: no key, no line,
+  // never a fabricated "retrieved 0 times".
   function factMeta(fact) {
-    var meta = "stored " + String(fact.stored || "").substring(0, 10)
+    var meta = fact.pinned === true ? "pinned · " : ""
+    meta += "stored " + String(fact.stored || "").substring(0, 10)
     var updated = String(fact.updated || "").substring(0, 10)
     if (updated !== "" && updated !== String(fact.stored || "").substring(0, 10)) {
       meta += " · confirmed " + updated
@@ -1133,6 +1163,12 @@ FloatingWindow {
     if (previous.length > 0) {
       meta += " · " + previous.length
         + (previous.length === 1 ? " earlier version" : " earlier versions")
+    }
+    var retrieved = Number(fact.times_retrieved || 0)
+    if (retrieved > 0) {
+      meta += " · retrieved " + retrieved + (retrieved === 1 ? " time" : " times")
+      var last = String(fact.last_retrieved_spoken || "")
+      if (last !== "") meta += " · last " + last
     }
     return meta
   }
@@ -1625,6 +1661,15 @@ FloatingWindow {
           if (frame.error) {
             win.errorStage = "memory"
             win.errorMessage = String(frame.error.message || "the fact could not be forgotten")
+          }
+        } else if (frame.id !== undefined && frame.id === win.memoryPinRequestId) {
+          // Success refreshes the listing (the pin and any over-budget
+          // warning arrive with it); a refusal must be seen in words.
+          if (frame.error) {
+            win.errorStage = "memory"
+            win.errorMessage = String(frame.error.message || "the pin could not be changed")
+          } else {
+            win.requestMemory()
           }
         } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
           if (frame.result) win.loadMemory(frame.result)
@@ -3152,10 +3197,27 @@ FloatingWindow {
         color: Util.alpha(Color.popups.text, 0.7)
       }
 
+      // The over-budget warning (#104): the daemon's sentence, verbatim, in
+      // words — urgent colour flags it but never carries it alone. Present
+      // exactly when the daemon sent one; a trim is never silent here.
+      Text {
+        id: memoryWarningLine
+        visible: win.memoryWarning !== "" && !win.memoryFormOpen
+        anchors.top: memoryCountLine.visible ? memoryCountLine.bottom
+          : (memoryFilterBox.visible ? memoryFilterBox.bottom : parent.top)
+        anchors.topMargin: Style.space(6)
+        width: parent.width
+        wrapMode: Text.Wrap
+        text: "Warning: " + win.memoryWarning
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Color.urgent
+      }
+
       ListView {
         id: memoryList
         visible: win.memoryFacts.length > 0 && !win.memoryFormOpen
-        anchors.top: memoryCountLine.bottom
+        anchors.top: memoryWarningLine.visible ? memoryWarningLine.bottom : memoryCountLine.bottom
         anchors.topMargin: Style.space(8)
         anchors.left: parent.left
         anchors.right: parent.right
@@ -3190,10 +3252,19 @@ FloatingWindow {
             actionLabel: "Edit"
             actionName: "Edit: " + factDelegate.modelData.content
             onActionTriggered: win.openMemoryEdit(String(factDelegate.modelData.id),
-              String(factDelegate.modelData.content))
-            action2Label: "Forget"
-            action2Name: "Forget: " + factDelegate.modelData.content
-            onAction2Triggered: win.forgetFact(String(factDelegate.modelData.id))
+              String(factDelegate.modelData.content),
+              factDelegate.modelData.pinned === true)
+            // Pin second, Forget last (#104): the reversible toggle sits
+            // above the one destructive act, which keeps its confirmation
+            // card.
+            action2Label: factDelegate.modelData.pinned === true ? "Unpin" : "Pin"
+            action2Name: (factDelegate.modelData.pinned === true ? "Unpin: " : "Pin: ")
+              + factDelegate.modelData.content
+            onAction2Triggered: win.setFactPinned(String(factDelegate.modelData.id),
+              factDelegate.modelData.pinned !== true)
+            action3Label: "Forget"
+            action3Name: "Forget: " + factDelegate.modelData.content
+            onAction3Triggered: win.forgetFact(String(factDelegate.modelData.id))
           }
 
           Column {
@@ -3286,11 +3357,20 @@ FloatingWindow {
           placeholder: "the staging server is called atlas"
           problem: win.memoryProblemFor("content")
           hint: win.memoryFormId === ""
-            ? "Kept until you forget it, and offered to the model on every turn."
-            : "Saving keeps the old wording on the fact's history."
+            ? "Kept until you forget it."
+            : "Saving a wording change keeps the old wording on the fact's history."
           Component.onCompleted: text = win.memoryFormContent
           onEdited: function(value) { win.memoryFormContent = value }
           onCommitted: {}
+        }
+
+        // The pin toggle (#104): ambient versus searchable, in words.
+        JarvixFormToggle {
+          width: parent.width
+          label: "Pinned"
+          detail: "A pinned fact rides every prompt; unpinned facts are found on demand with memory.search."
+          checked: win.memoryFormPinned
+          onToggled: function(checked) { win.memoryFormPinned = checked }
         }
       }
     }

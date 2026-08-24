@@ -18,12 +18,15 @@ import (
 
 // factView is the wire shape of one fact, shared by every memory method.
 type factView struct {
-	ID       string `json:"id"`
-	Content  string `json:"content"`
-	Stored   string `json:"stored"`
-	Updated  string `json:"updated"`
-	Source   string `json:"source"`
-	Previous []struct {
+	ID             string `json:"id"`
+	Content        string `json:"content"`
+	Stored         string `json:"stored"`
+	Updated        string `json:"updated"`
+	Source         string `json:"source"`
+	Pinned         bool   `json:"pinned"`
+	TimesRetrieved int    `json:"times_retrieved"`
+	LastSpoken     string `json:"last_retrieved_spoken"`
+	Previous       []struct {
 		Content    string `json:"content"`
 		Stored     string `json:"stored"`
 		Superseded string `json:"superseded"`
@@ -31,9 +34,25 @@ type factView struct {
 }
 
 // printFact renders one fact with its supersede trail, dates trimmed to the
-// day — the precision a person scanning a list actually reads.
+// day — the precision a person scanning a list actually reads. The pin and
+// the retrieval stats (#104) appear only when they say something: an
+// unpinned, never-retrieved fact prints exactly as it always has.
 func printFact(f factView, indent string) {
-	fmt.Printf("%s%-5s %s  (updated %s)\n", indent, f.ID, f.Content, day(f.Updated))
+	note := fmt.Sprintf("updated %s", day(f.Updated))
+	if f.Pinned {
+		note = "pinned, " + note
+	}
+	if f.TimesRetrieved > 0 {
+		times := "times"
+		if f.TimesRetrieved == 1 {
+			times = "time"
+		}
+		note += fmt.Sprintf(", retrieved %d %s", f.TimesRetrieved, times)
+		if f.LastSpoken != "" {
+			note += ", last " + f.LastSpoken
+		}
+	}
+	fmt.Printf("%s%-5s %s  (%s)\n", indent, f.ID, f.Content, note)
 	for _, p := range f.Previous {
 		fmt.Printf("%s      previously %q, %s to %s\n", indent, p.Content, day(p.Stored), day(p.Superseded))
 	}
@@ -59,6 +78,7 @@ func cmdMemoryList(paths config.Paths, query string) error {
 		Path    string     `json:"path"`
 		Count   int        `json:"count"`
 		Max     int        `json:"max"`
+		Warning string     `json:"warning"`
 		Facts   []factView `json:"facts"`
 	}
 	params := map[string]any{"query": query}
@@ -82,6 +102,11 @@ func cmdMemoryList(paths config.Paths, query string) error {
 	}
 	fmt.Printf("\n%d of %d facts — the file is yours to edit: %s\n",
 		listing.Count, listing.Max, listing.Path)
+	// The over-budget warning (#104): the same sentence the Memory tab
+	// shows, because a trim must never be silent on any surface.
+	if listing.Warning != "" {
+		fmt.Println("warning: " + listing.Warning)
+	}
 	return nil
 }
 
@@ -146,13 +171,14 @@ func isFactID(s string) bool {
 // given with what they believe is stored.
 func printLastMemory(client *ipc.Client) error {
 	var last struct {
-		Enabled   bool       `json:"enabled"`
-		Injected  bool       `json:"injected"`
-		SessionID string     `json:"session_id"`
-		Facts     []factView `json:"facts"`
-		Trimmed   int        `json:"trimmed"`
-		Total     int        `json:"total"`
-		EstTokens int        `json:"est_tokens"`
+		Enabled    bool       `json:"enabled"`
+		Injected   bool       `json:"injected"`
+		SessionID  string     `json:"session_id"`
+		Facts      []factView `json:"facts"`
+		Trimmed    int        `json:"trimmed"`
+		Searchable int        `json:"searchable"`
+		Total      int        `json:"total"`
+		EstTokens  int        `json:"est_tokens"`
 	}
 	if err := client.Call("memory.last", nil, &last); err != nil {
 		return err
@@ -169,6 +195,9 @@ func printLastMemory(client *ipc.Client) error {
 			len(last.Facts), last.Total, last.EstTokens)
 		if last.Trimmed > 0 {
 			note += fmt.Sprintf(", %d trimmed by the token cap", last.Trimmed)
+		}
+		if last.Searchable > 0 {
+			note += fmt.Sprintf(", %d behind memory.search", last.Searchable)
 		}
 		fmt.Printf("memory:   session %s, %s\n", last.SessionID, note)
 		for _, f := range last.Facts {

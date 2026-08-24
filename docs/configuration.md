@@ -252,7 +252,7 @@ shell_deny = []                  # extra command prefixes that never run,
 # "desktop.focus_window" = "allow"   # run silently; move, close and launch
                                      # take the default above ("ask")
 # "conversations.search" = "allow"   # built-in default: a read of your own
-                                     # archive (ADR 0028), like memory.recall
+                                     # archive (ADR 0028), like memory.search
 # "typing.type_text" = "allow"   # the typing tools ALWAYS ask unless you name
 # "typing.press_key" = "allow"   # them here — a global default of "allow"
                                  # deliberately does not reach them. A global
@@ -318,8 +318,11 @@ enabled = true                   # off: tools not registered, nothing injected �
                                  # the store file is left alone (restart-class)
 max_facts = 200                  # store cap; warns from nine-tenths full
 max_injected_tokens = 500        # per-turn budget for the remembered-facts
-                                 # block (~4 chars/token); facts that do not
-                                 # fit are left out of the turn, never deleted.
+                                 # block (~4 chars/token). With pinned facts
+                                 # the budget governs exactly them; a book
+                                 # that outgrows it moves facts behind the
+                                 # memory.search tool — never deleted, and
+                                 # never trimmed silently (ADR 0037).
                                  # Minimum 100
 
 [conversation]
@@ -1241,16 +1244,28 @@ What the design guarantees:
   server is helios" supersedes the stored fact rather than sitting beside
   it, and the old value stays on the fact's trail with both timestamps —
   `jarvix memory list` answers "when did that change".
-- **Memory cannot crowd out the conversation.** The injected block has a
-  token budget (`max_injected_tokens`); facts that do not fit are left out
-  of the turn — least recently confirmed first, never deleted — and the
-  model is told the list is incomplete so it can search with its recall
-  tool instead of concluding a fact does not exist.
+- **Memory scales past the prompt.** The injected block has a token budget
+  (`max_injected_tokens`), and how it is spent is the retrieval policy of
+  [ADR 0037](adr/0037-memory-retrieval.md). A small book rides every prompt
+  whole, exactly as it always has. **Pin** the facts that must shape every
+  answer — from the fact card or edit form in the window, or `pinned = true`
+  in the file — and exactly those stay ambient (the budget governs them
+  alone); everything else leaves the prompt and is found on demand with the
+  model's deterministic `memory.search` tool. A book that outgrows the
+  budget with nothing pinned goes search-only rather than silently dropping
+  its tail, and every over-budget state puts a warning sentence in the
+  Memory tab and `jarvix memory list` naming the fix. Nothing here ever
+  deletes a fact.
+- **Retrieval is observable.** Each fact records how often `memory.search`
+  returned it and when last — the fact card shows "retrieved N times · last
+  <relative time>", and shows nothing for a fact never retrieved (ambient
+  injection and your own browsing do not count). That usefulness signal is
+  what makes pruning and pinning informed acts.
 - **Forgetting is deletion, and deletion is confirmed.** The forget tool is
   the one memory verb behind an "ask" confirmation by default, and the
-  question names the exact fact about to go. Remember and recall run
+  question names the exact fact about to go. Remember and search run
   silently: storing is disclosed by the spoken confirmation and undoable by
-  forgetting.
+  forgetting, and searching is a read of your own facts.
 - **Every turn is auditable.** `jarvix status --last` prints which facts the
   model was just given, beside the desktop context and the latency budget of
   the same interaction. Fact content never appears in logs or bus events.

@@ -503,7 +503,7 @@ func configChangeSource(data map[string]any) string {
 func memoryEntryChangedRow(data map[string]any) ActivityRow {
 	action := activityString(data, "action")
 	switch action {
-	case "added", "edited":
+	case "added", "edited", "pinned", "unpinned":
 	default:
 		action = "changed"
 	}
@@ -583,6 +583,11 @@ func memoryInjectedRow(data map[string]any) ActivityRow {
 	}
 	if trimmed, ok := activityInt(data, "trimmed"); ok && trimmed > 0 {
 		detail += fmt.Sprintf(" · %d kept out by the token cap", trimmed)
+	}
+	// The unpinned rest under the split (#104): not a loss like the trim, so
+	// the wording says where those facts went instead of that they were cut.
+	if searchable, ok := activityInt(data, "searchable"); ok && searchable > 0 {
+		detail += fmt.Sprintf(" · %d behind memory.search", searchable)
 	}
 	return ActivityRow{Kind: ActivityKindMemory, Label: "Remembered facts offered", Detail: detail}
 }
@@ -668,7 +673,7 @@ func SummariseToolArgs(tool, arguments string) string {
 		// store was written, and `jarvix memory list` is where content lives.
 		n := runes("content")
 		return fmt.Sprintf("a fact of %d %s (content not shown)", n, pluralActivity(n, "character", "characters"))
-	case "memory.recall", "memory.forget":
+	case "memory.search", "memory.forget":
 		// The query can quote the fact it is looking for.
 		return "query not shown"
 	case "conversations.search":

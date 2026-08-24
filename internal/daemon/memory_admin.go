@@ -29,18 +29,22 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/session"
 )
 
-// registerMemoryAdminMethods adds the Memory tab's two write verbs (#100).
+// registerMemoryAdminMethods adds the Memory tab's write verbs (#100, #104).
 func (d *Daemon) registerMemoryAdminMethods() {
 	// memory.add: a new fact, straight into the store. The reply carries the
 	// stored fact (id assigned, timestamps set) and the book's near-cap
 	// warning when it has one — the refusal at the cap must never be the
 	// first anyone hears of the limit, on this surface as on the tool's.
+	// `pinned` (#104) lets the form create an ambient fact in one save; it
+	// is a second book call rather than an Add parameter because pinning is
+	// its own reversible operation, not part of a fact's content.
 	d.server.Handle("memory.add", func(params json.RawMessage) (any, error) {
 		if d.memory == nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams,
@@ -48,6 +52,7 @@ func (d *Daemon) registerMemoryAdminMethods() {
 		}
 		var p struct {
 			Content string `json:"content"`
+			Pinned  bool   `json:"pinned"`
 		}
 		if len(params) > 0 {
 			if err := json.Unmarshal(params, &p); err != nil {
@@ -58,6 +63,17 @@ func (d *Daemon) registerMemoryAdminMethods() {
 		if err != nil {
 			return nil, memoryWriteError(err)
 		}
+		if p.Pinned {
+			// The fact exists whatever happens next, so a failed pin is a
+			// failed *pin*, not a failed add: the error names what did not
+			// happen and the fact report shows the true state.
+			if pinnedFact, pinErr := d.memory.SetPinned(fact.ID, true); pinErr == nil {
+				fact = pinnedFact
+			} else {
+				return nil, ipc.Errorf(ipc.CodeInternalError,
+					"the fact was stored as %s but could not be pinned: %v", fact.ID, pinErr)
+			}
+		}
 		d.publishMemoryEntryChanged("added", fact)
 		result := map[string]any{"fact": factReport(fact)}
 		if warning != "" {
@@ -66,10 +82,14 @@ func (d *Daemon) registerMemoryAdminMethods() {
 		return result, nil
 	})
 
-	// memory.update: edit one fact's text. The book supersedes rather than
-	// overwrites — the old value moves onto the fact's trail — which is what
-	// makes this verb safe ungated: nothing is destroyed, and "when did that
-	// change" stays answerable.
+	// memory.update: edit one fact from the form. The book supersedes rather
+	// than overwrites — the old value moves onto the fact's trail — which is
+	// what makes this verb safe ungated: nothing is destroyed, and "when did
+	// that change" stays answerable. Since #104 the form also carries the
+	// pin state, so the handler compares before it writes: unchanged content
+	// must not manufacture a revision of itself just because the user opened
+	// the form to toggle the pin, and an untouched pin must not cost a
+	// write. Each real change goes through the book verb that owns it.
 	d.server.Handle("memory.update", func(params json.RawMessage) (any, error) {
 		if d.memory == nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams,
@@ -78,6 +98,7 @@ func (d *Daemon) registerMemoryAdminMethods() {
 		var p struct {
 			ID      string `json:"id"`
 			Content string `json:"content"`
+			Pinned  *bool  `json:"pinned"`
 		}
 		if len(params) > 0 {
 			if err := json.Unmarshal(params, &p); err != nil {
@@ -87,13 +108,79 @@ func (d *Daemon) registerMemoryAdminMethods() {
 		if p.ID == "" {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "memory.update needs an id")
 		}
-		fact, err := d.memory.Update(p.ID, p.Content, "")
-		if err != nil {
-			return nil, memoryWriteError(err)
+		current, ok := d.memoryFact(p.ID)
+		if !ok {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams,
+				"no remembered fact has id %q; memory.list shows what is stored", p.ID)
+		}
+		fact := current
+		if strings.TrimSpace(p.Content) != current.Content {
+			updated, err := d.memory.Update(p.ID, p.Content, "")
+			if err != nil {
+				return nil, memoryWriteError(err)
+			}
+			fact = updated
+		}
+		if p.Pinned != nil && *p.Pinned != fact.Pinned {
+			pinned, err := d.memory.SetPinned(p.ID, *p.Pinned)
+			if err != nil {
+				return nil, memoryWriteError(err)
+			}
+			fact = pinned
 		}
 		d.publishMemoryEntryChanged("edited", fact)
 		return map[string]any{"fact": factReport(fact)}, nil
 	})
+
+	// memory.set_pinned: the fact card's one-click pin toggle (#104).
+	// Ungated for the reversibility reason add and edit are: the opposite
+	// click undoes it exactly, nothing is destroyed, and the click is the
+	// user's own explicit act. The reply carries the book's over-budget
+	// warning when the new pin state creates one, so pinning past the
+	// budget answers with the consequence in the same breath.
+	d.server.Handle("memory.set_pinned", func(params json.RawMessage) (any, error) {
+		if d.memory == nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams,
+				"memory is disabled (memory.enabled = false)")
+		}
+		var p struct {
+			ID     string `json:"id"`
+			Pinned bool   `json:"pinned"`
+		}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "memory.set_pinned params: %v", err)
+			}
+		}
+		if p.ID == "" {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "memory.set_pinned needs an id")
+		}
+		fact, err := d.memory.SetPinned(p.ID, p.Pinned)
+		if err != nil {
+			return nil, memoryWriteError(err)
+		}
+		action := "unpinned"
+		if p.Pinned {
+			action = "pinned"
+		}
+		d.publishMemoryEntryChanged(action, fact)
+		result := map[string]any{"fact": factReport(fact)}
+		if warning := d.memory.AmbientWarning(); warning != "" {
+			result["warning"] = warning
+		}
+		return result, nil
+	})
+}
+
+// memoryFact resolves one fact by id from the store, for handlers that need
+// the current state before deciding what to write.
+func (d *Daemon) memoryFact(id string) (memory.Fact, bool) {
+	for _, f := range d.memory.List("") {
+		if f.ID == id {
+			return f, true
+		}
+	}
+	return memory.Fact{}, false
 }
 
 // memoryWriteError places one book refusal for the form: empty content under

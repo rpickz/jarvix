@@ -55,6 +55,20 @@ type Fact struct {
 	// held before, with when it was stored and when it was replaced — so
 	// "when did that change" is answerable long after the correction.
 	Previous []Revision
+	// Pinned marks a fact as ambient: pinned facts are the ones injected
+	// into every model turn once the pin/search split engages (issue #104).
+	// A pin is presentation-of-memory state, not content — toggling it never
+	// touches Updated or the supersede trail.
+	Pinned bool
+	// TimesRetrieved counts how often memory.search returned this fact — the
+	// usefulness signal behind the Memory tab's "retrieved N times" line.
+	// Zero means never retrieved, and the surfaces show nothing rather than
+	// fabricate. Ambient injection and the user's own listings do not count:
+	// retrieval means the model went looking and this fact answered.
+	TimesRetrieved int
+	// LastRetrieved is when memory.search last returned this fact; zero when
+	// it never has.
+	LastRetrieved time.Time
 }
 
 // Revision is one superseded value of a fact.
@@ -78,10 +92,17 @@ type Injection struct {
 	// recently confirmed first). Retained so the user can see exactly what
 	// the model was given, mirroring desktop context (ADR 0019).
 	Facts []Fact
-	// Trimmed counts facts that exist in the store but were left out of the
-	// block by the token cap. The trim is disclosed to the model inside
-	// Message; this field discloses it to the user.
+	// Trimmed counts facts that *should* have been in the block — the whole
+	// store before the split engages, the pinned set after — but were left
+	// out by the token cap. The trim is disclosed to the model inside
+	// Message; this field discloses it to the user, and it is what turns
+	// into the Memory tab's over-budget warning (never silent, issue #104).
 	Trimmed int
+	// Searchable counts facts deliberately not in the block: the unpinned
+	// facts once the pin/search split engages (ADR 0037). Unlike Trimmed
+	// this is not a loss — the model is told they exist and how to find
+	// them with memory.search.
+	Searchable int
 	// Total is how many facts the store held at injection time.
 	Total int
 	// EstTokens is the estimated token cost of Message (see EstimateTokens).
