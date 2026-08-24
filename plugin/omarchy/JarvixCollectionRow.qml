@@ -24,6 +24,9 @@ import qs.Ui
 //   action2Label — a second, quieter button below the first ("" hides it),
 //                 for rows with two operations (Refresh now / Disable);
 //                 action2Name and action2Triggered mirror the first's.
+//   action3Label — a third button in the same quiet style ("" hides it), for
+//                 rows with three operations (a fact's Edit / Pin / Forget);
+//                 action3Name and action3Triggered mirror the second's.
 //   interactive — makes the row itself focusable and clickable; activated
 //                 fires. The sibling tickets wire this to their detail views
 //                 (JarvixDetailPane) or expanders; a plain listing leaves it
@@ -45,10 +48,13 @@ Rectangle {
   property string actionName: actionLabel
   property string action2Label: ""
   property string action2Name: action2Label
+  property string action3Label: ""
+  property string action3Name: action3Label
   property bool interactive: false
 
   signal actionTriggered()
   signal action2Triggered()
+  signal action3Triggered()
   signal activated()
 
   height: body.height + Style.space(16)
@@ -126,7 +132,7 @@ Rectangle {
 
     Column {
       id: actionColumn
-      visible: row.actionLabel !== "" || row.action2Label !== ""
+      visible: row.actionLabel !== "" || row.action2Label !== "" || row.action3Label !== ""
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(6)
 
@@ -182,6 +188,34 @@ Rectangle {
           color: Color.popups.text
         }
         MouseArea { anchors.fill: parent; onClicked: row.action2Triggered() }
+      }
+
+      // The third slot, visually identical to the second: a row's extra
+      // operations must all read quieter than its primary one.
+      Rectangle {
+        id: action3Button
+        visible: row.action3Label !== ""
+        width: action3ButtonLabel.width + Style.space(20)
+        height: action3ButtonLabel.height + Style.space(8)
+        anchors.right: parent.right
+        radius: Style.cornerRadius
+        color: Util.alpha(Color.popups.text, action3Button.activeFocus ? 0.16 : 0.06)
+        border.color: action3Button.activeFocus ? Color.accent : Util.alpha(Color.popups.text, 0.4)
+        border.width: action3Button.activeFocus ? 2 : 1
+        activeFocusOnTab: visible
+        Accessible.role: Accessible.Button
+        Accessible.name: row.action3Name
+        Keys.onReturnPressed: row.action3Triggered()
+        Keys.onSpacePressed: row.action3Triggered()
+        Text {
+          id: action3ButtonLabel
+          anchors.centerIn: parent
+          text: row.action3Label
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+        MouseArea { anchors.fill: parent; onClicked: row.action3Triggered() }
       }
     }
   }
