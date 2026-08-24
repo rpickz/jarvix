@@ -1,6 +1,8 @@
 # ADR 0025 — A curated knowledge base: remember, consult, correct, forget
 
-**Status:** accepted
+**Status:** accepted (injection section amended by ADR 0037: pinned facts
+are the ambient set, `memory.recall` became the ranked `memory.search`, and
+trims are disclosed to the user, never silently)
 
 ## Context
 
