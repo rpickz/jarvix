@@ -113,13 +113,87 @@ Item {
 
   // The conversation window: the click-through target for notifications and
   // `jarvix window`. It manages its own daemon connection (ADR 0013).
-  JarvixWindow { id: convWindow }
+  //
+  // It is owned by a LazyLoader rather than declared inline, and the instance
+  // is discarded and rebuilt after the compositor destroys its toplevel
+  // (super+W / killactive — issue #106). Why recreation, established from
+  // Quickshell's own source (src/window/proxywindow.cpp, floatingwindow.cpp):
+  //
+  //   - FloatingWindow.visible has asymmetric read and write paths. A write
+  //     lands in ProxyFloatingWindow's `bWantsVisible` property, whose
+  //     *change* callback is the only thing that ever shows or hides the
+  //     window; a read comes from the backing QWindow.
+  //   - A compositor kill closes the toplevel through plain Qt (QCloseEvent →
+  //     QWindow destroy(): platform window deleted, QWindow turns invisible).
+  //     Quickshell resyncs its internal mVisible and emits closed(), but
+  //     nothing on that path resets bWantsVisible — it is stranded at true.
+  //   - Every later `visible = true` is therefore a same-value property
+  //     write: no change, no callback, no toplevel — openWindow assigns true
+  //     to true and toggleWindow answers "closed" forever. And reviving the
+  //     half-dead object with visible false-then-true was observed live to
+  //     not map a window either: it re-creates the platform window through
+  //     generic Qt rather than Quickshell's own createWindow/connectWindow
+  //     path. A window object whose toplevel the compositor destroyed cannot
+  //     be trusted again; only a fresh object (or a shell restart) recovers.
+  //
+  // FloatingWindow emits closed() exactly when the window went away without
+  // `visible` being set false by us (Quickshell suppresses it for ordinary
+  // hides), so that signal is the kill detector. A plain IPC closeWindow only
+  // flips `visible`, so the instance — current tab, scroll, composer draft —
+  // survives it exactly as before; only a compositor kill pays the recreation
+  // (in-window presentation state resets, which #106 accepts: the window is
+  // display-only per ADR 0013, the conversation lives in the daemon).
+  LazyLoader {
+    id: convLoader
+    active: true
+
+    JarvixWindow {
+      // Marks the instance dead and schedules the rebuild. Deferred via
+      // callLater inside conversationWindowKilled: closed() is emitted from
+      // within Qt's close-event delivery, and tearing the window down
+      // mid-emission would destroy the object currently signalling.
+      onClosed: root.conversationWindowKilled()
+    }
+  }
+
+  // True from the compositor killing the toplevel until the replacement
+  // exists. Held as state rather than only a deferred call so an IPC request
+  // landing in that gap forces the rebuild instead of poking the corpse.
+  property bool convWindowDead: false
+
+  function conversationWindowKilled() {
+    root.convWindowDead = true
+    Qt.callLater(root.respawnConversationWindow)
+  }
+
+  function respawnConversationWindow() {
+    if (!root.convWindowDead) return
+    root.convWindowDead = false
+    convLoader.active = false // deleteLater()s the dead instance
+    convLoader.active = true  // incubates the replacement synchronously
+  }
+
+  // conversationWindow hands every entry point a live instance whatever came
+  // before: alive → as-is, compositor-killed → rebuilt, somehow inactive →
+  // activated. All window IPC converges here so no path can reach a dead
+  // object.
+  function conversationWindow() {
+    if (root.convWindowDead) root.respawnConversationWindow()
+    if (!convLoader.active) convLoader.active = true
+    return convLoader.item
+  }
 
   // Shell contract for summoned panels. The overlay itself derives its
   // visibility from daemon state, so summoning Jarvix opens the conversation
   // window — the surface a user summons *to*.
-  function open() { convWindow.openWindow() }
-  function close() { convWindow.closeWindow() }
+  function open() {
+    var w = conversationWindow()
+    if (w) w.openWindow()
+  }
+  function close() {
+    var w = conversationWindow()
+    if (w) w.closeWindow()
+  }
 
   IpcHandler {
     target: "jarvix"
@@ -127,13 +201,32 @@ Item {
     function ping(): string { return "ok" }
     // Window controls, driven by `omarchy-shell jarvix <fn>`: the CLI's
     // `jarvix window` toggles; a notification click opens.
-    function openWindow(): string { convWindow.openWindow(); return "open" }
-    function closeWindow(): string { convWindow.closeWindow(); return "closed" }
-    function toggleWindow(): string { convWindow.toggleWindow(); return convWindow.visible ? "open" : "closed" }
+    function openWindow(): string {
+      var w = root.conversationWindow()
+      if (!w) return "error"
+      w.openWindow()
+      return "open"
+    }
+    function closeWindow(): string {
+      var w = root.conversationWindow()
+      if (w) w.closeWindow()
+      return "closed"
+    }
+    function toggleWindow(): string {
+      var w = root.conversationWindow()
+      if (!w) return "error"
+      w.toggleWindow()
+      return w.visible ? "open" : "closed"
+    }
     // The bar widget's Settings action. Settings are a screen inside the
     // window, so this opens the window already showing them rather than
     // inventing a second surface.
-    function openSettings(): string { convWindow.openSettings(); return "open" }
+    function openSettings(): string {
+      var w = root.conversationWindow()
+      if (!w) return "error"
+      w.openSettings()
+      return "open"
+    }
   }
 
   // --- presentation -------------------------------------------------------
