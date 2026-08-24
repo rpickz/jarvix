@@ -61,6 +61,14 @@ type Setting struct {
 	// Enforcement stays in Config.Validate so its messages remain the single
 	// vocabulary for validation errors.
 	Enum []string
+	// Dangerous marks a setting whose change widens what the assistant may do
+	// on this machine or re-points something the daemon executes. The
+	// assistant's own settings tool (issue #105, ADR 0036) always confirms a
+	// dangerous write out loud, whatever the [tools] policy says — no
+	// configuration can make these land silently. Set from
+	// dangerousSettingKey in Settings(), never per-row, so the rule that
+	// decides is written once and pinned by one test.
+	Dangerous bool
 
 	// Get reads the current value.
 	Get func(Config) any
@@ -104,6 +112,14 @@ func (s Setting) Apply(cfg *Config, v any) error {
 // ([ai.<name>]) and secrets are deliberately absent: endpoints are hand-edited
 // TOML, and API keys never travel through the settings surface at all.
 func Settings() []Setting {
+	list := settingRows()
+	for i := range list {
+		list[i].Dangerous = dangerousSettingKey(list[i].Key)
+	}
+	return list
+}
+
+func settingRows() []Setting {
 	return []Setting{
 		// The assistant's identity (issue #103) leads the list: the name is
 		// the most personal knob there is, and the STT bias, the transcript
@@ -417,6 +433,103 @@ func SettingFor(key string) (Setting, bool) {
 		}
 	}
 	return Setting{}, false
+}
+
+// dangerousSettingKey is the rule behind Setting.Dangerous (issue #105, ADR
+// 0036): which registry keys the assistant must always confirm before
+// writing, however permissive the [tools] policy is. Three groups, each for a
+// stated reason:
+//
+//   - Everything under [tools] (tools.*): these switches enable, widen, or
+//     re-parameterise what the assistant itself may do — shell, typing,
+//     window control, launchable apps, output caps. A prefix rather than a
+//     key list on purpose: a future tools.* key that forgot to classify
+//     itself must land on the always-confirm side, never the silent one.
+//     (tools.policy.* is not here because it is not a registry key at all —
+//     the whole [tools.policy] table is structurally unreachable, see
+//     AssistantExcludedSettingReason.)
+//   - activation.mode: flips the microphone model between push-to-talk and
+//     always-listening — the most consequential privacy switch there is.
+//   - The command- and binary-bearing keys: activation.wake_command,
+//     artifacts.open_command, tts.piper.binary, stt.whisper.binary, and
+//     intents.terminal each name a program the daemon will execute, so a
+//     silent write here is a silent change to what runs on this machine —
+//     the shell.run discipline (the exact value on the card, spoken consent)
+//     applies at authoring time too.
+//
+// TestDangerousSettingsAreExactlyTheEnumeratedSet pins the resulting set, so
+// widening or narrowing it is a reviewed decision, not a drive-by.
+func dangerousSettingKey(key string) bool {
+	if strings.HasPrefix(key, "tools.") {
+		return true
+	}
+	switch key {
+	case "activation.mode",
+		"activation.wake_command",
+		"artifacts.open_command",
+		"tts.piper.binary",
+		"stt.whisper.binary",
+		"intents.terminal":
+		return true
+	}
+	return false
+}
+
+// AssistantExcludedSettingReason is the settings half of the assistant's
+// exclusion wall (issue #105, ADR 0036): the configuration the assistant's
+// tools must not be able to address AT ALL — not deny-by-default but
+// structurally, whatever [tools] says, because each of these is part of the
+// gate (or the mind) that judges the assistant's own actions, and a gate
+// must not be able to loosen itself:
+//
+//   - [ai] — provider, model, system prompt, token/temperature knobs, and
+//     every [ai.<endpoint>] table: the assistant steering its own brain, or
+//     its credentials, on request is the one write no confirmation can make
+//     safe, because the thing being confirmed is the judge of later asks.
+//   - [tools.policy] — the permission gate's own tables.
+//   - [advisors] — advisor argvs are commands the daemon executes with the
+//     user's credentials, and their tiers feed the gate (ADR 0016).
+//   - [[intents.custom]] — user-authored shell commands behind spoken
+//     phrases (ADR 0017); the intent.run identity's whole premise is that
+//     the user wrote them by hand.
+//
+// The reason returned is spoken-ready: it becomes the refusal the user hears
+// and the model reads. ok false means the key is merely unknown or ordinary —
+// unknown keys come back as correctable errors, never as this wall.
+func AssistantExcludedSettingReason(key string) (string, bool) {
+	k := strings.TrimSpace(key)
+	switch {
+	case k == "ai" || strings.HasPrefix(k, "ai."):
+		return "the assistant may not change its own AI provider, model, or system prompt; " +
+			"[ai] settings are changed in the settings screen or config.toml", true
+	case k == "tools.policy" || strings.HasPrefix(k, "tools.policy."):
+		return "the assistant may not change the tool permission policy that governs it; " +
+			"[tools.policy] is edited by hand in config.toml", true
+	case k == "advisors" || strings.HasPrefix(k, "advisors."):
+		return "the assistant may not change advisor configuration; " +
+			"[advisors] is edited by hand in config.toml", true
+	case k == "intents.custom" || strings.HasPrefix(k, "intents.custom."):
+		return "the assistant may not change custom voice intents; " +
+			"[[intents.custom]] is edited by hand in config.toml", true
+	}
+	return "", false
+}
+
+// AssistantSettings is the registry as the assistant's tools see it: every
+// editable setting minus the excluded space above. This is the *structural*
+// half of the wall — the settings tool resolves keys against this view and
+// nothing else, so an excluded key is not a denied write, it is a key that
+// does not exist on the surface the tool operates on.
+func AssistantSettings() []Setting {
+	all := Settings()
+	out := make([]Setting, 0, len(all))
+	for _, s := range all {
+		if _, excluded := AssistantExcludedSettingReason(s.Key); excluded {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- coercion

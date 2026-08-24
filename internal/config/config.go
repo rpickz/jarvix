@@ -654,6 +654,26 @@ const MemorySystemPrompt = " You have a long-term memory of facts, injected abov
 	"in plain words. When they ask you to forget something, use memory.forget. After remembering " +
 	"or forgetting, confirm what changed in one short sentence."
 
+// ConfigSystemPrompt is appended to the system prompt for the always-present
+// self-configuration tools (issue #105, ADR 0036). Deliberately terse — the
+// prompt pays for every turn (the context-floor check measures it) — so it
+// carries only the judgements the model makes *before* any tool description
+// is read: that "remind yourself…"/"talk faster" are tool calls, that an edit
+// starts with a read, that validation problems come back to be fixed, and
+// that the confirmation states what actually changed. The off-limits sentence
+// is here, not just in the wall that enforces it, so the model refuses in
+// words instead of discovering the refusal by calling.
+// TestConfigSystemPromptPinsTheContract pins the wording.
+const ConfigSystemPrompt = " You can change your own configuration when the user asks: create, " +
+	"edit, or remove routines, scripts, and knowledge feeds with the config entry tools, and " +
+	"change settings with config.write_setting. Before editing an entry, read it with " +
+	"config.get_entry and send back the whole edited entry. The daemon validates every draft " +
+	"and returns field-keyed problems: fix exactly what they name and retry, or tell the user " +
+	"the real problem — never claim a change you did not make. The tool permission policy, " +
+	"advisors, and AI provider settings are off limits to you; say so if asked. After a change, " +
+	"confirm in one short sentence what actually changed, using the values the tool result " +
+	"reports — never a paraphrase of the request."
+
 // minWarmMemoryCapMB is the smallest cap that can hold any engine Jarvix keeps
 // warm (whisper base.en alone is ~165 MB resident). A cap below it would
 // retire the worker the moment it loaded its model, turning warm mode into a

@@ -166,5 +166,11 @@ func AssistantSystemPrompt(cfg Config) string {
 	if len(cfg.Knowledge.Feeds) > 0 {
 		prompt += KnowledgeSystemPrompt
 	}
+	// Unconditional, unlike every suffix above: the self-configuration tools
+	// (issue #105) are always registered — they are how "talk faster" or
+	// "remind yourself…" becomes an action at all, and there is no config
+	// switch whose absence should silently remove the capability the user is
+	// speaking to.
+	prompt += ConfigSystemPrompt
 	return prompt
 }
