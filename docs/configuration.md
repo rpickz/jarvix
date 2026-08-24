@@ -257,6 +257,18 @@ shell_deny = []                  # extra command prefixes that never run,
 # "typing.press_key" = "allow"   # them here — a global default of "allow"
                                  # deliberately does not reach them. A global
                                  # "deny" still does.
+# "config.write_entry" = "ask"   # the assistant's self-configuration writes
+# "config.delete_entry" = "ask"  # (ADR 0036) carry script.run's floor: a
+                                 # global "allow" does not reach them — only
+                                 # naming them here does; "deny" disables
+                                 # voice edits of routines/scripts/feeds.
+# "config.write_setting" = "ask" # settings changes; dangerous settings
+                                 # (typing.*, tools.*, activation.mode, and
+                                 # every command/binary-bearing key) ALWAYS
+                                 # ask, even named "allow" here. The [ai],
+                                 # [tools.policy], [advisors] and
+                                 # [[intents.custom]] spaces are not writable
+                                 # by the assistant at all, under any policy.
 
 [intents]                        # the deterministic intent router (Phase 3)
 enabled = true                   # false = every utterance goes to the AI
@@ -1416,6 +1428,34 @@ without asking again — scoped strictly to the current conversation:
 approvals.
 
 `jarvix status` prints the effective policy.
+
+### Self-configuration by voice (`config.*` tools)
+
+The assistant can administer its own configuration when you ask it to
+([ADR 0036](adr/0036-assistant-self-configuration.md)): create, change, or
+remove **routines, scripts, and knowledge feeds**, and change any setting the
+settings screen shows — "remind yourself to check the market every morning",
+"talk a bit faster", "change your name to Hal". Always available; the safety
+story is the gate, not a switch:
+
+- Drafts are validated with the loader's own rules **before** anything is
+  written — never a half-write — and every write is fingerprint-guarded and
+  byte-preserving, exactly like a save from the window's forms (ADR 0033).
+- Entry writes and deletes are ask-tier with `script.run`'s floor (see the
+  `[tools.policy.tool]` block above): the confirmation card shows the entry's
+  name, phrases, schedule, and **every command-bearing field verbatim** — the
+  script's path, a feed's exact argv, a routine's launched apps.
+- Settings marked dangerous — everything under `tools.*`, `activation.mode`,
+  and every key naming a command or binary — always confirm, whatever the
+  policy says. Benign ones (voice speed, notification switches) follow the
+  normal policy.
+- The `[ai]` tables, `[tools.policy]`, `[advisors]`, and `[[intents.custom]]`
+  are **not writable by the assistant at all** — not deny-by-default but
+  structurally unreachable, so the gate cannot be talked into loosening
+  itself. Those remain hand edits (or, for `[ai]`, the settings screen).
+- Every attempt — approved, declined, or refused — lands in the window's
+  Activity pane, and entry/setting rows say whether the window, you, or the
+  assistant made the change.
 
 ## Window control (`[tools] desktop`)
 
