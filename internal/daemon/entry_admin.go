@@ -175,119 +175,141 @@ func entryFamily(family string) (entryFamilySpec, *ipc.Error) {
 		family, strings.Join(names, ", "))
 }
 
-// registerEntryAdminMethods adds the form dialog surface (#99).
+// Entry-change sources: who drove one write through this surface. On the
+// config.entry_changed event and in the activity row's wording, because "the
+// window saved this" and "the assistant saved this" are different facts to
+// audit (issue #105) even though the pipeline underneath is one and the same.
+const (
+	entrySourceWindow    = "window"
+	entrySourceAssistant = "assistant"
+)
+
+// registerEntryAdminMethods adds the form dialog surface (#99). The handlers
+// are named methods rather than closures because the assistant's config tools
+// (issue #105) invoke the very same functions in-process — one write path,
+// with only the source label differing.
 func (d *Daemon) registerEntryAdminMethods() {
-	// config.get_entry: one whole entry, straight from the file the form will
-	// edit, paired with that file's fingerprint so the two can never be from
-	// different versions of the document.
-	d.server.Handle("config.get_entry", func(params json.RawMessage) (any, error) {
-		var p struct {
-			Family string `json:"family"`
-			Name   string `json:"name"`
+	d.server.Handle("config.get_entry", d.entryAdminGet)
+	d.server.Handle("config.validate_entry", d.entryAdminValidate)
+	d.server.Handle("config.upsert_entry", func(params json.RawMessage) (any, error) {
+		return d.entryAdminUpsert(params, entrySourceWindow)
+	})
+	d.server.Handle("config.delete_entry", func(params json.RawMessage) (any, error) {
+		return d.entryAdminDelete(params, entrySourceWindow)
+	})
+}
+
+// entryAdminGet serves config.get_entry: one whole entry, straight from the
+// file the form will edit, paired with that file's fingerprint so the two can
+// never be from different versions of the document.
+func (d *Daemon) entryAdminGet(params json.RawMessage) (any, error) {
+	var p struct {
+		Family string `json:"family"`
+		Name   string `json:"name"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.get_entry params: %v", err)
 		}
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.get_entry params: %v", err)
-			}
-		}
-		spec, ipcErr := entryFamily(p.Family)
-		if ipcErr != nil {
-			return nil, ipcErr
-		}
+	}
+	spec, ipcErr := entryFamily(p.Family)
+	if ipcErr != nil {
+		return nil, ipcErr
+	}
+	raw, err := os.ReadFile(d.paths.ConfigFile())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	entry, ok, err := config.EntryValue(raw, spec.family, p.Name)
+	if err != nil {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+	}
+	if !ok {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "no [[%s]] entry is named %q", spec.family, p.Name)
+	}
+	fp := config.FingerprintMissing
+	if raw != nil {
+		fp = config.Fingerprint(raw)
+	}
+	return map[string]any{"fingerprint": fp, "family": spec.family, "entry": entry}, nil
+}
+
+// entryAdminValidate serves config.validate_entry: the dry run behind live
+// field errors and the next-fire preview. Same pipeline as the save, minus
+// the write — so a form that validated clean can still be refused at save
+// time only by the world moving (a fingerprint conflict), never by a rule it
+// was not shown.
+func (d *Daemon) entryAdminValidate(params json.RawMessage) (any, error) {
+	p, spec, draft, problems, ipcErr := decodeEntryParams("config.validate_entry", params)
+	if ipcErr != nil {
+		return nil, ipcErr
+	}
+	result := map[string]any{}
+	if next, ok := entryNextFire(draft); ok {
+		result["next_fire"] = next
+	}
+	if len(problems) == 0 {
 		raw, err := os.ReadFile(d.paths.ConfigFile())
 		if err != nil && !os.IsNotExist(err) {
 			return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
 		}
-		entry, ok, err := config.EntryValue(raw, spec.family, p.Name)
+		newRaw, err := config.UpsertEntryTOML(raw, spec.family, p.Name, draft, spec.keyOrder, spec.subOrder)
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
 		}
-		if !ok {
-			return nil, ipc.Errorf(ipc.CodeInvalidParams, "no [[%s]] entry is named %q", spec.family, p.Name)
-		}
-		fp := config.FingerprintMissing
-		if raw != nil {
-			fp = config.Fingerprint(raw)
-		}
-		return map[string]any{"fingerprint": fp, "family": spec.family, "entry": entry}, nil
-	})
+		problems = d.entryDocProblems(newRaw, spec, draft)
+	}
+	result["valid"] = len(problems) == 0
+	result["problems"] = problems
+	return result, nil
+}
 
-	// config.validate_entry: the dry run behind live field errors and the
-	// next-fire preview. Same pipeline as the save, minus the write — so a
-	// form that validated clean can still be refused at save time only by the
-	// world moving (a fingerprint conflict), never by a rule it was not shown.
-	d.server.Handle("config.validate_entry", func(params json.RawMessage) (any, error) {
-		p, spec, draft, problems, ipcErr := decodeEntryParams("config.validate_entry", params)
-		if ipcErr != nil {
-			return nil, ipcErr
-		}
-		result := map[string]any{}
-		if next, ok := entryNextFire(draft); ok {
-			result["next_fire"] = next
-		}
-		if len(problems) == 0 {
-			raw, err := os.ReadFile(d.paths.ConfigFile())
-			if err != nil && !os.IsNotExist(err) {
-				return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
-			}
-			newRaw, err := config.UpsertEntryTOML(raw, spec.family, p.Name, draft, spec.keyOrder, spec.subOrder)
-			if err != nil {
-				return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
-			}
-			problems = d.entryDocProblems(newRaw, spec, draft)
-		}
-		result["valid"] = len(problems) == 0
-		result["problems"] = problems
-		return result, nil
-	})
+// entryAdminUpsert serves config.upsert_entry: the save. Fingerprint-guarded
+// like automations.set_enabled, validated whole before anything lands,
+// written atomically, applied by the standard reload — which is what
+// recompiles the grammar and rebuilds the schedules — and announced on the
+// activity feed naming the entry and who saved it.
+func (d *Daemon) entryAdminUpsert(params json.RawMessage, source string) (map[string]any, error) {
+	p, spec, draft, problems, ipcErr := decodeEntryParams("config.upsert_entry", params)
+	if ipcErr != nil {
+		return nil, ipcErr
+	}
+	if len(problems) > 0 {
+		return nil, entryProblemsError(problems)
+	}
+	return d.writeEntryChange(spec, p.Fingerprint, p.Name == "",
+		func(raw []byte) ([]byte, error) {
+			return config.UpsertEntryTOML(raw, spec.family, p.Name, draft, spec.keyOrder, spec.subOrder)
+		}, draft, source)
+}
 
-	// config.upsert_entry: the save. Fingerprint-guarded like
-	// automations.set_enabled, validated whole before anything lands, written
-	// atomically, applied by the standard reload — which is what recompiles
-	// the grammar and rebuilds the schedules — and announced on the activity
-	// feed naming the entry.
-	d.server.Handle("config.upsert_entry", func(params json.RawMessage) (any, error) {
-		p, spec, draft, problems, ipcErr := decodeEntryParams("config.upsert_entry", params)
-		if ipcErr != nil {
-			return nil, ipcErr
+// entryAdminDelete serves config.delete_entry: confirmed removal. The same
+// whole-document validation guards it — a delete that would leave the file
+// invalid is refused with the problems, nothing written.
+func (d *Daemon) entryAdminDelete(params json.RawMessage, source string) (map[string]any, error) {
+	var p struct {
+		Family      string `json:"family"`
+		Name        string `json:"name"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.delete_entry params: %v", err)
 		}
-		if len(problems) > 0 {
-			return nil, entryProblemsError(problems)
-		}
-		return d.writeEntryChange(spec, p.Fingerprint, p.Name == "",
-			func(raw []byte) ([]byte, error) {
-				return config.UpsertEntryTOML(raw, spec.family, p.Name, draft, spec.keyOrder, spec.subOrder)
-			}, draft)
-	})
-
-	// config.delete_entry: confirmed removal. The same whole-document
-	// validation guards it — a delete that would leave the file invalid is
-	// refused with the problems, nothing written.
-	d.server.Handle("config.delete_entry", func(params json.RawMessage) (any, error) {
-		var p struct {
-			Family      string `json:"family"`
-			Name        string `json:"name"`
-			Fingerprint string `json:"fingerprint"`
-		}
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.delete_entry params: %v", err)
-			}
-		}
-		spec, ipcErr := entryFamily(p.Family)
-		if ipcErr != nil {
-			return nil, ipcErr
-		}
-		result, err := d.writeEntryChange(spec, p.Fingerprint, false,
-			func(raw []byte) ([]byte, error) {
-				return config.DeleteEntryTOML(raw, spec.family, p.Name)
-			}, nil)
-		if err != nil {
-			return nil, err
-		}
-		d.publishEntryChanged("deleted", spec, p.Name)
-		return result, nil
-	})
+	}
+	spec, ipcErr := entryFamily(p.Family)
+	if ipcErr != nil {
+		return nil, ipcErr
+	}
+	result, err := d.writeEntryChange(spec, p.Fingerprint, false,
+		func(raw []byte) ([]byte, error) {
+			return config.DeleteEntryTOML(raw, spec.family, p.Name)
+		}, nil, source)
+	if err != nil {
+		return nil, err
+	}
+	d.publishEntryChanged("deleted", spec, p.Name, source)
+	return result, nil
 }
 
 // decodeEntryParams reads the shared {family, name?, entry} params and
@@ -328,7 +350,7 @@ func decodeEntryParams(method string, params json.RawMessage) (
 // is the byte-preserving editor call; draft is nil for a delete. On any
 // refusal the file is untouched — the mutation tests pin it.
 func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, created bool,
-	rewrite func([]byte) ([]byte, error), draft map[string]any) (map[string]any, error) {
+	rewrite func([]byte) ([]byte, error), draft map[string]any, source string) (map[string]any, error) {
 	path := d.paths.ConfigFile()
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -382,7 +404,7 @@ func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, crea
 			action = "created"
 		}
 		name, _ := draft["name"].(string)
-		d.publishEntryChanged(action, spec, name)
+		d.publishEntryChanged(action, spec, name, source)
 	}
 	result := map[string]any{
 		"fingerprint": newFP,
@@ -397,13 +419,15 @@ func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, crea
 	return result, nil
 }
 
-// publishEntryChanged announces one form save on the bus. The activity
-// watcher renders it into the feed row the acceptance criteria require —
-// create, edit, and delete each naming the entry — and any open window's
-// listing refreshes off the config.changed event that accompanied it.
-func (d *Daemon) publishEntryChanged(action string, spec entryFamilySpec, name string) {
+// publishEntryChanged announces one save on the bus. The activity watcher
+// renders it into the feed row the acceptance criteria require — create,
+// edit, and delete each naming the entry and its source (the window's form
+// or the assistant's tool) — and any open window's listing refreshes off the
+// config.changed event that accompanied it.
+func (d *Daemon) publishEntryChanged(action string, spec entryFamilySpec, name, source string) {
 	d.bus.Publish(session.Event{Type: "config.entry_changed", Data: map[string]any{
 		"action": action, "family": spec.family, "kind": spec.kind, "name": name,
+		"source": source,
 	}})
 }
 

@@ -35,6 +35,17 @@ func TestActivityToolSummariesMatchRealToolNames(t *testing.T) {
 		{tools.MemoryRecallToolName, `{"query":"abc"}`, "query not shown"},
 		{tools.MemoryForgetToolName, `{"query":"abc"}`, "query not shown"},
 		{tools.ConversationsSearchToolName, `{"query":"abcd"}`, "query of 4 characters (not shown)"},
+		{tools.ConfigListEntriesToolName, `{"family":"scripts"}`, "scripts"},
+		{tools.ConfigGetEntryToolName, `{"family":"scripts","name":"deploy"}`, "scripts · deploy"},
+		{tools.ConfigDeleteEntryToolName, `{"family":"routines","name":"morning"}`, "routines · morning"},
+		// The write's entry body never surfaces — it carries command-bearing
+		// fields the confirmation card (not the feed) shows verbatim.
+		{tools.ConfigWriteEntryToolName,
+			`{"family":"scripts","entry":{"name":"deploy","path":"/secret/path.sh"}}`,
+			"scripts · deploy"},
+		{tools.ConfigReadSettingsToolName, `{"prefix":"tts."}`, "tts."},
+		// The setting's value never surfaces either; the key alone.
+		{tools.ConfigWriteSettingToolName, `{"key":"tts.kokoro.speed","value":1.3}`, "tts.kokoro.speed"},
 	}
 	for _, c := range cases {
 		if got := desktop.SummariseToolArgs(c.tool, c.args); got != c.want {

@@ -185,12 +185,15 @@ type Daemon struct {
 	// (the tab shows nothing rather than fabricating). Guarded by actMu.
 	lastRuns map[string]automationRun
 
-	// captureReload is set when a layout capture (#62) has written new
-	// [[routines]] tables that the engine's router does not know yet. The
-	// engine cannot be reconfigured under the very session that spoke the
-	// capture, so the session watcher consumes this on session.finished and
-	// reloads then — which is what makes a captured routine runnable by the
-	// time its phrase can next be spoken. Guarded by cfgMu.
+	// captureReload is set when a mid-session write has changed config.toml
+	// in a way the engine's collaborators do not know yet: a layout capture
+	// (#62) with new [[routines]] tables, or an assistant self-configuration
+	// write (#105) — which is *always* mid-session, being a tool call. The
+	// engine cannot be reconfigured under the very session that made the
+	// change, so the session watcher consumes this on session.finished and
+	// reloads then — which is what makes a captured or assistant-written
+	// entry runnable by the time its phrase can next be spoken. Guarded by
+	// cfgMu.
 	captureReload bool
 }
 
@@ -585,6 +588,24 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		Log:       logger,
 	}))
 	logger.Info("tool enabled", "component", "tools", "tool", tools.ConversationsSearchToolName)
+	// The self-configuration tools (issue #105, ADR 0036), registered after
+	// the daemon exists because their write path IS the daemon's: the bridge
+	// invokes the same entry and settings handlers the window's IPC does.
+	// Always registered, with no enabling flag, because they are how "talk
+	// faster" or "remind yourself…" becomes an action at all — the safety
+	// story is the gate (write verbs on script.run's ask floor, dangerous
+	// settings always confirmed, the excluded families unreachable), not a
+	// switch whose absence would silently disable the capability the prompt
+	// advertises.
+	selfConfig := tools.NewConfigTools(tools.ConfigToolsOptions{
+		Admin: &assistantConfigAdmin{d: d},
+		Log:   logger,
+	})
+	for _, t := range selfConfig.Tools() {
+		registry.Register(t)
+	}
+	logger.Info("tool enabled", "component", "tools",
+		"tools", strings.Join(selfConfig.Names(), ","))
 	d.registerMethods()
 	return d, nil
 }
