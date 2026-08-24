@@ -1,0 +1,24 @@
+# my config, hand-written
+[context]
+window = false
+
+# --- the routines section ---
+
+# the evening wind-down
+[[routines]]
+name = "evening"
+phrases = ["evening mode"]
+
+  # the film screen
+  [[routines.steps]]
+  app = "mpv"
+  workspace = 5
+
+# the neighbour must not move
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup"]
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 1

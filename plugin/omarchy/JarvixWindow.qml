@@ -52,10 +52,14 @@ FloatingWindow {
   //                 Resume is one conversation.open call — the daemon owns
   //                 what reopening means.
   //   automations — the configured routines (ADR 0026) and scripts
-  //                 (ADR 0030) as one managed collection (issue #93):
+  //                 (ADR 0030) as one managed collection (issues #93/#99):
   //                 automations.list for everything shown, Run through the
   //                 existing gated paths, Enable/Disable through
-  //                 automations.set_enabled (the surgical config write).
+  //                 automations.set_enabled (the surgical config write),
+  //                 and New/Edit/Delete through the entry form dialog
+  //                 (config.get_entry / validate_entry / upsert_entry /
+  //                 delete_entry — validation and the byte-preserving
+  //                 rewrite are entirely the daemon's).
   //   knowledge   — the feed cache (ADR 0031), read-only from
   //                 knowledge.status.
   //   memory      — the fact store (ADR 0025), read-only from memory.list.
@@ -390,23 +394,276 @@ FloatingWindow {
       || Boolean(entry.last_run && entry.last_run.failed)
   }
 
-  // newAutomationTOML is the copyable hint block (issue #93): creating a
-  // routine or script stays a hand edit in v1 — definitions are
-  // code-adjacent — so the tab hands over the exact TOML to paste into
-  // config.toml instead of a form.
-  readonly property string newAutomationTOML: "[[routines]]\n"
-    + "name = \"morning setup\"\n"
-    + "phrases = [\"morning setup\"]\n"
-    + "# schedule = \"08:30 mon-fri\"  # optional: run it on a clock too\n"
-    + "\n"
-    + "  [[routines.steps]]\n"
-    + "  app = \"firefox\"\n"
-    + "  workspace = 2\n"
-    + "\n"
-    + "[[scripts]]\n"
-    + "name = \"backup notes\"\n"
-    + "phrases = [\"backup my notes\"]\n"
-    + "path = \"/home/you/bin/backup-notes.sh\"\n"
+  // --- automation entry forms ---------------------------------------------
+  // The New/Edit/Delete form dialog (issue #99), replacing #93's copyable
+  // TOML hint: entries are created and edited in place, in a form, with the
+  // loader's own validation pinned to the offending field. The window stays
+  // display-only (ADR 0013): the form round-trips a draft entry over IPC —
+  // config.get_entry to open, config.validate_entry for live field errors
+  // and the schedule's next-fire preview, config.upsert_entry to save,
+  // config.delete_entry after the confirm — and every rule (phrase grammar,
+  // collisions, schedule syntax, the zero-argument script shape) is judged
+  // daemon-side against the whole rewritten document before anything is
+  // written. Saving never runs anything.
+  //
+  // The draft is the daemon's own entry map: fields the form shows are
+  // edited, every other key (report, a step's size) rides along untouched.
+  // Text edits mutate the draft in place — no binding storm, no focus loss —
+  // while structural changes (add/remove/reorder) reassign it so the
+  // Repeaters rebuild. The fingerprint is captured when the form opens; the
+  // daemon refuses the save if the file changed outside the window since.
+  property bool automationFormOpen: false
+  property string automationFormFamily: "" // "routines" | "scripts"
+  property string automationFormOriginalName: "" // "" while creating
+  property var automationDraft: ({})
+  property var automationFormOriginal: ({}) // keys the loaded entry carried
+  property var automationFormProblems: [] // [{field, message}] from the daemon
+  property string automationFormNextFire: ""
+  property string automationFormError: "" // transport/conflict line, verbatim
+  property bool automationDeleteConfirm: false
+  property int automationEntryGetRequestId: 0
+  property int automationValidateRequestId: 0
+  property int automationSaveRequestId: 0
+  property int automationDeleteRequestId: 0
+
+  function automationFormKindWord() {
+    return automationFormFamily === "routines" ? "routine" : "script"
+  }
+
+  // openAutomationCreate opens an empty form. The fingerprint is the
+  // listing's — the file version the New button was rendered from.
+  function openAutomationCreate(family) {
+    automationFormFamily = family
+    automationFormOriginalName = ""
+    automationFormOriginal = {}
+    automationDraft = family === "routines"
+      ? { name: "", phrases: [""], steps: [{ app: "", workspace: 1 }] }
+      : { name: "", phrases: [""], path: "" }
+    automationFormProblems = []
+    automationFormNextFire = ""
+    automationFormError = ""
+    automationDeleteConfirm = false
+    automationFormOpen = true
+  }
+
+  // openAutomationEdit asks the daemon for the whole entry — the listing
+  // never carries every key — and opens when it answers.
+  function openAutomationEdit(kind, name) {
+    if (!daemon.connected) return
+    automationEntryGetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationEntryGetRequestId,
+      method: "config.get_entry",
+      params: { family: kind === "routine" ? "routines" : "scripts", name: name } }) + "\n")
+  }
+
+  function loadAutomationEntry(frame) {
+    if (frame.error) {
+      errorStage = "automations"
+      errorMessage = String(frame.error.message || "the entry could not be read")
+      requestAutomations()
+      return
+    }
+    var result = frame.result || {}
+    automationFormFamily = String(result.family || "")
+    automationDraft = result.entry || {}
+    automationFormOriginal = result.entry || {}
+    automationFormOriginalName = String((result.entry || {}).name || "")
+    automationsFingerprint = String(result.fingerprint || automationsFingerprint)
+    automationFormProblems = []
+    automationFormNextFire = ""
+    automationFormError = ""
+    automationDeleteConfirm = false
+    automationFormOpen = true
+    validateAutomationDraft()
+  }
+
+  function closeAutomationForm() {
+    automationFormOpen = false
+    automationDeleteConfirm = false
+    requestAutomations()
+  }
+
+  // reassignAutomationDraft clones the draft so the Repeaters see the
+  // structural change — the automationRuns pattern, one reassignment per
+  // add/remove/reorder.
+  function reassignAutomationDraft() {
+    var clone = {}
+    for (var key in automationDraft) clone[key] = automationDraft[key]
+    automationDraft = clone
+    validateAutomationDraft()
+  }
+
+  // automationDraftEntry serialises the draft for the wire: shown fields as
+  // typed (trimmed; numbers passed through so the daemon judges a bad one
+  // and answers with its field problem), unshown keys carried verbatim.
+  // Phrase indices are preserved exactly as displayed so a returned
+  // "phrases[1]" problem pins to the right row.
+  function automationDraftEntry() {
+    var d = automationDraft
+    var entry = { name: String(d.name || "").trim() }
+    var phrases = []
+    var list = d.phrases || []
+    for (var i = 0; i < list.length; i++) phrases.push(String(list[i] || "").trim())
+    entry.phrases = phrases
+    var schedule = String(d.schedule || "").trim()
+    if (schedule !== "") entry.schedule = schedule
+    if (d.announce === true || "announce" in automationFormOriginal) {
+      entry.announce = d.announce === true
+    }
+    if (d.enabled === false || "enabled" in automationFormOriginal) {
+      entry.enabled = d.enabled !== false
+    }
+    if (automationFormFamily === "scripts") {
+      entry.path = String(d.path || "").trim()
+      var timeout = String(d.timeout_sec === undefined ? "" : d.timeout_sec).trim()
+      if (timeout !== "") entry.timeout_sec = automationFormNumber(timeout)
+      if (d.report !== undefined) entry.report = d.report
+    } else {
+      var steps = []
+      var drafted = d.steps || []
+      for (var j = 0; j < drafted.length; j++) {
+        var s = drafted[j]
+        var step = { app: String(s.app || "").trim(),
+          workspace: automationFormNumber(String(s.workspace === undefined ? "" : s.workspace).trim()) }
+        var match = String(s.match || "").trim()
+        if (match !== "") step.match = match
+        if (s.float === true) step.float = true
+        var tile = String(s.tile || "").trim()
+        if (tile !== "") step.tile = tile
+        if (s.size !== undefined) step.size = s.size
+        if (s.position !== undefined) step.position = s.position
+        steps.push(step)
+      }
+      entry.steps = steps
+    }
+    return entry
+  }
+
+  // automationFormNumber passes an integral value as a number and anything
+  // else through as text, so the daemon — not this window — words what a
+  // non-number in a number field means (ADR 0013).
+  function automationFormNumber(text) {
+    var n = Number(text)
+    return (text !== "" && isFinite(n) && Math.floor(n) === n) ? n : text
+  }
+
+  // validateAutomationDraft is the dry run: field problems and the next-fire
+  // preview, from the daemon, nothing written. Called when a field commits
+  // and after every structural change.
+  function validateAutomationDraft() {
+    if (!daemon.connected || !automationFormOpen) return
+    automationValidateRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationValidateRequestId,
+      method: "config.validate_entry",
+      params: { family: automationFormFamily, name: automationFormOriginalName,
+        entry: automationDraftEntry() } }) + "\n")
+  }
+
+  function handleAutomationValidateReply(frame) {
+    if (frame.error) {
+      automationFormError = String(frame.error.message || "validation failed")
+      return
+    }
+    var result = frame.result || {}
+    automationFormProblems = result.problems || []
+    automationFormNextFire = String(result.next_fire || "")
+    automationFormError = ""
+  }
+
+  function saveAutomationForm() {
+    if (!daemon.connected) return
+    automationSaveRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationSaveRequestId,
+      method: "config.upsert_entry",
+      params: { family: automationFormFamily, name: automationFormOriginalName,
+        entry: automationDraftEntry(), fingerprint: automationsFingerprint } }) + "\n")
+  }
+
+  function deleteAutomationEntry() {
+    if (!daemon.connected) return
+    automationDeleteRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationDeleteRequestId,
+      method: "config.delete_entry",
+      params: { family: automationFormFamily, name: automationFormOriginalName,
+        fingerprint: automationsFingerprint } }) + "\n")
+  }
+
+  // handleAutomationFormReply lands a save or delete: refused validation
+  // pins the daemon's problems to their fields, a fingerprint conflict shows
+  // the daemon's "changed outside the window" sentence verbatim, success
+  // closes the form (the refreshed listing shows the result).
+  function handleAutomationFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) {
+        automationFormProblems = data.problems || []
+      }
+      automationFormError = String(frame.error.message || "the save failed")
+      automationDeleteConfirm = false
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) automationsFingerprint = String(result.fingerprint)
+    automationFormOpen = false
+    automationDeleteConfirm = false
+    requestAutomations()
+    if (result.applied === false) {
+      errorStage = "automations"
+      errorMessage = "Saved to config.toml, but not applied yet: "
+        + String(result.reason || "the daemon is busy") + ". It applies on the next reload."
+    }
+  }
+
+  // automationProblemFor collects the daemon's messages for one field key
+  // (or its sub-keys: "steps[1]" also gathers "steps[1].app"), joined for
+  // the field's problem line. Field "" is the form-level area.
+  function automationProblemFor(field) {
+    var out = []
+    for (var i = 0; i < automationFormProblems.length; i++) {
+      var f = String(automationFormProblems[i].field || "")
+      if (f === field || (field !== "" && f.indexOf(field + ".") === 0)) {
+        out.push(String(automationFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
+  // automationGeneralProblems is the form-level area's catch-all: problems
+  // with no field, plus problems on entry keys the form has no input for
+  // (report rides along uneditable) — named so the message still says where
+  // to look. Nothing the daemon says may be dropped.
+  function automationGeneralProblems() {
+    var out = []
+    for (var i = 0; i < automationFormProblems.length; i++) {
+      var f = String(automationFormProblems[i].field || "")
+      var msg = String(automationFormProblems[i].message || "")
+      if (f === "") out.push(msg)
+      else if (f === "report") out.push("report: " + msg)
+    }
+    return out.join("\n")
+  }
+
+  // automationStepExtraProblems catches a step's problems on the keys the
+  // form carries through without an input (size, position, tile) so they
+  // still land inside the step that owns them.
+  function automationStepExtraProblems(index) {
+    var shown = { app: true, workspace: true, match: true, float: true }
+    var prefix = "steps[" + index + "]"
+    var out = []
+    for (var i = 0; i < automationFormProblems.length; i++) {
+      var f = String(automationFormProblems[i].field || "")
+      var msg = String(automationFormProblems[i].message || "")
+      if (f === prefix) out.push(msg)
+      else if (f.indexOf(prefix + ".") === 0 && !shown[f.substring(prefix.length + 1)]) {
+        out.push(msg)
+      }
+    }
+    return out.join("\n")
+  }
 
   // --- knowledge feeds ----------------------------------------------------
   // The Knowledge tab (issues #91/#92): the daemon's feed cache as cards —
@@ -1091,6 +1348,13 @@ FloatingWindow {
         } else if (frame.id !== undefined && (frame.id === win.automationsRunRequestId ||
                    frame.id === win.automationsEnableRequestId)) {
           win.handleAutomationsActionReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.automationEntryGetRequestId) {
+          win.loadAutomationEntry(frame)
+        } else if (frame.id !== undefined && frame.id === win.automationValidateRequestId) {
+          win.handleAutomationValidateReply(frame)
+        } else if (frame.id !== undefined && (frame.id === win.automationSaveRequestId ||
+                   frame.id === win.automationDeleteRequestId)) {
+          win.handleAutomationFormReply(frame)
         } else if (frame.id === 1 && frame.result) {
           win.loadSnapshot(frame.result)
         } else if (frame.id === 1 && frame.error) {
@@ -1665,17 +1929,18 @@ FloatingWindow {
       }
     }
 
-    // The Automations tab (issue #93): routines and scripts as one managed
-    // list on the shared collection rows — kind badge and phrases in the
-    // subtitle, the script's exact path in the monospace detail line (it is
-    // what the script.run gate's confirmation names, ADR 0030), and a status
-    // line carrying the daemon's own facts: the enabled switch, the
+    // The Automations tab (issues #93/#99): routines and scripts as one
+    // managed list on the shared collection rows — kind badge and phrases in
+    // the subtitle, the script's exact path in the monospace detail line (it
+    // is what the script.run gate's confirmation names, ADR 0030), and a
+    // status line carrying the daemon's own facts: the enabled switch, the
     // incomplete/validity markers, the schedule with its daemon-computed
     // next fire and would-refuse warning, the last observed run, and live
     // progress from the run events. Run replays the entry's phrase through
-    // the existing gated path; Enable/Disable is the surgical config write;
-    // a disabled row says so and loses its Run button. The footer hands over
-    // the TOML for a new entry — creation stays a hand edit in v1.
+    // the existing gated path; Enable/Disable is the surgical config write.
+    // Clicking a row opens it in the edit form (#99); the footer's New
+    // buttons open an empty one — the form pane replaces the listing while
+    // it is open, and every rule it enforces is the daemon's.
     Item {
       id: automationsScreen
       visible: win.socketReady && win.currentTab === "automations"
@@ -1687,19 +1952,19 @@ FloatingWindow {
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
       JarvixEmptyState {
-        visible: win.automations.length === 0
+        visible: win.automations.length === 0 && !win.automationFormOpen
         anchors.centerIn: parent
         width: parent.width
-        text: "No routines or scripts yet — copy the block below into config.toml to add one."
+        text: "No routines or scripts yet — the New buttons below create one."
       }
 
       ListView {
         id: automationsList
-        visible: win.automations.length > 0
+        visible: win.automations.length > 0 && !win.automationFormOpen
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: automationsHint.top
+        anchors.bottom: automationsNewRow.top
         anchors.bottomMargin: Style.space(8)
         clip: true
         spacing: Style.space(10)
@@ -1713,6 +1978,10 @@ FloatingWindow {
           detail: String(modelData.path || "")
           meta: win.automationMeta(modelData)
           flagged: win.automationFlagged(modelData)
+          // The row itself opens the edit form (#99) — name, phrases,
+          // schedule, steps, and Delete live there.
+          interactive: true
+          onActivated: win.openAutomationEdit(modelData.kind, modelData.name)
           // A disabled entry cannot run — its phrases are out of the
           // grammar and the daemon would refuse — so the row does not offer
           // it; Enable is the way back (the Knowledge tab's rule).
@@ -1727,112 +1996,423 @@ FloatingWindow {
         }
       }
 
-      // The new-entry hint (issue #93): a collapsed block that unfolds into
-      // the exact TOML to copy — the Knowledge tab's pattern, because
-      // routine and script definitions are code-adjacent and stay
-      // hand-edited in v1.
-      Column {
-        id: automationsHint
+      // The New buttons (#99), replacing #93's copyable TOML hint: creation
+      // is a form now, so the footer opens one instead of handing over text
+      // to paste.
+      Row {
+        id: automationsNewRow
+        visible: !win.automationFormOpen
         anchors.bottom: parent.bottom
         anchors.left: parent.left
-        anchors.right: parent.right
-        spacing: Style.space(6)
+        spacing: Style.space(8)
 
-        Rectangle {
-          id: automationsHintToggle
-          width: automationsHintToggleLabel.width + Style.space(20)
-          height: automationsHintToggleLabel.height + Style.space(8)
-          radius: Style.cornerRadius
-          color: Util.alpha(Color.popups.text, automationsHintToggle.activeFocus ? 0.16 : 0.06)
-          border.color: automationsHintToggle.activeFocus
-            ? Color.accent : Util.alpha(Color.popups.text, 0.4)
-          border.width: automationsHintToggle.activeFocus ? 2 : 1
-          activeFocusOnTab: true
-          property bool open: false
-          Accessible.role: Accessible.Button
-          Accessible.name: open ? "Hide the new-automation TOML"
-            : "Show the TOML for adding a routine or script"
-          Keys.onReturnPressed: automationsHintToggle.open = !automationsHintToggle.open
-          Keys.onSpacePressed: automationsHintToggle.open = !automationsHintToggle.open
+        JarvixFormButton {
+          label: "New routine…"
+          name: "Create a new routine"
+          accent: true
+          onClicked: win.openAutomationCreate("routines")
+        }
+        JarvixFormButton {
+          label: "New script…"
+          name: "Create a new script"
+          accent: true
+          onClicked: win.openAutomationCreate("scripts")
+        }
+      }
+
+      // The entry form (#99): a pane that replaces the listing — at the
+      // window's 600px width a pane beats a floating popover — on the shared
+      // detail scaffold: Back cancels, the accent action saves. It is loaded
+      // fresh per open so every input initialises from the draft; from there
+      // text edits mutate the draft in place and problems/preview arrive as
+      // property changes, so typing never rebuilds the form.
+      JarvixDetailPane {
+        id: automationFormPane
+        visible: win.automationFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the list"
+        actionLabel: "Save"
+        actionName: "Save the " + win.automationFormKindWord()
+        note: (win.automationFormOriginalName === ""
+          ? "New " + win.automationFormKindWord()
+          : "Editing " + win.automationFormKindWord() + " “" + win.automationFormOriginalName + "”")
+        onBackRequested: win.closeAutomationForm()
+        onActionTriggered: win.saveAutomationForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.automationFormOpen
+          sourceComponent: automationFormBody
+        }
+      }
+    }
+
+    // The form body, built per open (see the Loader above). Every field
+    // pins the daemon's own message for its key — automationProblemFor —
+    // and the general area shows whole-entry problems and conflicts, so a
+    // refused save is never silent and never colour-only.
+    Component {
+      id: automationFormBody
+
+      Flickable {
+        id: formScroll
+        contentHeight: formColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: formColumn
+          width: formScroll.width
+          spacing: Style.space(10)
+
+          // The form-level area: transport errors, the fingerprint
+          // conflict's "changed outside the window" sentence, and problems
+          // the daemon could not pin to a field — all verbatim.
           Text {
-            id: automationsHintToggleLabel
-            anchors.centerIn: parent
-            text: automationsHintToggle.open ? "Hide the TOML" : "Add a routine or script…"
+            visible: win.automationFormError !== "" || win.automationGeneralProblems() !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: (win.automationFormError !== "" ? win.automationFormError + "\n" : "")
+              + win.automationGeneralProblems()
             font.family: Style.font.family
             font.pixelSize: Style.font.subtitle
-            color: Color.popups.text
+            color: Color.urgent
           }
-          MouseArea {
-            anchors.fill: parent
-            onClicked: automationsHintToggle.open = !automationsHintToggle.open
+
+          JarvixFormField {
+            width: parent.width
+            label: "Name"
+            problem: win.automationProblemFor("name")
+            Component.onCompleted: text = String(win.automationDraft.name || "")
+            onEdited: function(value) { win.automationDraft.name = value }
+            onCommitted: win.validateAutomationDraft()
           }
-        }
 
-        Rectangle {
-          visible: automationsHintToggle.open
-          width: parent.width
-          height: automationsHintBody.height + Style.space(20)
-          radius: Style.cornerRadius
-          color: Util.alpha(Color.popups.text, 0.06)
-
+          // Phrases: one row each, so a daemon problem keyed "phrases[1]"
+          // sits under exactly the phrase it means.
           Column {
-            id: automationsHintBody
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.margins: Style.space(10)
+            width: parent.width
             spacing: Style.space(6)
 
             Text {
-              width: parent.width
-              wrapMode: Text.Wrap
-              text: "Copy what you need into config.toml — a [[routines]] table, a "
-                + "[[scripts]] table, or both — then reload; the new row appears here."
+              text: "Trigger phrases"
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
-              color: Util.alpha(Color.popups.text, 0.7)
+              color: Color.popups.text
             }
-            TextEdit {
-              id: automationsHintTOML
+            Repeater {
+              model: (win.automationDraft.phrases || []).length
+              delegate: Row {
+                required property int index
+                width: parent.width
+                spacing: Style.space(8)
+
+                JarvixFormField {
+                  width: parent.width - phraseRemove.width - Style.space(8)
+                  label: "Phrase " + (index + 1)
+                  placeholder: "the words to say"
+                  problem: win.automationProblemFor("phrases[" + index + "]")
+                  Component.onCompleted: text = String((win.automationDraft.phrases || [])[index] || "")
+                  onEdited: function(value) { win.automationDraft.phrases[index] = value }
+                  onCommitted: win.validateAutomationDraft()
+                }
+                JarvixFormButton {
+                  id: phraseRemove
+                  label: "Remove"
+                  name: "Remove phrase " + (index + 1)
+                  onClicked: {
+                    win.automationDraft.phrases.splice(index, 1)
+                    win.reassignAutomationDraft()
+                  }
+                }
+              }
+            }
+            Text {
+              visible: win.automationProblemFor("phrases") !== ""
               width: parent.width
-              readOnly: true
-              selectByMouse: true
-              wrapMode: TextEdit.WrapAnywhere
-              text: win.newAutomationTOML
-              font.family: "monospace"
+              wrapMode: Text.Wrap
+              text: "Problem: " + win.automationProblemFor("phrases")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.urgent
+            }
+            JarvixFormButton {
+              label: "Add phrase"
+              name: "Add another trigger phrase"
+              onClicked: {
+                if (!win.automationDraft.phrases) win.automationDraft.phrases = []
+                win.automationDraft.phrases.push("")
+                win.reassignAutomationDraft()
+              }
+            }
+          }
+
+          JarvixFormField {
+            visible: win.automationFormFamily === "scripts"
+            width: parent.width
+            label: "Command (absolute path, run with no arguments)"
+            placeholder: "/home/you/bin/backup-notes.sh"
+            monospace: true
+            problem: win.automationProblemFor("path")
+            hint: "The file is run exactly as named — nothing spoken or typed here ever reaches it."
+            Component.onCompleted: text = String(win.automationDraft.path || "")
+            onEdited: function(value) { win.automationDraft.path = value }
+            onCommitted: win.validateAutomationDraft()
+          }
+
+          JarvixFormField {
+            visible: win.automationFormFamily === "scripts"
+            width: parent.width
+            label: "Timeout in seconds (empty for the default)"
+            placeholder: "60"
+            problem: win.automationProblemFor("timeout_sec")
+            Component.onCompleted: text = win.automationDraft.timeout_sec === undefined
+              ? "" : String(win.automationDraft.timeout_sec)
+            onEdited: function(value) {
+              if (value.trim() === "") delete win.automationDraft.timeout_sec
+              else win.automationDraft.timeout_sec = value.trim()
+            }
+            onCommitted: win.validateAutomationDraft()
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Schedule (empty for phrase-triggered only)"
+            placeholder: "08:30 mon-fri"
+            problem: win.automationProblemFor("schedule")
+            // The daemon's own next-fire arithmetic, previewed before the
+            // save — the form never computes a date itself.
+            hint: win.automationFormNextFire !== ""
+              ? "Next fire: " + win.automationFormNextFire.substring(0, 16).replace("T", " ")
+              : ""
+            Component.onCompleted: text = String(win.automationDraft.schedule || "")
+            onEdited: function(value) { win.automationDraft.schedule = value }
+            onCommitted: win.validateAutomationDraft()
+          }
+
+          JarvixFormToggle {
+            width: parent.width
+            label: "Announce scheduled runs out loud"
+            detail: "Off means scheduled runs report through the activity feed and a notification only."
+            problem: win.automationProblemFor("announce")
+            checked: win.automationDraft.announce === true
+            onToggled: function(state) {
+              win.automationDraft.announce = state
+              win.reassignAutomationDraft()
+            }
+          }
+
+          JarvixFormToggle {
+            width: parent.width
+            label: "Enabled"
+            detail: "Off keeps the entry but takes its phrases out of the grammar and its schedule off the clock."
+            problem: win.automationProblemFor("enabled")
+            checked: win.automationDraft.enabled !== false
+            onToggled: function(state) {
+              win.automationDraft.enabled = state
+              win.reassignAutomationDraft()
+            }
+          }
+
+          // The routine's steps: add, remove, reorder — each step editing
+          // the launch fields; sizing keys captured by #62 (size, position,
+          // tile) ride along untouched and say so.
+          Column {
+            visible: win.automationFormFamily === "routines"
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              text: "Steps (run in order)"
+              font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               color: Color.popups.text
-              selectionColor: Util.alpha(Color.accent, 0.4)
-              Accessible.role: Accessible.StaticText
-              Accessible.name: "The TOML block for a new routine or script"
             }
-            Rectangle {
-              id: automationsHintCopy
-              width: automationsHintCopyLabel.width + Style.space(20)
-              height: automationsHintCopyLabel.height + Style.space(8)
-              radius: Style.cornerRadius
-              color: Util.alpha(Color.accent, automationsHintCopy.activeFocus ? 0.35 : 0.18)
-              border.color: Color.accent
-              border.width: automationsHintCopy.activeFocus ? 2 : 1
-              activeFocusOnTab: true
-              Accessible.role: Accessible.Button
-              Accessible.name: "Copy the TOML block"
-              function copyTOML() {
-                automationsHintTOML.selectAll()
-                automationsHintTOML.copy()
-                automationsHintTOML.deselect()
+            Text {
+              visible: win.automationProblemFor("steps") !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Problem: " + win.automationProblemFor("steps")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.urgent
+            }
+            Repeater {
+              model: (win.automationDraft.steps || []).length
+              delegate: Rectangle {
+                required property int index
+                width: parent.width
+                height: stepBody.height + Style.space(16)
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.popups.text, 0.04)
+                border.color: Util.alpha(Color.popups.text, 0.25)
+                border.width: 1
+
+                Column {
+                  id: stepBody
+                  anchors.top: parent.top
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(6)
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    Text {
+                      text: "Step " + (index + 1)
+                      anchors.verticalCenter: parent.verticalCenter
+                      font.family: Style.font.family
+                      font.bold: true
+                      font.pixelSize: Style.font.subtitle
+                      color: Color.popups.text
+                    }
+                    JarvixFormButton {
+                      visible: index > 0
+                      label: "Up"
+                      name: "Move step " + (index + 1) + " up"
+                      onClicked: {
+                        var steps = win.automationDraft.steps
+                        var s = steps[index]
+                        steps[index] = steps[index - 1]
+                        steps[index - 1] = s
+                        win.reassignAutomationDraft()
+                      }
+                    }
+                    JarvixFormButton {
+                      visible: index < (win.automationDraft.steps || []).length - 1
+                      label: "Down"
+                      name: "Move step " + (index + 1) + " down"
+                      onClicked: {
+                        var steps = win.automationDraft.steps
+                        var s = steps[index]
+                        steps[index] = steps[index + 1]
+                        steps[index + 1] = s
+                        win.reassignAutomationDraft()
+                      }
+                    }
+                    JarvixFormButton {
+                      label: "Remove"
+                      name: "Remove step " + (index + 1)
+                      onClicked: {
+                        win.automationDraft.steps.splice(index, 1)
+                        win.reassignAutomationDraft()
+                      }
+                    }
+                  }
+
+                  JarvixFormField {
+                    width: parent.width
+                    label: "App (one executable name or absolute path)"
+                    placeholder: "firefox"
+                    monospace: true
+                    problem: win.automationProblemFor("steps[" + index + "].app")
+                    Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).app || "")
+                    onEdited: function(value) { win.automationDraft.steps[index].app = value }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  JarvixFormField {
+                    width: parent.width
+                    label: "Workspace (1–99)"
+                    problem: win.automationProblemFor("steps[" + index + "].workspace")
+                    Component.onCompleted: {
+                      var w = (win.automationDraft.steps[index] || {}).workspace
+                      text = w === undefined ? "" : String(w)
+                    }
+                    onEdited: function(value) { win.automationDraft.steps[index].workspace = value.trim() }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  JarvixFormField {
+                    width: parent.width
+                    label: "Window match (empty to match on the app name)"
+                    problem: win.automationProblemFor("steps[" + index + "].match")
+                    Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).match || "")
+                    onEdited: function(value) { win.automationDraft.steps[index].match = value }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  JarvixFormToggle {
+                    width: parent.width
+                    label: "Float this window"
+                    problem: win.automationProblemFor("steps[" + index + "].float")
+                    checked: (win.automationDraft.steps[index] || {}).float === true
+                    onToggled: function(state) {
+                      win.automationDraft.steps[index].float = state
+                      win.reassignAutomationDraft()
+                    }
+                  }
+                  Text {
+                    visible: win.automationStepExtraProblems(index) !== ""
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: "Problem: " + win.automationStepExtraProblems(index)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.subtitle
+                    color: Color.urgent
+                  }
+                  Text {
+                    visible: (win.automationDraft.steps[index] || {}).size !== undefined
+                      || (win.automationDraft.steps[index] || {}).position !== undefined
+                      || (win.automationDraft.steps[index] || {}).tile !== undefined
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: "Captured sizing (size/position/tile) is kept as it is; edit config.toml to change it."
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.subtitle
+                    color: Util.alpha(Color.popups.text, 0.6)
+                  }
+                }
               }
-              Keys.onReturnPressed: automationsHintCopy.copyTOML()
-              Keys.onSpacePressed: automationsHintCopy.copyTOML()
-              Text {
-                id: automationsHintCopyLabel
-                anchors.centerIn: parent
-                text: "Copy"
-                font.family: Style.font.family
-                font.pixelSize: Style.font.subtitle
-                color: Color.popups.text
+            }
+            JarvixFormButton {
+              label: "Add step"
+              name: "Add another step"
+              onClicked: {
+                if (!win.automationDraft.steps) win.automationDraft.steps = []
+                win.automationDraft.steps.push({ app: "", workspace: 1 })
+                win.reassignAutomationDraft()
               }
-              MouseArea { anchors.fill: parent; onClicked: automationsHintCopy.copyTOML() }
+            }
+          }
+
+          // Delete, behind its confirm (#99): the byte-preserving removal —
+          // phrases leave the grammar, the schedule stops — only after the
+          // question is answered in the dialog.
+          Column {
+            visible: win.automationFormOriginalName !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            JarvixFormButton {
+              visible: !win.automationDeleteConfirm
+              label: "Delete this " + win.automationFormKindWord() + "…"
+              name: "Delete the " + win.automationFormOriginalName + " " + win.automationFormKindWord()
+              onClicked: win.automationDeleteConfirm = true
+            }
+            Text {
+              visible: win.automationDeleteConfirm
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Delete “" + win.automationFormOriginalName + "”? Its phrases stop triggering and"
+                + " any schedule stops firing. Everything else in config.toml stays as it is."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Row {
+              visible: win.automationDeleteConfirm
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                label: "Delete"
+                name: "Confirm deleting " + win.automationFormOriginalName
+                accent: true
+                onClicked: win.deleteAutomationEntry()
+              }
+              JarvixFormButton {
+                label: "Keep it"
+                name: "Keep " + win.automationFormOriginalName
+                onClicked: win.automationDeleteConfirm = false
+              }
             }
           }
         }

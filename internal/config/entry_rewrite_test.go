@@ -119,6 +119,190 @@ func TestSetEntryFieldRefusals(t *testing.T) {
 	}
 }
 
+// The whole-entry editor (#99): the key orders the daemon's form surface
+// uses, restated here so the goldens render in the documented shape.
+var (
+	routineKeyOrder = []string{"name", "phrases", "schedule", "announce", "enabled", "steps"}
+	routineSubOrder = map[string][]string{
+		"steps": {"app", "match", "workspace", "float", "size", "position", "tile"},
+	}
+	scriptKeyOrder = []string{"name", "phrases", "path", "timeout_sec", "report", "schedule", "announce", "enabled"}
+)
+
+// TestUpsertEntryTOMLGolden drives the whole-entry writer over hand-written
+// documents and compares byte-for-byte: an insert appends at the end with
+// everything above untouched, an in-place edit replaces exactly one entry's
+// block — [[routines.steps]] sub-tables rendered fresh in the draft's order —
+// with both neighbours and their comments byte-identical.
+func TestUpsertEntryTOMLGolden(t *testing.T) {
+	cases := []struct {
+		name     string
+		family   string
+		entry    string // "" inserts
+		draft    map[string]any
+		keyOrder []string
+		subOrder map[string][]string
+	}{
+		// A new routine with two steps lands at the end of the document, after
+		// the [[scripts]] table that follows the existing routines — blocks are
+		// appended, never re-sorted into their family's section.
+		{"routine_insert", "routines", "", map[string]any{
+			"name":     "morning setup",
+			"phrases":  []string{"morning setup", "start the day"},
+			"schedule": "08:30 mon-fri",
+			"steps": []map[string]any{
+				{"app": "alacritty", "workspace": 1},
+				{"app": "firefox", "match": "org.mozilla.firefox", "workspace": 2},
+			},
+		}, routineKeyOrder, routineSubOrder},
+		// The #99 edit shape: a phrase added, the steps reordered with one
+		// gaining float+size, announce switched on. Only this entry's block
+		// changes; the neighbour and the hand comments outside the block stay.
+		{"routine_edit", "routines", "evening", map[string]any{
+			"name":     "evening",
+			"phrases":  []string{"evening mode", "wind down"},
+			"schedule": "19:00",
+			"announce": true,
+			"steps": []map[string]any{
+				{"app": "spotify", "workspace": 6},
+				{"app": "mpv", "workspace": 5, "float": true, "size": []int{1280, 720}},
+			},
+		}, routineKeyOrder, routineSubOrder},
+		{"script_insert", "scripts", "", map[string]any{
+			"name":        "rotate wallpaper",
+			"phrases":     []string{"rotate the wallpaper"},
+			"path":        "/home/me/bin/rotate-wallpaper.sh",
+			"timeout_sec": 30,
+			"report":      "silent",
+			"enabled":     false,
+		}, scriptKeyOrder, nil},
+		{"script_edit", "scripts", "backup notes", map[string]any{
+			"name":        "backup notes",
+			"phrases":     []string{"backup my notes", "run the backup"},
+			"path":        "/home/me/bin/backup-notes-v2.sh",
+			"timeout_sec": 120,
+			"schedule":    "03:30",
+			"announce":    true,
+		}, scriptKeyOrder, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, err := os.ReadFile(filepath.Join("testdata", "entry", tc.name+".input.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			golden, err := os.ReadFile(filepath.Join("testdata", "entry", tc.name+".golden.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := UpsertEntryTOML(input, tc.family, tc.entry, tc.draft, tc.keyOrder, tc.subOrder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(golden) {
+				t.Errorf("rewrite mismatch\n--- got ---\n%s\n--- want ---\n%s", got, golden)
+			}
+		})
+	}
+}
+
+// TestUpsertEntryTOMLRoundTripsThroughEntryValue: what EntryValue reads is
+// exactly what UpsertEntryTOML accepts — the form's round trip (#99): read the
+// map, write it back unchanged, and the edit is a no-op except for block
+// re-rendering, with every key (report, timeout_sec, sub-tables) surviving.
+func TestUpsertEntryTOMLRoundTripsThroughEntryValue(t *testing.T) {
+	input, err := os.ReadFile(filepath.Join("testdata", "entry", "routine_edit.input.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := EntryValue(input, "routines", "Evening")
+	if err != nil || !ok {
+		t.Fatalf("EntryValue = %v, %v", ok, err)
+	}
+	out, err := UpsertEntryTOML(input, "routines", "evening", entry, routineKeyOrder, routineSubOrder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, ok, err := EntryValue(out, "routines", "evening")
+	if err != nil || !ok || !entryMapEqual(back, entry) {
+		t.Errorf("round trip changed the entry: %v vs %v (%v)", back, entry, err)
+	}
+	if !strings.Contains(string(out), "# the neighbour must not move") {
+		t.Error("a hand comment outside the entry vanished")
+	}
+}
+
+// TestUpsertEntryTOMLRefusals: an unknown addressed entry and an unparsable
+// document each refuse without producing a document.
+func TestUpsertEntryTOMLRefusals(t *testing.T) {
+	input, err := os.ReadFile(filepath.Join("testdata", "entry", "script_edit.input.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpsertEntryTOML(input, "scripts", "no such", map[string]any{"name": "x"},
+		scriptKeyOrder, nil); err == nil || !strings.Contains(err.Error(), `named "no such"`) {
+		t.Errorf("unknown entry error = %v, want it named", err)
+	}
+	if _, err := UpsertEntryTOML([]byte("not = toml ["), "scripts", "", map[string]any{"name": "x"},
+		scriptKeyOrder, nil); err == nil || !strings.Contains(err.Error(), "fix it by hand") {
+		t.Errorf("unparsable document error = %v, want the hand-fix pointer", err)
+	}
+}
+
+// TestDeleteEntryTOMLGolden: removal takes the entry's block, its sub-tables,
+// and the comment glued to its header — a comment separated by a blank line
+// (a section header) stays — and collapses the separator so no double blank
+// remains, with every other byte preserved.
+func TestDeleteEntryTOMLGolden(t *testing.T) {
+	cases := []struct {
+		name   string
+		family string
+		entry  string
+	}{
+		// A middle entry with a glued comment and a section-header comment
+		// above it: the glued one goes, the section header stays.
+		{"routine_delete", "routines", "evening"},
+		// The last entry of the document: no trailing blank lines left behind.
+		{"script_delete", "scripts", "rotate wallpaper"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, err := os.ReadFile(filepath.Join("testdata", "entry", tc.name+".input.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			golden, err := os.ReadFile(filepath.Join("testdata", "entry", tc.name+".golden.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DeleteEntryTOML(input, tc.family, tc.entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(golden) {
+				t.Errorf("rewrite mismatch\n--- got ---\n%s\n--- want ---\n%s", got, golden)
+			}
+		})
+	}
+}
+
+// TestDeleteEntryTOMLRefusals: an unknown entry refuses by name; the sibling
+// families are untouched by a delete in one.
+func TestDeleteEntryTOMLRefusals(t *testing.T) {
+	input, err := os.ReadFile(filepath.Join("testdata", "entry", "routine_delete.input.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DeleteEntryTOML(input, "routines", "no such"); err == nil ||
+		!strings.Contains(err.Error(), `named "no such"`) {
+		t.Errorf("unknown entry error = %v, want it named", err)
+	}
+	if _, err := DeleteEntryTOML([]byte("not = toml ["), "routines", "evening"); err == nil ||
+		!strings.Contains(err.Error(), "fix it by hand") {
+		t.Errorf("unparsable document error = %v, want the hand-fix pointer", err)
+	}
+}
+
 // TestSetEntryFieldOtherScalars: the editor is not an enabled-only tool — the
 // value side takes what encodeTOMLValue takes, which is what lets #93 reuse
 // it beyond the switch.

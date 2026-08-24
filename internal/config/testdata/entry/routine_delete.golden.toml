@@ -1,0 +1,14 @@
+# my config, hand-written
+[context]
+window = false
+
+# --- the routines section ---
+
+# the neighbour must not move
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup"]
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 1

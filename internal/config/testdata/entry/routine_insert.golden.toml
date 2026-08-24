@@ -1,0 +1,33 @@
+# my config, hand-written
+[context]
+window = false # keep the title bar private
+
+# the routines I curated by hand
+[[routines]]
+name = "evening"
+phrases = ["evening mode"]
+
+  # the film screen
+  [[routines.steps]]
+  app = "mpv"
+  workspace = 5
+
+# the scripts live below the routines
+[[scripts]]
+name = "backup notes"
+phrases = ["backup my notes"]
+path = "/home/me/bin/backup-notes.sh" # the audited copy
+
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup", "start the day"]
+schedule = "08:30 mon-fri"
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 1
+
+  [[routines.steps]]
+  app = "firefox"
+  match = "org.mozilla.firefox"
+  workspace = 2

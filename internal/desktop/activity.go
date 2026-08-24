@@ -226,6 +226,12 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 		return one(ActivityRow{Kind: ActivityKindAutomation,
 			Label:  "Missed while off: " + activityString(data, "name"),
 			Detail: joinActivity("was due "+activityString(data, "due"), "reported, never re-fired")})
+	case "config.entry_changed":
+		// A form save in the window (#99): one routine or script created,
+		// edited, or deleted through config.upsert_entry / config.delete_entry.
+		// The feed names the entry — configuration changes are actions too,
+		// and a schedule that appears or stops must be traceable to its save.
+		return one(entryChangedRow(data))
 	case "artifact.created":
 		return one(ActivityRow{Kind: ActivityKindArtifact,
 			Label:  "Artifact created",
@@ -416,6 +422,34 @@ func scriptFinishedRow(data map[string]any) ActivityRow {
 	}
 	return ActivityRow{Kind: ActivityKindScript,
 		Label: "Script finished: " + name, Detail: joinActivity("exit 0", dur)}
+}
+
+// entryChangedRow words one form save (#99): a routine or script created,
+// edited, or deleted from the window. The label names the entry — a schedule
+// that appears or stops must be traceable to the save that did it — and the
+// glyph follows the entry's kind so the row sits beside that entry's runs.
+func entryChangedRow(data map[string]any) ActivityRow {
+	kind := activityString(data, "kind")
+	row := ActivityRow{Kind: ActivityKindAutomation}
+	word := "Entry"
+	switch kind {
+	case "routine":
+		row.Kind, word = ActivityKindRoutine, "Routine"
+	case "script":
+		row.Kind, word = ActivityKindScript, "Script"
+	}
+	action := activityString(data, "action")
+	switch action {
+	case "created", "edited", "deleted":
+	default:
+		action = "changed"
+	}
+	row.Label = word + " " + action + ": " + activityString(data, "name")
+	row.Detail = "config.toml, saved from the window"
+	if action == "deleted" {
+		row.Detail = "config.toml, removed from the window"
+	}
+	return row
 }
 
 func routineStepRow(data map[string]any) ActivityRow {
