@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
 )
 
@@ -39,6 +40,7 @@ func (d *Daemon) registerMemoryMethods() {
 			"session_id": sessionID,
 			"facts":      factReports(inj.Facts),
 			"trimmed":    inj.Trimmed,
+			"searchable": inj.Searchable,
 			"total":      inj.Total,
 			"est_tokens": inj.EstTokens,
 		}, nil
@@ -58,13 +60,22 @@ func (d *Daemon) registerMemoryMethods() {
 		}
 		facts := d.memory.List(p.Query)
 		count, max := d.memory.Count()
-		return map[string]any{
+		result := map[string]any{
 			"enabled": true,
 			"path":    d.memory.Path(),
 			"count":   count,
 			"max":     max,
 			"facts":   factReports(facts),
-		}, nil
+		}
+		// The over-budget disclosure (issue #104): the book decides whether
+		// facts are being left out of the prompt against the user's intent —
+		// a pinned set past the budget, or an unpinned book that outgrew it
+		// — and the Memory tab shows the sentence wherever the facts show.
+		// A trim must never again be something only the model hears about.
+		if warning := d.memory.AmbientWarning(); warning != "" {
+			result["warning"] = warning
+		}
+		return result, nil
 	})
 
 	// Deletion by id or by words, with the same refuse-to-guess rule as the
@@ -153,16 +164,29 @@ func (d *Daemon) registerMemoryMethods() {
 }
 
 // factReport renders one fact for the wire, trail included, timestamps in
-// RFC 3339 like every other IPC surface.
+// RFC 3339 like every other IPC surface. The retrieval stats (#104) travel
+// only when a retrieval has actually happened: a never-retrieved fact
+// carries no times_retrieved key at all, so no client can render a
+// fabricated zero — absence on the wire is absence on the card. The spoken
+// age reuses the knowledge feeds' one wording (`age_spoken`'s helper), so
+// no surface invents a second relative-time scale.
 func factReport(f memory.Fact) map[string]any {
 	report := map[string]any{
 		"id":      f.ID,
 		"content": f.Content,
 		"stored":  f.Stored.Format(time.RFC3339),
 		"updated": f.Updated.Format(time.RFC3339),
+		"pinned":  f.Pinned,
 	}
 	if f.Source != "" {
 		report["source"] = f.Source
+	}
+	if f.TimesRetrieved > 0 {
+		report["times_retrieved"] = f.TimesRetrieved
+		if !f.LastRetrieved.IsZero() {
+			report["last_retrieved"] = f.LastRetrieved.Format(time.RFC3339)
+			report["last_retrieved_spoken"] = knowledge.SpokenAge(time.Now(), f.LastRetrieved)
+		}
 	}
 	if len(f.Previous) > 0 {
 		previous := make([]map[string]any, 0, len(f.Previous))

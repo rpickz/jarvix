@@ -191,6 +191,191 @@ func TestMemoryWriteDisabledRefuses(t *testing.T) {
 	}
 }
 
+// TestMemorySetPinnedOverSocket is the fact card's pin toggle (#104): the
+// pin lands on disk through the book, the listing serves it, the activity
+// feed names the toggle by id, and the opposite call undoes it exactly.
+func TestMemorySetPinnedOverSocket(t *testing.T) {
+	client, _, dir := startMemoryDaemon(t, nil)
+	seedMemoryFile(t, dir)
+
+	var out map[string]any
+	if err := client.Call("memory.set_pinned",
+		map[string]any{"id": "m1", "pinned": true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	fact, _ := out["fact"].(map[string]any)
+	if fact["id"] != "m1" || fact["pinned"] != true {
+		t.Fatalf("set_pinned = %v, want the fact pinned", out)
+	}
+	waitForActivityRow(t, client, "Fact pinned: m1")
+	if !strings.Contains(memoryFileBody(t, dir), "pinned = true") {
+		t.Error("pin did not reach memory.toml")
+	}
+
+	if err := client.Call("memory.set_pinned",
+		map[string]any{"id": "m1", "pinned": false}, &out); err != nil {
+		t.Fatal(err)
+	}
+	waitForActivityRow(t, client, "Fact unpinned: m1")
+	if strings.Contains(memoryFileBody(t, dir), "pinned = true") {
+		t.Error("unpin left the pin on disk")
+	}
+
+	// The refusals match the sibling verbs: unknown id named, missing id
+	// crisp.
+	err := client.Call("memory.set_pinned", map[string]any{"id": "m9", "pinned": true}, nil)
+	var rpcErr *ipc.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != ipc.CodeInvalidParams ||
+		!strings.Contains(rpcErr.Message, `"m9"`) {
+		t.Errorf("unknown id err = %v, want CodeInvalidParams naming it", err)
+	}
+	if err := client.Call("memory.set_pinned", map[string]any{"pinned": true}, nil); err == nil {
+		t.Error("set_pinned without an id succeeded")
+	}
+}
+
+// TestMemoryUpdateTogglesPinWithoutManufacturingARevision: the edit form
+// always sends content and pin together, so a save that only toggled the pin
+// must not push an identical content onto the supersede trail — and a save
+// that changed both does both, through the book verb that owns each change.
+func TestMemoryUpdateTogglesPinWithoutManufacturingARevision(t *testing.T) {
+	client, _, dir := startMemoryDaemon(t, nil)
+	seedMemoryFile(t, dir)
+
+	var out map[string]any
+	if err := client.Call("memory.update", map[string]any{
+		"id": "m1", "content": "the staging server is called atlas", "pinned": true,
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	fact, _ := out["fact"].(map[string]any)
+	if fact["pinned"] != true {
+		t.Fatalf("update = %v, want the pin applied", out)
+	}
+	if previous, _ := fact["previous"].([]any); len(previous) != 0 {
+		t.Errorf("unchanged content grew a trail: %v", previous)
+	}
+
+	// Content and pin in one save: the trail records the wording change,
+	// the pin comes off, one event round.
+	if err := client.Call("memory.update", map[string]any{
+		"id": "m1", "content": "the staging server is called helios", "pinned": false,
+	}, &out); err != nil {
+		t.Fatal(err)
+	}
+	fact, _ = out["fact"].(map[string]any)
+	previous, _ := fact["previous"].([]any)
+	if fact["content"] != "the staging server is called helios" ||
+		fact["pinned"] != false || len(previous) != 1 {
+		t.Fatalf("combined update = %v, want new wording, no pin, one revision", out)
+	}
+	raw := memoryFileBytes(t, dir)
+	if !strings.Contains(raw, "the staging server is called atlas") {
+		t.Errorf("trail lost on disk:\n%s", raw)
+	}
+}
+
+// TestMemoryAddPinnedCreatesAnAmbientFact: the form's "add pinned" is one
+// save on the wire even though the daemon writes it as add-then-pin.
+func TestMemoryAddPinnedCreatesAnAmbientFact(t *testing.T) {
+	client, _, dir := startMemoryDaemon(t, nil)
+	var out map[string]any
+	if err := client.Call("memory.add",
+		map[string]any{"content": "the user's editor is neovim", "pinned": true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	fact, _ := out["fact"].(map[string]any)
+	if fact["pinned"] != true {
+		t.Fatalf("add = %v, want the fact pinned", out)
+	}
+	if !strings.Contains(memoryFileBody(t, dir), "pinned = true") {
+		t.Error("pinned add did not reach memory.toml")
+	}
+}
+
+// memoryFileBody is the store file below its header — the header's own
+// documentation mentions the pinned key, so key assertions scan the document
+// body only.
+func memoryFileBody(t *testing.T, dir string) string {
+	t.Helper()
+	raw := memoryFileBytes(t, dir)
+	if i := strings.Index(raw, "version ="); i >= 0 {
+		return raw[i:]
+	}
+	return raw
+}
+
+// TestMemoryListCarriesStatsAndWarning: the Memory tab's data contract
+// (#104). A never-retrieved fact carries no stats keys at all — absence on
+// the wire is what stops a client fabricating "retrieved 0 times" — while a
+// retrieved fact carries the count, the timestamp, and the shared spoken
+// wording; and a pinned set past the budget puts the book's warning sentence
+// in the listing, never silently in a log.
+func TestMemoryListCarriesStatsAndWarning(t *testing.T) {
+	client, _, dir := startMemoryDaemon(t, func(cfg *config.Config) {
+		cfg.Memory.MaxInjectedTokens = 100
+	})
+	seedMemoryFile(t, dir)
+	seedRetrievedFact(t, dir)
+
+	facts := memoryFacts(t, client)
+	byID := map[string]map[string]any{}
+	for _, f := range facts {
+		fact, _ := f.(map[string]any)
+		byID[fact["id"].(string)] = fact
+	}
+	for _, id := range []string{"m1", "m2"} {
+		if _, has := byID[id]["times_retrieved"]; has {
+			t.Errorf("never-retrieved %s carries stats: %v", id, byID[id])
+		}
+		if byID[id]["pinned"] != false {
+			t.Errorf("%s pinned = %v, want false on the wire", id, byID[id]["pinned"])
+		}
+	}
+	retrieved := byID["m3"]
+	if retrieved["times_retrieved"] != float64(2) {
+		t.Errorf("m3 = %v, want times_retrieved 2", retrieved)
+	}
+	if spoken, _ := retrieved["last_retrieved_spoken"].(string); !strings.Contains(spoken, "ago") &&
+		spoken != "just now" && spoken != "yesterday" {
+		t.Errorf("m3 spoken age = %q, want the shared spoken wording", retrieved["last_retrieved_spoken"])
+	}
+
+	// No pins, three facts, a 100-token budget: the book is over budget, so
+	// the listing must say so and say the fix — the never-silent contract.
+	var listing map[string]any
+	if err := client.Call("memory.list", nil, &listing); err != nil {
+		t.Fatal(err)
+	}
+	warning, _ := listing["warning"].(string)
+	if !strings.Contains(warning, "none are pinned") || !strings.Contains(warning, "memory.search") {
+		t.Errorf("listing warning = %q, want the over-budget sentence", warning)
+	}
+}
+
+// seedRetrievedFact appends a fact with retrieval stats to the seeded store,
+// as a previous daemon life's searches would have left it.
+func seedRetrievedFact(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "memory.toml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := `
+[[fact]]
+id = "m3"
+content = "the user's terminal is Ghostty and it runs everywhere the user works"
+stored = 2026-08-03T10:00:00Z
+updated = 2026-08-03T10:00:00Z
+times_retrieved = 2
+last_retrieved = 2026-08-03T12:00:00Z
+`
+	if err := os.WriteFile(path, append(raw, []byte(extra)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestMemoryAddNearCapWarns: the warning that must precede the refusal — a
 // store filling up says so on every successful add, so the cap is never the
 // first anyone hears of the limit.
