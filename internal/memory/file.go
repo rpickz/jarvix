@@ -34,12 +34,23 @@ type document struct {
 }
 
 type factRecord struct {
-	ID       string           `toml:"id"`
-	Content  string           `toml:"content"`
-	Stored   time.Time        `toml:"stored"`
-	Updated  time.Time        `toml:"updated"`
-	Source   string           `toml:"source,omitempty"`
-	Previous []revisionRecord `toml:"previous,omitempty"`
+	ID      string    `toml:"id"`
+	Content string    `toml:"content"`
+	Stored  time.Time `toml:"stored"`
+	Updated time.Time `toml:"updated"`
+	Source  string    `toml:"source,omitempty"`
+	// Pinned and the retrieval stats are all omitted at their zero values on
+	// purpose: an unpinned, never-retrieved fact writes exactly the lines it
+	// wrote before this schema grew (hand-edit diffs stay clean), and a fact
+	// with no `times_retrieved` line *is* the never-retrieved state — the
+	// Memory tab shows nothing rather than a fabricated zero. The count
+	// needs omitzero because this encoder's omitempty does not treat 0 as
+	// empty for ints; a false bool and the zero time (a comparable struct)
+	// are covered by omitempty.
+	Pinned         bool             `toml:"pinned,omitempty"`
+	TimesRetrieved int              `toml:"times_retrieved,omitzero"`
+	LastRetrieved  time.Time        `toml:"last_retrieved,omitempty"`
+	Previous       []revisionRecord `toml:"previous,omitempty"`
 }
 
 type revisionRecord struct {
@@ -60,8 +71,10 @@ const header = `# Jarvix's remembered facts — the knowledge base behind "remem
 #
 # Edit freely; Jarvix picks up changes without a restart. Each [[fact]] needs
 # a content; ids and timestamps are filled in when missing. [[fact.previous]]
-# entries are the values a fact held before it was corrected. Jarvix rewrites
-# this file whenever a fact changes, and comments are not preserved.
+# entries are the values a fact held before it was corrected. pinned = true
+# keeps a fact in every prompt; the rest are found on demand with the search
+# tool, and times_retrieved / last_retrieved record when that happened.
+# Jarvix rewrites this file whenever a fact changes; comments not preserved.
 
 `
 
@@ -90,7 +103,9 @@ func readStore(path string) ([]Fact, int, error) {
 	}
 	facts := make([]Fact, 0, len(doc.Facts))
 	for _, r := range doc.Facts {
-		f := Fact{ID: r.ID, Content: r.Content, Stored: r.Stored, Updated: r.Updated, Source: r.Source}
+		f := Fact{ID: r.ID, Content: r.Content, Stored: r.Stored, Updated: r.Updated,
+			Source: r.Source, Pinned: r.Pinned,
+			TimesRetrieved: r.TimesRetrieved, LastRetrieved: r.LastRetrieved}
 		for _, p := range r.Previous {
 			f.Previous = append(f.Previous, Revision(p))
 		}
@@ -107,7 +122,11 @@ func writeStore(path string, facts []Fact, nextID int) error {
 	doc := document{Version: documentVersion, NextID: nextID,
 		Facts: make([]factRecord, 0, len(facts))}
 	for _, f := range facts {
-		r := factRecord{ID: f.ID, Content: f.Content, Stored: f.Stored.UTC(), Updated: f.Updated.UTC(), Source: f.Source}
+		r := factRecord{ID: f.ID, Content: f.Content, Stored: f.Stored.UTC(), Updated: f.Updated.UTC(),
+			Source: f.Source, Pinned: f.Pinned, TimesRetrieved: f.TimesRetrieved}
+		if !f.LastRetrieved.IsZero() {
+			r.LastRetrieved = f.LastRetrieved.UTC()
+		}
 		for _, p := range f.Previous {
 			r.Previous = append(r.Previous, revisionRecord{
 				Content: p.Content, Stored: p.Stored.UTC(), Superseded: p.Superseded.UTC()})

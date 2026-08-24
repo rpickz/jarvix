@@ -72,6 +72,13 @@ type Book struct {
 	maxInjectedTokens int
 	now               func() time.Time
 	log               *slog.Logger
+	// write persists a fact list; always writeStore outside tests. It is a
+	// field for one reason: the write-failure contracts (a failed stats
+	// write must cost exactly the stats, never the book) need a disk that
+	// fails on command, and the real filesystem cannot be made to do that
+	// hermetically — writeStore itself repairs the permission tricks a test
+	// could play.
+	write func(path string, facts []Fact, nextID int) error
 
 	mu    sync.Mutex
 	facts []Fact
@@ -115,6 +122,7 @@ func NewBook(path string, opts BookOptions, log *slog.Logger) *Book {
 	if b.now == nil {
 		b.now = time.Now
 	}
+	b.write = writeStore
 	// Ids are 1-based; the mark only ever moves up from here (refreshLocked).
 	b.next = 1
 	return b
@@ -195,6 +203,18 @@ func (b *Book) normalize(facts []Fact) []Fact {
 		if f.Updated.IsZero() {
 			f.Updated = f.Stored
 		}
+		// Retrieval stats can only arrive broken by hand-edit. A negative
+		// count is nonsense, repaired to never-retrieved; a last_retrieved
+		// with no count is evidence of one retrieval, so the count follows
+		// the timestamp rather than the timestamp being erased — the repair
+		// must never fabricate, but it must not discard the user's line
+		// either.
+		if f.TimesRetrieved < 0 {
+			f.TimesRetrieved = 0
+		}
+		if f.TimesRetrieved == 0 && !f.LastRetrieved.IsZero() {
+			f.TimesRetrieved = 1
+		}
 		out = append(out, f)
 	}
 	return out
@@ -227,7 +247,7 @@ func (b *Book) saveLocked(facts []Fact) error {
 		}
 		b.corrupt = false
 	}
-	if err := writeStore(b.path, facts, b.next); err != nil {
+	if err := b.write(b.path, facts, b.next); err != nil {
 		return err
 	}
 	b.facts = facts
@@ -307,6 +327,30 @@ func (b *Book) Update(id, content, source string) (Fact, error) {
 	return f, nil
 }
 
+// SetPinned marks or unmarks a fact as ambient (issue #104). A pin is not a
+// content change: Stored, Updated, and the supersede trail are untouched, so
+// pinning never reorders the injection and never manufactures a revision.
+// Setting the value it already has is a no-op that skips the disk write.
+func (b *Book) SetPinned(id string, pinned bool) (Fact, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refreshLocked()
+	i := b.indexLocked(id)
+	if i < 0 {
+		return Fact{}, fmt.Errorf("%w %q", ErrUnknownID, id)
+	}
+	if b.facts[i].Pinned == pinned {
+		return copyFact(b.facts[i]), nil
+	}
+	next := append([]Fact(nil), b.facts...)
+	next[i].Pinned = pinned
+	if err := b.saveLocked(next); err != nil {
+		return Fact{}, err
+	}
+	b.log.Info("fact pin toggled", "component", "memory", "id", id, "pinned", pinned)
+	return copyFact(next[i]), nil
+}
+
 // Forget deletes a fact from disk — trail and all. Deletion is deletion:
 // nothing of a forgotten fact survives anywhere Jarvix can reach.
 func (b *Book) Forget(id string) (Fact, error) {
@@ -355,6 +399,59 @@ func (b *Book) List(query string) []Fact {
 	return out
 }
 
+// Search is the memory.search tool's storage half (ADR 0037): the ranked,
+// deterministic lookup over the whole book — pinned facts included, so a
+// search can never claim a fact does not exist. It returns at most
+// maxSearchResults facts, best match first (see rankSearch), and records the
+// retrieval on each returned fact: times_retrieved increments, last_retrieved
+// becomes now, persisted in ONE write for the whole result set — the batch is
+// the search call itself, so a search costs exactly one store write, never
+// one per fact.
+//
+// The stats write is best-effort by design: the facts were retrieved whether
+// or not the bookkeeping about it reaches disk, so a failed write logs a
+// warning and the search still answers. saveLocked commits the in-memory
+// facts only on success, which is what makes the failure safe — the book
+// never holds stats the file does not, the supersede trail is never touched
+// (only two scalar fields change), and the next successful search simply
+// counts from the persisted state.
+func (b *Book) Search(query string) []Fact {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refreshLocked()
+	matched := rankSearch(query, b.facts)
+	if len(matched) > maxSearchResults {
+		matched = matched[:maxSearchResults]
+	}
+	if len(matched) == 0 {
+		return nil
+	}
+	hit := make(map[string]bool, len(matched))
+	for _, f := range matched {
+		hit[f.ID] = true
+	}
+	now := b.now()
+	next := append([]Fact(nil), b.facts...)
+	for i := range next {
+		if hit[next[i].ID] {
+			next[i].TimesRetrieved++
+			next[i].LastRetrieved = now
+		}
+	}
+	if err := b.saveLocked(next); err != nil {
+		b.log.Warn("retrieval stats were not persisted; the search still answered",
+			"component", "memory", "error", err.Error())
+	}
+	// The returned copies carry the retrieval that just happened — matched
+	// holds copies made by rankSearch, so bumping them mutates nothing the
+	// Book owns even when the save failed and the Book kept its old state.
+	for i := range matched {
+		matched[i].TimesRetrieved++
+		matched[i].LastRetrieved = now
+	}
+	return matched
+}
+
 // Similar returns the stored facts that look like statements about the same
 // thing as content — the supersede candidates a remember must decide about
 // before it may accumulate a contradiction.
@@ -391,19 +488,86 @@ func (b *Book) capWarningLocked() string {
 		len(b.facts), b.maxFacts)
 }
 
-// Inject builds the memory block for one model turn: every fact that fits
-// the token budget, most recently confirmed first, with any trim disclosed.
-// Facts are only ever dropped from the block, never from storage.
+// Inject builds the memory block for one model turn under the retrieval
+// policy of ADR 0037. The ambient set is decided here, in code:
+//
+//   - No fact pinned and the whole book fits the budget: every fact is
+//     ambient — exactly the pre-#104 behaviour, so a user who never touches
+//     pinning sees no change at all.
+//   - Any fact pinned: exactly the pinned facts are ambient. The budget
+//     applies to them alone — an over-budget pinned set trims its least
+//     recently confirmed tail, disclosed to the model here and to the user
+//     via AmbientWarning (never silently). Unpinned facts are not in the
+//     prompt; the block says how many exist and that memory.search finds
+//     them.
+//   - No fact pinned and the book no longer fits: nothing is ambient. The
+//     old behaviour here was a silent tail-drop; the honest replacement is
+//     a block that says all N facts are searchable, plus the user-facing
+//     warning telling them pinning is how facts get back into every prompt.
+//
+// Facts are only ever dropped from the block, never from storage, and
+// injection never touches the retrieval stats — ambient presence is not a
+// retrieval.
 func (b *Book) Inject() Injection {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.refreshLocked()
 	facts := make([]Fact, 0, len(b.facts))
+	pinned := make([]Fact, 0, len(b.facts))
 	for _, f := range b.facts {
 		facts = append(facts, copyFact(f))
+		if f.Pinned {
+			pinned = append(pinned, copyFact(f))
+		}
 	}
 	sortForInjection(facts)
-	return buildInjection(facts, b.maxInjectedTokens)
+	sortForInjection(pinned)
+
+	if len(pinned) == 0 {
+		inj := buildInjection(facts, b.maxInjectedTokens, 0)
+		if inj.Trimmed == 0 {
+			return inj // the graceful default: everything fits, all ambient
+		}
+		return searchOnlyInjection(len(facts))
+	}
+	return buildInjection(pinned, b.maxInjectedTokens, len(facts)-len(pinned))
+}
+
+// AmbientWarning is the Memory tab's over-budget disclosure (issue #104):
+// non-empty exactly when the current book would leave facts out of the
+// prompt *without the user having chosen that* — a pinned set past the
+// budget, or an unpinned book that outgrew it. The designed split (pins plus
+// searchable rest, everything fitting) warns about nothing: that state is
+// the feature working. The daemon serves this from memory.list, so the
+// warning appears wherever the facts do — a trim is never silent again.
+func (b *Book) AmbientWarning() string {
+	inj := b.Inject()
+	pinnedAny := false
+	for _, f := range inj.Facts {
+		if f.Pinned {
+			pinnedAny = true
+			break
+		}
+	}
+	switch {
+	case inj.Trimmed > 0 && pinnedAny:
+		return fmt.Sprintf("the pinned facts do not fit memory.max_injected_tokens: the %d least "+
+			"recently confirmed pinned %s left out of every prompt — unpin something, or raise the budget",
+			inj.Trimmed, plural(inj.Trimmed, "fact is", "facts are"))
+	case inj.Trimmed > 0:
+		// Pinned facts exist in the store (Trimmed only arises for an
+		// ambient set) but none survived into the block: the pathological
+		// tiny-budget case. The same sentence applies — these are pins the
+		// prompt is not carrying.
+		return fmt.Sprintf("the pinned facts do not fit memory.max_injected_tokens: %d pinned %s "+
+			"left out of every prompt — unpin something, or raise the budget",
+			inj.Trimmed, plural(inj.Trimmed, "fact is", "facts are"))
+	case inj.Searchable > 0 && len(inj.Facts) == 0 && inj.Trimmed == 0 && inj.Total == inj.Searchable:
+		return fmt.Sprintf("the %d remembered facts no longer fit memory.max_injected_tokens and none "+
+			"are pinned, so none ride the prompt; pin the facts that must shape every answer — "+
+			"the rest stay reachable with memory.search", inj.Total)
+	}
+	return ""
 }
 
 // sortForInjection orders facts most recently confirmed first — the facts
