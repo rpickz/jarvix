@@ -884,6 +884,19 @@ func (d *Daemon) registerMethods() {
 		d.engine.ResetConversation()
 		return nil, nil
 	})
+	// conversation.new is the explicit end of a conversation (issue #117;
+	// ADR 0038) — the one verb every New Chat surface is a thin client of:
+	// `jarvix new`, the window's button, the bar menu's item. Unlike
+	// conversation.reset above it also cancels a session in flight, so "new
+	// chat" means the same thing mid-answer as it does at rest: the exchange
+	// being interrupted is committed (marked interrupted) into the thread
+	// that is ending, the thread is archived and searchable, and the next
+	// utterance starts clean. The spoken "start a new conversation" intent
+	// reaches the same engine reset from inside its own session.
+	d.server.Handle("conversation.new", func(json.RawMessage) (any, error) {
+		d.engine.NewConversation()
+		return nil, nil
+	})
 	// conversation.get gives the conversation window its opening snapshot:
 	// the current turns straight from the engine's in-memory history (this
 	// method's shape is deliberately independent of any storage), plus the

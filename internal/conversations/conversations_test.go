@@ -78,6 +78,92 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// The interrupted flag (issue #117) is additive: it round-trips when set and
+// leaves every completed turn's line byte-identical when not. The golden test
+// below already proves the second half — these files carry no interrupted
+// turn and must not change — so this test covers the flag's own trip and the
+// omitempty pin.
+func TestInterruptedFlagRoundTrips(t *testing.T) {
+	s := fixedStore(t)
+	ts := time.Date(2026, 8, 21, 10, 30, 0, 0, time.UTC)
+	id, err := s.Append("", []Turn{
+		{Role: "user", Text: "what's on my calendar tomorrow?", Time: ts, Interrupted: true},
+		{Role: "assistant", Text: "Do you mean tomorrow, or the whole week?", Time: ts, Interrupted: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(id, turnsAt(ts.Add(time.Minute), "tomorrow", "One meeting, at ten.")); err != nil {
+		t.Fatal(err)
+	}
+	conv, err := s.Read(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Turns) != 4 {
+		t.Fatalf("read %d turns, want 4", len(conv.Turns))
+	}
+	if !conv.Turns[0].Interrupted || !conv.Turns[1].Interrupted {
+		t.Errorf("interrupted flags lost on the cut exchange: %+v", conv.Turns[:2])
+	}
+	if conv.Turns[2].Interrupted || conv.Turns[3].Interrupted {
+		t.Errorf("interrupted flags leaked onto the completed exchange: %+v", conv.Turns[2:])
+	}
+	// omitempty is the compatibility mechanism: a completed turn's line must
+	// not so much as mention the key, so archives written after #117 read
+	// identically to ones written before it wherever nothing was interrupted.
+	raw, err := os.ReadFile(s.turnsPath(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for _, line := range lines[3:] { // header + the two flagged turns precede
+		if strings.Contains(line, "interrupted") {
+			t.Errorf("completed turn's line carries the key: %s", line)
+		}
+	}
+}
+
+// An archive written before the interrupted flag existed loads clean: the
+// missing key reads as false, the schema version still matches, and nothing
+// is reported unreadable. This is the promise that let the flag ship without
+// a schema bump.
+func TestOldArchiveWithoutInterruptedKeyLoadsClean(t *testing.T) {
+	s := fixedStore(t)
+	id := "20260820-090000-old"
+	// Byte-for-byte the pre-#117 format, straight from the golden files.
+	transcript := `{"schema":1,"id":"` + id + `"}
+{"role":"user","text":"an old question","ts":"2026-08-20T09:00:00Z"}
+{"role":"assistant","text":"An old answer.","ts":"2026-08-20T09:00:00Z"}
+`
+	meta := `{"schema":1,"id":"` + id + `","started":"2026-08-20T09:00:00Z","last_active":"2026-08-20T09:00:00Z","turns":2,"preview":"an old question"}`
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.turnsPath(id), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.metaPath(id), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := s.Read(id)
+	if err != nil {
+		t.Fatalf("old archive did not load: %v", err)
+	}
+	if len(conv.Turns) != 2 {
+		t.Fatalf("read %d turns, want 2", len(conv.Turns))
+	}
+	for i, turn := range conv.Turns {
+		if turn.Interrupted {
+			t.Errorf("turn %d read as interrupted from a file without the key", i)
+		}
+	}
+	if _, unreadable, err := s.List(); err != nil || len(unreadable) != 0 {
+		t.Errorf("old archive listed as unreadable: %v %v", unreadable, err)
+	}
+}
+
 // TestGoldenFiles pins the on-disk schema byte for byte: two files per
 // conversation, a schema version in both, and role/text/timestamp per turn.
 // If this test breaks, the search ticket's index and every future reader

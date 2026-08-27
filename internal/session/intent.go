@@ -107,6 +107,16 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 	var runErr error
 	switch {
 	case m.Control == intent.ControlNewConversation:
+		// Claim the commit before resetting: this turn is never recorded (see
+		// below), and without the claim an interruption racing the tail would
+		// commit "start a new conversation" — marked interrupted — as the
+		// seed of the very thread the user just asked to have empty.
+		e.mu.Lock()
+		s.committed = true
+		e.mu.Unlock()
+		// ResetConversation, not NewConversation: this session *is* the
+		// active one, and the interrupt-then-reset the verb performs for an
+		// outside caller already happened when this session started.
 		e.ResetConversation()
 	case m.UserDefined:
 		var alive bool
@@ -171,7 +181,7 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 			// action happened. The ear stays silent; the history says "Done."
 			recorded = "Done."
 		}
-		e.commitTurn(utterance, recorded)
+		e.commitTurn(s, utterance, recorded)
 	}
 
 	e.mu.Lock()
