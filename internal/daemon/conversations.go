@@ -81,9 +81,16 @@ func (d *Daemon) registerConversationMethods() {
 		}
 		turns := make([]map[string]any, 0, len(conv.Turns))
 		for _, t := range conv.Turns {
-			turns = append(turns, map[string]any{
+			turn := map[string]any{
 				"role": t.Role, "text": t.Text, "ts": t.Time.Format(time.RFC3339),
-			})
+			}
+			// Present only when true, mirroring the file's omitempty: an
+			// exchange the user cut off says so on the wire too (issue #117),
+			// and a completed turn's shape is unchanged.
+			if t.Interrupted {
+				turn["interrupted"] = true
+			}
+			turns = append(turns, turn)
 		}
 		report := metaReport(conv.Meta)
 		report["turns"] = turns

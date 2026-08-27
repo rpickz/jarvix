@@ -395,7 +395,13 @@ func cmdNewConversation(paths config.Paths) error {
 		return nil
 	}
 	defer func() { _ = client.Close() }()
-	if err := client.Call("conversation.reset", nil, nil); err != nil {
+	// conversation.new, not conversation.reset: the explicit-end verb
+	// (issue #117) also cancels a session in flight, committing its exchange
+	// — marked interrupted — into the thread being ended, so `jarvix new`
+	// said over a running answer archives that answer instead of orphaning
+	// it. The daemon owns that sequencing; composing session.cancel +
+	// conversation.reset here would reopen the gap between the two calls.
+	if err := client.Call("conversation.new", nil, nil); err != nil {
 		return err
 	}
 	fmt.Println("started a fresh conversation")

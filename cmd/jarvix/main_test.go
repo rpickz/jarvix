@@ -217,8 +217,8 @@ func TestRunStatusAgainstDaemon(t *testing.T) {
 func TestRunCancelAndNewConversation(t *testing.T) {
 	hermeticEnv(t)
 	rec := startDaemon(t, nil, map[string]ipc.Handler{
-		"session.cancel":     ok,
-		"conversation.reset": ok,
+		"session.cancel":   ok,
+		"conversation.new": ok,
 	})
 	var code int
 	capture(t, func() { code = run([]string{"cancel"}) })
@@ -233,7 +233,10 @@ func TestRunCancelAndNewConversation(t *testing.T) {
 		t.Errorf("stdout = %q", stdout)
 	}
 	calls := rec.recorded()
-	if len(calls) != 2 || calls[0] != "session.cancel" || calls[1] != "conversation.reset" {
+	// `jarvix new` sends the one explicit-end verb (issue #117) and composes
+	// nothing client-side: the daemon cancels any in-flight session itself,
+	// so the interrupted exchange lands in the thread being ended.
+	if len(calls) != 2 || calls[0] != "session.cancel" || calls[1] != "conversation.new" {
 		t.Errorf("calls = %v", calls)
 	}
 }

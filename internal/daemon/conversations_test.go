@@ -67,6 +67,15 @@ func startConvDaemon(t *testing.T, retention string) *convFixture {
 // the step *before* the archive flush — and observe the archive mid-gap.
 func startConvDaemonWith(t *testing.T, retention string, hist history.Store) *convFixture {
 	t.Helper()
+	return startConvDaemonSpeaking(t, retention, hist, &tts.Fake{})
+}
+
+// startConvDaemonSpeaking additionally injects the synthesizer, for the
+// interruption tests: a tts.Fake with a hold gate is how a session is kept
+// deterministically mid-speech — the incident's exact posture — while the
+// socket interrupts it (issue #117).
+func startConvDaemonSpeaking(t *testing.T, retention string, hist history.Store, synth *tts.Fake) *convFixture {
+	t.Helper()
 	dir := t.TempDir()
 	paths := config.Paths{
 		Config:  dir,
@@ -86,7 +95,7 @@ func startConvDaemonWith(t *testing.T, retention string, hist history.Store) *co
 	d, err := New(cfg, paths, nil, Deps{
 		Provider:          provider,
 		Transcriber:       &stt.Fake{Text: "hello computer"},
-		Synthesizer:       &tts.Fake{},
+		Synthesizer:       synth,
 		Recorder:          &audio.FakeRecorder{Clip: audio.Clip{WAVPath: dir + "/r.wav"}},
 		Player:            &audio.FakePlayer{},
 		Notifier:          &desktop.FakeNotifier{},
@@ -615,5 +624,153 @@ func TestStatusReportsSearchInactiveNotBroken(t *testing.T) {
 	if status.Conversations.Search != "inactive" || status.Conversations.Retention ||
 		status.Conversations.Archived != 0 {
 		t.Errorf("status conversations = %+v, want inactive with retention off", status.Conversations)
+	}
+}
+
+// The incident over the socket (issue #117): a session interrupted by a new
+// session.start — the push-to-talk shape from the daemon log — has its
+// exchange committed marked interrupted, and a conversation.search issued the
+// moment session.cancelled is seen already finds it. This is the #116
+// read-barrier guarantee extended to interrupted commits: the incident's s2
+// searched and got results=0; this pins that it now gets the exchange.
+func TestInterruptedTurnIsSearchableTheMomentItIsCancelled(t *testing.T) {
+	synth := &tts.Fake{}
+	hold := make(chan struct{})
+	synth.SetHold(hold)
+	defer close(hold)
+	f := startConvDaemonSpeaking(t, config.RetentionOn, nil, synth)
+	f.provider.Response = "Do you mean tomorrow, or the whole week?"
+
+	if err := f.client.Call("session.start", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Call("session.submit",
+		map[string]string{"text": "what's on my calendar tomorrow?"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Every delta has streamed and the held speaker keeps the session alive:
+	// the interrupt below always lands mid-turn, never after a clean finish.
+	waitForEvent(t, f.client, "assistant.finished")
+
+	// The user pushes to talk to answer the clarifying question.
+	if err := f.client.Call("session.start", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, f.client, "session.cancelled")
+
+	// Immediately — no waiting on the tail flush. The daemon's read barrier
+	// must surface the interrupted exchange to the same client that just saw
+	// it cancelled.
+	r := f.search(t, "calendar tomorrow")
+	if len(r.Results) == 0 {
+		t.Fatal("the interrupted exchange is not searchable — the incident's results=0, reproduced")
+	}
+	if r.ActiveID == "" {
+		t.Error("active_id is empty while the interrupted exchange is on disk")
+	}
+	hit := r.Results[0]
+	if !hit.Current || !strings.Contains(hit.Passage, "calendar") {
+		t.Errorf("hit = %+v, want a current hit on the interrupted question", hit)
+	}
+
+	// The record says the exchange was cut, not completed: both halves carry
+	// the wire flag, and the assistant half ends in the annotation.
+	var read struct {
+		Turns []struct {
+			Role        string `json:"role"`
+			Text        string `json:"text"`
+			Interrupted bool   `json:"interrupted"`
+		} `json:"turns"`
+	}
+	if err := f.client.Call("conversation.read", map[string]string{"id": r.ActiveID}, &read); err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Turns) != 2 || !read.Turns[0].Interrupted || !read.Turns[1].Interrupted {
+		t.Fatalf("archived turns = %+v, want both flagged interrupted", read.Turns)
+	}
+	if !strings.Contains(read.Turns[1].Text, "interrupted") {
+		t.Errorf("assistant half carries no annotation: %q", read.Turns[1].Text)
+	}
+	// Unwind the second session so teardown is quiet.
+	if err := f.client.Call("session.cancel", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// conversation.new is the explicit end, over the socket: it cancels the
+// session in flight, commits its exchange (marked interrupted) into the
+// thread being ended, archives and detaches that thread, and the next
+// exchange starts a fresh conversation (ADR 0038). `jarvix new`, the
+// window's New chat button, and the bar menu item are all thin clients of
+// exactly this call.
+func TestConversationNewEndsTheThreadCleanly(t *testing.T) {
+	synth := &tts.Fake{}
+	hold := make(chan struct{})
+	defer close(hold)
+	f := startConvDaemonSpeaking(t, config.RetentionOn, nil, synth)
+
+	f.ask(t, "the first question")
+	first := f.list(t).ActiveID
+	if first == "" {
+		t.Fatal("no active conversation after the first exchange")
+	}
+
+	// A second exchange, held mid-speech so New Chat lands on a live session.
+	synth.SetHold(hold)
+	f.provider.Response = "An answer New Chat cuts off."
+	if err := f.client.Call("session.start", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Call("session.submit",
+		map[string]string{"text": "a question new chat interrupts"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, f.client, "assistant.finished")
+
+	if err := f.client.Call("conversation.new", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	cancelled := waitForEvent(t, f.client, "session.cancelled")
+	if reason, _ := cancelled["reason"].(string); reason != "new conversation" {
+		t.Errorf("cancel reason = %q, want %q", reason, "new conversation")
+	}
+	waitForEvent(t, f.client, "conversation.changed")
+
+	// The live head is empty and detached; the ended thread holds everything,
+	// interrupted tail included.
+	if turns := conversationTurns(t, f.client); len(turns) != 0 {
+		t.Errorf("conversation.get after conversation.new = %+v, want empty", turns)
+	}
+	l := f.list(t)
+	if l.ActiveID != "" || len(l.Conversations) != 1 {
+		t.Fatalf("listing after conversation.new = %+v, want one detached conversation", l)
+	}
+	if l.Conversations[0].Turns != 4 {
+		t.Errorf("ended thread holds %d turns, want 4 (completed + interrupted)", l.Conversations[0].Turns)
+	}
+	var read struct {
+		Turns []struct {
+			Role        string `json:"role"`
+			Text        string `json:"text"`
+			Interrupted bool   `json:"interrupted"`
+		} `json:"turns"`
+	}
+	if err := f.client.Call("conversation.read", map[string]string{"id": first}, &read); err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Turns) != 4 || read.Turns[0].Interrupted || !read.Turns[2].Interrupted || !read.Turns[3].Interrupted {
+		t.Fatalf("ended thread = %+v, want the completed exchange unflagged and the cut one flagged", read.Turns)
+	}
+
+	// The next utterance starts a fresh conversation.
+	synth.SetHold(nil)
+	f.provider.Response = "A fresh answer."
+	f.ask(t, "a fresh thread")
+	l = f.list(t)
+	if len(l.Conversations) != 2 {
+		t.Fatalf("listing after the fresh exchange = %+v, want two conversations", l)
+	}
+	if l.ActiveID == "" || l.ActiveID == first {
+		t.Errorf("fresh thread landed in %q, want a new conversation (ended one was %q)", l.ActiveID, first)
 	}
 }
