@@ -47,6 +47,12 @@ type Options struct {
 	// ConfirmTimeout is how long a pending tool confirmation waits for the
 	// user before declining. Zero means DefaultConfirmTimeout.
 	ConfirmTimeout time.Duration
+	// ConfirmTimer overrides the confirmation-timeout clock; nil uses a real
+	// time.Timer. It exists so daemon-level socket tests can fire a timeout
+	// deterministically — the validated config cannot express a timeout
+	// shorter than a second, and a test that waited one out would be a sleep
+	// wearing a costume. Never set in production.
+	ConfirmTimer func(d time.Duration) (<-chan time.Time, func())
 	// RememberApprovals re-runs a user-approved command without asking again
 	// for the rest of the conversation. Approvals live in memory only and
 	// are cleared with the conversation — they never survive `jarvix new`,
@@ -200,6 +206,18 @@ type Engine struct {
 	// follow-up questions have context. Guarded by mu.
 	history  []ai.Message
 	lastTurn time.Time
+	// msgCount counts every message ever committed to the live thread —
+	// including any the retention cap has trimmed, and the pairs counted
+	// while in-memory history is disabled — so confirmation records can be
+	// anchored to positions that never shift under the cap (issue #118;
+	// confirmrecord.go). Guarded by mu; reset with the thread.
+	msgCount int
+	// confRecords are the resolved permission-gate exchanges of the live
+	// thread, in resolution order (afterMsgs nondecreasing), rendered by
+	// Conversation() between the turns they belong to. They are display and
+	// archive state, never model context: the model already hears about each
+	// outcome through the tool round itself. Guarded by mu.
+	confRecords []*confirmationRecord
 
 	// The durable archive's view of the thread (ADR 0027; archive.go).
 	// archiveID is which archived conversation the live thread belongs to
@@ -363,6 +381,9 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 		approvals:     make(map[string]bool),
 		state:         StateIdle,
 	}
+	if opts.ConfirmTimer != nil {
+		e.timer = opts.ConfirmTimer
+	}
 	e.loadHistory()
 	return e
 }
@@ -398,6 +419,13 @@ func (e *Engine) loadHistory() {
 	}
 	e.history = msgs
 	e.lastTurn = lastTurn
+	// The restored head starts the position counter at its own length: the
+	// messages the file did not keep are also not displayed, so the base of
+	// the window and the base of the count coincide. Confirmation records are
+	// not restored here — history.json is the model-context head and carries
+	// none (issue #118); they live in the archive, and reopening the
+	// conversation (conversation.open) brings them back into the display.
+	e.msgCount = len(msgs)
 	// The restored head belongs to an archived conversation; reattach so the
 	// next turn appends to the same record instead of forking a new one per
 	// restart (ADR 0027). A stale or missing pointer degrades to "": the next
@@ -670,6 +698,9 @@ func (e *Engine) CancelSpeech() (stopped bool) {
 	// follow-up to a stopped answer meets the same amnesia the incident log
 	// shows for push-to-talk interruption.
 	committed := e.commitInterruptedLocked(s)
+	// The abandoned confirmation's record follows even when no exchange was
+	// committable (issue #118) — see cancelLocked for why.
+	committed = e.finalizeConfRecordsLocked() || committed
 	e.log.Info("speech cancelled", "component", "session", "session_id", s.id)
 	e.finishLocked(s)
 	if committed {
@@ -788,6 +819,11 @@ func (e *Engine) cancelLocked(reason string) {
 		e.active.Go(rec.Cancel)
 	}
 	committed := e.commitInterruptedLocked(s)
+	// A confirmation resolved (or abandoned above) by a turn that committed
+	// no exchange still owes the archive its record — the approval may have
+	// executed something (issue #118). No-op when the interrupted commit
+	// just claimed the records, so nothing is ever recorded twice.
+	committed = e.finalizeConfRecordsLocked() || committed
 	// A session cancelled before it ever left Idle (started, never advanced)
 	// has no transition to make — that is a quiet nothing, not a refusal.
 	if e.state.Active() {
@@ -896,6 +932,16 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 	e.publish(Event{Type: "session.finished", Data: map[string]any{"session_id": s.id}})
 	s.cancel()
 	e.current = nil
+	// A failed turn commits no exchange, but any confirmation it resolved
+	// still happened — and if it was approved, the command already ran
+	// before the failure. The record is staged standalone (issue #118) and
+	// persisted by a writer of its own: the dead session's tail sees the
+	// cancelled context and unwinds without writing, exactly as the
+	// interrupted-commit paths found (#117). Tracked in e.active so the
+	// shutdown drain waits for it (#29).
+	if e.finalizeConfRecordsLocked() {
+		e.active.Go(e.persistArchive)
+	}
 }
 
 // maybeThinkLocked advances to Thinking once transcript and submission have
@@ -1379,11 +1425,24 @@ func (e *Engine) commitInterruptedLocked(s *sess) bool {
 // commitTurnLocked is the one place an exchange enters the record, complete
 // or interrupted. Callers hold e.mu and have already claimed s.committed.
 func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bool) {
+	// Any confirmations resolved during this exchange are claimed by it now:
+	// they were already visible to conversation.get the moment they resolved
+	// (issue #118), and here they take their archive position between the
+	// exchange's two halves.
+	recs := e.unstagedConfRecordsLocked()
+	for _, r := range recs {
+		r.staged = true
+	}
 	// The archive is staged before the cap can trim anything, and even with
 	// in-memory history disabled: history_turns governs what the model is
 	// sent, never what is kept (ADR 0027).
-	e.stageArchiveTurnLocked(userText, assistantText, interrupted)
+	e.stageArchiveTurnLocked(userText, assistantText, interrupted, recs)
+	// The position counter advances even when in-memory history is disabled:
+	// it counts what was committed to the thread, not what was retained, so
+	// record anchors stay comparable to it either way.
+	e.msgCount += 2
 	if e.opts.HistoryTurns <= 0 {
+		e.pruneConfRecordsLocked()
 		return
 	}
 	e.history = append(e.history,
@@ -1392,6 +1451,7 @@ func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bo
 	if max := e.opts.HistoryTurns * 2; len(e.history) > max {
 		e.history = append([]ai.Message(nil), e.history[len(e.history)-max:]...)
 	}
+	e.pruneConfRecordsLocked()
 	e.lastTurn = e.now()
 }
 
@@ -1417,13 +1477,18 @@ func (e *Engine) persistHistory() {
 	e.log.Debug("conversation history saved", "component", "session", "turns", len(msgs)/2)
 }
 
-// Turn is one utterance of the current conversation as a client should
-// display it. Only what carries meaning for a reader is included: committed
-// user/assistant exchanges plus the in-flight user question — no system
-// prompt, no tool traffic.
+// Turn is one entry of the current conversation as a client should display
+// it. Only what carries meaning for a reader is included: committed
+// user/assistant exchanges, the resolved confirmation records between them
+// (issue #118), plus the in-flight user question — no system prompt, no tool
+// traffic.
 type Turn struct {
-	Role string `json:"role"` // "user" or "assistant"
+	Role string `json:"role"` // "user", "assistant", or "confirmation"
 	Text string `json:"text"`
+	// Confirmation carries the resolved permission-gate record when Role is
+	// conversations.RoleConfirmation, and is absent on every utterance —
+	// additive, so a client that ignores it sees the shape it always saw.
+	Confirmation *conversations.Confirmation `json:"confirmation,omitempty"`
 }
 
 // Conversation returns the turns of the current conversation, oldest first,
@@ -1434,16 +1499,42 @@ type Turn struct {
 // follow-up-window reset is deliberately not applied here: this reports what
 // happened, not what the next turn will remember. Never nil — an empty
 // conversation is an empty slice, so clients always see a JSON array.
+//
+// Resolved confirmation records are interleaved at their anchors (issue
+// #118): a record renders after the first afterMsgs messages of the thread,
+// which for a confirmation resolved mid-exchange is between that exchange's
+// question and answer — the position the live card occupied. A still-pending
+// confirmation is deliberately NOT a turn here: it rides the snapshot's
+// `confirmation` field (issue #76) and renders as the live card, so a reopen
+// during the wait shows exactly one card and never a history duplicate.
 func (e *Engine) Conversation() []Turn {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	turns := make([]Turn, 0, len(e.history)+1)
-	for _, m := range e.history {
+	turns := make([]Turn, 0, len(e.history)+len(e.confRecords)+1)
+	// confRecords is ordered by afterMsgs (resolution order within a
+	// monotonic counter), so one cursor walks it alongside the history.
+	next := 0
+	through := func(g int) {
+		for next < len(e.confRecords) && e.confRecords[next].afterMsgs <= g {
+			turns = append(turns, e.confRecords[next].displayTurn())
+			next++
+		}
+	}
+	base := e.msgCount - len(e.history)
+	for i, m := range e.history {
+		through(base + i)
 		turns = append(turns, Turn{Role: string(m.Role), Text: m.Content})
 	}
+	// Records anchored at the committed tail — a confirmation whose turn
+	// died without committing an exchange around it — come before the
+	// in-flight question of the next turn.
+	through(e.msgCount)
 	if s := e.current; s != nil && s.transcriptReady && strings.TrimSpace(s.transcript) != "" {
 		turns = append(turns, Turn{Role: string(ai.RoleUser), Text: s.transcript})
 	}
+	// And the confirmations the in-flight exchange has already resolved
+	// render after its question, exactly where they will sit once it commits.
+	through(e.msgCount + 1)
 	return turns
 }
 
@@ -1492,6 +1583,14 @@ func (e *Engine) reset(cancelActive bool) {
 	e.history = nil
 	e.lastTurn = time.Time{}
 	e.approvals = make(map[string]bool)
+	// A record still unstaged here belongs to the thread that is ending —
+	// stage it standalone before the detach hands the batch over, then clear
+	// the display list: the confirmation records die with the head exactly
+	// like the turns they sat between, and stay in the archive exactly like
+	// them too (issue #118).
+	e.finalizeConfRecordsLocked()
+	e.confRecords = nil
+	e.msgCount = 0
 	archive, archivedID, pending := e.detachArchiveLocked()
 	e.mu.Unlock()
 	e.flushArchiveDetached(archive, archivedID, pending)
