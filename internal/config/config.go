@@ -500,6 +500,20 @@ type UI struct {
 	// reset (`jarvix new`). Off by default: activity is operational history,
 	// and "what did it just do?" is usually asked *after* starting fresh.
 	ActivityClearOnNew bool `toml:"activity_clear_on_new"`
+	// LineSpacing multiplies the conversation window's transcript line height
+	// (issue #121). 1.0 is the shipped rendering; extra room between lines
+	// helps a dyslexic reader keep their place in a long answer. Transcript
+	// messages only — window chrome, tabs, and cards keep the design
+	// system's scale.
+	LineSpacing float64 `toml:"line_spacing"`
+	// TextSize multiplies the transcript's message text size. A multiple of
+	// the design token rather than a pixel value, so it rides the shell's
+	// font scale instead of overriding it. 1.0 is the shipped rendering.
+	TextSize float64 `toml:"text_size"`
+	// LetterSpacing adds space between letters in transcript messages, in
+	// ems of the rendered text size (0.0 is the shipped rendering; WCAG's
+	// reading-aid guidance is 0.12 em).
+	LetterSpacing float64 `toml:"letter_spacing"`
 }
 
 // Log configures daemon logging.
@@ -601,7 +615,11 @@ func Default() Config {
 			// 400 rows is several sessions of tool-heavy work at a few
 			// kilobytes total: enough to answer "what happened earlier?",
 			// small enough to never matter.
-			ActivityRows: 400},
+			ActivityRows: 400,
+			// The reading-comfort defaults pin the window's previously
+			// hard-coded rendering (issue #121): a config that never touches
+			// them renders pixel-identically to before the settings existed.
+			LineSpacing: 1.0, TextSize: 1.0, LetterSpacing: 0.0},
 		Log: Log{Level: "info"},
 	}
 }
@@ -719,6 +737,20 @@ const minWarmMemoryCapMB = 256
 // keeps the worst-case ring at a few megabytes rather than a memory setting
 // the user has to reason about.
 const maxActivityRows = 10000
+
+// Reading-comfort bounds (issue #121). The typography ranges guide rather
+// than overwhelm: the low ends stay legible, the high ends cover the
+// dyslexia-informed guidance (WCAG 1.4.12 asks for up to 1.5× line height
+// and 0.12 em letter spacing — both comfortably inside). Letter spacing has
+// no negative range: crowding letters together is the failure the setting
+// exists to fix.
+const (
+	minLineSpacing   = 0.8
+	maxLineSpacing   = 2.0
+	minTextSize      = 0.7
+	maxTextSize      = 1.6
+	maxLetterSpacing = 0.3
+)
 
 // Load reads the config file at path, applying defaults for anything unset.
 // A missing file is not an error; defaults are returned.
@@ -840,6 +872,21 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"ui.activity_rows is %d; the activity feed is a glanceable ring, not a log — use at most %d",
 			c.UI.ActivityRows, maxActivityRows))
+	}
+	if c.UI.LineSpacing < minLineSpacing || c.UI.LineSpacing > maxLineSpacing {
+		problems = append(problems, fmt.Sprintf(
+			"ui.line_spacing is %g; use %g to %g (multiplies the transcript's line height; 1.0 is the shipped spacing)",
+			c.UI.LineSpacing, minLineSpacing, maxLineSpacing))
+	}
+	if c.UI.TextSize < minTextSize || c.UI.TextSize > maxTextSize {
+		problems = append(problems, fmt.Sprintf(
+			"ui.text_size is %g; use %g to %g (multiplies the transcript's message text size; 1.0 is the shipped size)",
+			c.UI.TextSize, minTextSize, maxTextSize))
+	}
+	if c.UI.LetterSpacing < 0 || c.UI.LetterSpacing > maxLetterSpacing {
+		problems = append(problems, fmt.Sprintf(
+			"ui.letter_spacing is %g; use 0 to %g (ems added between letters in transcript messages; 0 is the shipped spacing)",
+			c.UI.LetterSpacing, maxLetterSpacing))
 	}
 	if c.Performance.WarmMemoryCapMB < 0 {
 		problems = append(problems,

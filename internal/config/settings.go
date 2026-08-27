@@ -374,6 +374,29 @@ func settingRows() []Setting {
 		{Key: "ui.activity_clear_on_new", Label: "Clear activity on a new conversation", Type: TypeBool, Reload: ReloadLive,
 			Get: func(c Config) any { return c.UI.ActivityClearOnNew },
 			set: func(c *Config, v any) { c.UI.ActivityClearOnNew = v.(bool) }},
+		// Reading comfort (issue #121): the transcript's typography is
+		// personal — for a dyslexic or ADHD reader, line spacing and text
+		// density decide whether an answer is readable at a glance or a wall
+		// to bounce off. Three knobs and no more (a wall of typography
+		// toggles is its own accessibility failure), all relative units so
+		// they ride the shell's font scale, all scoped to transcript messages
+		// — window chrome, tabs, and cards keep the design system's scale.
+		// Live class like the rest of [ui]: these are display-only values the
+		// conversation window reads (nothing in the engine consumes them),
+		// and "increase the line spacing a bit" spoken through the settings
+		// tool mid-session must land on the transcript being looked at, not
+		// after the session ends. Bounds live in Config.Validate beside the
+		// other [ui] checks, so an out-of-range value is refused with the
+		// standard field problem.
+		{Key: "ui.line_spacing", Label: "Line spacing (× line height; extra room helps dyslexic readers keep their place)", Type: TypeFloat, Reload: ReloadLive,
+			Get: func(c Config) any { return c.UI.LineSpacing },
+			set: func(c *Config, v any) { c.UI.LineSpacing = v.(float64) }},
+		{Key: "ui.text_size", Label: "Message text size (× the design size; larger turns a wall of text back into lines)", Type: TypeFloat, Reload: ReloadLive,
+			Get: func(c Config) any { return c.UI.TextSize },
+			set: func(c *Config, v any) { c.UI.TextSize = v.(float64) }},
+		{Key: "ui.letter_spacing", Label: "Letter spacing (ems between letters; a little air stops letters crowding)", Type: TypeFloat, Reload: ReloadLive,
+			Get: func(c Config) any { return c.UI.LetterSpacing },
+			set: func(c *Config, v any) { c.UI.LetterSpacing = v.(float64) }},
 
 		{Key: "tools.shell", Label: "Assistant may run shell commands", Type: TypeBool, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Tools.Shell },
