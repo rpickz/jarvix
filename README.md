@@ -288,10 +288,15 @@ keyboard and which control blocks each path — is written down in
 whether typing would work here and why not if it would not.
 
 Jarvix remembers the conversation: ask a follow-up ("what should I change?")
-and it keeps the prior context, until the thread goes idle (configurable) or
-you run `jarvix new`. Answers are spoken **as they stream** — Jarvix starts
-talking on the first complete sentence rather than waiting for the whole
-reply.
+and it keeps the prior context. A conversation only ends when you say so —
+"start a new conversation", the window's **New chat** button, the bar menu, or
+`jarvix new` ([ADR 0038](docs/adr/0038-conversation-lifecycle.md)); sessions,
+interruptions, idle time, and daemon restarts never end it (an optional idle
+window is configurable for those who want auto-forget back). Interrupting an
+answer keeps the exchange too, marked interrupted, so answering a clarifying
+question never loses the question. Answers are spoken **as they stream** —
+Jarvix starts talking on the first complete sentence rather than waiting for
+the whole reply.
 
 Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
 `jarvix new` archives the thread instead of destroying it, whole — the
