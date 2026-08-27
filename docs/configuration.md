@@ -333,6 +333,13 @@ max_injected_tokens = 500        # per-turn budget for the remembered-facts
                                  # never trimmed silently (ADR 0037).
                                  # Minimum 100
 
+[focus]                          # focus threads (see below). The threads
+                                 # themselves are state (focus.toml), not
+                                 # configuration — this section is policy only
+midpoint_checkin = false         # speak a halfway line during a timeboxed
+                                 # focus session. Off by default: a timebox is
+                                 # a promise of quiet (live-class)
+
 [conversation]
 speak_responses = true           # false = text-only sessions
 history_turns = 16               # remember this many prior exchanges as context
@@ -751,9 +758,14 @@ The shipped table:
 | `conversation.new` | "new conversation", "start over", "forget that", "clear the conversation" | the same reset as `jarvix new` |
 | `workspace.switch` | "workspace 4", "go to workspace four", "switch to workspace 4" | switches you to workspace `<n>` |
 | `terminal.open` | "open terminal", "open a terminal", "new terminal" | starts `<[intents] terminal>` |
+| `focus.*` | "new thread called `<name>`" (± "with this window" / "with these two windows"), "switch to the `<name>` thread", "later `<thought>`" / "park `<thought>`", "what did I park", "where am I on everything", "where am I on `<name>`", "end the `<name>` thread" / "end this thread", "anchor this window", "focus on `<name>` for `<n>` minutes", "focus session update", "end the focus session" / "stop focusing", "keep focusing", "take a break", "check in every `<n>` minutes", "stop checking in" | focus threads (#123, [ADR 0041](adr/0041-focus-threads.md)) — every action edits Jarvix's own thread store; nothing spoken reaches a command line |
 
 Numbers work spoken or written — "volume thirty" and "volume 30" are the same
-request — anywhere from 0 to 150 (workspaces 1–10).
+request — anywhere from 0 to 150 (workspaces 1–10; focus minutes 1–240). The
+focus family's `<name>` and `<thought>` slots are the one place the table
+takes free text: bounded (six words for a name, twelve for a thought),
+anchored by the fixed words around them, and destined only for the thread
+store — never an argv, never a shell.
 
 **Matching is strict, and that is the feature.** A pattern must match the
 *whole* utterance, word for word. "Turn it up" is an intent; "turn it up a
@@ -1283,6 +1295,54 @@ What the design guarantees:
 - **Off means off — but never deletes.** `enabled = false` unregisters the
   tools and injects nothing, and leaves the store file untouched: only an
   explicit forget (or deleting the file) removes facts.
+
+## Focus threads (`[focus]`)
+
+A **thread** is a named piece of work: "Jarvix, new thread: the CI refactor,
+with this window". Switching is cheap ("switch to the deploy thread" — Jarvix
+speaks a two-sentence recap of where that thread stands), parking a stray
+thought costs one sentence ("later: reply to Dan" → a soft "Parked."), and
+"where am I on everything?" answers with one line per thread, active thread
+first ([ADR 0041](adr/0041-focus-threads.md)). Monotasking is the same model
+timeboxed: "focus on the refactor for 25 minutes" speaks a start, optionally
+a midpoint, and a clear close ("keep focusing, or take a break?"). "Check in
+every 45 minutes" puts a per-thread reminder on the clock.
+
+The phrases are deterministic intents — no model call, collision-checked
+against your routines, scripts, and custom intents at load. The recaps are
+templated daemon-side from the thread's own record, never generated: fast,
+predictable, and only ever wrong if the record is.
+
+What the design guarantees:
+
+- **You own the store.** Threads, anchors, parked thoughts, and the live
+  timebox live in one hand-editable TOML file,
+  `~/.local/state/jarvix/focus.toml` (0600), documented in its own header.
+  Edits are live on the next operation; an unparseable file degrades to a
+  warning and an empty store and is moved aside (`focus.toml.corrupt`),
+  never overwritten. Everything survives a daemon restart, a timebox
+  mid-flight included.
+- **Anchors degrade, threads survive.** A thread may be anchored to one or
+  two windows ("with this window" / "with these two windows"), resolved
+  through the same compositor seam the window tools use. A window that
+  closes marks the anchor *gone* — in the recap and the Focus tab — and
+  nothing else changes.
+- **Reminders never nag.** A check-in is skipped — dropped, not queued —
+  while a conversation is live, while speech is playing, or while a focus
+  session holds the floor. A timebox that ran out while the daemon was off
+  is closed quietly at boot, never re-announced.
+- **Nothing spoken becomes a command.** A focus phrase carries a name, a
+  thought, or a number of minutes into Jarvix's own store, and nowhere else.
+
+The Focus tab in the conversation window lists the threads (anchors, parked
+thoughts, last activity, the live session) and offers Switch and End; the
+`focus.*` IPC verbs behind it are documented in [ipc.md](ipc.md).
+
+```toml
+[focus]
+midpoint_checkin = false   # speak a halfway line during a timeboxed session;
+                           # off by default — a timebox is a promise of quiet
+```
 
 ## Knowledge feeds (`[[knowledge.feeds]]`)
 
@@ -1848,6 +1908,7 @@ jarvix config set 'tts.lexicon=Kubernetes=koo ber net eez,k9s=kay nine ess'
 | Models | `~/.local/share/jarvix/models/` |
 | State | `~/.local/state/jarvix/` |
 | Memory (remembered facts, hand-editable) | `~/.local/state/jarvix/memory.toml` |
+| Focus threads (threads, parked thoughts, the live timebox — hand-editable) | `~/.local/state/jarvix/focus.toml` |
 | Socket | `$XDG_RUNTIME_DIR/jarvix.sock` |
 | Recordings (transient) | `$XDG_RUNTIME_DIR/jarvix/` (tmpfs, deleted after use) |
 | Artifacts (diagrams, documents, spreadsheets, sketches) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |

@@ -71,6 +71,11 @@ FloatingWindow {
   readonly property var tabs: [
     { id: "chat", label: "Chat" },
     { id: "activity", label: "Activity" },
+    // focus — the focus threads (#123, ADR 0041): threads with anchors,
+    // parked thoughts and the live timeboxed session, self-contained in
+    // JarvixFocusTab.qml (own socket, request ids 500–599, focus.list /
+    // focus.changed).
+    { id: "focus", label: "Focus" },
     { id: "library", label: "Library" },
     { id: "automations", label: "Automations" },
     { id: "knowledge", label: "Knowledge" },
@@ -1977,6 +1982,21 @@ FloatingWindow {
       anchors.centerIn: parent
       width: parent.width
       text: "No conversation yet — hold Super+Alt+V and speak, or type below."
+    }
+
+    // The Focus tab (#123): self-contained in its own file with its own
+    // daemon socket, like the settings screen below — the window only places
+    // it and gates its connection on visibility.
+    JarvixFocusTab {
+      id: focusScreen
+      visible: win.socketReady && win.currentTab === "focus"
+      active: win.visible && win.currentTab === "focus"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
     }
 
     // The settings screen fills the content pane while its tab is current.

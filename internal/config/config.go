@@ -59,6 +59,9 @@ type Config struct {
 	// value the daemon keeps warm so changing facts answer instantly (see
 	// knowledge.go, ADR 0031). Empty feeds disable the feature.
 	Knowledge Knowledge `toml:"knowledge"`
+	// Focus is the focus-thread policy (see focus.go, ADR 0041). The threads
+	// themselves live in state (focus.toml), not configuration.
+	Focus Focus `toml:"focus"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
 	// delegation entirely — the tool is not registered.

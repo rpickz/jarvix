@@ -325,6 +325,12 @@ func settingRows() []Setting {
 			Get: func(c Config) any { return c.Memory.MaxInjectedTokens },
 			set: func(c *Config, v any) { c.Memory.MaxInjectedTokens = v.(int) }},
 
+		// Live class: the focus service reads the switch at fire time
+		// (ADR 0041), so a save lands on the very next timebox moment.
+		{Key: "focus.midpoint_checkin", Label: "Speak a halfway check-in during focus sessions", Type: TypeBool, Reload: ReloadLive,
+			Get: func(c Config) any { return c.Focus.MidpointCheckin },
+			set: func(c *Config, v any) { c.Focus.MidpointCheckin = v.(bool) }},
+
 		{Key: "audio.input_device", Label: "Microphone device", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Audio.InputDevice },
 			set: func(c *Config, v any) { c.Audio.InputDevice = v.(string) }},

@@ -137,6 +137,20 @@ type Match struct {
 	// WindowNames marks "what are my windows called" (#126): the engine
 	// answers with the window-name seam's one spoken listing.
 	WindowNames bool
+	// Focus is the focus-thread action this utterance asks for (#123),
+	// FocusNone for every other intent. The engine performs none of these
+	// itself — it hands the whole match to the focus runner, which owns the
+	// thread store and every sentence spoken about it.
+	Focus FocusAction
+	// FocusText is the bounded free text a focus phrase carried — a thread
+	// name or a parked thought — empty when the action takes none. It goes
+	// nowhere but the focus service's own store: never an argv, never a
+	// shell, never a dispatch.
+	FocusText string
+	// FocusWindows is how many windows the phrase asked to anchor (0, 1 or
+	// 2), fixed by which pattern matched — "with this window" versus "with
+	// these two windows" — never parsed from free text.
+	FocusWindows int
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -272,6 +286,10 @@ type rule struct {
 	windowName bool
 	// windowNames marks the "what are my windows called" rules (#126).
 	windowNames bool
+	// focus and focusWindows carry a focus rule's action (#123); focus is
+	// FocusNone for every other rule.
+	focus        FocusAction
+	focusWindows int
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -446,6 +464,28 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: WindowNamesIntentName, pattern: p, windowNames: true})
 	}
 	r.names = append(r.names, WindowNamesIntentName)
+	// The fixed half of the focus grammar (#123) compiles with the built-ins
+	// and enters the same collision world: a custom intent or routine
+	// claiming "take a break" is a config error naming both owners. The
+	// free-text half compiles at the very end, beside the capture patterns,
+	// for the same precedence reason those do.
+	focusNamed := make(map[string]bool)
+	for _, fb := range focusFixedTable() {
+		if !focusNamed[fb.name] {
+			// Two table entries may share a name ("focus.anchor" carries its
+			// window count per entry); the diagnostics list names once.
+			focusNamed[fb.name] = true
+			r.names = append(r.names, fb.name)
+		}
+		for _, raw := range fb.patterns {
+			p, err := compile(raw)
+			if err != nil {
+				return nil, fmt.Errorf("built-in intent %q pattern %q: %w", fb.name, raw, err)
+			}
+			builtinNames[p.key()] = fb.name
+			r.add(&rule{name: fb.name, pattern: p, focus: fb.action, focusWindows: fb.windows})
+		}
+	}
 
 	// taken maps a compiled phrase to a human description of what owns it, so
 	// a routine phrase collision is reported against whichever of the three
@@ -607,7 +647,72 @@ func New(opts Options) (*Router, error) {
 	// from the very map the config collisions were judged against, so a
 	// refused nickname and a refused routine phrase name owners identically.
 	r.owned = taken
+	// The free-text focus patterns (#123) compile after everything else, for
+	// the capture patterns' reason: a {text} slot could claim an utterance a
+	// literal phrase owns, so every literal phrase must sit ahead of it in
+	// insertion order. Within the family, focusTextTable's own order rules —
+	// most-suffixed first — so a sibling's anchoring words are never eaten by
+	// a bare slot.
+	for _, ft := range focusTextTable() {
+		if !focusNamed[ft.name] {
+			focusNamed[ft.name] = true
+			r.names = append(r.names, ft.name)
+		}
+		for _, raw := range ft.patterns {
+			p, err := compileFocus(raw, ft.textCap)
+			if err != nil {
+				// Unreachable for the shipped table; a bad pattern added later
+				// must fail compilation, not silently never match.
+				return nil, fmt.Errorf("focus pattern %q: %w", raw, err)
+			}
+			r.add(&rule{name: ft.name, pattern: p, focus: ft.action, focusWindows: ft.windows})
+		}
+	}
 	return r, nil
+}
+
+// compileFocus compiles one free-text focus pattern: literal words around
+// exactly one {text} slot, with {minutes} available after it. Kept separate
+// from compile so {text} stays unusable in custom intents and routine
+// phrases, where free text would have to be interpolated into a command or
+// would parameterise steps that are fixed — the compileCapture precedent.
+func compileFocus(raw string, textCap int) (pattern, error) {
+	const slot = "{text}"
+	words := strings.Fields(strings.ToLower(raw))
+	if len(words) == 0 {
+		return pattern{}, fmt.Errorf("pattern is empty")
+	}
+	if textCap <= 0 {
+		return pattern{}, fmt.Errorf("text slot has no word cap")
+	}
+	p := pattern{raw: strings.Join(words, " "), tokens: make([]token, 0, len(words))}
+	texts := 0
+	for _, w := range words {
+		if w == slot {
+			texts++
+			p.tokens = append(p.tokens, token{kind: slotText, min: 1, max: textCap})
+			continue
+		}
+		if t, ok := slotKinds[w]; ok {
+			p.tokens = append(p.tokens, t)
+			continue
+		}
+		if strings.ContainsAny(w, "{}") {
+			return pattern{}, fmt.Errorf("unknown placeholder %q in a focus pattern", w)
+		}
+		norm := normalize(w)
+		if len(norm) != 1 {
+			return pattern{}, fmt.Errorf("word %q is not a plain spoken word", w)
+		}
+		p.tokens = append(p.tokens, token{word: norm[0]})
+	}
+	if texts != 1 {
+		return pattern{}, fmt.Errorf("focus patterns carry exactly one %s slot", slot)
+	}
+	if p.tokens[0].kind != slotNone {
+		return pattern{}, fmt.Errorf("pattern must begin with a word, not a placeholder")
+	}
+	return p, nil
 }
 
 // CaptureIntentName identifies the "save this as <name>" intent (#62) in
@@ -789,7 +894,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		}
 		return Match{Name: ru.name, WindowName: name}, true
 	}
-	slot, hasSlot, ok := ru.pattern.match(fields)
+	slot, hasSlot, text, ok := ru.pattern.match(fields)
 	if !ok {
 		return Match{}, false
 	}
@@ -799,6 +904,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Command: ru.command, UserDefined: ru.userDefined,
 		Routine: ru.routine, Script: ru.script,
 		WindowNames: ru.windowNames,
+		Focus:       ru.focus, FocusText: text, FocusWindows: ru.focusWindows,
 	}
 	if ru.argv != nil {
 		m.Argv = ru.argv(slot)
@@ -818,6 +924,12 @@ const (
 	slotNone slotKind = iota
 	slotVolume
 	slotWorkspace
+	slotMinutes
+	// slotText is the one non-numeric slot: bounded free text (a thread name
+	// or a parked thought, #123). Only compileFocus can produce it, so free
+	// text stays impossible in custom intents and routine phrases. min and
+	// max bound how many words it may swallow.
+	slotText
 )
 
 // token is one element of a pattern: a literal word, or a bounded slot.
@@ -854,11 +966,14 @@ func (p pattern) key() string { return p.raw }
 func (p pattern) maxFields() int {
 	n := 0
 	for _, t := range p.tokens {
-		if t.kind == slotNone {
+		switch t.kind {
+		case slotNone:
 			n++
-			continue
+		case slotText:
+			n += t.max
+		default:
+			n += maxSlotWords
 		}
-		n += maxSlotWords
 	}
 	if p.trailingText {
 		n += maxNameWords
@@ -881,16 +996,18 @@ func (p pattern) matchText(fields []string) (string, bool) {
 	return strings.Join(fields[len(p.tokens):], " "), true
 }
 
-func (p pattern) match(fields []string) (slot int, hasSlot, ok bool) {
-	ok = p.matchFrom(fields, 0, 0, &slot, &hasSlot)
-	return slot, hasSlot, ok
+func (p pattern) match(fields []string) (slot int, hasSlot bool, text string, ok bool) {
+	ok = p.matchFrom(fields, 0, 0, &slot, &hasSlot, &text)
+	return slot, hasSlot, text, ok
 }
 
 // matchFrom walks pattern token pi against field fi. A slot backtracks over
 // how many words it takes (shortest first) so "volume thirty five" resolves
-// to 35 rather than failing after greedily reading "thirty". The recursion is
-// bounded by the pattern length, which is single digits.
-func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool) bool {
+// to 35 rather than failing after greedily reading "thirty", and a text slot
+// (#123) backtracks the same way, so the literal words after it — "with this
+// window", "thread", "for {minutes} minutes" — anchor exactly one reading.
+// The recursion is bounded by the pattern length, which is single digits.
+func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool, text *string) bool {
 	for pi < len(p.tokens) {
 		t := p.tokens[pi]
 		if t.kind == slotNone {
@@ -902,6 +1019,20 @@ func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool
 			continue
 		}
 		remaining := len(p.tokens) - pi - 1
+		if t.kind == slotText {
+			// Free text, bounded by the rule's word cap. Shortest first, like
+			// the number slots, so the fixed words around it always win the
+			// fields they name.
+			for n := t.min; n <= t.max && fi+n+remaining <= len(fields); n++ {
+				prev := *text
+				*text = strings.Join(fields[fi:fi+n], " ")
+				if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text) {
+					return true
+				}
+				*text = prev
+			}
+			return false
+		}
 		for n := 1; n <= maxSlotWords && fi+n+remaining <= len(fields); n++ {
 			v, parsed := parseNumber(fields[fi : fi+n])
 			// Out of bounds is a miss, never a clamp: "volume five hundred"
@@ -911,7 +1042,7 @@ func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool
 			}
 			prevSlot, prevHas := *slot, *hasSlot
 			*slot, *hasSlot = v, true
-			if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot) {
+			if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text) {
 				return true
 			}
 			*slot, *hasSlot = prevSlot, prevHas
@@ -924,6 +1055,7 @@ func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool
 var slotKinds = map[string]token{
 	"{volume}":    {kind: slotVolume, min: minVolume, max: maxVolume},
 	"{workspace}": {kind: slotWorkspace, min: minWorkspace, max: maxWorkspace},
+	"{minutes}":   {kind: slotMinutes, min: minMinutes, max: maxMinutes},
 }
 
 // compile turns a pattern source into tokens. Patterns must begin with a
@@ -940,7 +1072,7 @@ func compile(raw string) (pattern, error) {
 			continue
 		}
 		if strings.ContainsAny(w, "{}") {
-			return pattern{}, fmt.Errorf("unknown placeholder %q; the supported placeholders are {volume} and {workspace}", w)
+			return pattern{}, fmt.Errorf("unknown placeholder %q; the supported placeholders are {volume}, {workspace} and {minutes}", w)
 		}
 		norm := normalize(w)
 		if len(norm) != 1 {
