@@ -164,6 +164,108 @@ func TestOldArchiveWithoutInterruptedKeyLoadsClean(t *testing.T) {
 	}
 }
 
+// A confirmation record (issue #118) is a turn like any other to the store:
+// it round-trips whole — role, question, payload, timestamp — at its position
+// between the halves of its exchange, and its keys never leak onto an
+// utterance's line (the omitempty pin, exactly as for interrupted).
+func TestConfirmationRecordRoundTrips(t *testing.T) {
+	s := fixedStore(t)
+	ts := time.Date(2026, 8, 21, 10, 30, 0, 0, time.UTC)
+	record := &Confirmation{
+		Tool:       "shell.run",
+		Command:    "rm -rf ./build",
+		Rule:       "shell fallback",
+		Outcome:    ConfirmationApproved,
+		Source:     "cli",
+		TimeoutSec: 30,
+	}
+	id, err := s.Append("", []Turn{
+		{Role: "user", Text: "clean the build dir", Time: ts},
+		{Role: RoleConfirmation, Text: "Should I run rm -rf ./build?", Time: ts, Confirmation: record},
+		{Role: "assistant", Text: "Build directory removed.", Time: ts},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := s.Read(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Turns) != 3 {
+		t.Fatalf("read %d turns, want 3", len(conv.Turns))
+	}
+	rec := conv.Turns[1]
+	if rec.Role != RoleConfirmation || rec.Text != "Should I run rm -rf ./build?" {
+		t.Errorf("record turn = %+v, want the confirmation between the exchange's halves", rec)
+	}
+	if rec.Confirmation == nil {
+		t.Fatal("confirmation payload lost on the round trip")
+	}
+	if *rec.Confirmation != *record {
+		t.Errorf("payload = %+v, want %+v", *rec.Confirmation, *record)
+	}
+	if conv.Turns[0].Confirmation != nil || conv.Turns[2].Confirmation != nil {
+		t.Error("confirmation payload leaked onto an utterance")
+	}
+	// The utterances' lines must not so much as mention the key — the same
+	// compatibility mechanism the interrupted flag pinned: archives written
+	// after #118 read identically to ones written before it wherever no
+	// confirmation happened.
+	raw, err := os.ReadFile(s.turnsPath(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for _, line := range []string{lines[1], lines[3]} { // the user and assistant turns
+		if strings.Contains(line, "confirmation") {
+			t.Errorf("utterance's line carries the key: %s", line)
+		}
+	}
+	if conv.Meta.Preview != "clean the build dir" {
+		t.Errorf("preview = %q; a record must never become the preview", conv.Meta.Preview)
+	}
+}
+
+// An archive written before confirmation records existed loads clean: no key,
+// no payload, nothing unreadable, and the schema version still matches — the
+// promise that lets the record ship without a schema bump (the #117
+// precedent, and this issue's old-archive compatibility criterion).
+func TestOldArchiveWithoutConfirmationRecordsLoadsClean(t *testing.T) {
+	s := fixedStore(t)
+	id := "20260820-091500-old"
+	// Byte-for-byte the pre-#118 format, straight from the golden files.
+	transcript := `{"schema":1,"id":"` + id + `"}
+{"role":"user","text":"an old question","ts":"2026-08-20T09:15:00Z"}
+{"role":"assistant","text":"An old answer.","ts":"2026-08-20T09:15:00Z"}
+`
+	meta := `{"schema":1,"id":"` + id + `","started":"2026-08-20T09:15:00Z","last_active":"2026-08-20T09:15:00Z","turns":2,"preview":"an old question"}`
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.turnsPath(id), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.metaPath(id), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := s.Read(id)
+	if err != nil {
+		t.Fatalf("old archive did not load: %v", err)
+	}
+	if len(conv.Turns) != 2 {
+		t.Fatalf("read %d turns, want 2", len(conv.Turns))
+	}
+	for i, turn := range conv.Turns {
+		if turn.Confirmation != nil {
+			t.Errorf("turn %d read a confirmation from a file without the key", i)
+		}
+	}
+	if _, unreadable, err := s.List(); err != nil || len(unreadable) != 0 {
+		t.Errorf("old archive listed as unreadable: %v %v", unreadable, err)
+	}
+}
+
 // TestGoldenFiles pins the on-disk schema byte for byte: two files per
 // conversation, a schema version in both, and role/text/timestamp per turn.
 // If this test breaks, the search ticket's index and every future reader

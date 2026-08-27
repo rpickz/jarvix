@@ -30,6 +30,50 @@ const SchemaVersion = 1
 // the metadata file into a second copy of the transcript.
 const PreviewChars = 120
 
+// RoleConfirmation marks a turn that is not an utterance but the record of a
+// permission-gate exchange (issue #118): what Jarvix asked leave to run,
+// verbatim, and how the user answered. It sits in the transcript at the
+// position the question was asked — between the user turn that provoked the
+// tool call and the assistant turn that followed the answer — because the
+// moments the user authorised Jarvix to act are part of the conversation,
+// not ephemeral window state. A turn with this role carries the Confirmation
+// payload; its Text is the spoken question, so search finds the exchange the
+// way it finds anything else that was said.
+const RoleConfirmation = "confirmation"
+
+// How a recorded confirmation resolved. Three distinct words on disk because
+// they are three different things the user did — said yes, said no, said
+// nothing — and conflating any two would put words in the user's mouth in
+// the one record whose whole point is what the user actually authorised.
+const (
+	ConfirmationApproved = "approved"
+	ConfirmationDeclined = "declined"
+	ConfirmationTimedOut = "timed_out"
+)
+
+// Confirmation is the payload of a RoleConfirmation turn: the permission
+// question exactly as the card showed it, and its answer.
+type Confirmation struct {
+	// Tool is the gated identity — a tool name for a model call,
+	// the intent tool name for a user-defined voice intent.
+	Tool string `json:"tool"`
+	// Command is the exact command the user was shown, verbatim — never a
+	// summary, for the same reason the live card must not reword it
+	// (ADR 0014): this line is the ground truth of what was approved.
+	Command string `json:"command"`
+	// Rule names the policy rule that decided to ask.
+	Rule string `json:"rule,omitempty"`
+	// Outcome is one of the three vocabulary constants above.
+	Outcome string `json:"outcome"`
+	// Source is what resolved it — cli, text, voice, timeout, interrupted,
+	// error — the same closed vocabulary the tool.confirmed/tool.declined
+	// events carry.
+	Source string `json:"source,omitempty"`
+	// TimeoutSec is the confirmation window that applied, so a timed-out
+	// record can say how long the user was given.
+	TimeoutSec int `json:"timeout_sec,omitempty"`
+}
+
 // Turn is one archived utterance: who said it, what they said, and when.
 // This is the schema the acceptance golden file pins — role, text, and
 // timestamp per turn — so search and RAG can index the archive later without
@@ -49,6 +93,14 @@ type Turn struct {
 	// unmarshals to false, and SchemaVersion stays 1 because a reader that
 	// ignores the key still reads the turn correctly.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Confirmation carries the record of a permission-gate exchange when Role
+	// is RoleConfirmation (issue #118), and is nil on every utterance.
+	// Additive exactly like Interrupted: omitempty keeps every ordinary
+	// turn's line byte-identical, an old archive without the key loads with
+	// nil, and SchemaVersion stays 1 because a reader that ignores the key
+	// still reads every utterance correctly — it merely does not render the
+	// approvals, which is all any reader could do before this field existed.
+	Confirmation *Confirmation `json:"confirmation,omitempty"`
 }
 
 // Meta describes one archived conversation without its turns — everything a
