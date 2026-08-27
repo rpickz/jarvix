@@ -196,6 +196,46 @@ FloatingWindow {
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "conversation.get" }) + "\n")
   }
 
+  // --- reading comfort (issue #121) ---------------------------------------
+  // The transcript's typography is a setting, not a constant: line spacing,
+  // message text size, and letter spacing come from the daemon's settings
+  // registry via config.get — the same snapshot the Settings tab renders —
+  // and refresh on config.changed, so a change from the Settings form,
+  // `jarvix config set`, or the assistant's own settings tool lands on the
+  // open transcript without a restart (ADR 0013: the daemon decides, this
+  // window renders). All three are relative units: the size a multiple of
+  // the design token, letter spacing in ems of the rendered size, line
+  // height proportional — so they ride the shell's font scale rather than
+  // fighting it. The property defaults pin the pre-#121 hard-coded
+  // rendering (line height ×1.0, Style.font.subtitle ×1.0, no extra letter
+  // spacing): with the daemon unreachable, or the settings untouched, the
+  // transcript renders exactly as it always did. Scope is transcript
+  // messages only — chrome, tabs, and cards keep the design system's scale.
+  property real chatLineSpacing: 1.0
+  property real chatTextScale: 1.0
+  property real chatLetterSpacing: 0.0
+  property int typographyRequestId: 0
+
+  function requestTypography() {
+    if (!daemon.connected) return
+    typographyRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: typographyRequestId,
+      method: "config.get" }) + "\n")
+  }
+
+  function loadTypography(result) {
+    var fields = result.fields || []
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i]
+      var v = Number(f.value)
+      if (!isFinite(v)) continue
+      if (f.key === "ui.line_spacing") chatLineSpacing = v
+      else if (f.key === "ui.text_size") chatTextScale = v
+      else if (f.key === "ui.letter_spacing") chatLetterSpacing = v
+    }
+  }
+
   // --- activity feed ------------------------------------------------------
   // The snapshot is requested on every connect and the pushes keep it
   // current, so opening the pane costs nothing and survives window
@@ -1668,6 +1708,10 @@ FloatingWindow {
       // config.toml.
       requestAutomations()
       requestKnowledge()
+      // And it may have moved the reading-comfort typography (issue #121):
+      // re-reading the settings snapshot here is what makes a change apply
+      // to the open transcript live, whatever surface saved it.
+      requestTypography()
       break
     }
   }
@@ -1736,6 +1780,8 @@ FloatingWindow {
                    frame.id === win.historyOpenRequestId ||
                    frame.id === win.historySearchRequestId)) {
           win.handleHistoryReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.typographyRequestId) {
+          if (frame.result) win.loadTypography(frame.result)
         } else if (frame.id !== undefined && frame.id === win.automationsRequestId) {
           if (frame.result) win.loadAutomations(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.automationsRunRequestId ||
@@ -1775,6 +1821,10 @@ FloatingWindow {
         // conversation.changed, here).
         win.requestKnowledge()
         win.requestMemory()
+        // The transcript's typography settings (issue #121) load with the
+        // rest of the connect snapshot; until they arrive the property
+        // defaults render the shipped look.
+        win.requestTypography()
         if (win.currentTab === "library") win.requestHistory()
       } else {
         win.sessionState = "idle"
@@ -3549,13 +3599,24 @@ FloatingWindow {
             ? Util.alpha(Color.popups.text, 0.7)
             : Color.accent
         }
+        // The message body follows the user's reading-comfort settings
+        // (issue #121); everything else in the window — speaker labels,
+        // tabs, cards, chrome — keeps the design system's scale. The size
+        // multiplies the design token (so it still follows the shell's font
+        // scale), letter spacing is ems of the rendered size, and line
+        // height is proportional. At the defaults (1.0 / 1.0 / 0.0) every
+        // expression below reduces to exactly the hard-coded original.
         Text {
+          id: messageBody
           visible: model.role !== "confirmation"
           text: model.text
           width: parent.width
           wrapMode: Text.Wrap
           font.family: Style.font.family
-          font.pixelSize: Style.font.subtitle
+          font.pixelSize: Math.max(1, Math.round(Style.font.subtitle * win.chatTextScale))
+          font.letterSpacing: messageBody.font.pixelSize * win.chatLetterSpacing
+          lineHeight: win.chatLineSpacing
+          lineHeightMode: Text.ProportionalHeight
           color: Color.popups.text
         }
 
