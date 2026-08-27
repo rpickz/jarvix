@@ -90,6 +90,13 @@ func (d *Daemon) registerConversationMethods() {
 			if t.Interrupted {
 				turn["interrupted"] = true
 			}
+			// A confirmation record travels whole (issue #118): the same
+			// structured facts conversation.get's turns carry, so every
+			// transcript view renders the approval — question, verbatim
+			// command, outcome — from the daemon's record, never a guess.
+			if t.Confirmation != nil {
+				turn["confirmation"] = t.Confirmation
+			}
 			turns = append(turns, turn)
 		}
 		report := metaReport(conv.Meta)
@@ -113,11 +120,11 @@ func (d *Daemon) registerConversationMethods() {
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
 		}
-		msgs, err := adoptableMessages(conv.Turns)
+		msgs, confs, err := adoptableMessages(conv.Turns)
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
 		}
-		d.engine.AdoptConversation(id, msgs)
+		d.engine.AdoptConversation(id, msgs, confs)
 		d.log.Info("conversation reopened", "component", "daemon", "conversation_id", id,
 			"turns", len(conv.Turns))
 		return map[string]any{"id": id, "turns": len(conv.Turns)}, nil
@@ -291,20 +298,39 @@ func (s *syncedSearcher) Search(q conversations.Query) ([]conversations.Match, c
 	return s.inner.Search(q)
 }
 
-// adoptableMessages converts archived turns into the engine's message shape.
-// Only the roles the engine commits — user and assistant — may enter the
-// model context; anything else in the file is a hand edit or corruption the
-// parser happened to accept, and refusing it here keeps the corruption from
-// becoming a malformed provider request mid-conversation (the history
-// precedent, ADR 0011).
-func adoptableMessages(turns []conversations.Turn) ([]ai.Message, error) {
+// adoptableMessages converts archived turns into the engine's message shape,
+// splitting out confirmation records (issue #118) with their positions so
+// AdoptConversation restores them beside the turns they sat between. Only the
+// roles the engine commits — user and assistant — may enter the model
+// context; a confirmation record never does (the model heard about it through
+// the tool round when it happened); anything else in the file is a hand edit
+// or corruption the parser happened to accept, and refusing it here keeps the
+// corruption from becoming a malformed provider request mid-conversation
+// (the history precedent, ADR 0011).
+func adoptableMessages(turns []conversations.Turn) ([]ai.Message, []session.AdoptedConfirmation, error) {
 	msgs := make([]ai.Message, 0, len(turns))
+	var confs []session.AdoptedConfirmation
 	for i, t := range turns {
+		if t.Role == conversations.RoleConfirmation {
+			// A record without its payload is not a shape this daemon ever
+			// writes; refuse it like an unknown role rather than adopting a
+			// blank approval.
+			if t.Confirmation == nil {
+				return nil, nil, fmt.Errorf("conversation turn %d is a confirmation record without its payload", i+1)
+			}
+			confs = append(confs, session.AdoptedConfirmation{
+				Record:        *t.Confirmation,
+				Summary:       t.Text,
+				Time:          t.Time,
+				AfterMessages: len(msgs),
+			})
+			continue
+		}
 		role := ai.Role(t.Role)
 		if role != ai.RoleUser && role != ai.RoleAssistant {
-			return nil, fmt.Errorf("conversation turn %d has unknown role %q", i+1, t.Role)
+			return nil, nil, fmt.Errorf("conversation turn %d has unknown role %q", i+1, t.Role)
 		}
 		msgs = append(msgs, ai.Message{Role: role, Content: t.Text})
 	}
-	return msgs, nil
+	return msgs, confs, nil
 }

@@ -233,6 +233,11 @@ type Deps struct {
 	// helper process. Injected by tests, which also skips the "is the helper
 	// installed" probe — a fake detector is installed by definition.
 	WakeDetector func(context.Context) (wake.Detector, error)
+	// ConfirmTimer overrides the tool-confirmation timeout clock; nil uses
+	// the engine's real timer. Injected by tests that need a timeout to fire
+	// deterministically — the validated config cannot express one shorter
+	// than a second, and a socket test must not wait one out.
+	ConfirmTimer func(d time.Duration) (<-chan time.Time, func())
 }
 
 // New builds a daemon from configuration. cfg must already be validated.
@@ -511,6 +516,9 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	capture := newLayoutCapturer(paths, compositor, logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, feeds, convs, logger)
 	engOpts.Capture = capture
+	// Injected clock for the confirmation timeout; nil — production — keeps
+	// the engine's real timer (see session.Options.ConfirmTimer).
+	engOpts.ConfirmTimer = deps.ConfirmTimer
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
 	// Every search — the IPC method and the model's tool alike — goes through
