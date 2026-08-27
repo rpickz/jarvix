@@ -35,12 +35,18 @@ func installDoctorStubs(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	stubs := map[string]string{
-		"pw-record":   "#!/bin/sh\nexit 0\n",
-		"pw-play":     "#!/bin/sh\nexit 0\n",
-		"pw-cli":      "#!/bin/sh\nexit 0\n",
-		"wpctl":       "#!/bin/sh\ncat <<'EOF'\n" + wpctlStubOutput + "EOF\n",
-		"whisper-cli": "#!/bin/sh\nexit 0\n",
-		"piper-tts":   "#!/bin/sh\nexit 0\n",
+		"pw-record": "#!/bin/sh\nexit 0\n",
+		"pw-play":   "#!/bin/sh\nexit 0\n",
+		"pw-cli":    "#!/bin/sh\nexit 0\n",
+		"wpctl":     "#!/bin/sh\ncat <<'EOF'\n" + wpctlStubOutput + "EOF\n",
+		// The engine stubs behave like working engines, because the probes
+		// (issue #113) actually run them: whisper prints a transcript (and a
+		// ggml backend-load line, as ggml ≥ 0.20 does), piper consumes stdin
+		// and emits PCM bytes.
+		"whisper-cli": "#!/bin/sh\n" +
+			"echo 'load_backend: loaded CPU backend from /usr/lib/libggml-cpu.so' >&2\n" +
+			"echo 'probe transcript'\nexit 0\n",
+		"piper-tts": "#!/bin/sh\ncat > /dev/null\nprintf 'PCM-BYTES'\nexit 0\n",
 	}
 	for name, script := range stubs {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
@@ -149,7 +155,9 @@ func TestRunOnHealthyMachineHasNoFailures(t *testing.T) {
 		"audio output available",
 		"whisper.cpp installed",
 		"Whisper model available",
+		"whisper.cpp transcribes",
 		"Piper voice available",
+		"piper synthesizes",
 		"jarvixd running",
 		"AI provider configured",
 		"provider authentication succeeded",
