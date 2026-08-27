@@ -173,6 +173,12 @@ func printTimings(v any) {
 		}
 		fmt.Printf("          %-33s %5.0f ms\n", stage.label, toFloat(ms))
 	}
+	// The one non-duration key (issue #120): queued sentences dropped unplayed
+	// because a newer turn superseded them. Absent when nothing was dropped,
+	// like every stage that did not happen.
+	if n, ok := report[session.StageSupersededSentences]; ok {
+		fmt.Printf("          %-33s %5.0f skipped\n", "stale sentences superseded", toFloat(n))
+	}
 }
 
 // printLastTyping renders the typing audit trail: the most recent thing Jarvix
