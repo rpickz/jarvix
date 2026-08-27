@@ -184,6 +184,15 @@ func TestActivityRowVocabulary(t *testing.T) {
 			"tool_ms": 5300, "confirm_wait_ms": 8000, "jarvix_ms": 400},
 			ActivityRow{Kind: ActivityKindTimings, Label: "Timings",
 				Detail: "model 1.2s · tools 5.3s · confirming 8.0s · jarvix 400ms"}},
+		// Superseded speech (issue #120): the skip is a visible decision, not
+		// a silent absence — and not a failure, because the skip is the
+		// feature working.
+		{"tts.superseded", map[string]any{"session_id": "s1", "turn": 2, "dropped": 3},
+			ActivityRow{Kind: ActivityKindTurn, Label: "Speech caught up",
+				Detail: "3 stale sentences from an earlier turn skipped, audio only — the transcript is complete"}},
+		{"tts.superseded", map[string]any{"session_id": "s1", "turn": 2, "dropped": 1},
+			ActivityRow{Kind: ActivityKindTurn, Label: "Speech caught up",
+				Detail: "1 stale sentence from an earlier turn skipped, audio only — the transcript is complete"}},
 		{"error", map[string]any{"stage": "assistant", "message": "model exploded"},
 			ActivityRow{Kind: ActivityKindError, Failed: true,
 				Label: "Failed at assistant", Detail: "model exploded"}},

@@ -63,6 +63,18 @@ type timings struct {
 	// audioOut is when that sample reached the audio device (audio.Trace).
 	audioOut mark
 
+	// supersededSentences counts queued utterances the speaker dropped
+	// unplayed because a newer turn's speech superseded them (issue #120).
+	// A count, not a duration — the one non-clock fact this record carries,
+	// and it belongs here because it is the same kind of honesty as the
+	// excluded spans: the turn's audio was shorter than its text, and a
+	// number that quietly omitted why would flatter the transcript. Noted
+	// per drop by the speaker goroutine, which is why it sits under mu like
+	// the marks rather than riding a speaker-local counter: it must survive
+	// into the report even when the turn is cancelled before the speaker's
+	// own tts.superseded event could be published.
+	supersededSentences int
+
 	// excluded accumulates the completed excluded spans by stage name
 	// (StageToolRuns, StageConfirmWait). Presence means the span happened,
 	// even when it rounded to zero milliseconds.
@@ -97,6 +109,14 @@ func (t *timings) set(field *mark) {
 		now := t.clock()
 		*field = mark{at: now, excluded: t.excludedTotalLocked(now)}
 	}
+}
+
+// noteSupersededDrop records one queued sentence dropped unplayed by
+// cross-turn supersession (issue #120).
+func (t *timings) noteSupersededDrop() {
+	t.mu.Lock()
+	t.supersededSentences++
+	t.mu.Unlock()
 }
 
 // clock reads the injected clock, defaulting to the real one.
@@ -190,6 +210,12 @@ const (
 	// Non-negative by construction: it equals the sum of the Jarvix-owned
 	// pipeline spans, each of which is a real elapsed interval.
 	StageJarvixOverhead = "jarvix_ms"
+	// StageSupersededSentences is how many queued sentences were dropped
+	// unplayed because a newer turn's speech superseded them (issue #120) —
+	// a count, the record's one key that is not milliseconds, which is why
+	// the name carries no _ms. Absent when nothing was dropped, like every
+	// stage that did not happen.
+	StageSupersededSentences = "superseded_sentences"
 )
 
 // StageOrder is the order stages are reported in, so every surface prints the
@@ -205,6 +231,10 @@ var StageOrder = []string{
 	StageConfirmWait,
 	StageReleaseToFirstAudio,
 	StageJarvixOverhead,
+	// The superseded count sits last: it is not a span at all, and it
+	// qualifies everything above it — the audio the stages measure is the
+	// audio that survived.
+	StageSupersededSentences,
 }
 
 // report renders the marks as the session.timings payload. Stages that did not
@@ -246,6 +276,13 @@ func (t *timings) report() map[string]any {
 	span(StageTranscriptToDelta, modelFrom, t.firstDelta)
 	span(StageDeltaToFirstPCM, t.firstDelta, t.firstPCM)
 	span(StageFirstPCMToAudioOut, t.firstPCM, t.audioOut)
+
+	// The superseded count (issue #120): present exactly when sentences were
+	// dropped, absent otherwise — "0 skipped" would read as an event that
+	// happened and rounded down, and no such event exists.
+	if t.supersededSentences > 0 {
+		out[StageSupersededSentences] = t.supersededSentences
+	}
 
 	// The excluded spans, published whenever they happened — a tool that ran
 	// in under a millisecond still ran. A span still open (the session was

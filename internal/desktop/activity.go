@@ -265,6 +265,15 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 		return one(memoryInjectedRow(data))
 	case "session.timings":
 		return timingsRows(data)
+	case "tts.superseded":
+		// Speech caught up to the conversation's leading edge (issue #120):
+		// queued sentences from an earlier turn were dropped unplayed so the
+		// newest message plays next. A row because a skip must be a visible
+		// decision, never a silent absence — the transcript stayed complete,
+		// and this is where the audio's shortfall is explained. The turn
+		// number is a speaker-internal ordinal; the count is the fact worth
+		// reading, so the number stays out of the row.
+		return one(supersededRow(data))
 	case "error":
 		return one(ActivityRow{Kind: ActivityKindError, Failed: true,
 			Label:  "Failed at " + activityString(data, "stage"),
@@ -295,6 +304,17 @@ func assistantFinishedRows(data map[string]any) []ActivityRow {
 				"anything it claims to have done on the machine, it did not do"}))
 	}
 	return rows
+}
+
+// supersededRow words the dropped-speech record (issue #120). The turn kind,
+// not error or cancelled: the skip is the feature working — the answer is
+// playing, just without the stale narration in front of it.
+func supersededRow(data map[string]any) ActivityRow {
+	dropped, _ := activityInt(data, "dropped")
+	return ActivityRow{Kind: ActivityKindTurn,
+		Label: "Speech caught up",
+		Detail: fmt.Sprintf("%d stale %s from an earlier turn skipped, audio only — the transcript is complete",
+			dropped, pluralActivity(dropped, "sentence", "sentences"))}
 }
 
 func toolStartedRow(data map[string]any) ActivityRow {
