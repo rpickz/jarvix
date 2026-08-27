@@ -1,4 +1,4 @@
-# ADR 0042 — AI-session recap: a thread anchored to an AI session recaps itself
+# ADR 0043 — AI-session recap: a thread anchored to an AI session recaps itself
 
 **Status:** accepted
 

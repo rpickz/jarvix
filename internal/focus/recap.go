@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 )
 
-// The AI-session recap (#124, ADR 0042): a thread anchored to an AI session
+// The AI-session recap (#124, ADR 0043): a thread anchored to an AI session
 // answers "where were we?" itself. On a switch or a check, Jarvix reads what
 // is visible in the anchored window through the desktop-context capture seam,
 // asks the model for a pinned-style summary — at most three short sentences,

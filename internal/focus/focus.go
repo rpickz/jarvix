@@ -23,7 +23,7 @@
 //     own record (ADR 0013): a recap can be wrong only if the record is,
 //     never because something was invented. The one exception is deliberate
 //     and fenced: a thread anchored to an AI session earns a model-composed
-//     summary of what is visible in that window (#124, ADR 0042, recap.go),
+//     summary of what is visible in that window (#124, ADR 0043, recap.go),
 //     and every failure of that path falls back to the templated record
 //     behind a pinned honest admission.
 package focus

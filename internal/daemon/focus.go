@@ -59,7 +59,7 @@ func newFocusService(paths config.Paths, compositor desktop.Compositor, bus *ses
 
 // bindFocus completes the service once the daemon exists: the firing path,
 // the midpoint switch, and the AI-session recap's capture and summarise
-// halves (#124, ADR 0042) — all of which read the running config at call
+// halves (#124, ADR 0043) — all of which read the running config at call
 // time so a reload lands without a restart.
 func (d *Daemon) bindFocus() {
 	d.focus.Bind(d.fireFocus, func() bool {

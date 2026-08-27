@@ -12,7 +12,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 )
 
-// The AI-session recap (#124, ADR 0042): the trigger policy, the pinned
+// The AI-session recap (#124, ADR 0043): the trigger policy, the pinned
 // output contract, the honest fallbacks, the hard deadline, and the
 // transient-content rule — all hermetic, with the capture and the model
 // faked at the Service's own seams and no test sleeping.
