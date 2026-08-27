@@ -133,14 +133,14 @@ FloatingWindow {
   // True while assistant.delta events are building the newest turn.
   property bool assistantStreaming: false
 
-  ListModel { id: turns } // { role: "user"|"assistant", text: string }
+  ListModel { id: turns } // { role: "user"|"assistant"|"confirmation", text, command, outcome }
   // Activity rows, oldest first, exactly as the daemon rendered them.
   ListModel { id: activityRows } // { seq, time, kind, label, detail, failed }
   // Archived conversations, newest first. "cid" rather than "id" because id
   // is the QML object-id keyword. Unreadable records list too, greyed: one
   // bad file never hides itself, let alone the library.
   ListModel { id: pastConversations } // { cid, preview, turnCount, lastActive, unreadable }
-  ListModel { id: pastTurns }         // { role, text } — the record being viewed
+  ListModel { id: pastTurns }         // { role, text, command, outcome } — the record being viewed
   // Search hits over the archive (issue #59), ranked by the daemon. The
   // window renders them and opens the conversation a hit names — every
   // matching, ranking and bounding decision is made daemon-side (ADR 0013).
@@ -1304,6 +1304,21 @@ FloatingWindow {
     return "Declined — " + source
   }
 
+  // confirmationRecordOutcome words a resolved confirmation record from the
+  // daemon's structured outcome (conversation.get / conversation.read, issue
+  // #118). The vocabulary — approved, declined, timed_out — is the daemon's
+  // and closed (docs/ipc.md); a timed-out record carries its own timeout_sec
+  // because the configured window may have changed since it was recorded.
+  // Anything else falls through to declineOutcome so an unknown source still
+  // shows its reason.
+  function confirmationRecordOutcome(rec) {
+    var outcome = String(rec.outcome || "")
+    if (outcome === "approved") return "Approved"
+    if (outcome === "timed_out")
+      return "Declined — timed out after " + Number(rec.timeout_sec || 0) + "s"
+    return declineOutcome(String(rec.source || ""))
+  }
+
   // answerConfirmation is what the ✓ and ✗ buttons (and Y/N on the focused
   // card) do: one session.confirm call carrying a literal boolean. No text is
   // interpreted here — the yes/no vocabulary lives in the daemon, once. The
@@ -1412,7 +1427,14 @@ FloatingWindow {
     pastTurns.clear()
     var list = result.turns || []
     for (var i = 0; i < list.length; i++) {
-      pastTurns.append({ role: String(list[i].role), text: String(list[i].text) })
+      // Confirmation records render in the read-only view too (issue #118):
+      // command and worded outcome ride the row; empty on utterances so the
+      // delegate can branch on them.
+      var rec = list[i].confirmation
+      var isRecord = String(list[i].role) === "confirmation" && rec
+      pastTurns.append({ role: String(list[i].role), text: String(list[i].text),
+        command: isRecord ? String(rec.command || "") : "",
+        outcome: isRecord ? confirmationRecordOutcome(rec) : "" })
     }
   }
 
@@ -1453,6 +1475,19 @@ FloatingWindow {
     confirmDeadlineMs = 0
     var list = result.turns || []
     for (var i = 0; i < list.length; i++) {
+      // A resolved confirmation arrives as a turn of its own (issue #118):
+      // the daemon decided it is part of the record and where it sits; this
+      // window only renders it — as the same card the live exchange showed,
+      // already resolved, so a close-and-reopen (or the #108 kill-rebuild)
+      // never erases what was asked and answered. The outcome text is worded
+      // from the daemon's structured record, exactly as the live resolution
+      // words the daemon's event.
+      var rec = list[i].confirmation
+      if (String(list[i].role) === "confirmation" && rec) {
+        turns.append({ role: "confirmation", text: String(list[i].text),
+          command: String(rec.command || ""), outcome: confirmationRecordOutcome(rec) })
+        continue
+      }
       turns.append({ role: String(list[i].role), text: String(list[i].text),
         command: "", outcome: "" })
     }
@@ -2168,7 +2203,8 @@ FloatingWindow {
             spacing: Style.space(4)
 
             Text {
-              text: model.role === "user" ? "You" : "Jarvix"
+              text: model.role === "user" ? "You"
+                : model.role === "confirmation" ? "Jarvix asked permission" : "Jarvix"
               font.family: Style.font.family
               font.bold: true
               font.pixelSize: Style.font.subtitle
@@ -2177,12 +2213,77 @@ FloatingWindow {
                 : Color.accent
             }
             Text {
+              visible: model.role !== "confirmation"
               text: model.text
               width: parent.width
               wrapMode: Text.Wrap
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               color: Color.popups.text
+            }
+
+            // A confirmation record, read-only (issue #118): the same facts
+            // the chat card shows — question, verbatim command in monospace,
+            // outcome in words — without buttons or countdown, because a past
+            // conversation has nothing left to answer. Styled like the chat
+            // card so the record reads as the exchange it was.
+            Rectangle {
+              visible: model.role === "confirmation"
+              width: parent.width
+              height: visible ? pastRecordBody.height + Style.space(20) : 0
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.accent, 0.08)
+              border.color: Util.alpha(Color.accent, 0.5)
+              border.width: 1
+              Accessible.role: Accessible.Grouping
+              Accessible.name: "Permission question: " + model.text
+                + " Command: " + model.command + " " + model.outcome
+
+              Column {
+                id: pastRecordBody
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.margins: Style.space(10)
+                spacing: Style.space(8)
+
+                Text {
+                  text: model.text
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.subtitle
+                  color: Color.popups.text
+                }
+                Rectangle {
+                  width: parent.width
+                  height: pastRecordCommand.height + Style.space(12)
+                  radius: Style.cornerRadius
+                  color: Util.alpha(Color.popups.text, 0.08)
+
+                  Text {
+                    id: pastRecordCommand
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: Style.space(8)
+                    text: model.command
+                    wrapMode: Text.WrapAnywhere
+                    font.family: "monospace"
+                    font.pixelSize: Style.font.subtitle
+                    color: Color.popups.text
+                  }
+                }
+                Text {
+                  text: model.outcome
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  font.family: Style.font.family
+                  font.bold: true
+                  font.pixelSize: Style.font.subtitle
+                  color: Color.popups.text
+                }
+              }
             }
           }
         }
