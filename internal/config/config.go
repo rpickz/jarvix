@@ -55,6 +55,10 @@ type Config struct {
 	// Memory is the knowledge base — facts the user explicitly asks Jarvix
 	// to remember, consulted on every model turn (see memory.go, ADR 0025).
 	Memory Memory `toml:"memory"`
+	// Vocabulary is the taught vocabulary — the words and phrases the user
+	// explicitly teaches Jarvix, consulted on every model turn beside the
+	// remembered facts (see vocabulary.go, issue #129).
+	Vocabulary Vocabulary `toml:"vocabulary"`
 	// Knowledge is the feed section — user-configured fetchers whose latest
 	// value the daemon keeps warm so changing facts answer instantly (see
 	// knowledge.go, ADR 0031). Empty feeds disable the feature.
@@ -603,6 +607,11 @@ func Default() Config {
 		// "remember ..." explicitly, so the trust decision is made per fact,
 		// not per install (ADR 0025).
 		Memory: Memory{Enabled: true, MaxFacts: 200, MaxInjectedTokens: 500},
+		// On by default for the same reason: only explicit teaching writes.
+		// speak_back stays false — mirrored slang from a machine can read as
+		// mockery, so using the user's words back is opt-in (issue #129).
+		Vocabulary: Vocabulary{Enabled: true, MaxEntries: 200, MaxInjectedTokens: 300,
+			SpeakBack: false},
 		// No feeds by default: a feed runs a command on a schedule, and that
 		// is a decision the user makes by writing the command (ADR 0031).
 		Knowledge: Knowledge{MaxInjectedTokens: DefaultKnowledgeInjectedTokens},
@@ -978,6 +987,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.scriptProblems()...)
 	problems = append(problems, c.contextProblems()...)
 	problems = append(problems, c.memoryProblems()...)
+	problems = append(problems, c.vocabularyProblems()...)
 	problems = append(problems, c.knowledgeProblems()...)
 	problems = append(problems, c.voiceProblems()...)
 	switch c.Log.Level {
