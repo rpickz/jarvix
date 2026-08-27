@@ -58,6 +58,12 @@ func (d *Daemon) watchActivity(ctx context.Context, events <-chan session.Event,
 			// memory (#93): a routine or script ending is recorded before its
 			// rendered row, so a list read racing the row push still agrees.
 			d.recordAutomationRun(ev)
+			// The replay row (issue #122) is worded beside its verb
+			// (replay.go) rather than in the desktop vocabulary — same
+			// daemon-side discipline, one special case here.
+			if ev.Type == "speech.replayed" {
+				d.appendActivity(ev, replayActivityRow(ev.Data))
+			}
 			for _, row := range desktop.ActivityRowsFor(ev.Type, ev.Data) {
 				d.appendActivity(ev, row)
 			}

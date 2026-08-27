@@ -1095,6 +1095,7 @@ func (d *Daemon) registerMethods() {
 	d.registerVocabularyMethods()
 	d.registerKnowledgeMethods()
 	d.registerTextMethods()
+	d.registerReplayMethods()
 	d.registerWakeMethods()
 	d.registerRoutineMethods()
 	d.registerScriptMethods()
