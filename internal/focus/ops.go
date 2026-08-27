@@ -263,7 +263,8 @@ func (s *Service) End(ref string) (string, error) {
 	if next.active == ended.ID {
 		next.active = ""
 	}
-	if next.session.ThreadID == ended.ID {
+	endedSession := next.session.ThreadID == ended.ID
+	if endedSession {
 		next.session = Session{}
 	}
 	if err := s.saveLocked(next); err != nil {
@@ -271,6 +272,11 @@ func (s *Service) End(ref string) (string, error) {
 		return "", err
 	}
 	delete(s.reminderNext, ended.ID)
+	if endedSession {
+		// Ending the thread ended its timebox too: the other threads'
+		// silenced check-ins reschedule rather than fire at the boundary.
+		s.rescheduleSilencedLocked()
+	}
 	s.mu.Unlock()
 	s.log.Info("thread ended", "component", "focus", "thread", ended.ID,
 		"parked", len(ended.Parked))

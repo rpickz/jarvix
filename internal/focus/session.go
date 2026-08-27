@@ -135,6 +135,10 @@ func (s *Service) clearSession(ack func(th Thread, elapsedMinutes int) string) (
 		s.mu.Unlock()
 		return "", err
 	}
+	// The session has left the floor: a check-in whose due moment fell
+	// inside it is rescheduled a whole interval out, never fired at the
+	// boundary (the do-not-nag rule's edge, rescheduleSilencedLocked).
+	s.rescheduleSilencedLocked()
 	s.mu.Unlock()
 	s.log.Info("focus session ended", "component", "focus",
 		"thread", th.ID, "elapsed_min", elapsed)
