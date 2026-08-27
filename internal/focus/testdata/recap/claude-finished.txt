@@ -1,0 +1,9 @@
+✔ All tasks complete
+
+● Ran go test ./... — 132 tests passed, 0 failed
+● Committed "billing: verify webhook signatures before parsing" (a1b2c3d)
+
+The refactor is done: every webhook now verifies its signature before the
+payload is parsed, and the replay path shares the same check.
+
+❯

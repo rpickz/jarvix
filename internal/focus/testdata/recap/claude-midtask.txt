@@ -1,0 +1,9 @@
+✳ Claude Code — refactoring the payment webhook
+
+● Running: go test ./internal/billing/...
+  ⎿ 14 of 22 packages compiled
+
+● Updating webhook_handler.go to verify Stripe signatures before parsing
+  the payload. Two call sites left: the retry queue and the CLI replayer.
+
+esc to interrupt · 42s

@@ -21,8 +21,11 @@
 //     neither wall-clock moments nor fetch backoff.
 //   - Every spoken sentence is templated here, daemon-side, from the thread's
 //     own record (ADR 0013): a recap can be wrong only if the record is,
-//     never because something was invented. Model-composed summaries arrive
-//     with the sibling ticket, not this one.
+//     never because something was invented. The one exception is deliberate
+//     and fenced: a thread anchored to an AI session earns a model-composed
+//     summary of what is visible in that window (#124, ADR 0042, recap.go),
+//     and every failure of that path falls back to the templated record
+//     behind a pinned honest admission.
 package focus
 
 import (
@@ -71,6 +74,10 @@ type Thread struct {
 	LastActivity time.Time
 	// RemindEveryMin is the check-in interval in minutes, 0 for none.
 	RemindEveryMin int
+	// Recap is the AI-session recap trigger (#124): RecapAuto (the empty
+	// default — read the anchored window only when it is a terminal),
+	// RecapAlways, or RecapNever. Hand-editable as the thread's `recap` key.
+	Recap string
 	// Anchors holds at most two windows.
 	Anchors []Anchor
 	Parked  []Parked
@@ -177,6 +184,20 @@ type Options struct {
 	// (config focus.midpoint_checkin), read at fire time so a reload lands
 	// without a restart. Nil means disabled — the shipped default.
 	Midpoint func() bool
+	// Capture reads what is visible in one anchored window for the
+	// AI-session recap (#124), through the desktop-context capture seam:
+	// bounded, redacted, and honouring ctx. ErrRecapUnavailable means the
+	// window source is switched off and the recap skips silently. Nil
+	// disables the model-composed recap entirely (with Summarise).
+	Capture func(ctx context.Context, a Anchor) (Capture, error)
+	// Summarise asks the model for the pinned-style session summary; the
+	// prompt is composed here (RecapPrompt) so every provider answers the
+	// same contract. Nil disables the model-composed recap (with Capture).
+	Summarise func(ctx context.Context, prompt string) (string, error)
+	// RecapBudget bounds one capture-plus-summary attempt; zero means
+	// DefaultRecapBudget. Tests shrink it so a deadline fires without a
+	// sleep.
+	RecapBudget time.Duration
 	// Now is the clock; Timer creates one shot of it.
 	Now   func() time.Time
 	Timer func(d time.Duration) (<-chan time.Time, func())
@@ -192,9 +213,15 @@ type Service struct {
 	fire     func(ctx context.Context, f Firing)
 	publish  func(string, map[string]any)
 	midpoint func() bool
-	now      func() time.Time
-	timer    func(d time.Duration) (<-chan time.Time, func())
-	log      *slog.Logger
+	// capture and summarise are the AI-session recap's two halves (#124);
+	// both nil means every recap is the templated base. Bound once, before
+	// Start, like fire — never mutated after.
+	capture     func(ctx context.Context, a Anchor) (Capture, error)
+	summarise   func(ctx context.Context, prompt string) (string, error)
+	recapBudget time.Duration
+	now         func() time.Time
+	timer       func(d time.Duration) (<-chan time.Time, func())
+	log         *slog.Logger
 	// write persists the store; always writeStore outside tests. A field for
 	// the memory book's reason: the write-failure contract (a failed write
 	// must cost exactly nothing in memory) needs a disk that fails on
@@ -239,16 +266,19 @@ func NewService(path string, opts Options, log *slog.Logger) *Service {
 		log = slog.Default()
 	}
 	s := &Service{
-		path:     path,
-		windows:  opts.Windows,
-		fire:     opts.Fire,
-		publish:  opts.Publish,
-		midpoint: opts.Midpoint,
-		now:      opts.Now,
-		timer:    opts.Timer,
-		log:      log,
-		write:    writeStore,
-		rearm:    make(chan struct{}, 1),
+		path:        path,
+		windows:     opts.Windows,
+		fire:        opts.Fire,
+		publish:     opts.Publish,
+		midpoint:    opts.Midpoint,
+		capture:     opts.Capture,
+		summarise:   opts.Summarise,
+		recapBudget: opts.RecapBudget,
+		now:         opts.Now,
+		timer:       opts.Timer,
+		log:         log,
+		write:       writeStore,
+		rearm:       make(chan struct{}, 1),
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -276,6 +306,17 @@ func (s *Service) Path() string { return s.path }
 func (s *Service) Bind(fire func(ctx context.Context, f Firing), midpoint func() bool) {
 	s.fire = fire
 	s.midpoint = midpoint
+}
+
+// BindRecap installs the AI-session recap's two halves (#124) after
+// construction, the same late-bind pattern as Bind: wired once,
+// single-threaded, before Start ever runs. The capture half reaches the
+// desktop and the summarise half reaches the provider, and both belong to
+// the daemon.
+func (s *Service) BindRecap(capture func(ctx context.Context, a Anchor) (Capture, error),
+	summarise func(ctx context.Context, prompt string) (string, error)) {
+	s.capture = capture
+	s.summarise = summarise
 }
 
 // ---------------------------------------------------------------- storage
@@ -362,6 +403,11 @@ func (s *Service) normalize(p persisted) persisted {
 		}
 		if th.RemindEveryMin < 0 {
 			th.RemindEveryMin = 0
+		}
+		if th.Recap != RecapAlways && th.Recap != RecapNever {
+			// An unrecognised trigger word repairs to the conservative
+			// default rather than being guessed at.
+			th.Recap = RecapAuto
 		}
 		if len(th.Anchors) > maxAnchors {
 			th.Anchors = th.Anchors[:maxAnchors]
