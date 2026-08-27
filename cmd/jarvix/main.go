@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/rpickz/jarvix/internal/build"
@@ -20,6 +21,7 @@ Usage:
   jarvix ask "question"         Ask through the full conversation pipeline
   jarvix listen                 Record from the microphone, then ask
   jarvix cancel                 Cancel the current interaction
+  jarvix say-again [n]          Speak a message again (default: the last answer)
   jarvix confirm                Approve the pending tool confirmation
   jarvix deny                   Decline the pending tool confirmation
   jarvix new                    Start a fresh conversation (the old one is archived)
@@ -101,6 +103,18 @@ func run(args []string) int {
 		err = cmdListen(paths)
 	case "cancel":
 		err = cmdCancel(paths)
+	case "say-again":
+		turn := 0
+		if len(rest) > 1 {
+			return fail(fmt.Errorf("usage: jarvix say-again [turn]"))
+		}
+		if len(rest) == 1 {
+			turn, err = strconv.Atoi(rest[0])
+			if err != nil || turn < 1 {
+				return fail(fmt.Errorf("usage: jarvix say-again [turn] — turn is a position in the current conversation, counting from 1"))
+			}
+		}
+		err = cmdSayAgain(paths, turn)
 	case "confirm":
 		err = cmdConfirm(paths, true)
 	case "deny":
