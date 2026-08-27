@@ -532,3 +532,49 @@ func TestActivitySummariesPluraliseCorrectly(t *testing.T) {
 		t.Errorf("steps detail = %q", got)
 	}
 }
+
+// TestFocusRecapRowSaysARecapHappenedWithoutTheContent (#124): the activity
+// ring says an AI-session recap was generated — thread, outcome, sizes —
+// and never what the screen showed or the summary said. The event itself
+// carries no content by contract; a rogue content field added later must
+// still never surface.
+func TestFocusRecapRowSaysARecapHappenedWithoutTheContent(t *testing.T) {
+	const secret = "hunter2-the-door-code-is-4312"
+	row := oneActivityRow(t, "focus.recap", map[string]any{
+		"thread": "t1", "name": "the ci refactor", "outcome": "spoken",
+		"chars": 812, "capture_ms": 12, "model_ms": 940, "total_ms": 952,
+		"text": secret, "summary": secret,
+	})
+	if row.Kind != ActivityKindContext || row.Label != "Session recap spoken" {
+		t.Errorf("row = %+v", row)
+	}
+	if !strings.Contains(row.Detail, "the ci refactor") ||
+		!strings.Contains(row.Detail, "812 chars read") ||
+		!strings.Contains(row.Detail, "952 ms") {
+		t.Errorf("detail = %q", row.Detail)
+	}
+	if strings.Contains(row.Label+row.Detail, secret) {
+		t.Errorf("the row leaked content: %+v", row)
+	}
+
+	fell := oneActivityRow(t, "focus.recap", map[string]any{
+		"thread": "t1", "name": "the ci refactor", "outcome": "capture_failed",
+		"chars": 0, "capture_ms": 3, "model_ms": 0, "total_ms": 3,
+	})
+	if fell.Label != "Session recap fell back" ||
+		!strings.Contains(fell.Detail, "could not be read") {
+		t.Errorf("capture-failed row = %+v", fell)
+	}
+	if fell.Failed {
+		t.Error("an honest fallback is not a failure row")
+	}
+
+	late := oneActivityRow(t, "focus.recap", map[string]any{
+		"thread": "t1", "name": "the ci refactor", "outcome": "model_failed",
+		"chars": 812, "capture_ms": 12, "model_ms": 3000, "total_ms": 3012,
+	})
+	if late.Label != "Session recap fell back" ||
+		!strings.Contains(late.Detail, "no summary in time") {
+		t.Errorf("model-failed row = %+v", late)
+	}
+}
