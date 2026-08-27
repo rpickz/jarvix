@@ -155,6 +155,39 @@ type utterance struct {
 	// the answer starting: the session is in AwaitingConfirmation or Thinking
 	// while it plays, and the overlay already has its own event for each.
 	aside bool
+	// turn is which speech turn of this speaker committed the utterance —
+	// stamped at enqueue from the speaker's monotonic turn counter (issue
+	// #120). It exists so that when a later turn commits its first sentence,
+	// this one can be recognised at dequeue as stale narration the
+	// conversation has already moved past, and dropped unplayed. Asides carry
+	// the turn they were queued during for the same test; whether an aside may
+	// actually be dropped is keep's decision, not turn's.
+	turn int
+	// keep exempts an aside from supersession — it plays however far the
+	// answer has moved on. The policy (issue #120), pinned here because this
+	// flag is where it is enforced:
+	//
+	//   - A confirmation question keeps. It gates progress: the turn is parked
+	//     in AwaitingConfirmation until it is answered or times out, so
+	//     dropping it would leave the user a silent countdown they were never
+	//     asked about. (In practice the asking goroutine is blocked while the
+	//     question is queued, so no later turn can commit speech around it —
+	//     but the guarantee must hold by construction, not by the current
+	//     shape of the caller.)
+	//   - A receipt of an executed action must keep, if one is ever spoken as
+	//     an aside: the action happened, and saying so is the record — honesty
+	//     outranks freshness. There is no such call site today; this is the
+	//     doctrine a future one inherits.
+	//   - A progress reassurance does not keep. "Still working" is only true
+	//     while the tool runs, and a later turn's sentence can only have been
+	//     committed after that tool returned — so a reassurance still queued
+	//     by then would announce work already finished. Stale comfort is
+	//     noise, and it drops.
+	//
+	// Answer sentences never set keep: within a turn nothing is ever skipped
+	// (a sentence of the newest turn is never stale by definition), and across
+	// turns dropping them is the whole feature.
+	keep bool
 	// ctx, non-nil only for an aside, bounds that one utterance: cancelling it
 	// stops the aside's synthesis and drops whatever of it has not reached the
 	// player, without touching the stream or the answer around it (issue #119
@@ -214,10 +247,30 @@ type streamingSpeaker struct {
 	// drained is set once run() has finished: nothing is playing and nothing
 	// ever will be again on this speaker.
 	drained bool
+	// turn is the speech turn utterances are being committed for — 1 for the
+	// answer's first provider round, advanced by nextTurn each time the tool
+	// loop opens another round (issue #120). Only the enqueueing goroutine
+	// ever moves it, but it sits under mu because run() reads floor (below)
+	// against the turn stamped on each utterance, and the two must move under
+	// one lock or a drop decision could read a torn pair.
+	turn int
+	// floor is the newest turn that has committed an answer sentence to the
+	// queue, and therefore the oldest turn still allowed to play: at dequeue,
+	// anything below it that does not keep is stale — narration for a turn
+	// the conversation has already moved past — and is dropped unplayed
+	// (issue #120). It rises only when a *sentence* of a newer turn is
+	// actually enqueued, never merely because a new round opened: a round
+	// that says nothing (tool calls only) supersedes nothing, because there
+	// is no newer speech for the stale sentences to be holding back. Raised
+	// on the enqueueing goroutine before the sentence is handed to run(), the
+	// same before-the-channel-send discipline accepted uses (#80), so by the
+	// time run() can dequeue anything the floor that governs it is already
+	// visible.
+	floor int
 }
 
 func newStreamingSpeaker(e *Engine, s *sess) *streamingSpeaker {
-	sp := &streamingSpeaker{e: e, s: s, in: make(chan utterance, 64), res: make(chan error, 1)}
+	sp := &streamingSpeaker{e: e, s: s, in: make(chan utterance, 64), res: make(chan error, 1), turn: 1}
 	// Register with the session so CancelSpeech can find the turn's voice.
 	// Registration replaces any previous speaker: a session has at most one
 	// live speaker at a time (one per think() call, or the prompt and ack
@@ -275,6 +328,55 @@ func (sp *streamingSpeaker) speak(sentence string) {
 	sp.enqueue(utterance{text: sentence})
 }
 
+// nextTurn opens a new speech turn: every sentence committed from here on
+// belongs to it, and the first one actually enqueued supersedes whatever
+// earlier turns still have queued unplayed (issue #120). The engine calls it
+// once per provider round after the first — a tool round is the model going
+// back to work, and what it says on returning is the newer message the user
+// asked speech to keep up with.
+//
+// Opening a turn is deliberately not what supersedes: the floor only rises
+// when the new turn commits a sentence (see enqueue). Only the enqueueing
+// goroutine calls this, in strict alternation with the round's speak calls,
+// so turn needs no ordering subtlety beyond the shared lock.
+func (sp *streamingSpeaker) nextTurn() {
+	sp.mu.Lock()
+	sp.turn++
+	sp.mu.Unlock()
+}
+
+// superseded reports whether u is stale at dequeue: committed for a turn the
+// answer has since moved past, and not exempt. This is the one place a queued
+// utterance can be discarded, and it is deliberately at dequeue rather than
+// enqueue — the queue is a channel, and only run() ever takes from it, so
+// dequeue is the single point where every stale utterance is guaranteed to
+// pass exactly once.
+//
+// The utterance currently being synthesized or played is never touched: a
+// sentence that has begun is finished, not cut. Cutting mid-word means either
+// tearing down the turn's one playback stream (the #52/#53 doctrine exists to
+// prevent a second stream) or injecting silence mid-buffer, and buys at most
+// one sentence of latency — while a word chopped in half is audibly broken in
+// every exchange it happens in. Supersession pays for its wins at the queue,
+// never at the device (issue #120).
+func (sp *streamingSpeaker) superseded(u utterance) bool {
+	if u.keep {
+		return false
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return u.turn < sp.floor
+}
+
+// supersedingTurn is the newest turn with committed speech — the turn on
+// whose behalf stale utterances are being dropped, reported in the
+// tts.superseded event.
+func (sp *streamingSpeaker) supersedingTurn() int {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.floor
+}
+
 // interject queues something that is not part of the answer — a confirmation
 // question, a "still working" reassurance — behind everything already waiting
 // to be said, and returns once it has been handed to the player (or at once if
@@ -295,9 +397,14 @@ func (sp *streamingSpeaker) speak(sentence string) {
 // per-utterance moment at which the device has fallen silent, and inventing
 // one would mean tearing the stream down and starting a second (which is the
 // overlap this exists to prevent).
-func (sp *streamingSpeaker) interject(ctx context.Context, text string) {
+//
+// keep exempts the aside from cross-turn supersession (issue #120) — see
+// utterance.keep for the policy of who keeps and why. A dropped aside still
+// releases this wait exactly as a cancelled one does: run() sees it once and
+// closes done.
+func (sp *streamingSpeaker) interject(ctx context.Context, text string, keep bool) {
 	done := make(chan struct{})
-	if !sp.enqueue(utterance{text: text, aside: true, ctx: ctx, done: done}) {
+	if !sp.enqueue(utterance{text: text, aside: true, keep: keep, ctx: ctx, done: done}) {
 		return
 	}
 	select {
@@ -327,8 +434,22 @@ func (sp *streamingSpeaker) enqueue(u utterance) bool {
 	// handoff then loses to session teardown, the stale mark is unobservable:
 	// every path that cancels the session context also clears Engine.current
 	// under the lock, so CancelSpeech bails before it would ask this speaker.
+	//
+	// The turn stamp and the supersession floor ride the same critical
+	// section and the same before-the-send ordering (issue #120): an answer
+	// sentence raises the floor to its own turn the moment it is committed,
+	// so by the time run() can dequeue anything at all, every older queued
+	// sentence is already condemned — there is no window in which run() races
+	// past a stale sentence the commit meant to drop. If the handoff below
+	// then fails, the raised floor is as unobservable as the stale accepted
+	// mark: enqueue fails only when the session has ended, and a dead
+	// session's speaker drains everything regardless.
 	sp.mu.Lock()
 	sp.accepted = true
+	u.turn = sp.turn
+	if !u.aside && sp.floor < u.turn {
+		sp.floor = u.turn
+	}
 	needsAnnounce := !u.aside && !sp.announced
 	sp.mu.Unlock()
 	if needsAnnounce && !sp.announce() {
@@ -472,6 +593,14 @@ func (sp *streamingSpeaker) run() {
 		return nil
 	}
 
+	// dropped counts stale utterances discarded since the last one that
+	// played, so one supersession is one event however many sentences it
+	// swallowed. Local to this loop on purpose: drops only ever happen here,
+	// and the durable copy lives in the session's timings (noted per drop),
+	// where it survives even a turn that dies before the event below could be
+	// published — the cancel path owns that turn's events, but the record
+	// still says what was dropped.
+	dropped := 0
 	for u := range sp.in {
 		if synthErr != nil || sp.s.ctx.Err() != nil {
 			// Drain input without speaking once we've stopped — but still
@@ -487,6 +616,40 @@ func (sp *streamingSpeaker) run() {
 			// are untouched (issue #119).
 			sp.release(u)
 			continue
+		}
+		if sp.superseded(u) {
+			// Stale: a newer turn has committed speech, and this utterance
+			// belongs to a turn the conversation moved past while it sat in
+			// the queue (issue #120). Dropped unplayed — audio only: the
+			// transcript, the events, and the record all carried this text
+			// when it streamed, so nothing is lost except the lag. The
+			// utterance in flight when the floor rose is not this one and is
+			// never cut — see superseded for why a begun sentence always
+			// finishes.
+			dropped++
+			sp.s.timings.noteSupersededDrop()
+			sp.release(u)
+			continue
+		}
+		if dropped > 0 {
+			// The queue has caught up to speech that still counts: account
+			// for the skip before saying anything newer. One event per
+			// supersession, carrying the turn that won and how many sentences
+			// it cost — the shape replay/precedence work builds on, and the
+			// activity feed's evidence that the silence was a decision, not a
+			// glitch. Published here, at the first surviving utterance,
+			// because only now is the count complete: a channel cannot be
+			// counted at the moment the floor rises. A batch with no survivor
+			// cannot happen on a live turn — the sentence that raised the
+			// floor sits behind the stale ones it condemned and is itself
+			// immune — and a turn that died first forfeits the event to the
+			// cancel path like every other event it owns.
+			turn := sp.supersedingTurn()
+			sp.e.publish(Event{Type: "tts.superseded", Data: map[string]any{
+				"session_id": sp.s.id, "turn": turn, "dropped": dropped}})
+			sp.e.log.Info("stale queued speech superseded", "component", "tts",
+				"session_id", sp.s.id, "turn", turn, "dropped", dropped)
+			dropped = 0
 		}
 		if err := synth(u); err != nil {
 			// A cancelled aside unwinds with its own context's error, and

@@ -1099,6 +1099,16 @@ func (e *Engine) think(s *sess) {
 	// this stayed at zero is the model narrating work it never asked to do.
 	toolCalls := 0
 	for round := 0; round < maxToolRounds; round++ {
+		if round > 0 && speaker != nil {
+			// Each provider round is a new speech turn (issue #120): the model
+			// went away to work and is answering again, and what it says now
+			// is the message the user is actually waiting on. The first
+			// sentence this round commits to the voice supersedes whatever
+			// earlier rounds still have queued unplayed — strictly cross-turn,
+			// decided at commit (a round that streams no text supersedes
+			// nothing; see streamingSpeaker.nextTurn and enqueue).
+			speaker.nextTurn()
+		}
 		text, calls, ok := e.streamOnce(s, ai.ChatRequest{
 			Model:       e.opts.Model,
 			MaxTokens:   e.opts.MaxTokens,

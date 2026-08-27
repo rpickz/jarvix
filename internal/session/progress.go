@@ -55,8 +55,12 @@ func (e *Engine) startToolProgress(s *sess, call ai.ToolCall, waiting string,
 			// talks over the answer is worse than no reassurance.
 			// The session's own context as the prompt context: nothing
 			// resolves a reassurance early, so only the session ending can
-			// (and should) cut it off.
-			e.speakPrompt(s, s.ctx, waiting, speaker)
+			// (and should) cut it off. keep is false: "still working" is only
+			// true while the tool runs, and a newer turn's sentence can only
+			// have been committed after the tool returned — a reassurance
+			// still queued by then would announce work already finished, so
+			// cross-turn supersession drops it (issue #120; utterance.keep).
+			e.speakPrompt(s, s.ctx, waiting, speaker, false)
 		}
 	}()
 	return func() {

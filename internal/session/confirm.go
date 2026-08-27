@@ -412,8 +412,10 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		"command", req.command, "rule", req.rule)
 
 	// Speak first, then start the clock: the user's 30 seconds begin when
-	// the question has been asked, not while it is still being said.
-	e.speakPrompt(s, promptCtx, e.spokenConfirmationPrompt(req), req.speaker)
+	// the question has been asked, not while it is still being said. keep is
+	// true: a confirmation question gates progress and must survive
+	// cross-turn supersession (issue #120) — see utterance.keep.
+	e.speakPrompt(s, promptCtx, e.spokenConfirmationPrompt(req), req.speaker, true)
 
 	// The clock is starting *now*, which is later than the event above went
 	// out — so the deadline gets an announcement of its own rather than a
@@ -559,10 +561,17 @@ func shortConfirmationPrompt(tool string) string {
 // arriving mid-read-out cancels it, which stops the remaining audio on either
 // path without touching the turn (issue #119).
 //
+// keep is the aside's supersession exemption (issue #120), passed through to
+// the speaker's queue: true for a confirmation question (it gates progress
+// and must play however far the answer has moved on), false for a progress
+// reassurance (stale comfort drops). Meaningless on the direct path, which
+// has no queue for a newer turn to supersede. See utterance.keep for the
+// pinned policy.
+//
 // Failures degrade to silence either way: the overlay still shows the question
 // and the timeout still declines, so a broken voice never blocks the safety
 // decision.
-func (e *Engine) speakPrompt(s *sess, ctx context.Context, text string, speaker *streamingSpeaker) {
+func (e *Engine) speakPrompt(s *sess, ctx context.Context, text string, speaker *streamingSpeaker, keep bool) {
 	// A quiet session (ADR 0032) never reaches a confirmation on the intended
 	// path — the daemon refuses an ask-tier clockfire before a session exists
 	// — but belt and braces: if one ever does, the overlay still shows the
@@ -572,7 +581,7 @@ func (e *Engine) speakPrompt(s *sess, ctx context.Context, text string, speaker 
 		return
 	}
 	if speaker != nil {
-		speaker.interject(ctx, text)
+		speaker.interject(ctx, text, keep)
 		return
 	}
 	spoken := e.spokenForm(text)
