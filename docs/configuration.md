@@ -187,7 +187,7 @@ shell_max_output_kb = 16         # captured output cap fed back to the model
 artifacts = true                 # enable artifact.create (diagrams, documents,
                                  # spreadsheets, sketches on screen)
 desktop = true                   # enable the desktop.* window tools: list,
-                                 # focus, move, close, launch
+                                 # focus, move, close, launch, name
 desktop_apps = []                # what desktop.launch_app may start; empty
                                  # means anything on PATH, e.g.
                                  # ["firefox", "alacritty", "/opt/apps/notes"]
@@ -1505,6 +1505,7 @@ How much it asks first:
 | --- | --- | --- |
 | `desktop.list_windows` | allow | Sees no more than the desktop context Jarvix may already gather |
 | `desktop.focus_window` | allow | Changes only where you are looking, and you can see it happen |
+| `desktop.name_window` | allow | Assigns a nickname you chose out loud; the opposite assignment undoes it |
 | `desktop.move_window` | ask | Changes your workspace layout |
 | `desktop.close_window` | ask | Closes something you might be in the middle of |
 | `desktop.launch_app` | ask | Starts a program |

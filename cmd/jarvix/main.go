@@ -35,6 +35,8 @@ Usage:
   jarvix mute                   Close the microphone: kill background capture
   jarvix unmute                 Listen for the wake word again
   jarvix window                 Open/close the conversation window
+  jarvix windows [--json]       List open windows with their nicknames
+  jarvix windows name <nickname> [window]  Nickname a window (default: the focused one)
   jarvix routines [--json]      List the configured routines and their phrases
   jarvix routines run "name"    Run one routine (same as speaking its phrase)
   jarvix scripts [--json]       List the configured scripts and their phrases
@@ -133,6 +135,19 @@ func run(args []string) int {
 		err = cmdMute(paths, false)
 	case "window":
 		err = cmdWindow()
+	case "windows":
+		switch {
+		case len(rest) == 0:
+			err = cmdWindows(paths, false)
+		case rest[0] == "--json" && len(rest) == 1:
+			err = cmdWindows(paths, true)
+		case rest[0] == "name" && len(rest) >= 2:
+			// Words after the nickname describe which window; none means
+			// the focused one, exactly as the spoken assignment works.
+			err = cmdWindowsName(paths, rest[1], strings.Join(rest[2:], " "))
+		default:
+			return fail(fmt.Errorf("usage: jarvix windows [--json] | jarvix windows name <nickname> [window]"))
+		}
 	case "routines":
 		switch {
 		case len(rest) == 0:

@@ -335,7 +335,8 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	}
 	capture := newLayoutCapturer(d.paths, d.compositor, d.log)
 	capture.committed = d.captureCommitted
-	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.knowledge, d.conversations, d.log)
+	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.knowledge, d.conversations,
+		d.windows, d.log)
 	opts.Capture = capture
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, opts); err != nil {
@@ -369,6 +370,12 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		entries := merged.AutomationEntries()
 		d.automations.Reconfigure(entries)
 		d.warnUnattendableSchedules(merged, entries)
+	}
+	// The nickname collision check (#126) follows the engine to the rebuilt
+	// grammar, so a nickname refused as "already a routine trigger" and the
+	// routine that owns the phrase always come from the same config read.
+	if d.router != nil {
+		d.router.set(opts.Intents)
 	}
 	// The swap succeeded: the previous configuration's engine processes are
 	// nobody's children now, so kill them. Without this a reload leaks a

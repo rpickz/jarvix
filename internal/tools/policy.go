@@ -205,10 +205,16 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // registry (ADR 0015) and the [ai] space is pruned from the settings view
 // before the tool sees it, so there is nothing here a read could leak that
 // the prompt does not already carry.
+// desktop.name_window (#126) sits with the window reads for the focus
+// reason: assigning a nickname changes nothing on screen, enters nothing
+// anywhere, and the opposite assignment undoes it exactly. The user also
+// just said the name out loud — "call this window builds" IS the
+// authorisation — so a question would confirm their own sentence.
 var builtinToolDefaults = map[string]PolicyDecision{
 	"artifact.create":           PolicyAllow,
 	ListWindowsToolName:         PolicyAllow,
 	FocusWindowToolName:         PolicyAllow,
+	NameWindowToolName:          PolicyAllow,
 	MemoryRememberToolName:      PolicyAllow,
 	MemorySearchToolName:        PolicyAllow,
 	RoutineToolName:             PolicyAllow,

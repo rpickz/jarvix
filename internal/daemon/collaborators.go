@@ -17,6 +17,7 @@ import (
 	"github.com/rpickz/jarvix/internal/script"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt/whispercpp"
+	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
 	"github.com/rpickz/jarvix/internal/warm"
@@ -232,7 +233,7 @@ func scriptRunner(cfg config.Config, bus *session.Bus, logger *slog.Logger) sess
 // here decides whether the engine writes to it.
 func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
 	book *memory.Book, feeds *knowledge.Service, archive conversations.Store,
-	logger *slog.Logger) session.Options {
+	windows *tools.Desktop, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -247,6 +248,7 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Intents:           intentRouter(cfg),
 		Routines:          routineRunner(cfg, compositor, bus, logger),
 		Scripts:           scriptRunner(cfg, bus, logger),
+		WindowNames:       windowNamer(windows),
 		Compositor:        compositor,
 		Context:           contextCollector(cfg, logger),
 		Memory:            memoryInjector(book),
@@ -260,6 +262,18 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		WakeAliases: cfg.Assistant.EffectiveAliases(),
 		Lexicon:     cfg.TTS.Lexicon,
 	}
+}
+
+// windowNamer adapts the window tools' shared state for the engine's
+// nickname intents (#126), or leaves the option nil when no window tools are
+// wired. Same typed-nil trap as contextCollector: a nil *tools.Desktop in
+// the interface field would read as "nicknames exist" to the engine —
+// disabled must mean absent, so the intents refuse honestly.
+func windowNamer(windows *tools.Desktop) session.WindowNamer {
+	if windows == nil {
+		return nil
+	}
+	return windows
 }
 
 // contextCollector builds the desktop-context collector (ADR 0019), or leaves

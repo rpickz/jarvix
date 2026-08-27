@@ -128,6 +128,15 @@ type Match struct {
 	// anything more than a name would be the first place an argument could
 	// come from.
 	Script string
+	// WindowName is the nickname spoken to "call this window <name>" (#126),
+	// empty for every other intent. Like CaptureName, only the raw spoken
+	// name travels: the router decides *whether* the utterance names a
+	// window, and the engine hands the words to the window-name seam, which
+	// owns normalisation, collision checks, and the assignment itself.
+	WindowName string
+	// WindowNames marks "what are my windows called" (#126): the engine
+	// answers with the window-name seam's one spoken listing.
+	WindowNames bool
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -234,6 +243,12 @@ type Router struct {
 	maxWords int
 	// names lists the compiled intents in table order, for diagnostics.
 	names []string
+	// owned maps every literal phrase this table claims to a human
+	// description of its owner — the same map the collision checks in New
+	// build. Retained so Owner can answer "is this phrase spoken for?" for
+	// window nicknames (#126) with the exact wording a config collision
+	// error uses.
+	owned map[string]string
 }
 
 // rule is one compiled pattern together with what to do when it matches.
@@ -252,6 +267,11 @@ type rule struct {
 	// capture marks the "save this as {name}" rules (#62): a match hands the
 	// trailing free-text words to the engine as Match.CaptureName.
 	capture bool
+	// windowName marks the "call this window {name}" rules (#126): a match
+	// hands the trailing free-text words to the engine as Match.WindowName.
+	windowName bool
+	// windowNames marks the "what are my windows called" rules (#126).
+	windowNames bool
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -409,6 +429,24 @@ func New(opts Options) (*Router, error) {
 		}
 	}
 
+	// The window-name listing phrases (#126) are built-ins in all but table
+	// membership: literal, whole-utterance, and owned, so a custom intent or
+	// routine that wants one is refused naming this owner like any built-in's.
+	// They live outside builtinTable because their rule carries a flag, not an
+	// argv or a compositor action — the listing is composed by the window-name
+	// seam at match time, and nothing about windows may live in this table.
+	for _, raw := range windowNamesPatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list; a bad pattern added later must
+			// fail compilation, not silently never match.
+			return nil, fmt.Errorf("window names pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = WindowNamesIntentName
+		r.add(&rule{name: WindowNamesIntentName, pattern: p, windowNames: true})
+	}
+	r.names = append(r.names, WindowNamesIntentName)
+
 	// taken maps a compiled phrase to a human description of what owns it, so
 	// a routine phrase collision is reported against whichever of the three
 	// families — built-in, custom intent, another routine — got there first.
@@ -551,12 +589,78 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: CaptureIntentName, pattern: p, capture: true})
 	}
 	r.names = append(r.names, CaptureIntentName)
+
+	// The window-name assignment patterns (#126) share the capture patterns'
+	// shape — literal words ending in the one free-text slot — and their
+	// position: compiled last, so every literal phrase wins over the slot.
+	for _, raw := range windowNamePatterns {
+		p, err := compileCapture(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the capture table's.
+			return nil, fmt.Errorf("window name pattern %q: %w", raw, err)
+		}
+		r.add(&rule{name: WindowNameIntentName, pattern: p, windowName: true})
+	}
+	r.names = append(r.names, WindowNameIntentName)
+
+	// Keep the collision map: Owner answers nickname-assignment checks (#126)
+	// from the very map the config collisions were judged against, so a
+	// refused nickname and a refused routine phrase name owners identically.
+	r.owned = taken
 	return r, nil
 }
 
 // CaptureIntentName identifies the "save this as <name>" intent (#62) in
 // logs and the intent.executed event.
 const CaptureIntentName = "routine.capture"
+
+// WindowNameIntentName identifies the "call this window <name>" intent
+// (#126) in logs and the intent.executed event.
+const WindowNameIntentName = "window.name"
+
+// WindowNamesIntentName identifies the "what are my windows called" listing
+// (#126) in logs and the intent.executed event.
+const WindowNamesIntentName = "window.names"
+
+// windowNamePatterns are the utterances that give the focused window a
+// nickname (#126). Like the capture patterns they are a short, literal list
+// ending in the one free-text slot, because the name is the user's to choose
+// and cannot be enumerated. All of them say "window": "call this X" without
+// it is far more likely a sentence for the model ("call this a success")
+// than an assignment, and ambiguity belongs to the model, never this table.
+var windowNamePatterns = []string{
+	"call this window {name}",
+	"call that window {name}",
+	"name this window {name}",
+	"nickname this window {name}",
+}
+
+// windowNamesPatterns are the utterances that list the current window
+// nicknames (#126). Fully literal — a near-synonym is a code change with a
+// test, like every entry of the built-in table.
+var windowNamesPatterns = []string{
+	"what are my windows called",
+	"what are the windows called",
+	"what are my windows named",
+	"what did i call my windows",
+	"list my window names",
+}
+
+// Owner reports whether the router's grammar already claims this exact
+// utterance, and names the owner in the wording a config collision error
+// uses ("the built-in intent \"volume.mute\"", "the trigger for routine
+// \"standup\""). It exists for window nicknames (#126): a nickname that is
+// verbatim an intent phrase would be unspeakable — saying it alone would
+// run the intent — so assignment refuses it, naming the owner found here.
+// Matching is whole-utterance on the normalised words, the same identity
+// the collision checks in New judge; nil-safe, like Match.
+func (r *Router) Owner(utterance string) (owner string, taken bool) {
+	if r == nil {
+		return "", false
+	}
+	owner, taken = r.owned[strings.Join(normalize(utterance), " ")]
+	return owner, taken
+}
 
 // ScriptIntentName identifies a matched script phrase (ADR 0030) in logs and
 // the intent.executed event. It deliberately spells the same identity the
@@ -678,6 +782,13 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		}
 		return Match{Name: ru.name, CaptureName: name}, true
 	}
+	if ru.windowName {
+		name, ok := ru.pattern.matchText(fields)
+		if !ok {
+			return Match{}, false
+		}
+		return Match{Name: ru.name, WindowName: name}, true
+	}
 	slot, hasSlot, ok := ru.pattern.match(fields)
 	if !ok {
 		return Match{}, false
@@ -687,6 +798,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Desktop: ru.desktop, Program: ru.program,
 		Command: ru.command, UserDefined: ru.userDefined,
 		Routine: ru.routine, Script: ru.script,
+		WindowNames: ru.windowNames,
 	}
 	if ru.argv != nil {
 		m.Argv = ru.argv(slot)
