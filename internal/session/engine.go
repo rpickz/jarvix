@@ -53,6 +53,13 @@ type Options struct {
 	// shorter than a second, and a test that waited one out would be a sleep
 	// wearing a costume. Never set in production.
 	ConfirmTimer func(d time.Duration) (<-chan time.Time, func())
+	// SpeakConfirmationDetails reads the full generated confirmation question
+	// aloud — the one that quotes the command — instead of the default short
+	// prompt that names the kind of action and points at the screen
+	// (confirmations.speak_details, issue #119). Audio only: the events and
+	// the record always carry the full summary and the verbatim command, so
+	// the visual surfaces are unaffected (ADR 0014).
+	SpeakConfirmationDetails bool
 	// RememberApprovals re-runs a user-approved command without asking again
 	// for the rest of the conversation. Approvals live in memory only and
 	// are cleared with the conversation — they never survive `jarvix new`,

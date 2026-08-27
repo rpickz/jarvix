@@ -468,6 +468,10 @@ func TestConfirmationSummaryIsSpoken(t *testing.T) {
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("clean the build dir")
 	h.waitFor(t, "tool.confirmation_required")
+	// The deadline event is the daemon saying the question has been asked
+	// aloud; answering before it now cancels the remaining read-out (issue
+	// #119), and this test is about the question being spoken at all.
+	h.waitFor(t, "tool.confirmation_deadline")
 	_ = h.engine.Confirm(true)
 	h.countUntil(t, "session.finished")
 	h.waitIdle(t)

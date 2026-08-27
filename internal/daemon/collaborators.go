@@ -245,15 +245,20 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		FollowUpWindow:    time.Duration(cfg.Conversation.FollowUpWindowSec) * time.Second,
 		ConfirmTimeout:    time.Duration(cfg.Tools.Policy.ConfirmTimeoutSec) * time.Second,
 		RememberApprovals: cfg.Tools.Policy.RememberForConversation,
-		Intents:           intentRouter(cfg),
-		Routines:          routineRunner(cfg, compositor, bus, logger),
-		Scripts:           scriptRunner(cfg, bus, logger),
-		WindowNames:       windowNamer(windows),
-		Compositor:        compositor,
-		Context:           contextCollector(cfg, logger),
-		Memory:            memoryInjector(book),
-		Knowledge:         knowledgeInjector(feeds),
-		Archive:           conversationArchive(cfg, archive),
+		// The audio half of a permission ask (issue #119): whether the spoken
+		// question quotes the command or just names the action class. Display
+		// is not configurable — the card and overlay always get the verbatim
+		// command (ADR 0014).
+		SpeakConfirmationDetails: cfg.Confirmations.SpeakDetails,
+		Intents:                  intentRouter(cfg),
+		Routines:                 routineRunner(cfg, compositor, bus, logger),
+		Scripts:                  scriptRunner(cfg, bus, logger),
+		WindowNames:              windowNamer(windows),
+		Compositor:               compositor,
+		Context:                  contextCollector(cfg, logger),
+		Memory:                   memoryInjector(book),
+		Knowledge:                knowledgeInjector(feeds),
+		Archive:                  conversationArchive(cfg, archive),
 		// The transcript strip follows the assistant's identity (issue
 		// #103): the configured name and its mishearing aliases, not the
 		// detector's word — the detector may be pointed at a different

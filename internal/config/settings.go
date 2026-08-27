@@ -259,6 +259,18 @@ func settingRows() []Setting {
 			Enum: []string{RetentionOn, RetentionOff},
 			Get:  func(c Config) any { return c.Conversation.Retention },
 			set:  func(c *Config, v any) { c.Conversation.Retention = v.(string) }},
+		// The permission gate's audio knob (issue #119): off speaks the short
+		// prompt ("May I run a shell command? The details are on screen."), on
+		// restores the full read-out that quotes the command. In the registry —
+		// not hand-edit-only like [tools.policy] — because it changes what is
+		// said, never what is allowed, so the settings screen and the
+		// assistant's own settings tool (#109) may both flip it. Idle-class:
+		// the engine's options are rebuilt between sessions, and swapping the
+		// prompt's wording underneath a question already being asked would be
+		// worse than answering the next one in the new style.
+		{Key: "confirmations.speak_details", Label: "Read the full command aloud when asking permission", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Confirmations.SpeakDetails },
+			set: func(c *Config, v any) { c.Confirmations.SpeakDetails = v.(bool) }},
 
 		// The intent table itself is rebuilt with the engine, so these are
 		// idle-class. [[intents.custom]], [[routines]], [[scripts]] and

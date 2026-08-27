@@ -182,6 +182,12 @@ func TestToolConfirmationWhileSpeaking(t *testing.T) {
 			// The question is queued behind the sentence still being
 			// synthesized; releasing it lets both be heard, in that order.
 			close(ss.hold)
+			// Answer only once the question has actually been asked — the
+			// deadline event is the daemon saying so. An answer landing
+			// earlier now cancels the rest of the question (issue #119),
+			// which is its own behaviour with its own tests; this test is
+			// about the question being queued and heard, never dropped.
+			ss.waitFor(t, "tool.confirmation_deadline")
 			tc.answer(t, ss, fire)
 
 			counts := ss.countUntil(t, "session.finished")

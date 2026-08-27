@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -154,6 +155,13 @@ type utterance struct {
 	// the answer starting: the session is in AwaitingConfirmation or Thinking
 	// while it plays, and the overlay already has its own event for each.
 	aside bool
+	// ctx, non-nil only for an aside, bounds that one utterance: cancelling it
+	// stops the aside's synthesis and drops whatever of it has not reached the
+	// player, without touching the stream or the answer around it (issue #119
+	// — a resolved confirmation silences the rest of its own question). Always
+	// a child of the session context, so a dying session still cancels asides
+	// exactly as before.
+	ctx context.Context
 	// done, when non-nil, is closed once this utterance has been handed to the
 	// player (or abandoned). It is how awaitConfirmation waits for the question
 	// to have been asked before it starts the user's clock.
@@ -274,6 +282,11 @@ func (sp *streamingSpeaker) speak(sentence string) {
 // pauses until it has actually been asked, and only then does the user's
 // confirmation clock start.
 //
+// ctx bounds this one utterance (see utterance.ctx): cancelling it stops the
+// aside — skipped entirely if it has not started, cut short if it is mid
+// synthesis — and releases this wait, so a confirmation answered while its
+// question is still being said resumes the turn immediately (issue #119).
+//
 // "Handed to the player" is the strongest ordering this design can offer and
 // the one that matters: it cannot begin until every earlier sentence has been
 // synthesized and pushed into the same stream, so the user never hears two
@@ -282,14 +295,18 @@ func (sp *streamingSpeaker) speak(sentence string) {
 // per-utterance moment at which the device has fallen silent, and inventing
 // one would mean tearing the stream down and starting a second (which is the
 // overlap this exists to prevent).
-func (sp *streamingSpeaker) interject(text string) {
+func (sp *streamingSpeaker) interject(ctx context.Context, text string) {
 	done := make(chan struct{})
-	if !sp.enqueue(utterance{text: text, aside: true, done: done}) {
+	if !sp.enqueue(utterance{text: text, aside: true, ctx: ctx, done: done}) {
 		return
 	}
 	select {
 	case <-done:
-	case <-sp.s.ctx.Done():
+	case <-ctx.Done():
+		// Cancelled while still queued (or mid synthesis): the caller's turn
+		// resumes now rather than waiting for the queue to reach an utterance
+		// that will only be skipped. run() still sees it and closes done —
+		// nothing waits on it twice.
 	}
 }
 
@@ -406,7 +423,15 @@ func (sp *streamingSpeaker) run() {
 		if spoken == "" {
 			return nil
 		}
-		f, chunks, err := sp.e.tts.Speak(sp.s.ctx, tts.Request{Text: spoken})
+		// An aside synthesizes under its own context so a resolved
+		// confirmation can cut its question short (issue #119); everything
+		// else runs under the session's, exactly as before. u.ctx is always a
+		// child of the session context, so this can only ever stop *sooner*.
+		uctx := sp.s.ctx
+		if u.ctx != nil {
+			uctx = u.ctx
+		}
+		f, chunks, err := sp.e.tts.Speak(uctx, tts.Request{Text: spoken})
 		if err != nil {
 			return err
 		}
@@ -440,8 +465,8 @@ func (sp *streamingSpeaker) run() {
 			}
 			select {
 			case pcm <- c.PCM:
-			case <-sp.s.ctx.Done():
-				return sp.s.ctx.Err()
+			case <-uctx.Done():
+				return uctx.Err()
 			}
 		}
 		return nil
@@ -455,8 +480,25 @@ func (sp *streamingSpeaker) run() {
 			sp.release(u)
 			continue
 		}
+		if u.ctx != nil && u.ctx.Err() != nil {
+			// The aside was cancelled before its turn came — a confirmation
+			// answered while its question was still queued behind the answer.
+			// Skipped, not an error: the stream and the sentences after it
+			// are untouched (issue #119).
+			sp.release(u)
+			continue
+		}
 		if err := synth(u); err != nil {
-			synthErr = err
+			// A cancelled aside unwinds with its own context's error, and
+			// that is a stopped question, not a broken voice: recording it as
+			// synthErr would silence the rest of the answer — the exact
+			// opposite of "speech resumes immediately". A session-level
+			// cancellation still lands in u.ctx (it is a child), and the
+			// drain branch above plus the s.ctx check at delivery handle it
+			// exactly as they always have.
+			if u.ctx == nil || u.ctx.Err() == nil {
+				synthErr = err
+			}
 		}
 		sp.release(u)
 	}

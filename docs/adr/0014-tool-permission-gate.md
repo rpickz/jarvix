@@ -1,6 +1,7 @@
 # ADR 0014 — The tool permission gate: risky commands require spoken confirmation
 
-**Status:** accepted (implements the permission boundary reserved by ADR 0006)
+**Status:** accepted (implements the permission boundary reserved by ADR 0006);
+amended 2026-08 — the audio/display split below (issue #119)
 
 ## Context
 
@@ -91,3 +92,40 @@ only. `jarvix status` prints the effective policy.
 - Residual risk is acknowledged, not hidden: an approved command runs with
   full user authority, and the deny list is best-effort pattern matching,
   not a sandbox. Namespaces/seccomp remain out of scope (per the ticket).
+
+## Amendment (issue #119): verbatim display is mandatory, verbatim audio is optional
+
+The original decision conflated two guarantees under "the user must be able
+to hear what is about to happen": that the ground truth is *available* to the
+user before they answer, and that it is *read aloud*. Living with the gate
+separated them — the verbatim text is already on the confirmation card (and
+the ask is identified on the mid-screen overlay), so the read-out repeats
+what is in front of the user and makes every ask slow. The amendment splits
+the doctrine explicitly:
+
+- **Verbatim display is mandatory and not configurable.** Every visual
+  surface that renders a pending confirmation shows the daemon's exact
+  command (the window card), or identifies the ask and defers to a surface
+  that does (the overlay's compact request). The events
+  (`tool.confirmation_required`), the mid-wait snapshots
+  (`conversation.get`, `status.get`), and the conversation record always
+  carry the full generated question and the verbatim command, whatever is
+  spoken. Nothing about "generated daemon-side from the parsed command —
+  never from the model's description" changes.
+- **Verbatim audio is optional, default off.** By default the spoken prompt
+  names the action class and points at the screen ("May I run a shell
+  command? The details are on screen.") — a sentence that is honest exactly
+  because the display half is mandatory. `confirmations.speak_details =
+  true` restores the full verbatim read-out. The knob is audio-only and
+  lives in the settings registry; it never widens what the assistant may do,
+  so it is editable from the Settings tab and by voice (ADR 0036).
+
+Unchanged and deliberately so: the ask/deny tiers and their ordering, the
+one-confirmation mechanism (one state, one timeout, one `session.confirm`
+resolution verb shared by every surface, one audit trail), `script.run`'s
+always-ask floor, and the eyes-free path — a user who wants to decide without
+looking turns `speak_details` on and hears everything, as before.
+
+A resolution from any surface also stops whatever remains of the question's
+own read-out: the answer has been given, and the conversation's speech
+resumes immediately (the "moves onto the next message" requirement).
