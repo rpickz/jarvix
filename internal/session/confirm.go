@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
+	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
 )
@@ -91,9 +92,14 @@ func (e *Engine) resolveConfirmationLocked(approved bool, source string) {
 	e.pending = nil
 	e.forceStateLocked(p.resumeState())
 	eventType := "tool.confirmed"
+	outcome := conversations.ConfirmationApproved
 	if !approved {
 		eventType = "tool.declined"
+		outcome = conversations.ConfirmationDeclined
 	}
+	// The record before the event (issue #118): a client that has this
+	// resolution acknowledged must find it on an immediate history read.
+	e.recordConfirmationLocked(p, outcome, source)
 	e.publish(Event{Type: eventType, Data: e.confirmationData(p, source)})
 	e.log.Info("tool confirmation resolved", "component", "tools", "tool", p.tool,
 		"command", p.command, "approved", approved, "source", source)
@@ -110,6 +116,10 @@ func (e *Engine) clearPendingLocked(source string) {
 		return
 	}
 	e.pending = nil
+	// Recorded as declined (issue #118), like any other resolution: the
+	// audit promise above — a question never stands without an answer —
+	// extends to the durable record, not just the event stream.
+	e.recordConfirmationLocked(p, conversations.ConfirmationDeclined, source)
 	e.publish(Event{Type: "tool.declined", Data: e.confirmationData(p, source)})
 	e.log.Info("tool confirmation abandoned", "component", "tools", "tool", p.tool,
 		"command", p.command, "source", source)
@@ -426,6 +436,10 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 			}
 			e.pending = nil
 			e.forceStateLocked(p.resumeState())
+			// Recorded as its own outcome, never conflated with a spoken no
+			// (issue #118): "the user did not answer" and "the user said no"
+			// are different facts, on disk as much as to the model.
+			e.recordConfirmationLocked(p, conversations.ConfirmationTimedOut, "timeout")
 			e.publish(Event{Type: "tool.declined", Data: e.confirmationData(p, "timeout")})
 			e.mu.Unlock()
 			e.log.Info("tool confirmation timed out", "component", "tools",

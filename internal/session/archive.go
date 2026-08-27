@@ -28,13 +28,23 @@ import (
 // the flag rides the turn schema (additive, omitempty) so the record says the
 // answer was incomplete by act rather than by accident, without disturbing a
 // single byte of any completed turn's line.
-func (e *Engine) stageArchiveTurnLocked(userText, assistantText string, interrupted bool) {
+//
+// recs are the confirmations resolved during this exchange (issue #118),
+// woven between its halves — after the question that provoked the tool call,
+// before the answer that followed it — which is the position the live card
+// occupied and the position every rebuilt view puts the record back in.
+func (e *Engine) stageArchiveTurnLocked(userText, assistantText string, interrupted bool,
+	recs []*confirmationRecord) {
 	if e.opts.Archive == nil {
 		return // retention off: nothing is ever staged, so nothing is written
 	}
 	now := e.now()
 	e.pendingArchive = append(e.pendingArchive,
-		conversations.Turn{Role: string(ai.RoleUser), Text: userText, Time: now, Interrupted: interrupted},
+		conversations.Turn{Role: string(ai.RoleUser), Text: userText, Time: now, Interrupted: interrupted})
+	for _, r := range recs {
+		e.pendingArchive = append(e.pendingArchive, r.archiveTurn())
+	}
+	e.pendingArchive = append(e.pendingArchive,
 		conversations.Turn{Role: string(ai.RoleAssistant), Text: assistantText, Time: now, Interrupted: interrupted})
 }
 
@@ -168,11 +178,20 @@ func (e *Engine) ActiveConversationID() string {
 // recent history_turns exchanges reach the model; the archive keeps
 // everything — and new turns append to the same archived record.
 //
+// confs are the conversation's confirmation records (issue #118), restored
+// alongside the turns they sat between: reopening a conversation brings back
+// the approvals exactly like the questions and answers around them. Records
+// anchored before the context window's cut fall away with the turns they
+// belonged to — they remain in the archive, which keeps everything.
+//
 // Like ResetConversation it does not cancel a session in flight; a turn that
 // completes after the switch commits into the adopted thread, which is what
 // an explicit "continue this conversation" means.
-func (e *Engine) AdoptConversation(id string, msgs []ai.Message) {
+func (e *Engine) AdoptConversation(id string, msgs []ai.Message, confs []AdoptedConfirmation) {
 	e.mu.Lock()
+	// Records the ending thread had not yet archived go with it, not with
+	// the adopted one — the same rule reset applies.
+	e.finalizeConfRecordsLocked()
 	prevArchive, prevID, pending := e.detachArchiveLocked()
 	if max := e.opts.HistoryTurns * 2; e.opts.HistoryTurns <= 0 {
 		// Memory is disabled: no context can be carried, but the thread still
@@ -182,6 +201,29 @@ func (e *Engine) AdoptConversation(id string, msgs []ai.Message) {
 		e.history = append([]ai.Message(nil), msgs[len(msgs)-max:]...)
 	} else {
 		e.history = append([]ai.Message(nil), msgs...)
+	}
+	// The counter restarts at the adopted head's length; anchors arrive as
+	// positions in the full archive record and are rebased to it, dropping
+	// whatever the cap dropped.
+	e.msgCount = len(e.history)
+	dropped := len(msgs) - len(e.history)
+	e.confRecords = nil
+	// With memory disabled nothing of the record is displayed, so nothing of
+	// it is restored either — the archive still holds it all.
+	if e.opts.HistoryTurns > 0 {
+		for _, c := range confs {
+			after := c.AfterMessages - dropped
+			if after < 0 {
+				continue
+			}
+			e.confRecords = append(e.confRecords, &confirmationRecord{
+				Confirmation: c.Record,
+				summary:      c.Summary,
+				at:           c.Time,
+				afterMsgs:    after,
+				staged:       true, // it came from the archive; it owes it nothing
+			})
+		}
 	}
 	// The clock restarts now: reopening is an explicit act, so the follow-up
 	// window must not immediately expire a conversation last touched days ago.

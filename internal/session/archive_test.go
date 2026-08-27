@@ -260,7 +260,7 @@ func TestReopenContinuesContextWithinBudget(t *testing.T) {
 	for _, turn := range archived {
 		msgs = append(msgs, ai.Message{Role: ai.Role(turn.Role), Content: turn.Text})
 	}
-	h.engine.AdoptConversation("old-conv", msgs)
+	h.engine.AdoptConversation("old-conv", msgs, nil)
 
 	h.ask(t, "a follow-up")
 	awaitAppend(t, fake)

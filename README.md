@@ -301,6 +301,11 @@ the whole reply.
 Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
 `jarvix new` archives the thread instead of destroying it, whole — the
 `history_turns` cap only limits what the model is sent, never what is kept.
+Tool approvals are part of the record too
+([ADR 0039](docs/adr/0039-approvals-in-the-record.md)): every confirmation
+exchange — what was asked, the exact command, and whether you approved,
+declined, or let it time out — survives closing the window, is shown in place
+when the history is rebuilt, and rides `show`/`open` like any turn.
 `jarvix conversations` lists the archive newest-first (the window's
 **Library** tab shows the same library), `show` prints one read-only,
 `open` continues one as the active thread with its context, and

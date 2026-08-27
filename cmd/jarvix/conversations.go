@@ -29,11 +29,16 @@ type conversationView struct {
 	Preview    string `json:"preview"`
 }
 
-// turnView is the wire shape of one archived turn.
+// turnView is the wire shape of one archived turn. Confirmation is present
+// only on a permission-record turn (role "confirmation", issue #118) and
+// carries the daemon's structured record; conversations.Confirmation is the
+// same shape the archive stores, so both the wire and the daemon-down
+// fallback decode into it.
 type turnView struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
-	TS   string `json:"ts"`
+	Role         string                      `json:"role"`
+	Text         string                      `json:"text"`
+	TS           string                      `json:"ts"`
+	Confirmation *conversations.Confirmation `json:"confirmation"`
 }
 
 // fileStore opens the archive directly, for the daemon-down fallback.
@@ -234,7 +239,8 @@ func cmdConversationsShow(paths config.Paths, id string) error {
 		}
 		turns := make([]turnView, 0, len(conv.Turns))
 		for _, t := range conv.Turns {
-			turns = append(turns, turnView{Role: t.Role, Text: t.Text, TS: t.Time.Format(time.RFC3339)})
+			turns = append(turns, turnView{Role: t.Role, Text: t.Text,
+				TS: t.Time.Format(time.RFC3339), Confirmation: t.Confirmation})
 		}
 		printConversation(conv.Meta.ID, conv.Meta.Started.Format(time.RFC3339), turns)
 		return nil
@@ -255,10 +261,19 @@ func cmdConversationsShow(paths config.Paths, id string) error {
 }
 
 // printConversation renders a transcript the way the window does: who, then
-// what, oldest first.
+// what, oldest first. A confirmation record (issue #118) prints as the
+// exchange it was — the question, the exact command verbatim, and the
+// outcome — never as an utterance, so the transcript shows what the user
+// authorised in the place they authorised it.
 func printConversation(id string, started string, turns []turnView) {
 	fmt.Printf("conversation %s (started %s, %d turns)\n\n", id, day(started), len(turns))
 	for _, t := range turns {
+		if t.Role == "confirmation" && t.Confirmation != nil {
+			fmt.Printf("permission: %s\n", t.Text)
+			fmt.Printf("  command: %s\n", t.Confirmation.Command)
+			fmt.Printf("  outcome: %s\n", confirmationOutcomeWord(t.Confirmation))
+			continue
+		}
 		speaker := "jarvix"
 		if t.Role == "user" {
 			speaker = "you"
@@ -266,6 +281,24 @@ func printConversation(id string, started string, turns []turnView) {
 		fmt.Printf("%s: %s\n", speaker, t.Text)
 	}
 	fmt.Printf("\ncontinue it with: jarvix conversations open %s\n", id)
+}
+
+// confirmationOutcomeWord words a record's outcome for the terminal. The
+// vocabulary is the daemon's and closed; an unknown word shows as itself —
+// an outcome must never be hidden by a rendering gap.
+func confirmationOutcomeWord(c *conversations.Confirmation) string {
+	switch c.Outcome {
+	case conversations.ConfirmationApproved:
+		return "approved"
+	case conversations.ConfirmationDeclined:
+		return "declined"
+	case conversations.ConfirmationTimedOut:
+		if c.TimeoutSec > 0 {
+			return fmt.Sprintf("timed out after %ds", c.TimeoutSec)
+		}
+		return "timed out"
+	}
+	return c.Outcome
 }
 
 // cmdConversationsOpen reopens an archived conversation as the active thread.
