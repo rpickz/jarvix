@@ -55,6 +55,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		// engine that aborts on every call (issue #113).
 		checkSTTProbe,
 		checkNameRecognition,
+		checkVocabularyBias,
 		checkTTS,
 		checkTTSProbe,
 		checkVoiceLanguage,

@@ -20,6 +20,7 @@ import (
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts/kokoro"
 	"github.com/rpickz/jarvix/internal/tts/piper"
+	"github.com/rpickz/jarvix/internal/vocabulary"
 	"github.com/rpickz/jarvix/internal/warm"
 )
 
@@ -70,7 +71,8 @@ func (w warmWorkers) Status() []warm.Status {
 // down when this configuration stops being the running one. Nothing is spawned
 // here: a supervisor starts its child on first use, so building deps stays
 // free and a daemon that is never spoken to never loads a model.
-func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger) (Deps, warmWorkers, error) {
+func fillDeps(cfg config.Config, paths config.Paths, deps Deps, vocab *vocabulary.Store,
+	log *slog.Logger) (Deps, warmWorkers, error) {
 	var workers warmWorkers
 	if log == nil {
 		log = slog.Default()
@@ -86,28 +88,36 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, log *slog.Logger
 		deps.Provider = openaicompat.New(cfg.AI.Provider, ep.BaseURL, ep.Key())
 	}
 	if deps.Transcriber == nil {
+		// One prompt composition, shared by both paths: the warm request and
+		// the cold fallback must bias identically or a fallback would change
+		// what Jarvix's own name transcribes as (issue #83). Read through a
+		// function rather than composed once, because the taught hard-to-hear
+		// phrases (issue #129) live in a store, not in config: "listen for
+		// the word X" must bias the very next utterance, and the store read
+		// behind this closure is one stat(2) of a file in the page cache.
+		biasPrompt := func() string { return cfg.STTBiasPrompt() }
+		if vocab != nil {
+			biasPrompt = func() string { return cfg.STTBiasPromptWith(vocab.HardToHear()) }
+		}
 		cold := &whispercpp.Transcriber{
-			Binary:    cfg.STT.Whisper.Binary,
-			ModelPath: whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
-			Language:  cfg.STT.Whisper.Language,
-			// One prompt, composed once, for both paths: the warm request and
-			// the cold fallback must bias identically or a fallback would
-			// change what Jarvix's own name transcribes as (issue #83).
-			Prompt: cfg.STTBiasPrompt(),
+			Binary:     cfg.STT.Whisper.Binary,
+			ModelPath:  whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),
+			Language:   cfg.STT.Whisper.Language,
+			PromptFunc: biasPrompt,
 		}
 		if cfg.Performance.WarmEngines {
 			server := &whispercpp.ServerTranscriber{
 				// whisper.cpp ships the server next to the CLI; the config
 				// names the CLI, so the server is derived from it rather than
 				// adding a second binary path nobody would set.
-				Binary:    whispercpp.ServerBinaryFor(cfg.STT.Whisper.Binary),
-				ModelPath: cold.ModelPath,
-				Language:  cold.Language,
-				Prompt:    cold.Prompt,
-				Cold:      cold,
-				MemoryCap: memCap,
-				IdleAfter: idle,
-				Log:       log,
+				Binary:     whispercpp.ServerBinaryFor(cfg.STT.Whisper.Binary),
+				ModelPath:  cold.ModelPath,
+				Language:   cold.Language,
+				PromptFunc: biasPrompt,
+				Cold:       cold,
+				MemoryCap:  memCap,
+				IdleAfter:  idle,
+				Log:        log,
 			}
 			deps.Transcriber = server
 			workers.engines = append(workers.engines, server)
@@ -232,8 +242,8 @@ func scriptRunner(cfg config.Config, bus *session.Bus, logger *slog.Logger) sess
 // appends and the conversation.* IPC methods, and only the retention switch
 // here decides whether the engine writes to it.
 func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
-	book *memory.Book, feeds *knowledge.Service, archive conversations.Store,
-	windows *tools.Desktop, logger *slog.Logger) session.Options {
+	book *memory.Book, vocab *vocabulary.Store, feeds *knowledge.Service,
+	archive conversations.Store, windows *tools.Desktop, logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -257,6 +267,8 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Compositor:               compositor,
 		Context:                  contextCollector(cfg, logger),
 		Memory:                   memoryInjector(book),
+		Vocabulary:               vocabularyInjector(vocab, cfg.Vocabulary.SpeakBack),
+		VocabularyTeacher:        vocabularyTeacher(vocab, bus),
 		Knowledge:                knowledgeInjector(feeds),
 		Archive:                  conversationArchive(cfg, archive),
 		// The transcript strip follows the assistant's identity (issue
@@ -312,6 +324,48 @@ func memoryInjector(book *memory.Book) session.MemoryInjector {
 		return nil
 	}
 	return book
+}
+
+// storeInjector binds the vocabulary store to the speak_back stance for one
+// engine build. A named type rather than an inline closure so the nil rules
+// below stay visible at the wiring site.
+type storeInjector struct {
+	store     *vocabulary.Store
+	speakBack bool
+}
+
+// Inject implements session.VocabularyInjector.
+func (i storeInjector) Inject() vocabulary.Injection {
+	return i.store.Inject(i.speakBack)
+}
+
+// vocabularyInjector adapts the taught vocabulary for the engine, or leaves
+// the option nil when the feature is disabled — the memoryInjector rules.
+// speakBack rides the adapter because it shapes the block's wording and the
+// store deliberately holds no configuration; idle-class reloads rebuild this
+// adapter, which is what makes the setting land without a restart.
+func vocabularyInjector(vocab *vocabulary.Store, speakBack bool) session.VocabularyInjector {
+	if vocab == nil {
+		return nil
+	}
+	return storeInjector{store: vocab, speakBack: speakBack}
+}
+
+// vocabularyTeacher adapts the store for the deterministic teach phrases
+// (issue #129), or leaves the option nil when the feature is disabled so a
+// matched phrase refuses honestly. The bus closure publishes the same
+// vocabulary.entry_changed the form verbs publish — a voice teach changes
+// the same listing an open window is showing.
+func vocabularyTeacher(vocab *vocabulary.Store, bus *session.Bus) session.VocabularyTeacher {
+	if vocab == nil {
+		return nil
+	}
+	return &vocabularyVoice{store: vocab, publish: func(action string, e vocabulary.Entry) {
+		bus.Publish(session.Event{Type: "vocabulary.entry_changed", Data: map[string]any{
+			"action": action, "id": e.ID,
+			"chars": len([]rune(e.Phrase)) + len([]rune(e.Meaning)),
+		}})
+	}}
 }
 
 // conversationArchive gates the durable archive (ADR 0027) on the retention

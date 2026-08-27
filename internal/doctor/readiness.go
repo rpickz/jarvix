@@ -46,6 +46,9 @@ func SettingsChecks(cfg config.Config, paths config.Paths) []ReadinessResult {
 		// its one warning — a custom name with no aliases — is fixed by
 		// typing into exactly that field.
 		{checkNameRecognition, "assistant.aliases"},
+		// One stat and at most one small file read — settings-screen fast —
+		// and the place "why does listen-for refuse?" is answered (#129).
+		{checkVocabularyBias, "vocabulary.enabled"},
 		{checkTTS, "tts.provider"},
 		// The settings screen is where a voice is chosen, so it is where the
 		// consequences of choosing one must appear: which language it speaks,

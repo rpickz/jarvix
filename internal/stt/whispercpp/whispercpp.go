@@ -51,6 +51,24 @@ type Transcriber struct {
 	// config.STTBiasPrompt composes it from the wake word and stt.vocabulary.
 	// Empty passes no prompt at all.
 	Prompt string
+	// PromptFunc, when set, supplies the prompt per transcription and wins
+	// over Prompt. It exists for the taught hard-to-hear phrases (issue
+	// #129): "listen for the word X" lands in a store, not in config, and a
+	// static prompt would make the flag take effect only at the next reload —
+	// a mechanism that looks enabled while doing nothing. The prompt was
+	// already composed per exec (cold) and per request (warm), so reading it
+	// through a function changes when the words are *decided*, not when they
+	// are applied.
+	PromptFunc func() string
+}
+
+// biasPrompt resolves the prompt for one transcription: PromptFunc when
+// wired, the static Prompt otherwise.
+func (t *Transcriber) biasPrompt() string {
+	if t.PromptFunc != nil {
+		return t.PromptFunc()
+	}
+	return t.Prompt
 }
 
 // ResolveModelPath turns a configured model value into a file path. Absolute
@@ -90,8 +108,8 @@ func (t *Transcriber) Transcribe(ctx context.Context, input stt.AudioInput) (<-c
 	if t.Language != "" {
 		args = append(args, "--language", t.Language)
 	}
-	if t.Prompt != "" {
-		args = append(args, "--prompt", t.Prompt)
+	if prompt := t.biasPrompt(); prompt != "" {
+		args = append(args, "--prompt", prompt)
 	}
 	cmd := exec.CommandContext(ctx, t.Binary, args...)
 	var stdout, stderr bytes.Buffer

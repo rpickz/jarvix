@@ -30,6 +30,7 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/vocabulary"
 	"github.com/rpickz/jarvix/internal/wake"
 	"github.com/rpickz/jarvix/internal/warm"
 )
@@ -67,6 +68,14 @@ type Daemon struct {
 	// through it, the engine injects from it, and the memory.* IPC methods
 	// read it — so every surface always agrees on what is remembered.
 	memory *memory.Book
+
+	// vocabulary is the taught vocabulary (issue #129), nil when
+	// vocabulary.enabled is false. One instance for the daemon's life on the
+	// memory book's terms: the vocabulary tools and voice phrases write
+	// through it, the engine injects from it, the transcriber's bias prompt
+	// reads its hard-to-hear phrases, and the vocabulary.* IPC methods serve
+	// it — every surface always agrees on what has been taught.
+	vocabulary *vocabulary.Store
 
 	// knowledge is the feed cache (ADR 0031), nil when no [[knowledge.feeds]]
 	// are configured. One instance for the daemon's life, like the memory
@@ -262,10 +271,29 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger = slog.Default()
 	}
 
+	// The taught vocabulary (issue #129), built before the transcriber so
+	// the STT bias prompt can read the hard-to-hear phrases live. Disabled
+	// means absent — no store consulted, no tools registered — but never
+	// deleted: like the memory book, the store holds words the user
+	// deliberately taught, and only an explicit forget removes them.
+	var vocab *vocabulary.Store
+	if cfg.Vocabulary.Enabled {
+		vocab = vocabulary.NewStore(paths.VocabularyFile(), vocabulary.StoreOptions{
+			MaxEntries:        cfg.Vocabulary.MaxEntries,
+			MaxInjectedTokens: cfg.Vocabulary.MaxInjectedTokens,
+		}, logger)
+		logger.Info("vocabulary enabled", "component", "vocabulary",
+			"path", paths.VocabularyFile(), "max_entries", cfg.Vocabulary.MaxEntries,
+			"max_injected_tokens", cfg.Vocabulary.MaxInjectedTokens,
+			"speak_back", cfg.Vocabulary.SpeakBack)
+	} else {
+		logger.Info("vocabulary disabled", "component", "vocabulary")
+	}
+
 	// Remember what the caller injected before filling from config, so a
 	// later config reload rebuilds only what came from config (settings.go).
 	injected := deps
-	deps, workers, err := fillDeps(cfg, paths, deps, logger)
+	deps, workers, err := fillDeps(cfg, paths, deps, vocab, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +572,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// life, like the memory book: the runner, the verbs, and the check-in
 	// clockwork must always agree on what the threads are.
 	focusSvc := newFocusService(paths, compositor, bus, logger)
-	engOpts := engineOptions(cfg, compositor, bus, book, feeds, convs, windows, logger)
+	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, logger)
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
 	// the engine's real timer (see session.Options.ConfirmTimer).
@@ -580,6 +608,25 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			"tools", strings.Join(mem.Names(), ","))
 	}
 
+	// The vocabulary tools (issue #129), registered after the engine for the
+	// memory tools' reason: a taught entry carries its source turn, and only
+	// the engine knows which session is asking.
+	if vocab != nil {
+		voc := tools.NewVocabulary(tools.VocabularyOptions{
+			Store: vocab,
+			Source: func() string {
+				_, id := engine.State()
+				return id
+			},
+			Log: logger,
+		})
+		for _, t := range voc.Tools() {
+			registry.Register(t)
+		}
+		logger.Info("tool enabled", "component", "tools",
+			"tools", strings.Join(voc.Names(), ","))
+	}
+
 	// The knowledge.get tool (ADR 0031), registered only when feeds exist:
 	// a tool with an empty enum would spend every turn's context describing
 	// a feature that cannot be used. Its description and schema read the
@@ -604,7 +651,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy, toolsPolicy: policy,
-		memory: book, knowledge: feeds, focus: focusSvc,
+		memory: book, vocabulary: vocab, knowledge: feeds, focus: focusSvc,
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor, windows: windows, router: router,
@@ -1045,6 +1092,7 @@ func (d *Daemon) registerMethods() {
 	d.registerConversationMethods()
 	d.registerMemoryMethods()
 	d.registerMemoryAdminMethods()
+	d.registerVocabularyMethods()
 	d.registerKnowledgeMethods()
 	d.registerTextMethods()
 	d.registerWakeMethods()
