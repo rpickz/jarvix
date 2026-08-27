@@ -365,6 +365,30 @@ func cmdCancel(paths config.Paths) error {
 	return client.Call("session.cancel", nil, nil)
 }
 
+// cmdSayAgain speaks one turn of the live conversation again (issue #122).
+// turn is a position in the current conversation, counting from 1 — the
+// numbering of the window's transcript and the conversation.get snapshot —
+// and 0 asks the daemon for the newest assistant turn: bare
+// `jarvix say-again` is "say that again". The daemon resolves the text from
+// its own record and speaks it through the standard pipeline;
+// `jarvix cancel` or the stop word ends it like any speech.
+func cmdSayAgain(paths config.Paths, turn int) error {
+	client, err := ipc.Dial(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	var out struct {
+		Turn int    `json:"turn"`
+		Role string `json:"role"`
+	}
+	if err := client.Call("speech.replay", map[string]any{"turn": turn}, &out); err != nil {
+		return err
+	}
+	fmt.Printf("speaking turn %d (%s) again\n", out.Turn, out.Role)
+	return nil
+}
+
 // daemonIsDown reports whether a dial error means "nothing is listening on
 // the socket" as opposed to "something went wrong reaching it".
 //

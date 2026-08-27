@@ -359,6 +359,14 @@ func (sp *streamingSpeaker) nextTurn() {
 // one sentence of latency — while a word chopped in half is audibly broken in
 // every exchange it happens in. Supersession pays for its wins at the queue,
 // never at the device (issue #120).
+//
+// The floor's writ runs within one speaker — one turn's voice — and no
+// further. Between turns, supersession is session interruption: a new
+// utterance cancels the session still speaking, instantly, because there the
+// user has acted and the cut is the response they asked for. A speech replay
+// (issue #122) composes at that level — its own session, superseded by live
+// speech or a newer replay through cancellation — while this queue-level
+// mechanism governs the sentences inside it exactly as inside any turn.
 func (sp *streamingSpeaker) superseded(u utterance) bool {
 	if u.keep {
 		return false
