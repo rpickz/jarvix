@@ -28,15 +28,38 @@ import (
 // Case is presentation only: everything that matches the transcript afterwards
 // is case-insensitive.
 func (c Config) STTBiasPrompt() string {
+	return c.STTBiasPromptWith(nil)
+}
+
+// STTBiasPromptWith is STTBiasPrompt plus the taught hard-to-hear phrases
+// (issue #129) — the ONE copy of the bias sentence composition, so a taught
+// phrase and an [stt] vocabulary term enter whisper's conditioning in
+// exactly the same shape (a full capitalised sentence; bare terms get
+// absorbed, see above). Taught phrases join the same "Conversations may
+// mention" sentence as the configured terms, deduplicated case-insensitively
+// so a phrase present in both biases once. The caller bounds taught (the
+// store's MaxHardToHear cap); this function only composes.
+func (c Config) STTBiasPromptWith(taught []string) string {
 	var parts []string
 	if name := capitalise(strings.TrimSpace(c.Assistant.Name)); name != "" {
 		parts = append(parts, "The assistant is called "+name+".")
 	}
 	var terms []string
-	for _, t := range c.STT.Vocabulary {
-		if t = strings.TrimSpace(t); t != "" {
-			terms = append(terms, t)
+	seen := make(map[string]bool, len(c.STT.Vocabulary)+len(taught))
+	add := func(t string) {
+		t = strings.TrimSpace(t)
+		key := strings.ToLower(t)
+		if t == "" || seen[key] {
+			return
 		}
+		seen[key] = true
+		terms = append(terms, t)
+	}
+	for _, t := range c.STT.Vocabulary {
+		add(t)
+	}
+	for _, t := range taught {
+		add(t)
 	}
 	if len(terms) > 0 {
 		parts = append(parts, "Conversations may mention: "+strings.Join(terms, ", ")+".")

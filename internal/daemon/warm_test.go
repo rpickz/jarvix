@@ -24,7 +24,7 @@ func testPaths(t *testing.T) config.Paths {
 func TestFillDepsBuildsWarmAdaptersWhenWarmModeIsOn(t *testing.T) {
 	cfg := config.Default()
 	cfg.TTS.Provider = "kokoro"
-	deps, workers, err := fillDeps(cfg, testPaths(t), Deps{}, nil)
+	deps, workers, err := fillDeps(cfg, testPaths(t), Deps{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestFillDepsBuildsWarmAdaptersWhenWarmModeIsOn(t *testing.T) {
 
 func TestFillDepsBuildsTheWarmPiperAdapter(t *testing.T) {
 	cfg := config.Default() // piper is the default TTS
-	deps, workers, err := fillDeps(cfg, testPaths(t), Deps{}, nil)
+	deps, workers, err := fillDeps(cfg, testPaths(t), Deps{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestFillDepsKeepsTheColdAdaptersWhenWarmModeIsOff(t *testing.T) {
 	cfg := config.Default()
 	cfg.Performance.WarmEngines = false
 	cfg.TTS.Provider = "kokoro"
-	deps, workers, err := fillDeps(cfg, testPaths(t), Deps{}, nil)
+	deps, workers, err := fillDeps(cfg, testPaths(t), Deps{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestFillDepsLeavesInjectedCollaboratorsAlone(t *testing.T) {
 	// a warm adapter that would try to spawn a process for it.
 	cfg := config.Default()
 	injected := Deps{Transcriber: &stt.Fake{}, Synthesizer: &tts.Fake{}}
-	deps, workers, err := fillDeps(cfg, testPaths(t), injected, nil)
+	deps, workers, err := fillDeps(cfg, testPaths(t), injected, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestLastTimingsSurviveTheSessionThatProducedThem(t *testing.T) {
 func TestBothSTTPathsCarryTheConfiguredNameBiasSentence(t *testing.T) {
 	cfg := config.Default()
 	cfg.Assistant.Name = "Hal"
-	deps, _, err := fillDeps(cfg, testPaths(t), Deps{}, nil)
+	deps, _, err := fillDeps(cfg, testPaths(t), Deps{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,14 +175,23 @@ func TestBothSTTPathsCarryTheConfiguredNameBiasSentence(t *testing.T) {
 	if !ok {
 		t.Fatalf("transcriber = %T, want the warm whisper adapter", deps.Transcriber)
 	}
+	// Since #129 the prompt is read through PromptFunc — per request, so
+	// taught hard-to-hear phrases land without a reload — but the composed
+	// sentence contract is unchanged.
 	const want = "The assistant is called Hal."
-	if server.Prompt != want {
-		t.Errorf("warm path prompt = %q, want %q", server.Prompt, want)
+	if server.PromptFunc == nil {
+		t.Fatal("the warm adapter has no prompt function wired")
+	}
+	if got := server.PromptFunc(); got != want {
+		t.Errorf("warm path prompt = %q, want %q", got, want)
 	}
 	if server.Cold == nil {
 		t.Fatal("the warm adapter has no cold fallback wired")
 	}
-	if server.Cold.Prompt != want {
-		t.Errorf("cold path prompt = %q, want %q", server.Cold.Prompt, want)
+	if server.Cold.PromptFunc == nil {
+		t.Fatal("the cold fallback has no prompt function wired")
+	}
+	if got := server.Cold.PromptFunc(); got != want {
+		t.Errorf("cold path prompt = %q, want %q", got, want)
 	}
 }

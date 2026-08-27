@@ -152,6 +152,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		if !alive {
 			return // cancelled or superseded; that path owns the events
 		}
+	case m.VocabPhrase != "":
+		ack, runErr = e.runVocabTeach(s, m)
+	case m.VocabListen != "":
+		ack, runErr = e.runVocabListen(s, m)
+	case m.VocabList:
+		ack, runErr = e.runVocabList(s)
 	case m.Desktop != intent.DesktopNone:
 		runErr = e.runDesktopIntent(s, m)
 	case len(m.Argv) > 0:

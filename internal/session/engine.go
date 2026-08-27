@@ -25,6 +25,7 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/vocabulary"
 )
 
 // Options tunes engine behaviour. Values come from configuration.
@@ -110,6 +111,15 @@ type Options struct {
 	// base (ADR 0025) — for turns that reach the model. Nil disables it
 	// entirely: no consultation, no message, no cost.
 	Memory MemoryInjector
+	// Vocabulary supplies the taught-words block — the phrases the user
+	// explicitly taught (issue #129) — for turns that reach the model. Nil
+	// disables it entirely: no consultation, no message, no cost.
+	Vocabulary VocabularyInjector
+	// VocabularyTeacher stores what the deterministic teach phrases match —
+	// "when i say X i mean Y", "listen for the word X", the spoken listing
+	// (issue #129). Nil — vocabulary disabled — makes a matched teach phrase
+	// an honest spoken refusal rather than a silent drop.
+	VocabularyTeacher VocabularyTeacher
 	// Knowledge supplies the live feed values block — cached readings from
 	// the user's configured feeds (ADR 0031) — for turns that reach the
 	// model. Nil disables it entirely: no consultation, no message, no cost.
@@ -260,6 +270,13 @@ type Engine struct {
 	lastMemory        memory.Injection
 	lastMemorySession string
 	lastMemoryTaken   bool
+
+	// The most recent vocabulary injection (issue #129), on memory's exact
+	// audit terms: what taught words the model was given must be answerable
+	// after the fact (vocabulary.last). Guarded by mu.
+	lastVocabulary        vocabulary.Injection
+	lastVocabularySession string
+	lastVocabularyTaken   bool
 }
 
 // sess is one interaction from start to finish.
@@ -1070,10 +1087,13 @@ func (e *Engine) think(s *sess) {
 	// The knowledge base is consulted on the same terms (ADR 0025): only a
 	// turn that reaches the provider pays, and what it pays is one stat(2).
 	remembered := e.gatherMemory(s)
+	// The taught vocabulary likewise (issue #129): one stat(2), standing
+	// knowledge, and with nothing taught the turn is byte-identical.
+	taught := e.gatherVocabulary(s)
 	// Feed values likewise (ADR 0031): cached readings only, never a fetch —
 	// a turn must not wait on a feed command.
 	feeds := e.gatherKnowledge(s)
-	messages := e.conversationMessages(s.userText, snapshot, remembered.Message, feeds.Message)
+	messages := e.conversationMessages(s.userText, snapshot, remembered.Message, taught.Message, feeds.Message)
 
 	var toolDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
@@ -1322,13 +1342,18 @@ func (e *Engine) abortSpeaker(speaker *streamingSpeaker) {
 // stays adjacent to the question that moment belongs to. Like the capture,
 // the block is never committed to history: it is rebuilt fresh each turn, so
 // a hand-edit or a forget is reflected on the very next question.
+// The taught vocabulary (issue #129) sits beside the remembered facts, after
+// them, on identical terms: how the user talks is standing knowledge about
+// the user, true for the whole thread, rebuilt fresh each turn — and with
+// nothing taught it contributes no message at all, keeping the zero-entry
+// prompt byte-identical to one before the feature existed.
 // Feed values (ADR 0031) sit with the capture, not with the remembered
 // facts: a feed reading describes "right now" — its whole content is a value
 // and an age measured at this turn — so like the capture it stays adjacent
 // to the question that moment belongs to, and like the capture it is never
 // committed to history: rebuilt fresh each turn, so an answer can never
 // quote last turn's price with this turn's confidence.
-func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot, remembered, feeds string) []ai.Message {
+func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot, remembered, taught, feeds string) []ai.Message {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.opts.FollowUpWindow > 0 && !e.lastTurn.IsZero() &&
@@ -1354,6 +1379,9 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 	}
 	if remembered != "" {
 		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: remembered})
+	}
+	if taught != "" {
+		msgs = append(msgs, ai.Message{Role: ai.RoleSystem, Content: taught})
 	}
 	msgs = append(msgs, e.history...)
 	if captured := snapshot.Message(); captured != "" {

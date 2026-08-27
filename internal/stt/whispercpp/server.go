@@ -47,6 +47,11 @@ type ServerTranscriber struct {
 	// drift: both carry the prompt with the clip it applies to, and a config
 	// reload that changes a term never needs the model reloaded.
 	Prompt string
+	// PromptFunc, when set, supplies the prompt per request and wins over
+	// Prompt — the cold Transcriber's arrangement, mirrored here so the warm
+	// and cold paths bias identically when the taught hard-to-hear phrases
+	// (issue #129) change mid-life.
+	PromptFunc func() string
 	// Cold is the per-transcription fallback. Required.
 	Cold *Transcriber
 	// MemoryCap and IdleAfter configure the supervisor ([performance]).
@@ -175,7 +180,11 @@ func (s *ServerTranscriber) Transcribe(ctx context.Context, input stt.AudioInput
 	// Read the clip before handing the session a channel: a missing recording
 	// is the caller's bug and should surface as a start error, not a stream
 	// error, exactly as the cold path's missing-model check does.
-	body, contentType, err := multipartWAV(input.WAVPath, s.Prompt)
+	prompt := s.Prompt
+	if s.PromptFunc != nil {
+		prompt = s.PromptFunc()
+	}
+	body, contentType, err := multipartWAV(input.WAVPath, prompt)
 	if err != nil {
 		return nil, err
 	}

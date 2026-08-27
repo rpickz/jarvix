@@ -331,6 +331,29 @@ func settingRows() []Setting {
 			Get: func(c Config) any { return c.Focus.MidpointCheckin },
 			set: func(c *Config, v any) { c.Focus.MidpointCheckin = v.(bool) }},
 
+		// The taught vocabulary (issue #129) is restart-class like memory and
+		// for the same reason: the store and the vocabulary tools are wired at
+		// daemon construction. speak_back is the exception — it only selects
+		// the injection block's stance sentence, which is composed through the
+		// engine's collaborators, so it lands on an idle reload like the other
+		// prompt-shaping settings. Its default is false on purpose: the
+		// vocabulary exists so Jarvix *understands* the user, and mirrored
+		// slang from a machine reads as mockery more often than rapport
+		// (recorded in the ADR); using the user's words back is theirs to
+		// invite, not Jarvix's to assume.
+		{Key: "vocabulary.enabled", Label: "Learn words and phrases the user teaches", Type: TypeBool, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Vocabulary.Enabled },
+			set: func(c *Config, v any) { c.Vocabulary.Enabled = v.(bool) }},
+		{Key: "vocabulary.max_entries", Label: "Taught phrases the store may hold", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Vocabulary.MaxEntries },
+			set: func(c *Config, v any) { c.Vocabulary.MaxEntries = v.(int) }},
+		{Key: "vocabulary.max_injected_tokens", Label: "Token budget for taught words per turn", Type: TypeInt, Reload: ReloadRestart,
+			Get: func(c Config) any { return c.Vocabulary.MaxInjectedTokens },
+			set: func(c *Config, v any) { c.Vocabulary.MaxInjectedTokens = v.(int) }},
+		{Key: "vocabulary.speak_back", Label: "Use taught words in replies", Type: TypeBool, Reload: ReloadIdle,
+			Get: func(c Config) any { return c.Vocabulary.SpeakBack },
+			set: func(c *Config, v any) { c.Vocabulary.SpeakBack = v.(bool) }},
+
 		{Key: "audio.input_device", Label: "Microphone device", Type: TypeString, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.Audio.InputDevice },
 			set: func(c *Config, v any) { c.Audio.InputDevice = v.(string) }},

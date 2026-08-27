@@ -171,6 +171,12 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // loud — into a question about itself. memory.forget is absent on purpose:
 // deletion is the one memory operation that cannot be undone, so it takes
 // the policy default (ask) and confirms the exact fact about to go.
+// vocabulary.teach (#129) is allow on memory.remember's exact argument —
+// teaching is the user's explicit word, and the write is one line into their
+// own 0600 vocabulary file, undone with one forget — and vocabulary.forget
+// is absent for memory.forget's exact reason: deleting an entry destroys its
+// taught history, so it takes the policy default and confirms the exact
+// phrase about to go.
 //
 // routine.run is allow for yet another reason: authorship. Every step of a
 // routine was written by the user in their own configuration — a fixed
@@ -217,6 +223,7 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	NameWindowToolName:          PolicyAllow,
 	MemoryRememberToolName:      PolicyAllow,
 	MemorySearchToolName:        PolicyAllow,
+	VocabularyTeachToolName:     PolicyAllow,
 	RoutineToolName:             PolicyAllow,
 	ConversationsSearchToolName: PolicyAllow,
 	KnowledgeRefreshToolName:    PolicyAllow,

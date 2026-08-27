@@ -340,6 +340,18 @@ midpoint_checkin = false         # speak a halfway line during a timeboxed
                                  # focus session. Off by default: a timebox is
                                  # a promise of quiet (live-class)
 
+[vocabulary]                     # words you teach Jarvix (see below)
+enabled = true                   # off: tools and teach phrases not registered,
+                                 # nothing injected — the store file is left
+                                 # alone (restart-class)
+max_entries = 200                # store cap; warns from nine-tenths full
+max_injected_tokens = 300        # per-turn budget for the taught-words block
+                                 # (~4 chars/token); entries past it leave the
+                                 # block least-recently-taught first, never the
+                                 # store, never silently. Minimum 150
+speak_back = false               # let Jarvix use your words in its own replies
+                                 # (default off — see below)
+
 [conversation]
 speak_responses = true           # false = text-only sessions
 history_turns = 16               # remember this many prior exchanges as context
@@ -1357,6 +1369,72 @@ thoughts, last activity, the live session) and offers Switch and End; the
 midpoint_checkin = false   # speak a halfway line during a timeboxed session;
                            # off by default — a timebox is a promise of quiet
 ```
+
+## Vocabulary (`[vocabulary]`)
+
+Say "when I say quid I mean pounds", and from then on Jarvix understands
+your word without you translating yourself (issue #129,
+[ADR 0042](adr/0042-personal-vocabulary.md)). Memory holds facts about the
+world; the vocabulary holds facts about **your language** — regional
+phrases, project codenames, family words — each one a phrase → meaning with
+an optional note, offered to the model on every turn beside the remembered
+facts.
+
+```text
+you:    when I say quid I mean pounds
+jarvix: Okay — quid means pounds.
+        …later…
+you:    how much did I spend this month, in quid?
+jarvix: About two hundred and forty pounds …
+```
+
+Teaching works by voice ("when I say X I mean Y" is answered deterministically,
+no model involved; natural phrasings like "quid means pounds, remember that"
+land through the model's `vocabulary.teach` tool), by chat, or in the
+window's Memory tab, whose **Vocabulary** section lists every entry with
+add/edit/delete forms — all one store. "What words have I taught you?" gets
+a short spoken list.
+
+What the design guarantees:
+
+- **Explicit teaching only.** Nothing enters the store unless you taught it.
+  Jarvix never learns a word from usage on its own — an assistant silently
+  deciding what you "really meant" would be rewriting you.
+- **You own the store.** One hand-editable TOML file,
+  `~/.local/state/jarvix/vocabulary.toml` (0600), format documented in its
+  header, hand-edits live on the next question, unparseable files moved
+  aside — the memory book's discipline exactly.
+- **Re-teaching updates; it never duplicates.** The phrase is the entry's
+  identity ("Quid," and "quid" are one word), so "when I say quid I mean
+  euros" supersedes, and the old meaning stays on the entry's trail with
+  both timestamps.
+- **Hard-to-hear words also improve recognition.** Say "listen for the word
+  quid" (or flip the form's toggle) and the phrase joins whisper's bias
+  prompt through the same sentence the assistant's name uses — effective on
+  the very next utterance. The bias is finite, so the flag list is capped
+  (20 phrases): flagging warns as it fills and refuses at the cap, and
+  `jarvix doctor` shows the budget. Bare recognition terms with no meaning
+  belong in `stt.vocabulary` instead; the flag needs a taught entry.
+- **Budgeted and disclosed.** The injected block is token-capped
+  (`max_injected_tokens`); entries that do not fit leave the block —
+  least recently taught first, never the store — and both the model and the
+  window's section are told. A vocabulary with zero entries adds nothing at
+  all: the prompt is byte-identical to one before the feature existed.
+- **Jarvix does not talk like you by default.** Understanding your words and
+  performing them are different things — mirrored slang from a machine reads
+  as mockery more often than rapport — so the block tells the model to
+  answer in plain words. `speak_back = true` opts in.
+- **Deleting is confirmed.** The Delete button and the model's
+  `vocabulary.forget` run behind the standard confirmation naming the exact
+  phrase: deletion destroys the entry's taught history, so it gets the same
+  second look `memory.forget` does. Teaching runs silently — it is your own
+  sentence, confirmed aloud, and undone with one forget.
+- **Off means off — but never deletes.** `enabled = false` unregisters the
+  tools and phrases and injects nothing, and leaves the store file alone.
+
+Taught phrases deliberately **never** touch the deterministic intent
+grammar: "quid" meaning "pounds" cannot make "volume quid" mean anything,
+and no taught word can collide with or rewrite a spoken command.
 
 ## Knowledge feeds (`[[knowledge.feeds]]`)
 

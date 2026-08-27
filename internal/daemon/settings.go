@@ -313,6 +313,12 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	// Memory is restart-class with the rest of the tool registry: the store
 	// and the memory tools are wired at construction (ADR 0025).
 	merged.Memory = running.Memory
+	// Vocabulary likewise (issue #129) — except speak_back, which only
+	// shapes the injection block's stance sentence and is rebuilt with the
+	// engine's collaborators below, so it lands idle-class.
+	speakBack := merged.Vocabulary.SpeakBack
+	merged.Vocabulary = running.Vocabulary
+	merged.Vocabulary.SpeakBack = speakBack
 	// Knowledge feeds are idle-class *once the service exists*: the tables
 	// swap through Reconfigure below. With no feeds at boot there is no
 	// service and no registered tool, so the section is pinned like memory —
@@ -330,14 +336,14 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		return true, ""
 	}
 
-	deps, workers, err := fillDeps(merged, d.paths, d.injected, d.log)
+	deps, workers, err := fillDeps(merged, d.paths, d.injected, d.vocabulary, d.log)
 	if err != nil {
 		return false, err.Error()
 	}
 	capture := newLayoutCapturer(d.paths, d.compositor, d.log)
 	capture.committed = d.captureCommitted
-	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.knowledge, d.conversations,
-		d.windows, d.log)
+	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.vocabulary, d.knowledge,
+		d.conversations, d.windows, d.log)
 	opts.Capture = capture
 	// The focus runner is rebuilt around the same construction-wired service
 	// (ADR 0041): the store instance survives every reload, exactly like the

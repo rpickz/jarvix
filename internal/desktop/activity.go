@@ -255,6 +255,13 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 		// — the memory privacy contract (counts, not content) holds for
 		// window saves exactly as for the memory.remember tool.
 		return one(memoryEntryChangedRow(data))
+	case "vocabulary.entry_changed":
+		// A phrase taught, edited, flagged, or forgotten (#129) — voice and
+		// window alike publish this. Id and size only, never the words: the
+		// memory privacy contract, held for vocabulary verbatim.
+		return one(vocabularyEntryChangedRow(data))
+	case "vocabulary.injected":
+		return one(vocabularyInjectedRow(data))
 	case "artifact.created":
 		return one(ActivityRow{Kind: ActivityKindArtifact,
 			Label:  "Artifact created",
@@ -535,6 +542,32 @@ func memoryEntryChangedRow(data map[string]any) ActivityRow {
 		Label: "Fact " + action + ": " + activityString(data, "id"),
 		Detail: fmt.Sprintf("memory.toml, saved from the window · %d %s (content not shown)",
 			chars, pluralActivity(chars, "character", "characters"))}
+}
+
+func vocabularyEntryChangedRow(data map[string]any) ActivityRow {
+	action := activityString(data, "action")
+	switch action {
+	case "taught", "edited", "flagged", "forgotten":
+	default:
+		action = "changed"
+	}
+	chars, _ := activityInt(data, "chars")
+	return ActivityRow{Kind: ActivityKindMemory,
+		Label: "Word " + action + ": " + activityString(data, "id"),
+		Detail: fmt.Sprintf("vocabulary.toml · %d %s (content not shown)",
+			chars, pluralActivity(chars, "character", "characters"))}
+}
+
+func vocabularyInjectedRow(data map[string]any) ActivityRow {
+	entries, _ := activityInt(data, "entries")
+	detail := fmt.Sprintf("%d %s", entries, pluralActivity(entries, "word", "words"))
+	if tokens, ok := activityInt(data, "est_tokens"); ok && tokens > 0 {
+		detail += fmt.Sprintf(" · ~%d tokens", tokens)
+	}
+	if trimmed, ok := activityInt(data, "trimmed"); ok && trimmed > 0 {
+		detail += fmt.Sprintf(" · %d kept out by the token cap", trimmed)
+	}
+	return ActivityRow{Kind: ActivityKindMemory, Label: "Taught words offered", Detail: detail}
 }
 
 func routineStepRow(data map[string]any) ActivityRow {

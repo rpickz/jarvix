@@ -29,14 +29,32 @@ import (
 // routines.run starts a session for a button press: an active session is
 // interrupted, exactly as any new interaction interrupts.
 func (e *Engine) ForgetFact(id, content string) (string, error) {
+	return e.startGatedForget(tools.MemoryForgetToolName, id,
+		"Forget the remembered fact: "+content)
+}
+
+// ForgetVocabularyEntry starts a session that forgets one taught phrase by
+// id, gated (issue #129). The same machinery on the same argument: the
+// window's Delete button in the Vocabulary section deserves the second look
+// the model gets, because deleting an entry destroys its taught history —
+// the reversibility split of ADR 0025, applied to vocabulary as the ADR
+// records. description names the entry as a person would ("quid means
+// pounds"), resolved by the caller against the store.
+func (e *Engine) ForgetVocabularyEntry(id, description string) (string, error) {
+	return e.startGatedForget(tools.VocabularyForgetToolName, id,
+		"Forget the taught word: "+description)
+}
+
+// startGatedForget starts the session both gated forgets share: one tool
+// identity, one id argument, and the sentence the conversation record keeps.
+func (e *Engine) startGatedForget(tool, id, recorded string) (string, error) {
 	args, err := json.Marshal(struct {
 		ID string `json:"id"`
 	}{ID: id})
 	if err != nil {
 		return "", err
 	}
-	call := ai.ToolCall{ID: "forget-" + id, Name: tools.MemoryForgetToolName,
-		Arguments: string(args)}
+	call := ai.ToolCall{ID: "forget-" + id, Name: tool, Arguments: string(args)}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -51,13 +69,13 @@ func (e *Engine) ForgetFact(id, content string) (string, error) {
 	}
 	// Tracked like every acting turn (#74): the tail writes history and the
 	// archive, and an untracked goroutine there is invisible to the drains.
-	e.active.Go(func() { e.runForget(s, call, content) })
+	e.active.Go(func() { e.runForget(s, call, recorded) })
 	return sid, nil
 }
 
 // runForget carries the forget out off the engine lock: gate, act, one spoken
 // line, one recorded turn — the runIntent shape without a router in front.
-func (e *Engine) runForget(s *sess, call ai.ToolCall, content string) {
+func (e *Engine) runForget(s *sess, call ai.ToolCall, recorded string) {
 	ack, runErr, alive := e.gatedForget(s, call)
 	if !alive {
 		return // cancelled or superseded; that path owns the events
@@ -73,10 +91,10 @@ func (e *Engine) runForget(s *sess, call ai.ToolCall, content string) {
 	s.timings.markFirstDelta()
 	e.speakAck(s, ack)
 	// Recorded like an intent turn: a follow-up that reaches the model must
-	// know the fact is gone — memory injection alone would only fall silent
-	// about it. Fact content is already conversation-record material (it was
+	// know the fact is gone — injection alone would only fall silent about
+	// it. The content is already conversation-record material (it was
 	// injected every turn), so naming it here discloses nothing new.
-	e.commitTurn(s, "Forget the remembered fact: "+content, ack)
+	e.commitTurn(s, recorded, ack)
 	e.mu.Lock()
 	e.finishLocked(s)
 	e.mu.Unlock()
