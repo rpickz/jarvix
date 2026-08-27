@@ -695,6 +695,26 @@ desktop_apps = ["", "flatpak run org.x.App", "bin/relative"]
 	}
 }
 
+// The lifecycle policy issue #117 pinned (ADR 0038): a conversation has no
+// implicit end. The follow-up window default is 0 — idle time never resets
+// the thread — and the knob remains for anyone who explicitly wants the old
+// auto-forget gap back.
+func TestFollowUpWindowDefaultsOff(t *testing.T) {
+	cfg := Default()
+	if cfg.Conversation.FollowUpWindowSec != 0 {
+		t.Errorf("default follow_up_window_sec = %d, want 0: a conversation only ends when the user says so",
+			cfg.Conversation.FollowUpWindowSec)
+	}
+	// The opt-in still parses: setting a window is a decision, not a default.
+	cfg, err := parse([]byte("[conversation]\nfollow_up_window_sec = 900\n"), Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Conversation.FollowUpWindowSec != 900 {
+		t.Errorf("configured follow_up_window_sec = %d, want 900", cfg.Conversation.FollowUpWindowSec)
+	}
+}
+
 func TestRetentionDefaultsOnAndValidates(t *testing.T) {
 	cfg := Default()
 	if cfg.Conversation.Retention != RetentionOn {

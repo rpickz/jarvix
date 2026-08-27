@@ -421,8 +421,12 @@ type Conversation struct {
 	// follow-up questions. 0 makes every turn standalone.
 	HistoryTurns int `toml:"history_turns"`
 	// FollowUpWindowSec resets the conversation after this many seconds of
-	// inactivity, so a new question does not inherit a stale thread. 0 keeps
-	// context until Jarvix restarts or the conversation is reset explicitly.
+	// inactivity. 0 — the default since issue #117 (ADR 0038) — keeps the
+	// thread until the user explicitly starts a new one: idle time is not a
+	// decision, and a conversation must only end on one. Context survives
+	// daemon restarts too (ADR 0011/0027), so 0 really does mean "until
+	// `jarvix new`". The knob remains for anyone who wants the old
+	// auto-forget behaviour back.
 	FollowUpWindowSec int `toml:"follow_up_window_sec"`
 	// Retention archives every conversation to disk until the user deletes it
 	// (ADR 0027): "on" (the default) keeps whole conversations — untouched by
@@ -529,7 +533,7 @@ func Default() Config {
 			Piper:    Piper{Voice: "en_US-amy-medium", Binary: "piper-tts"},
 			Kokoro:   Kokoro{Voice: "af_heart", Speed: 1.0},
 		},
-		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 900,
+		Conversation: Conversation{SpeakResponses: true, HistoryTurns: 16, FollowUpWindowSec: 0,
 			Retention: RetentionOn},
 		Intents: Intents{Enabled: true, Terminal: intent.DefaultTerminal},
 		Tools: Tools{

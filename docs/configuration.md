@@ -329,8 +329,11 @@ max_injected_tokens = 500        # per-turn budget for the remembered-facts
 speak_responses = true           # false = text-only sessions
 history_turns = 16               # remember this many prior exchanges as context
                                  # (0 = every question is standalone)
-follow_up_window_sec = 900       # forget the thread after this idle gap
-                                 # (0 = keep until restart or `jarvix new`)
+follow_up_window_sec = 0         # 0 (default): a conversation never ends on
+                                 # idle time — only "start a new conversation",
+                                 # New Chat, or `jarvix new` end it (ADR 0038).
+                                 # It survives daemon restarts too. Set seconds
+                                 # here to bring back the old auto-forget gap
 retention = "on"                 # archive every conversation until you delete it
                                  # (ADR 0027; `jarvix conversations`). The cap
                                  # above limits what the model is sent, never
