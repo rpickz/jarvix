@@ -90,6 +90,11 @@ type Options struct {
 	// Nil — a daemon built without the capture service — makes a matched
 	// capture phrase an honest spoken refusal rather than a silent drop.
 	Capture RoutineCapturer
+	// WindowNames assigns and lists window nicknames (#126) through the
+	// window tools' shared resolution seam. Nil — a daemon whose window
+	// tools are switched off — makes a matched nickname phrase an honest
+	// spoken refusal rather than a silent drop.
+	WindowNames WindowNamer
 	// Context gathers opt-in desktop context — active window, selection,
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.

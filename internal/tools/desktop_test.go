@@ -700,7 +700,7 @@ func TestToolSchemasAreValidJSON(t *testing.T) {
 			t.Errorf("%s has no description", tool.Name())
 		}
 	}
-	if got := len(h.d.Names()); got != 5 {
+	if got := len(h.d.Names()); got != 6 {
 		t.Errorf("Names() = %v", h.d.Names())
 	}
 }

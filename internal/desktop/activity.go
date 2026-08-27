@@ -376,6 +376,8 @@ func desktopActionRow(data map[string]any) ActivityRow {
 	verbs := map[string]string{
 		"focus": "Focused", "move": "Moved", "close": "Closed",
 		"launch": "Launched", "list": "Listed windows",
+		// #126 — the detail carries "window → nickname".
+		"name": "Named window",
 	}
 	verb := activityString(data, "verb")
 	label, ok := verbs[verb]
@@ -393,6 +395,7 @@ func desktopRefusalLabel(verb, target string) string {
 	verbs := map[string]string{
 		"focus": "Focus refused", "move": "Move refused",
 		"close": "Close refused", "launch": "Launch refused",
+		"name": "Name refused",
 	}
 	label, ok := verbs[verb]
 	if !ok {

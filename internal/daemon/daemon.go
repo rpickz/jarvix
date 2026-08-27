@@ -121,6 +121,15 @@ type Daemon struct {
 	// probed dispatch dialect, rather than making the next "workspace four"
 	// pay for a fresh probe.
 	compositor desktop.Compositor
+	// windows is the window tools' shared state (ADR 0022, #126), nil when
+	// both the desktop tools and typing are off. Held here for the windows.*
+	// IPC verbs and so a reload hands the engine the same instance — its
+	// nickname registry is session-scoped by design, and rebuilding it would
+	// silently forget every name.
+	windows *tools.Desktop
+	// router tracks the live intent router for the nickname collision check
+	// (#126); a config reload stores the rebuilt one (settings.go).
+	router *routerHolder
 
 	// post tracks the daemon's own post-session goroutines: the session
 	// watcher and every notification delivery it dispatches. They outlive the
@@ -306,13 +315,20 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// The shared state is built whenever *either* family is on, because typing
 	// borrows every window decision from it (ADR 0023): one inventory, one
 	// matcher, one definition of which window is being acted on. Only the
-	// desktop flag decides whether the five verbs are offered to the model.
+	// desktop flag decides whether the six verbs are offered to the model.
+	//
+	// router tracks the live intent grammar for the nickname collision check
+	// (#126): the window tools outlive config reloads, the router does not,
+	// so the assignment path reads whichever router is current rather than
+	// keeping the one it was built beside.
+	router := &routerHolder{}
 	var windows *tools.Desktop
 	if cfg.Tools.Desktop || cfg.Tools.Typing.Enable {
 		windows = tools.NewDesktop(tools.DesktopOptions{
-			Compositor: compositor,
-			Apps:       cfg.Tools.DesktopApps,
-			ScrubEnv:   providerKeyEnvNames(cfg),
+			Compositor:  compositor,
+			Apps:        cfg.Tools.DesktopApps,
+			ScrubEnv:    providerKeyEnvNames(cfg),
+			PhraseOwner: router.owner,
 			// The event carries what was done to which window so the overlay
 			// can show it; addresses stay daemon-side, and spoken summaries
 			// never mention either.
@@ -514,11 +530,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// engine first. Nothing can capture before Run serves, so the late bind
 	// is single-threaded construction, not a race.
 	capture := newLayoutCapturer(paths, compositor, logger)
-	engOpts := engineOptions(cfg, compositor, bus, book, feeds, convs, logger)
+	engOpts := engineOptions(cfg, compositor, bus, book, feeds, convs, windows, logger)
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
 	// the engine's real timer (see session.Options.ConfirmTimer).
 	engOpts.ConfirmTimer = deps.ConfirmTimer
+	// The nickname collision check consults the same router the engine
+	// routes with; a reload stores the rebuilt one (settings.go).
+	router.set(engOpts.Intents)
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
 	// Every search — the IPC method and the model's tool alike — goes through
@@ -573,8 +592,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		memory: book, knowledge: feeds,
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
-		compositor: compositor,
-		paths:      paths, injected: injected, cfg: cfg, warm: workers,
+		compositor: compositor, windows: windows, router: router,
+		paths: paths, injected: injected, cfg: cfg, warm: workers,
 		shutdownGrace: DefaultShutdownGrace,
 	}
 	capture.committed = d.captureCommitted
@@ -1007,6 +1026,7 @@ func (d *Daemon) registerMethods() {
 	d.registerWakeMethods()
 	d.registerRoutineMethods()
 	d.registerScriptMethods()
+	d.registerWindowMethods()
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
 	d.registerEntryAdminMethods()

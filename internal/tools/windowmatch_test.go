@@ -49,7 +49,7 @@ func TestResolveWindow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := resolveWindow(tt.query, inventory())
+			res := resolveWindow(tt.query, inventory(), nil)
 			if res.Kind != tt.kind {
 				t.Fatalf("kind = %v (window %q, candidates %d), want %v",
 					res.Kind, res.Window.Address, len(res.Candidates), tt.kind)
@@ -74,7 +74,7 @@ func TestResolveWindow(t *testing.T) {
 
 func TestResolveWindowOnAnEmptyDesktop(t *testing.T) {
 	for _, query := range []string{"firefox", "this", ""} {
-		if res := resolveWindow(query, nil); res.Kind != resolveNone {
+		if res := resolveWindow(query, nil, nil); res.Kind != resolveNone {
 			t.Errorf("resolveWindow(%q, nothing open) = %v, want no match", query, res.Kind)
 		}
 	}
@@ -87,7 +87,7 @@ func TestResolveWindowPrefersTheStrongerSignal(t *testing.T) {
 		{Address: "0x1", Class: "firefox", Title: "a browser tab about terminals"},
 		{Address: "0x2", Class: "Alacritty", Title: "terminal"},
 	}
-	res := resolveWindow("terminal", windows)
+	res := resolveWindow("terminal", windows, nil)
 	if res.Kind != resolveOne || res.Window.Address != "0x2" {
 		t.Errorf("resolve = %v %q, want the window titled terminal", res.Kind, res.Window.Address)
 	}
@@ -97,17 +97,17 @@ func TestResolveWindowPrefersTheStrongerSignal(t *testing.T) {
 // query word matches a haystack word by prefix, not the other way round.
 func TestResolveWindowDoesNotMatchOnFragments(t *testing.T) {
 	windows := []desktop.Window{{Address: "0x1", Class: "xterm", Title: "shell"}}
-	if res := resolveWindow("term", windows); res.Kind != resolveOne {
+	if res := resolveWindow("term", windows, nil); res.Kind != resolveOne {
 		// "term" *is* a substring of "xterm", which is the tolerated looseness.
 		t.Errorf("resolve = %v, want the substring match", res.Kind)
 	}
-	if res := resolveWindow("terminology", windows); res.Kind != resolveNone {
+	if res := resolveWindow("terminology", windows, nil); res.Kind != resolveNone {
 		t.Errorf("resolve = %v, want no match for a longer word", res.Kind)
 	}
 }
 
 func TestDescribeCandidatesNamesWindowsAndBoundsTheList(t *testing.T) {
-	res := resolveWindow("firefox", inventory())
+	res := resolveWindow("firefox", inventory(), nil)
 	got := describeCandidates(res.Candidates)
 	for _, want := range []string{"firefox — GitHub — pull requests", "workspace 1", "Fastmail"} {
 		if !strings.Contains(got, want) {
@@ -125,7 +125,7 @@ func TestDescribeCandidatesNamesWindowsAndBoundsTheList(t *testing.T) {
 }
 
 func TestSummariseWindowsGroupsAndNeverLeaksIdentifiers(t *testing.T) {
-	got := summariseWindows(inventory())
+	got := summariseWindows(inventory(), nil)
 	for _, want := range []string{"firefox", "Obsidian", "workspace 3", "the one the user is in"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary %q missing %q", got, want)

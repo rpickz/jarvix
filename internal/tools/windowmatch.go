@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +63,10 @@ const (
 	// resolveMany: several windows tied at the winning tier, so the user has
 	// to choose.
 	resolveMany
+	// resolveReleased: nothing matched, but the reference is a nickname
+	// (#126) whose window has closed — a different honest answer from "never
+	// heard of it".
+	resolveReleased
 )
 
 // resolution is one attempt to turn a spoken reference into a window.
@@ -138,8 +143,9 @@ var categorySynonyms = map[string]string{
 
 // resolveWindow turns a spoken reference into a window, or into an honest
 // non-answer. windows is the inventory captured for this resolution and the
-// only thing consulted: no second look, no compositor call, no state.
-func resolveWindow(query string, windows []desktop.Window) resolution {
+// only thing consulted: no second look, no compositor call, no state beyond
+// the nickname registry, which is judged against this same inventory.
+func resolveWindow(query string, windows []desktop.Window, names *desktop.Nicknames) resolution {
 	tokens := normaliseTokens(query)
 	res := resolution{Query: strings.Join(tokens, " ")}
 	if len(windows) == 0 {
@@ -155,6 +161,16 @@ func resolveWindow(query string, windows []desktop.Window) resolution {
 			}
 		}
 		return res
+	}
+	// The nickname seam (#126): a chosen name outranks every matching tier.
+	// The precedence is deliberate and test-pinned — the user picked this
+	// name to *stop* depending on what apps and titles happen to say, so a
+	// title that contains the same word must never outbid it. Deictic words
+	// stay above it only because they are reserved: no nickname can be one.
+	if names != nil {
+		if w, ok := names.Resolve(res.Query, windows); ok {
+			return resolution{Kind: resolveOne, Window: w, Query: res.Query}
+		}
 	}
 
 	best := tierNone
@@ -172,6 +188,11 @@ func resolveWindow(query string, windows []desktop.Window) resolution {
 	}
 	switch len(winners) {
 	case 0:
+		// A total miss that used to be a nickname is its own honest answer:
+		// "nothing is called builds right now", not "never heard of builds".
+		if names != nil && names.Released(res.Query, windows) {
+			res.Kind = resolveReleased
+		}
 		return res
 	case 1:
 		res.Kind, res.Window = resolveOne, winners[0]
@@ -248,6 +269,31 @@ func categoryTerms(tokens []string) []string {
 		terms = append(terms, appCategories[category]...)
 	}
 	return terms
+}
+
+// ReservedWindowWords is the matcher's own vocabulary (#126): every word
+// that already means something in a window reference, each with the
+// description a nickname refusal names as its owner. Supplied to the
+// nickname registry from here — the one place the vocabulary lives — so the
+// matcher and the refusals can never disagree about what is reserved.
+// Application names are deliberately absent: nicknaming a window "firefox"
+// is allowed, and the nickname's precedence over app matching is the
+// deterministic contract, pinned by test.
+func ReservedWindowWords() map[string]string {
+	out := make(map[string]string, len(deicticWords)+len(stopWords)+len(appCategories)+len(categorySynonyms))
+	for w := range deicticWords {
+		out[w] = "it is how a reference says \"the window I am in\""
+	}
+	for w := range stopWords {
+		out[w] = "it is a filler word window references ignore"
+	}
+	for c := range appCategories {
+		out[c] = fmt.Sprintf("it is the word for any %s window", c)
+	}
+	for s, c := range categorySynonyms {
+		out[s] = fmt.Sprintf("it is another word for any %s window", c)
+	}
+	return out
 }
 
 // isDeictic reports whether the reference points at the window the user is
@@ -363,8 +409,10 @@ func workspaceLabel(w desktop.Window) string {
 // summariseWindows renders the whole inventory for the model, grouped so a
 // spoken summary can be built from it without arithmetic. Addresses are
 // deliberately absent: nothing in this string may be read aloud by accident,
-// and a string that never contains an address cannot leak one.
-func summariseWindows(windows []desktop.Window) string {
+// and a string that never contains an address cannot leak one. nicknames
+// (#126) maps a window's address to its nickname — the address is the lookup
+// key here and nothing more; it still never enters the string.
+func summariseWindows(windows []desktop.Window, nicknames map[string]string) string {
 	byApp := map[string][]desktop.Window{}
 	order := make([]string, 0, len(windows))
 	for _, w := range windows {
@@ -393,6 +441,9 @@ func summariseWindows(windows []desktop.Window) string {
 				label = "no title"
 			}
 			label += " (workspace " + workspaceLabel(w) + ")"
+			if nick := nicknames[w.Address]; nick != "" {
+				label += " — the user calls it " + nick
+			}
 			if w.Focused {
 				label += " — the one the user is in"
 			}

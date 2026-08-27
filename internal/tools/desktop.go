@@ -55,6 +55,7 @@ const (
 	MoveWindowToolName  = "desktop.move_window"
 	CloseWindowToolName = "desktop.close_window"
 	LaunchAppToolName   = "desktop.launch_app"
+	NameWindowToolName  = "desktop.name_window"
 )
 
 // Window tool bounds.
@@ -111,6 +112,10 @@ type Desktop struct {
 	// and the model's tool result; the user's surfaces heard nothing. Nil in
 	// tests.
 	onRefusal func(verb, target, reason string)
+	// names is the window-nickname registry (#126): one instance behind
+	// every consumer of a window reference, so a nickname means the same
+	// window in a tool call, a typed target, and a deterministic intent.
+	names *desktop.Nicknames
 
 	mu sync.Mutex
 	// inventory is the last capture and when it was taken.
@@ -149,6 +154,10 @@ type DesktopOptions struct {
 	// the target as a person would name it, and the reason — never a window
 	// address, never compositor diagnostics.
 	OnRefusal func(verb, target, reason string)
+	// PhraseOwner reports whether a whole utterance already belongs to the
+	// intent grammar, naming the owner (#126) — intent.Router.Owner behind a
+	// func so this package never imports the router. Nil skips the check.
+	PhraseOwner func(phrase string) (owner string, taken bool)
 	// Log records each action. Nil uses slog.Default().
 	Log *slog.Logger
 
@@ -172,7 +181,11 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 		log:       opts.Log,
 		onAction:  opts.OnAction,
 		onRefusal: opts.OnRefusal,
-		pending:   make(map[string]pendingTarget),
+		names: desktop.NewNicknames(desktop.NicknameOptions{
+			Reserved:    ReservedWindowWords(),
+			PhraseOwner: opts.PhraseOwner,
+		}),
+		pending: make(map[string]pendingTarget),
 	}
 	if d.launcher == nil {
 		d.launcher = &execLauncher{scrubEnv: opts.ScrubEnv}
@@ -201,9 +214,10 @@ const (
 	verbMove
 	verbClose
 	verbLaunch
+	verbName
 )
 
-// Tools returns the five window tools, in the order they are registered and
+// Tools returns the six window tools, in the order they are registered and
 // therefore offered to the model: read first, then act.
 func (d *Desktop) Tools() []Tool {
 	return []Tool{
@@ -212,6 +226,7 @@ func (d *Desktop) Tools() []Tool {
 		&windowTool{d: d, verb: verbMove},
 		&windowTool{d: d, verb: verbClose},
 		&windowTool{d: d, verb: verbLaunch},
+		&windowTool{d: d, verb: verbName},
 	}
 }
 
@@ -243,6 +258,8 @@ func (t *windowTool) Name() string {
 		return MoveWindowToolName
 	case verbClose:
 		return CloseWindowToolName
+	case verbName:
+		return NameWindowToolName
 	default:
 		return LaunchAppToolName
 	}
@@ -272,6 +289,11 @@ func (t *windowTool) Description() string {
 		return "Close one of the user's open windows, exactly as clicking its close button would: " +
 			"the application may still ask them to save. Describe the window as the user did. Use " +
 			"this only when they asked to close something, and never to tidy up on your own."
+	case verbName:
+		return "Give one of the user's open windows a short spoken nickname, when they ask to call " +
+			"or name a window something (\"call this window builds\"). The name must be a single " +
+			"word; afterwards the user can say it anywhere they would describe a window. Use it " +
+			"only when the user chose the name — never invent nicknames on your own."
 	default:
 		return "Start an application on the user's computer by name (\"firefox\", \"spotify\"). Use " +
 			"it when they ask you to open or launch something. It starts the program and returns " +
@@ -311,6 +333,18 @@ func (t *windowTool) Schema() json.RawMessage {
 		},
 		"required": ["workspace"]
 	}`)
+	case verbName:
+		return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"window": ` + windowArgSchema + `,
+			"name": {
+				"type": "string",
+				"description": "The nickname the user chose: one short word, exactly as they said it."
+			}
+		},
+		"required": ["name"]
+	}`)
 	default:
 		desc, _ := json.Marshal("Which application to start. " + t.d.launchHint())
 		return json.RawMessage(`{
@@ -338,6 +372,7 @@ type windowArgs struct {
 	Window    string `json:"window"`
 	Workspace int    `json:"workspace"`
 	App       string `json:"app"`
+	Name      string `json:"name"`
 }
 
 // Execute implements Tool. Every way the desktop can disappoint — no
@@ -354,6 +389,9 @@ func (t *windowTool) Execute(ctx context.Context, input json.RawMessage) (string
 	}
 	if t.verb == verbList {
 		return t.d.list(ctx)
+	}
+	if t.verb == verbName {
+		return t.d.nameWindow(ctx, args.Window, args.Name)
 	}
 	if t.verb == verbMove && (args.Workspace < 1 || args.Workspace > maxWorkspace) {
 		return fmt.Sprintf("Workspace %d does not exist; workspaces are numbered 1 to %d. Tell the "+
@@ -462,7 +500,7 @@ func (d *Desktop) list(ctx context.Context) (string, error) {
 		shown = shown[:maxListedWindows]
 	}
 	summary := fmt.Sprintf("%s open: %s.", plural(len(windows), "window is", "windows are"),
-		summariseWindows(shown))
+		summariseWindows(shown, d.nicknamesByAddress(windows)))
 	if extra > 0 {
 		summary += fmt.Sprintf(" (%d more not listed.)", extra)
 	}
@@ -779,13 +817,14 @@ func (d *Desktop) invalidate() {
 	d.inventory, d.fetched = nil, time.Time{}
 }
 
-// resolve captures an inventory and matches the reference against it.
+// resolve captures an inventory and matches the reference against it —
+// nicknames first (#126), then the matcher's tiers.
 func (d *Desktop) resolve(ctx context.Context, query string) (resolution, error) {
 	windows, err := d.windows(ctx)
 	if err != nil {
 		return resolution{}, err
 	}
-	return resolveWindow(query, windows), nil
+	return resolveWindow(query, windows, d.names), nil
 }
 
 // verify reports whether the compositor still has *that* window at the
@@ -819,6 +858,12 @@ func (d *Desktop) explainResolution(res resolution) (string, bool) {
 		return fmt.Sprintf("Several windows match %q: %s. Ask the user which one they mean, naming "+
 			"them, then call the tool again with a description that picks just one. Do not guess.",
 			res.Query, describeCandidates(res.Candidates)), true
+	case resolveReleased:
+		// The nickname's window has closed (#126): honesty is the whole
+		// answer, and it is a different answer from "never heard of it".
+		return fmt.Sprintf("Nothing is called %q right now — the window that was has closed, and "+
+			"names do not outlive their window. Tell the user in one short sentence, and do not "+
+			"retry.", res.Query), true
 	case resolveNone:
 		what := res.Query
 		if what == "" {
@@ -865,8 +910,10 @@ func (d *Desktop) publishRefusal(verb, target, reason string) {
 // sentence is kept, so approving *this* window cannot close another one that
 // happens to match the same words a moment later.
 func (t *windowTool) Confirmation(input json.RawMessage) (command, summary string, ok bool) {
-	if t.verb == verbList || t.verb == verbFocus {
-		return "", "", false // allow-tier verbs; never asked about
+	if t.verb == verbList || t.verb == verbFocus || t.verb == verbName {
+		// Allow-tier verbs; never asked about. Naming belongs here because it
+		// changes nothing on screen and the opposite assignment undoes it.
+		return "", "", false
 	}
 	var args windowArgs
 	if err := unmarshalWindowArgs(input, &args); err != nil {
