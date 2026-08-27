@@ -13,11 +13,12 @@ const (
 	StateTranscribing State = "transcribing"
 	StateThinking     State = "thinking"
 	StateResponding   State = "responding"
-	// Acting is the deterministic intent router's state (ADR 0017): the
-	// transcript matched the intent table, so the session is carrying out a
-	// local action instead of asking the model. It exists precisely because
-	// a matched intent must NOT pass through Thinking → Responding — those
-	// states mean "a provider request is open", and here none ever is.
+	// Acting is the deterministic local-action state (ADR 0017): the session
+	// is carrying out something decided without the model — a transcript the
+	// intent router claimed, or a speech replay re-reading a recorded turn
+	// (issue #122). It exists precisely because such a turn must NOT pass
+	// through Thinking → Responding — those states mean "a provider request
+	// is open", and here none ever is.
 	StateActing State = "acting"
 	// AwaitingConfirmation is the permission gate's ask tier (ADR 0014): a
 	// tool call needs the user's go-ahead. Jarvix has spoken (or is

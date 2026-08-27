@@ -342,6 +342,15 @@ type sess struct {
 	// lock like wake.
 	quiet bool
 
+	// replay marks a session that only re-speaks a recorded turn (issue
+	// #122): no transcript, no model call, and — enforced by claiming
+	// committed at birth — nothing ever written to the conversation. It
+	// exists so ReplaySpeech can tell "a live exchange holds the floor"
+	// (refuse: live speech wins) from "an earlier replay is still playing"
+	// (supersede it: the newest click wins). Set under Engine.mu before the
+	// session leaves Idle and immutable after.
+	replay bool
+
 	// speaker is the turn's streaming speaker, registered at construction so
 	// CancelSpeech can ask the component that actually owns playback whether
 	// audio is live, instead of inferring it from the session state — the
@@ -1560,6 +1569,14 @@ type Turn struct {
 func (e *Engine) Conversation() []Turn {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.conversationLocked()
+}
+
+// conversationLocked is Conversation's body, split out so ReplaySpeech can
+// resolve a turn address against the same view under the lock it already
+// holds — the address a client sends means a position in exactly this
+// rendering, so any second rendering would be a second chance to disagree.
+func (e *Engine) conversationLocked() []Turn {
 	turns := make([]Turn, 0, len(e.history)+len(e.confRecords)+1)
 	// confRecords is ordered by afterMsgs (resolution order within a
 	// monotonic counter), so one cursor walks it alongside the history.
