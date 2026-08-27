@@ -19,18 +19,23 @@ import (
 	"github.com/rpickz/jarvix/internal/conversations"
 )
 
-// stageArchiveTurnLocked records a completed exchange for the archive.
-// Callers hold e.mu. It must run before the retention cap is applied: the cap
-// governs what the model is sent, never what is kept, so a 100-turn
-// conversation archives 100 turns however small history_turns is.
-func (e *Engine) stageArchiveTurnLocked(userText, assistantText string) {
+// stageArchiveTurnLocked records an exchange for the archive. Callers hold
+// e.mu. It must run before the retention cap is applied: the cap governs what
+// the model is sent, never what is kept, so a 100-turn conversation archives
+// 100 turns however small history_turns is.
+//
+// interrupted marks both halves of an exchange the user cut off (issue #117):
+// the flag rides the turn schema (additive, omitempty) so the record says the
+// answer was incomplete by act rather than by accident, without disturbing a
+// single byte of any completed turn's line.
+func (e *Engine) stageArchiveTurnLocked(userText, assistantText string, interrupted bool) {
 	if e.opts.Archive == nil {
 		return // retention off: nothing is ever staged, so nothing is written
 	}
 	now := e.now()
 	e.pendingArchive = append(e.pendingArchive,
-		conversations.Turn{Role: string(ai.RoleUser), Text: userText, Time: now},
-		conversations.Turn{Role: string(ai.RoleAssistant), Text: assistantText, Time: now})
+		conversations.Turn{Role: string(ai.RoleUser), Text: userText, Time: now, Interrupted: interrupted},
+		conversations.Turn{Role: string(ai.RoleAssistant), Text: assistantText, Time: now, Interrupted: interrupted})
 }
 
 // persistArchive flushes staged turns to the archive. It runs after

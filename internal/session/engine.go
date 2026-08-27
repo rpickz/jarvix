@@ -250,6 +250,32 @@ type sess struct {
 	transcriptReady bool
 	submitted       bool
 
+	// userText is the transcript the turn actually processed — wake word
+	// stripped, snapshotted in maybeThinkLocked the moment the turn leaves
+	// the input stage. It exists because s.transcript is not stable for the
+	// turn's whole life: a voice reply to a tool confirmation overwrites it
+	// ("yes" replacing the question), and anything committed to the record
+	// afterwards must remember the question, not the reply. Guarded by
+	// Engine.mu; written exactly once.
+	userText string
+	// committed marks the exchange as recorded — by the normal tail
+	// (commitTurn) or by an interrupted commit (issue #117), whichever ran
+	// first. It closes the race between a cancel and a turn that had already
+	// reached its commit: without it, a cancel landing between commitTurn and
+	// finishLocked would record the exchange twice, once whole and once
+	// marked interrupted. Guarded by Engine.mu.
+	committed bool
+
+	// streamed accumulates the assistant text of every round as it streams,
+	// so an interruption can commit what the user actually heard begun
+	// (issue #117): the incident's clarifying question was fully streamed and
+	// still lost, because the only copy lived on think()'s stack. Its own
+	// mutex rather than Engine.mu, because appends happen per delta on the
+	// streaming hot path and reads happen from cancel paths that already hold
+	// Engine.mu — the ordering is always mu → streamedMu, never the reverse.
+	streamedMu sync.Mutex
+	streamed   strings.Builder
+
 	// replyCapture marks a voice capture that answers a pending tool
 	// confirmation rather than asking a new question: its transcript is
 	// interpreted as yes/no and resolves the confirmation instead of
@@ -284,6 +310,24 @@ type sess struct {
 	// flag the one moment Jarvix speaks on an intent turn would be the one
 	// moment it could not be stopped. Guarded by Engine.mu.
 	promptAudio bool
+}
+
+// recordDelta appends one streamed fragment to the turn's running assistant
+// text. Called from the streaming goroutine per delta; see streamedMu for why
+// this takes its own lock rather than Engine.mu.
+func (s *sess) recordDelta(text string) {
+	s.streamedMu.Lock()
+	s.streamed.WriteString(text)
+	s.streamedMu.Unlock()
+}
+
+// streamedText snapshots everything the assistant has streamed this turn so
+// far. Called from cancel paths holding Engine.mu (mu → streamedMu, never the
+// reverse).
+func (s *sess) streamedText() string {
+	s.streamedMu.Lock()
+	defer s.streamedMu.Unlock()
+	return s.streamed.String()
 }
 
 // NewEngine wires the engine. logger, registry, and store may be nil (no
@@ -620,8 +664,22 @@ func (e *Engine) CancelSpeech() (stopped bool) {
 	if announced {
 		e.publish(Event{Type: "tts.finished", Data: map[string]any{"session_id": s.id, "interrupted": true}})
 	}
+	// "Stop" ends the turn early, and an early end is an interruption of the
+	// exchange even though the session finishes normally (issue #117): the
+	// question and the partial answer must survive into the next turn, or a
+	// follow-up to a stopped answer meets the same amnesia the incident log
+	// shows for push-to-talk interruption.
+	committed := e.commitInterruptedLocked(s)
 	e.log.Info("speech cancelled", "component", "session", "session_id", s.id)
 	e.finishLocked(s)
+	if committed {
+		// think()'s tail sees the dead context and unwinds without writing,
+		// so the commit is persisted here, tracked for the shutdown drain.
+		e.active.Go(func() {
+			e.persistHistory()
+			e.persistArchive()
+		})
+	}
 	return true
 }
 
@@ -707,6 +765,13 @@ func (e *Engine) publish(ev Event) {
 }
 
 // cancelLocked tears the current session down through Cancelling → Idle.
+//
+// A cancelled turn is not a forgotten one (issue #117): whatever exchange the
+// session was carrying — the user's question and any partial answer — is
+// committed marked interrupted *before* session.cancelled is published, so a
+// client that has seen the event can already find the exchange behind the
+// archive read barrier (SyncArchive, issue #115), exactly as session.finished
+// promises for a completed turn.
 func (e *Engine) cancelLocked(reason string) {
 	s := e.current
 	if s == nil {
@@ -722,6 +787,7 @@ func (e *Engine) cancelLocked(reason string) {
 		// shutdown that raced it would leave both behind.
 		e.active.Go(rec.Cancel)
 	}
+	committed := e.commitInterruptedLocked(s)
 	// A session cancelled before it ever left Idle (started, never advanced)
 	// has no transition to make — that is a quiet nothing, not a refusal.
 	if e.state.Active() {
@@ -732,6 +798,16 @@ func (e *Engine) cancelLocked(reason string) {
 	e.log.Info("session cancelled", "component", "session", "session_id", s.id,
 		"reason", reason, "duration_ms", time.Since(s.started).Milliseconds())
 	e.current = nil
+	if committed {
+		// The cancelled session's own tail unwinds without writing (its stage
+		// goroutines see the dead context and return), so the interrupted
+		// commit needs a writer of its own — tracked in e.active, like the
+		// tail it replaces, so Shutdown's drain waits for it (#29).
+		e.active.Go(func() {
+			e.persistHistory()
+			e.persistArchive()
+		})
+	}
 }
 
 // finishLocked completes the session normally.
@@ -854,6 +930,12 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))
 		return
 	}
+	// Snapshot the processed transcript for the turn's whole life. Everything
+	// that records this turn — the normal commit, an interrupted commit, the
+	// provider request — reads this copy, because s.transcript itself is
+	// overwritten by a voice reply to a tool confirmation and the record must
+	// remember the question, never the "yes" that approved a step of it.
+	s.userText = s.transcript
 	// The deterministic intent router gets the transcript first (ADR 0017).
 	// A hit executes a local action and finishes the session without ever
 	// opening a provider request; a miss costs one map lookup and falls
@@ -933,7 +1015,7 @@ func (e *Engine) think(s *sess) {
 	// Feed values likewise (ADR 0031): cached readings only, never a fetch —
 	// a turn must not wait on a feed command.
 	feeds := e.gatherKnowledge(s)
-	messages := e.conversationMessages(s.transcript, snapshot, remembered.Message, feeds.Message)
+	messages := e.conversationMessages(s.userText, snapshot, remembered.Message, feeds.Message)
 
 	var toolDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
@@ -990,6 +1072,12 @@ func (e *Engine) think(s *sess) {
 		// by now every word of it is committed to the one playback queue: from
 		// the gate's point of view it has been said.
 		turn = turn.add(text)
+		if text != "" {
+			// A round boundary in the mirrored stream, so an interrupted
+			// commit does not glue this round's narration to the next round's
+			// first word.
+			s.recordDelta("\n")
+		}
 		// The model has stopped answering and gone back to work: the moment
 		// the table's Responding → Thinking entry describes.
 		e.backToThinking(s)
@@ -1026,7 +1114,7 @@ func (e *Engine) think(s *sess) {
 			return
 		}
 	}
-	e.commitTurn(s.transcript, finalText)
+	e.commitTurn(s, s.userText, finalText)
 
 	e.mu.Lock()
 	e.finishLocked(s)
@@ -1065,6 +1153,11 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 				e.publish(Event{Type: "assistant.delta", Data: map[string]any{"session_id": s.id, "content": ""}})
 			}
 			full.WriteString(ev.Content)
+			// Mirrored onto the session so an interruption can commit what
+			// was already streamed (issue #117) — think()'s locals die with
+			// the goroutine, and the incident lost a fully-streamed question
+			// for exactly that reason.
+			s.recordDelta(ev.Content)
 			e.publish(Event{Type: "assistant.delta", Data: map[string]any{"session_id": s.id, "content": ev.Content}})
 			if speaker != nil {
 				for _, sentence := range sc.push(ev.Content) {
@@ -1208,13 +1301,88 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 // commitTurn records a completed exchange as context for the next turn, kept
 // to the configured number of turns. Intermediate tool traffic is not stored;
 // the user question and the assistant's final answer are what carry meaning.
-func (e *Engine) commitTurn(userText, assistantText string) {
+//
+// It takes the session because commit-or-not is per-turn state: a cancel that
+// raced the tail may already have committed this exchange marked interrupted
+// (issue #117), and recording it a second time — once cut, once whole — would
+// be worse than either alone. Whoever sets s.committed first wins; both
+// versions are truthful about what the user experienced at the moment each
+// was written.
+func (e *Engine) commitTurn(s *sess, userText, assistantText string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if s.committed {
+		return
+	}
+	s.committed = true
+	e.commitTurnLocked(userText, assistantText, false)
+}
+
+// The wording an interrupted exchange carries into the record (issue #117).
+// The mark lives in the assistant half's *text* — beside the machine-readable
+// flag the archive keeps — because text is the one channel every consumer
+// already reads: the model sees why the thread's last answer stops
+// mid-thought (and never claims the exchange is missing), the window and
+// `jarvix conversations show` render it without new plumbing, and a reopened
+// conversation carries it back into context through adoptableMessages
+// untouched. Square brackets keep it visibly an annotation, not speech.
+const (
+	// interruptedMidAnswer follows partial answer text.
+	interruptedMidAnswer = "[interrupted — the user cut this answer off here]"
+	// interruptedNoAnswer stands alone when the turn was cut before any
+	// answer streamed. It is the whole assistant half rather than an empty
+	// string, because providers reject empty messages and the history's
+	// user/assistant pairing must hold (the "Done." precedent in runIntent).
+	interruptedNoAnswer = "[interrupted — the user cut in before any answer was given]"
+)
+
+// commitInterruptedLocked commits the exchange a dying session was carrying —
+// the user's turn and whatever answer had streamed — marked interrupted, into
+// working memory and the archive stage. Callers hold e.mu and, when it
+// reports true, must arrange persistence off the lock (the dying session's
+// own tail will not: its goroutines see the dead context and unwind without
+// writing).
+//
+// It reports false — nothing committed — when the turn was already committed
+// (the normal tail won the race), or when there is no user turn to commit: a
+// session cancelled while still listening, a too-short accidental tap, a
+// reply capture whose transcript is a yes/no and not a question. The one
+// commit-worthy thing such sessions could carry, the confirmation they were
+// answering, belongs to the session that asked it and is committed there.
+func (e *Engine) commitInterruptedLocked(s *sess) bool {
+	if s.committed {
+		return false
+	}
+	user := strings.TrimSpace(s.userText)
+	if user == "" && s.transcriptReady && !s.replyCapture {
+		// Cancelled after the transcript landed but before maybeThinkLocked
+		// processed it — the snapshot was never taken, so take it here, with
+		// the same wake-word strip processing would have applied.
+		t := s.transcript
+		if s.wake {
+			t = stripWakeWord(t, e.opts.WakeWord, e.opts.WakeAliases)
+		}
+		user = strings.TrimSpace(t)
+	}
+	if user == "" {
+		return false
+	}
+	s.committed = true
+	assistant := interruptedNoAnswer
+	if partial := strings.TrimSpace(s.streamedText()); partial != "" {
+		assistant = partial + "\n" + interruptedMidAnswer
+	}
+	e.commitTurnLocked(user, assistant, true)
+	return true
+}
+
+// commitTurnLocked is the one place an exchange enters the record, complete
+// or interrupted. Callers hold e.mu and have already claimed s.committed.
+func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bool) {
 	// The archive is staged before the cap can trim anything, and even with
 	// in-memory history disabled: history_turns governs what the model is
 	// sent, never what is kept (ADR 0027).
-	e.stageArchiveTurnLocked(userText, assistantText)
+	e.stageArchiveTurnLocked(userText, assistantText, interrupted)
 	if e.opts.HistoryTurns <= 0 {
 		return
 	}
@@ -1289,8 +1457,38 @@ func (e *Engine) Conversation() []Turn {
 // as they completed — so the reset only writes whatever the last exchange
 // left staged, then ends the attachment. The archived conversation stays,
 // listed and reopenable; only the live head is destroyed.
+//
+// A session in flight is deliberately left alone here — this is the reset
+// half of a delete or an intent turn's own reset, where cancelling would be a
+// side effect nobody asked for. NewConversation is the entry point that ends
+// the session too.
 func (e *Engine) ResetConversation() {
+	e.reset(false)
+}
+
+// NewConversation is the explicit end of a conversation — the one verb the
+// `conversation.new` IPC method, the spoken "start a new conversation"
+// intent's engine path, the window's New chat button, and the bar menu all
+// converge on (issue #117; ADR 0038). Where ResetConversation only forgets,
+// this first cancels any session in flight, which commits that session's
+// exchange marked interrupted into the *old* thread before the detach — so
+// even the turn the user talked over is archived, searchable, and gone from
+// the fresh thread's working memory.
+func (e *Engine) NewConversation() {
+	e.reset(true)
+}
+
+// reset is the shared body of ResetConversation and NewConversation.
+func (e *Engine) reset(cancelActive bool) {
 	e.mu.Lock()
+	if cancelActive && e.current != nil {
+		// cancelLocked commits the in-flight exchange (marked interrupted)
+		// into e.history and the archive stage — both of which the lines
+		// below hand to the old conversation and clear — so the ordering
+		// here is what puts the interrupted turn in the ending thread rather
+		// than the new one.
+		e.cancelLocked("new conversation")
+	}
 	e.history = nil
 	e.lastTurn = time.Time{}
 	e.approvals = make(map[string]bool)

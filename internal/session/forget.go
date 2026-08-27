@@ -76,7 +76,7 @@ func (e *Engine) runForget(s *sess, call ai.ToolCall, content string) {
 	// know the fact is gone — memory injection alone would only fall silent
 	// about it. Fact content is already conversation-record material (it was
 	// injected every turn), so naming it here discloses nothing new.
-	e.commitTurn("Forget the remembered fact: "+content, ack)
+	e.commitTurn(s, "Forget the remembered fact: "+content, ack)
 	e.mu.Lock()
 	e.finishLocked(s)
 	e.mu.Unlock()

@@ -227,6 +227,11 @@ func TestShutdownDrainsAMidFlightSession(t *testing.T) {
 	<-provider.entered // the model call is running and will not end by itself
 
 	h.stop()
+	// Cancelling the mid-flight session commits its exchange marked
+	// interrupted (issue #117), and shutdown's drain now waits for that
+	// write like any session tail — so the gated store must be released for
+	// Run to return, exactly as the persist test releases it.
+	h.release()
 	<-h.stopped
 
 	// Non-blocking on purpose: this asserts what was already true when Run
@@ -238,6 +243,19 @@ func TestShutdownDrainsAMidFlightSession(t *testing.T) {
 	}
 	if err := quiesced(h.daemon); err != nil {
 		t.Errorf("session goroutines were still in flight when Run returned: %v", err)
+	}
+	// The interrupted question survived into the persisted conversation: a
+	// restart mid-answer no longer erases what the user asked (ADR 0038).
+	msgs, _, err := h.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []string
+	for _, m := range msgs {
+		persisted = append(persisted, m.Content)
+	}
+	if !strings.Contains(strings.Join(persisted, " | "), "answer slowly") {
+		t.Errorf("the interrupted exchange was not persisted through shutdown: %v", persisted)
 	}
 }
 
