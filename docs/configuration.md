@@ -49,7 +49,7 @@ to each field in the settings screen:
 
 | Class | Options | When it takes effect |
 |---|---|---|
-| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new) | Immediately on save, even mid-session |
+| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new, line_spacing, text_size, letter_spacing) | Immediately on save, even mid-session |
 | **idle** | `assistant.aliases`, `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `confirmations.speak_details`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `assistant.name`, `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
 
@@ -389,6 +389,20 @@ activity_clear_on_new = false    # true = `jarvix new` also empties the
                                  # activity feed. Off by default: "what did it
                                  # just do?" is usually asked after starting
                                  # fresh
+
+# Reading comfort (issue #121): the conversation window's transcript
+# typography. Relative units throughout — multiples of the design scale, not
+# pixels — so they follow the shell's font size; the defaults render exactly
+# as the window did before these settings existed. Transcript messages only:
+# window chrome, tabs, and cards keep the design system's scale.
+line_spacing = 1.0               # × line height (0.8–2.0). Extra room between
+                                 # lines helps dyslexic readers keep their
+                                 # place in a long answer
+text_size = 1.0                  # × the design text size (0.7–1.6). Larger
+                                 # turns a wall of text back into lines
+letter_spacing = 0.0             # ems added between letters (0–0.3). A little
+                                 # air stops letters crowding; WCAG's
+                                 # reading-aid guidance is 0.12
 
 [log]
 level = "info"                   # debug | info | warn | error
@@ -1827,6 +1841,20 @@ with `jarvix window` (bound to `Super+Alt+C` by the Hyprland bindings).
 The window is rendered by the Omarchy shell plugin and works without the
 daemon: if jarvixd is down it says so and points at
 `systemctl --user start jarvixd`.
+
+### Reading comfort
+
+The transcript's typography is personal: `ui.line_spacing`,
+`ui.text_size`, and `ui.letter_spacing` (ranges and defaults in the `[ui]`
+reference above) govern how transcript messages render. They are ordinary
+registry settings, so every settings surface works: the Settings tab, the CLI
+(`jarvix config set ui.line_spacing=1.5`), and — because registry settings
+are what the assistant's own settings tool operates on (issue #109) — voice:
+*"increase the line spacing a bit"*. All three are live-class; the open
+window re-renders the transcript the moment a change is saved, no restart.
+Out-of-range values are refused with the standard field problem, and the
+defaults are pinned to the pre-setting rendering, so an untouched config
+looks exactly as it always did.
 
 ## Natural voice (Kokoro)
 
