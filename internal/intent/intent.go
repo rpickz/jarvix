@@ -151,6 +151,18 @@ type Match struct {
 	// 2), fixed by which pattern matched — "with this window" versus "with
 	// these two windows" — never parsed from free text.
 	FocusWindows int
+	// VocabPhrase and VocabMeaning carry a spoken teach — "when i say
+	// {phrase} i mean {meaning}" (#129). Both empty for every other intent.
+	// Only the raw words travel: the router decides *whether* the utterance
+	// teaches, and the vocabulary seam owns storage and supersede.
+	VocabPhrase  string
+	VocabMeaning string
+	// VocabListen carries "listen for the word {phrase}" (#129): the phrase
+	// to flag hard-to-hear, empty for every other intent.
+	VocabListen string
+	// VocabList marks "what words have i taught you" (#129): the engine
+	// answers with the vocabulary seam's one spoken listing.
+	VocabList bool
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -290,6 +302,13 @@ type rule struct {
 	// FocusNone for every other rule.
 	focus        FocusAction
 	focusWindows int
+	// vocabTeach marks the "when i say {phrase} i mean {meaning}" rules
+	// (#129): a match hands both slots to the engine via matchVocab.
+	vocabTeach bool
+	// vocabListen marks the "listen for the word {phrase}" rules (#129).
+	vocabListen bool
+	// vocabList marks the "what words have i taught you" rules (#129).
+	vocabList bool
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -487,6 +506,20 @@ func New(opts Options) (*Router, error) {
 		}
 	}
 
+	// The vocabulary listing phrases (#129) are owned literals on the window
+	// listing's exact terms: whole-utterance, in the collision map, refused
+	// to any custom intent or routine that wants one.
+	for _, raw := range vocabListPatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the window listing's.
+			return nil, fmt.Errorf("vocabulary list pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = VocabListIntentName
+		r.add(&rule{name: VocabListIntentName, pattern: p, vocabList: true})
+	}
+	r.names = append(r.names, VocabListIntentName)
+
 	// taken maps a compiled phrase to a human description of what owns it, so
 	// a routine phrase collision is reported against whichever of the three
 	// families — built-in, custom intent, another routine — got there first.
@@ -642,6 +675,30 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: WindowNameIntentName, pattern: p, windowName: true})
 	}
 	r.names = append(r.names, WindowNameIntentName)
+
+	// The vocabulary teach and listen patterns (#129) compile with the
+	// free-text group, after every literal phrase, for the capture table's
+	// reason: rules are tried in insertion order, so a literal phrase that
+	// happens to open with the same words always wins over a slot.
+	for _, vt := range vocabTeachPatterns {
+		p, err := compileVocabTeach(vt.lead, vt.sep)
+		if err != nil {
+			// Unreachable for the shipped list; a bad pattern added later must
+			// fail compilation, not silently never match.
+			return nil, fmt.Errorf("vocabulary teach pattern %q: %w", vt.lead, err)
+		}
+		r.add(&rule{name: VocabTeachIntentName, pattern: p, vocabTeach: true})
+	}
+	r.names = append(r.names, VocabTeachIntentName)
+	for _, raw := range vocabListenPatterns {
+		p, err := compileCapture(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the capture table's.
+			return nil, fmt.Errorf("vocabulary listen pattern %q: %w", raw, err)
+		}
+		r.add(&rule{name: VocabListenIntentName, pattern: p, vocabListen: true})
+	}
+	r.names = append(r.names, VocabListenIntentName)
 
 	// Keep the collision map: Owner answers nickname-assignment checks (#126)
 	// from the very map the config collisions were judged against, so a
@@ -894,6 +951,20 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		}
 		return Match{Name: ru.name, WindowName: name}, true
 	}
+	if ru.vocabTeach {
+		phrase, meaning, ok := ru.pattern.matchVocab(fields)
+		if !ok {
+			return Match{}, false
+		}
+		return Match{Name: ru.name, VocabPhrase: phrase, VocabMeaning: meaning}, true
+	}
+	if ru.vocabListen {
+		phrase, ok := ru.pattern.matchText(fields)
+		if !ok {
+			return Match{}, false
+		}
+		return Match{Name: ru.name, VocabListen: phrase}, true
+	}
 	slot, hasSlot, text, ok := ru.pattern.match(fields)
 	if !ok {
 		return Match{}, false
@@ -905,6 +976,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Routine: ru.routine, Script: ru.script,
 		WindowNames: ru.windowNames,
 		Focus:       ru.focus, FocusText: text, FocusWindows: ru.focusWindows,
+		VocabList: ru.vocabList,
 	}
 	if ru.argv != nil {
 		m.Argv = ru.argv(slot)
@@ -953,6 +1025,13 @@ type pattern struct {
 	// make "save this as x on workspace two" ambiguous about where the name
 	// stops, and ambiguity belongs to the model, never to this table.
 	trailingText bool
+	// vocabSep marks a vocabulary teach pattern (#129): the tokens are the
+	// literal lead, and the two free-text slots hinge on this separator
+	// occurring exactly once in what follows (see matchVocab). The one
+	// middle-slot exception to trailingText's rule, made safe by exactly
+	// that uniqueness requirement: an utterance where the boundary is
+	// ambiguous is declined, not guessed at.
+	vocabSep []string
 }
 
 // maxSlotWords bounds how many words one slot may swallow: "one hundred and
@@ -977,6 +1056,11 @@ func (p pattern) maxFields() int {
 	}
 	if p.trailingText {
 		n += maxNameWords
+	}
+	if len(p.vocabSep) > 0 {
+		// A teach pattern (#129): the phrase slot, the separator, the meaning
+		// slot — on top of the literal lead the tokens already counted.
+		n += maxNameWords + len(p.vocabSep) + maxVocabMeaningWords
 	}
 	return n
 }
