@@ -1485,7 +1485,7 @@ FloatingWindow {
     ? Math.max(0, Math.ceil((confirmDeadlineMs - confirmNowMs) / 1000)) : -1
 
   function appendConfirmationCard(summary, command, timeoutSec, deadlineMs) {
-    turns.append({ role: "confirmation", text: summary, command: command, outcome: "" })
+    turns.append({ role: "confirmation", text: summary, command: command, outcome: "", pos: 0 })
     pendingCardIndex = turns.count - 1
     confirmTimeoutSec = timeoutSec
     confirmDeadlineMs = deadlineMs
@@ -1549,6 +1549,42 @@ FloatingWindow {
       jsonrpc: "2.0", id: confirmRequestId, method: "session.confirm",
       params: { approved: approved }
     }) + "\n")
+  }
+
+  // --- speak again ---------------------------------------------------------
+  // The per-message replay control (issue #122) is a thin client of the
+  // daemon's `speech.replay` verb: it sends the row's record position (and
+  // its role, as a staleness guard) and displays what comes back — the
+  // daemon resolves the text from its own record, speaks it through the
+  // standard pipeline, and decides every precedence question (live speech
+  // wins; the newest replay wins). Request ids 750–799 are reserved for this
+  // control, the FocusTab discipline (500–599), so its traffic can never be
+  // mistaken for the window's own.
+  readonly property int replayRequestId: 750
+  // The refusal cue: the daemon's own sentence, shown briefly over the
+  // transcript — a refused replay must be visible, not a dead click.
+  property string replayCue: ""
+
+  function requestReplay(pos, role) {
+    if (!daemon.connected || pos <= 0) return
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: replayRequestId,
+      method: "speech.replay", params: { turn: pos, role: role } }) + "\n")
+  }
+
+  function handleReplayReply(frame) {
+    if (!frame.error) return // success speaks for itself: tts.* and state.changed render it
+    replayCue = String(frame.error.message || "that message cannot be spoken right now")
+    replayCueTimer.restart()
+    // A bad address means this view trailed the record; the fresh snapshot
+    // realigns it (and its replay controls) for the next click.
+    requestConversation()
+  }
+
+  Timer {
+    id: replayCueTimer
+    interval: 4000
+    repeat: false
+    onTriggered: win.replayCue = ""
   }
 
   // --- history requests ---------------------------------------------------
@@ -1686,12 +1722,24 @@ FloatingWindow {
 
   // loadSnapshot replaces the model with the daemon's authoritative view;
   // events append incrementally from here on.
+  //
+  // Each snapshot row carries `pos`, its 1-based position in the daemon's
+  // record — the address `speech.replay` speaks by (issue #122). Only the
+  // snapshot assigns positions: rows appended live carry pos 0 (no replay
+  // control) because the live view is an approximation the record can move
+  // past — an intent turn's acknowledgement never streams here, and a typed
+  // confirmation reply shows as a row the record does not keep. The
+  // turn-boundary re-request in handleEvent replaces the approximation with
+  // the record, which is when every row gains its address.
   function loadSnapshot(result) {
+    // A reader scrolled back must stay where they are through the rebuild;
+    // the tail-follower is repositioned by the count/height handlers.
+    var keepY = list.followTail ? -1 : list.contentY
     turns.clear()
     pendingCardIndex = -1
     confirmDeadlineMs = 0
-    var list = result.turns || []
-    for (var i = 0; i < list.length; i++) {
+    var snapshot = result.turns || []
+    for (var i = 0; i < snapshot.length; i++) {
       // A resolved confirmation arrives as a turn of its own (issue #118):
       // the daemon decided it is part of the record and where it sits; this
       // window only renders it — as the same card the live exchange showed,
@@ -1699,15 +1747,17 @@ FloatingWindow {
       // never erases what was asked and answered. The outcome text is worded
       // from the daemon's structured record, exactly as the live resolution
       // words the daemon's event.
-      var rec = list[i].confirmation
-      if (String(list[i].role) === "confirmation" && rec) {
-        turns.append({ role: "confirmation", text: String(list[i].text),
-          command: String(rec.command || ""), outcome: confirmationRecordOutcome(rec) })
+      var rec = snapshot[i].confirmation
+      if (String(snapshot[i].role) === "confirmation" && rec) {
+        turns.append({ role: "confirmation", text: String(snapshot[i].text),
+          command: String(rec.command || ""), outcome: confirmationRecordOutcome(rec),
+          pos: i + 1 })
         continue
       }
-      turns.append({ role: String(list[i].role), text: String(list[i].text),
-        command: "", outcome: "" })
+      turns.append({ role: String(snapshot[i].role), text: String(snapshot[i].text),
+        command: "", outcome: "", pos: i + 1 })
     }
+    if (keepY >= 0) list.contentY = keepY
     // A window opened *during* a confirmation wait missed the events that
     // announced it, so the snapshot carries the pending question (issue #76)
     // and the card renders here — same facts, same daemon, no blindness.
@@ -1750,11 +1800,11 @@ FloatingWindow {
       // a pending tool confirmation ("yes", spoken or typed) is a second, and
       // showing it is right: the user answered and should see their answer.
       // Events never repeat, so appending cannot double a turn.
-      turns.append({ role: "user", text: String(params.text || ""), command: "", outcome: "" })
+      turns.append({ role: "user", text: String(params.text || ""), command: "", outcome: "", pos: 0 })
       break
     case "assistant.delta":
       if (!assistantStreaming) {
-        turns.append({ role: "assistant", text: "", command: "", outcome: "" })
+        turns.append({ role: "assistant", text: "", command: "", outcome: "", pos: 0 })
         assistantStreaming = true
       }
       var chunk = String(params.content || "")
@@ -1773,7 +1823,7 @@ FloatingWindow {
           turns.setProperty(turns.count - 1, "text", full)
         }
       } else if (full !== "") {
-        turns.append({ role: "assistant", text: full, command: "", outcome: "" })
+        turns.append({ role: "assistant", text: full, command: "", outcome: "", pos: 0 })
       }
       assistantStreaming = false
       break
@@ -1868,6 +1918,14 @@ FloatingWindow {
       // that look answerable — the daemon would refuse them anyway.
       resolveConfirmationCard("Declined — the session ended")
       assistantStreaming = false
+      // A turn boundary: re-request the snapshot so the transcript becomes
+      // the daemon's record rather than this window's live approximation —
+      // which omits intent acknowledgements, keeps confirmation replies the
+      // record does not, and lacks an interrupted turn's annotation. It is
+      // also what gives every row its record position, and with it the
+      // speak-again control (issue #122): replay addresses the record, so
+      // the control appears exactly when the row provably is the record.
+      requestConversation()
       break
     case "activity.row":
       // One rendered feed row, pushed as it happened. Appending is all the
@@ -1920,6 +1978,8 @@ FloatingWindow {
           // back as an error. Deliberately swallowed: the resolution event
           // renders the card's real outcome, and a banner for "you were a
           // moment late" would alarm without informing.
+        } else if (frame.id !== undefined && frame.id === win.replayRequestId) {
+          win.handleReplayReply(frame)
         } else if (frame.id !== undefined && frame.id === win.activityRequestId) {
           if (frame.result) win.loadActivity(frame.result)
         } else if (frame.id !== undefined && frame.id === win.knowledgeRequestId) {
@@ -4022,15 +4082,59 @@ FloatingWindow {
         width: list.width
         spacing: Style.space(4)
 
-        Text {
-          text: model.role === "user" ? "You"
-            : model.role === "confirmation" ? "Jarvix asks permission" : "Jarvix"
-          font.family: Style.font.family
-          font.bold: true
-          font.pixelSize: Style.font.subtitle
-          color: model.role === "user"
-            ? Util.alpha(Color.popups.text, 0.7)
-            : Color.accent
+        Row {
+          spacing: Style.space(8)
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: model.role === "user" ? "You"
+              : model.role === "confirmation" ? "Jarvix asks permission" : "Jarvix"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: model.role === "user"
+              ? Util.alpha(Color.popups.text, 0.7)
+              : Color.accent
+          }
+
+          // The speak-again control (issue #122): one click asks the daemon
+          // to say this message again. Display-only (ADR 0013) — the row's
+          // record position and role go over the wire, the daemon resolves
+          // the text from its own record and owns every precedence decision.
+          // Present only on rows that carry a record position (pos > 0):
+          // live-appended rows gain theirs at the next turn boundary, and a
+          // replay is refused mid-turn anyway.
+          Rectangle {
+            id: replayButton
+            visible: model.pos > 0
+            enabled: visible && win.socketReady
+            anchors.verticalCenter: parent.verticalCenter
+            width: replayLabel.width + Style.space(12)
+            height: replayLabel.height + Style.space(4)
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.popups.text, replayButton.activeFocus ? 0.18 : 0.06)
+            border.color: Util.alpha(Color.popups.text, 0.5)
+            border.width: replayButton.activeFocus ? 2 : 0
+            activeFocusOnTab: enabled
+            Accessible.role: Accessible.Button
+            Accessible.name: "Say this message again"
+            Keys.onReturnPressed: win.requestReplay(model.pos, model.role)
+            Keys.onSpacePressed: win.requestReplay(model.pos, model.role)
+
+            Text {
+              id: replayLabel
+              anchors.centerIn: parent
+              text: "Say again"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+            MouseArea {
+              anchors.fill: parent
+              enabled: replayButton.enabled
+              onClicked: win.requestReplay(model.pos, model.role)
+            }
+          }
         }
         // The message body follows the user's reading-comfort settings
         // (issue #121); everything else in the window — speaker labels,
@@ -4213,6 +4317,37 @@ FloatingWindow {
             }
           }
         }
+      }
+    }
+
+    // The replay refusal cue (issue #122): the daemon's sentence for a
+    // replay it would not play — the conversation is speaking, or the click
+    // outran the record — shown briefly over the transcript's tail and
+    // cleared by its timer. Words, not colour alone, like every state here;
+    // an overlay so the transcript and composer never move for it.
+    Rectangle {
+      visible: win.socketReady && win.currentTab === "chat" && win.replayCue !== ""
+      anchors.bottom: list.bottom
+      anchors.bottomMargin: Style.space(8)
+      anchors.horizontalCenter: list.horizontalCenter
+      width: Math.min(list.width, replayCueText.implicitWidth + Style.space(24))
+      height: replayCueText.height + Style.space(14)
+      radius: Style.cornerRadius
+      color: Util.alpha(Color.background, 0.92)
+      border.color: Util.alpha(Color.popups.text, 0.4)
+      border.width: 1
+      Accessible.role: Accessible.StaticText
+      Accessible.name: win.replayCue
+
+      Text {
+        id: replayCueText
+        anchors.centerIn: parent
+        width: Math.min(implicitWidth, list.width - Style.space(24))
+        wrapMode: Text.Wrap
+        text: win.replayCue
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Color.popups.text
       }
     }
 
