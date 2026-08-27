@@ -146,6 +146,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runNicknameAssign(s, m)
 	case m.WindowNames:
 		ack, runErr = e.runNicknameList(s)
+	case m.Focus != intent.FocusNone:
+		var alive bool
+		ack, runErr, alive = e.runFocus(s, m)
+		if !alive {
+			return // cancelled or superseded; that path owns the events
+		}
 	case m.Desktop != intent.DesktopNone:
 		runErr = e.runDesktopIntent(s, m)
 	case len(m.Argv) > 0:
@@ -468,6 +474,8 @@ func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error
 		source = "routine"
 	case m.Script != "":
 		source = "script"
+	case m.Focus != intent.FocusNone:
+		source = "focus"
 	}
 	elapsed := time.Since(started)
 	data := map[string]any{

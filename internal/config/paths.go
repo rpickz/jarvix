@@ -67,6 +67,11 @@ func (p Paths) FeedsFile() string { return filepath.Join(p.State, "feeds.toml") 
 // boot's missed-while-down report.
 func (p Paths) AutomationsFile() string { return filepath.Join(p.State, "automations.toml") }
 
+// FocusFile is the focus-thread store (#123, ADR 0041): threads, anchors,
+// parked thoughts, and the live timebox, hand-editable like the memory store
+// it sits beside.
+func (p Paths) FocusFile() string { return filepath.Join(p.State, "focus.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

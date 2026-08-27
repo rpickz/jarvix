@@ -18,6 +18,7 @@ import (
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/doctor"
+	"github.com/rpickz/jarvix/internal/focus"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
@@ -81,6 +82,12 @@ type Daemon struct {
 	// service and drained as their own shutdown stage; a reload rebuilds the
 	// schedules through Reconfigure, never the service.
 	automations *automation.Service
+	// focus is the thread store and its check-in clockwork (#123, ADR 0041).
+	// Always present and construction-wired like the memory book: the
+	// engine's intent runner acts through it, the focus.* IPC methods read
+	// and write it, and its scheduler goroutines are tracked inside the
+	// service and drained as their own shutdown stage.
+	focus *focus.Service
 	// toolsPolicy is the compiled permission gate, held so the scheduler's
 	// fire path consults the very same tier resolution the session gate does
 	// — the clock and the voice can never disagree about what is permitted.
@@ -530,6 +537,13 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// engine first. Nothing can capture before Run serves, so the late bind
 	// is single-threaded construction, not a race.
 	capture := newLayoutCapturer(paths, compositor, logger)
+	// The focus service (#123, ADR 0041) is built before the engine because
+	// the engine's intent runner carries it — focus phrases dispatch through
+	// Options.IntentRunner — and bound to the daemon after (bindFocus), the
+	// same late bind the capture service uses. One instance for the daemon's
+	// life, like the memory book: the runner, the verbs, and the check-in
+	// clockwork must always agree on what the threads are.
+	focusSvc := newFocusService(paths, compositor, bus, logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, feeds, convs, windows, logger)
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
@@ -538,6 +552,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// The nickname collision check consults the same router the engine
 	// routes with; a reload stores the rebuilt one (settings.go).
 	router.set(engOpts.Intents)
+	engOpts.IntentRunner = &focus.IntentRunner{Service: focusSvc, Log: logger}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
 	// Every search — the IPC method and the model's tool alike — goes through
@@ -589,7 +604,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy, toolsPolicy: policy,
-		memory: book, knowledge: feeds,
+		memory: book, knowledge: feeds, focus: focusSvc,
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor, windows: windows, router: router,
@@ -597,6 +612,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		shutdownGrace: DefaultShutdownGrace,
 	}
 	capture.committed = d.captureCommitted
+	d.bindFocus()
 	// The automation scheduler (ADR 0032), built after the daemon exists
 	// because its fire path is the daemon's: policy pre-check, refusal
 	// notification, session entry. Nothing fires before Run starts it.
@@ -685,6 +701,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Started after the bus subscribers above, so the boot-time
 	// missed-while-down report lands in the activity feed.
 	d.automations.Start(ctx)
+	// The focus clockwork (ADR 0041) on the same terms again: its loop and
+	// every in-flight firing derive from the daemon's own context, and its
+	// tracked group is what the focus shutdown stage drains. A timebox that
+	// ran out while no daemon was up is closed quietly at this Start —
+	// reported in the journal, never re-announced (the ADR 0032 stance).
+	d.focus.Start(ctx)
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -739,6 +761,11 @@ func (d *Daemon) shutdown() {
 		// already ended them all, so this drain is loops unwinding a cancelled
 		// context (ADR 0032, the #74 lesson).
 		{"automations", d.automationsDrain, d.automationsInFlight},
+		// The focus clockwork beside it, for the same reason: a firing
+		// blocks until its spoken session ends, and the sessions stage has
+		// already ended them all, so this drain is one loop unwinding a
+		// cancelled context (ADR 0041).
+		{"focus", d.focusDrain, d.focusInFlight},
 		// The feed scheduler last of the drains: a draining session may be
 		// mid-Get, and its sync fetch finishes (or is killed by its own
 		// timeout) before this stage is reached. The drain kills any fetch
@@ -1026,6 +1053,7 @@ func (d *Daemon) registerMethods() {
 	d.registerWindowMethods()
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
+	d.registerFocusMethods()
 	d.registerEntryAdminMethods()
 }
 
