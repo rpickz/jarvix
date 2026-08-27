@@ -13,6 +13,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -58,6 +59,14 @@ type convFixture struct {
 // archive directory under the test's state dir.
 func startConvDaemon(t *testing.T, retention string) *convFixture {
 	t.Helper()
+	return startConvDaemonWith(t, retention, nil)
+}
+
+// startConvDaemonWith is startConvDaemon with an injected history store, for
+// the test that needs to hold the session tail open at the history write —
+// the step *before* the archive flush — and observe the archive mid-gap.
+func startConvDaemonWith(t *testing.T, retention string, hist history.Store) *convFixture {
+	t.Helper()
 	dir := t.TempDir()
 	paths := config.Paths{
 		Config:  dir,
@@ -84,6 +93,7 @@ func startConvDaemon(t *testing.T, retention string) *convFixture {
 		OpenWindow:        func(context.Context) error { return nil },
 		Compositor:        desktop.NewFakeCompositor(),
 		ConversationStore: store,
+		HistoryStore:      hist,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -454,6 +464,103 @@ func TestConversationSearchOverSocket(t *testing.T) {
 	if err := f.client.Call("conversation.search", map[string]string{"query": "  "}, nil); err == nil {
 		t.Error("conversation.search accepted a blank query")
 	}
+}
+
+// TestConversationSearchSeesTheAcknowledgedTurn pins the ordering guarantee
+// issue #115 is about: a turn acknowledged on the socket — session.finished
+// published — is visible to conversation.search and conversation.list, as
+// the *current* conversation, however slowly the session tail runs.
+//
+// The mechanism under test: the archive flush runs on the session tail after
+// session.finished (ADR 0011), and the append that creates a conversation is
+// also what adopts its id as the live thread's. A read landing in that gap
+// used to miss the just-finished exchange, or find it with active_id still
+// "" — the TestConversationSearchOverSocket / TestConversationListOverSocket
+// CI flakes, which only a starved runner's scheduling could open wide enough
+// to see. This test opens the gap deterministically instead: the history
+// write sits on the same tail *before* the archive flush, so a gated history
+// Save (the shutdown-drain tests' idiom) parks the tail with the exchange
+// committed and acknowledged but nothing yet in the archive. The daemon's
+// read-side barrier (Engine.SyncArchive) must do the flush itself before
+// answering; without it, this fails every run — no stress, no sleeps.
+func TestConversationSearchSeesTheAcknowledgedTurn(t *testing.T) {
+	hist := history.NewFake()
+	// Buffered, so a Save's start-announcement never blocks the tail if an
+	// assertion fails before the test gets to receive it.
+	hist.SaveStarted = make(chan struct{}, 4)
+	gate := make(chan struct{})
+	hist.SaveGate = gate
+	f := startConvDaemonWith(t, config.RetentionOn, hist)
+	// If the test fails while the tail is parked at the gate, the daemon's
+	// shutdown drain would wait on that Save forever. Cleanups run
+	// last-registered-first, so this release runs before serveDaemon's stop.
+	t.Cleanup(func() { close(gate) })
+	awaitSaveParked := func() {
+		t.Helper()
+		select {
+		case <-hist.SaveStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for the history write to start")
+		}
+	}
+
+	// One archived conversation first, its tail serviced promptly, so the
+	// search below runs over a corpus and not just the live head.
+	if err := f.client.Call("session.start", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Call("session.submit", map[string]string{"text": "what did we decide about the deployment approach?"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, f.client, "session.finished")
+	awaitSaveParked()
+	gate <- struct{}{}
+	f.store.awaitAppend(t)
+	if err := f.client.Call("conversation.reset", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pinch: the kittens exchange finishes on the socket, then its tail
+	// is held at the history write. The exchange is staged, session.finished
+	// has been seen, and the archive knows nothing of it — exactly the state
+	// a starved CI runner kept catching.
+	if err := f.client.Call("session.start", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Call("session.submit", map[string]string{"text": "an unrelated thread about kittens"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, f.client, "session.finished")
+	awaitSaveParked()
+
+	// Search must see the acknowledged turn, in the current conversation.
+	r := f.search(t, "kittens")
+	if r.Searched != 2 {
+		t.Errorf("searched %d conversations, want the archive and the live head", r.Searched)
+	}
+	if len(r.Results) != 1 || !r.Results[0].Current {
+		t.Fatalf("post-acknowledgement search = %+v, want one current hit", r.Results)
+	}
+	if r.ActiveID == "" || r.Results[0].ID != r.ActiveID {
+		t.Errorf("current hit in %q but active is %q", r.Results[0].ID, r.ActiveID)
+	}
+
+	// And the listing must agree — the sibling active_id flake's assertion,
+	// made deterministic by the same held-open gap.
+	l := f.list(t)
+	if len(l.Conversations) != 2 {
+		t.Fatalf("listed %d conversations, want 2", len(l.Conversations))
+	}
+	if l.Conversations[0].Preview != "an unrelated thread about kittens" || l.Conversations[0].Turns != 2 {
+		t.Errorf("newest listing entry = %+v, want the just-acknowledged exchange", l.Conversations[0])
+	}
+	if l.ActiveID != l.Conversations[0].ID {
+		t.Errorf("active_id = %q, want the newest conversation %q", l.ActiveID, l.Conversations[0].ID)
+	}
+
+	// Release the tail: its own flush finds nothing pending (the barrier
+	// already wrote it) and the daemon shuts down clean.
+	gate <- struct{}{}
 }
 
 func TestConversationSearchWithRetentionOff(t *testing.T) {
