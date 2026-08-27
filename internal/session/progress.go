@@ -53,7 +53,10 @@ func (e *Engine) startToolProgress(s *sess, call ai.ToolCall, waiting string,
 			// speaker when there is one, because a slow tool can be running
 			// while an earlier sentence is still playing and reassurance that
 			// talks over the answer is worse than no reassurance.
-			e.speakPrompt(s, waiting, speaker)
+			// The session's own context as the prompt context: nothing
+			// resolves a reassurance early, so only the session ending can
+			// (and should) cut it off.
+			e.speakPrompt(s, s.ctx, waiting, speaker)
 		}
 	}()
 	return func() {

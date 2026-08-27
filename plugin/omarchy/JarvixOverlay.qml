@@ -31,6 +31,66 @@ Item {
     errorMessage = ""
   }
 
+  // --- pending tool confirmation (issue #119) -----------------------------
+  // A compact approve/decline surface on the indicator the user is already
+  // looking at. Display-only in the ADR 0013 sense: the question, the gist,
+  // and the countdown all come off the socket, and the buttons call the SAME
+  // session.confirm verb as the window card — one resolution path, so both
+  // surfaces resolve together on the daemon's own events. The command is
+  // deliberately elided here: the one-line gist identifies the ask, and the
+  // window card carries the full verbatim command (ADR 0014) — this surface
+  // points at it rather than truncating it into something misreadable.
+  property bool confirmPending: false
+  property string confirmTool: ""
+  property string confirmSummary: ""
+  property int confirmTimeoutSec: 0    // the configured window, from the daemon
+  property double confirmDeadlineMs: 0 // absolute auto-decline time; 0 = clock not started
+  property double confirmNowMs: 0      // ticked by confirmTick so the binding updates
+
+  // Seconds left before auto-decline, or -1 while the daemon has not started
+  // the clock (the question is still being asked aloud). Clamped at 0 like
+  // the window card: only the daemon declines, so a countdown reaching zero
+  // waits for tool.declined rather than resolving anything itself.
+  readonly property int confirmRemainingSec: confirmDeadlineMs > 0
+    ? Math.max(0, Math.ceil((confirmDeadlineMs - confirmNowMs) / 1000)) : -1
+
+  function showConfirmation(tool, summary, timeoutSec, deadlineMs) {
+    confirmTool = tool
+    confirmSummary = summary
+    confirmTimeoutSec = timeoutSec
+    confirmDeadlineMs = deadlineMs
+    confirmNowMs = Date.now()
+    confirmPending = true
+  }
+
+  function clearConfirmation() {
+    confirmPending = false
+    confirmTool = ""
+    confirmSummary = ""
+    confirmDeadlineMs = 0
+  }
+
+  // JSON-RPC ids for the overlay's session.confirm calls. Its own private
+  // range (600–649) so a reply is recognisable as a confirm reply; the
+  // connection is the overlay's alone, but a fixed range keeps this file's
+  // ids disjoint from every other surface's by construction.
+  property int confirmRequestId: 0
+  property int nextConfirmRequestId: 600
+
+  // One session.confirm call with a literal boolean — exactly what the window
+  // card's buttons send. Nothing resolves here: the surface clears on the
+  // daemon's tool.confirmed / tool.declined event, the same signal that
+  // resolves the card, so both surfaces always agree (single source of truth).
+  function answerConfirmation(approved) {
+    if (!daemon.connected || !confirmPending) return
+    confirmRequestId = nextConfirmRequestId
+    nextConfirmRequestId = nextConfirmRequestId >= 649 ? 600 : nextConfirmRequestId + 1
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: confirmRequestId, method: "session.confirm",
+      params: { approved: approved }
+    }) + "\n")
+  }
+
   function handleEvent(method, params) {
     switch (method) {
     case "state.changed":
@@ -57,7 +117,33 @@ Item {
     case "assistant.finished":
       if (params.content) response = String(params.content)
       break
+    case "tool.confirmation_required":
+      // The gate asked. The deadline is unknown until the daemon says the
+      // clock has started — the question may still be being spoken — so the
+      // countdown opens at "up to timeout_sec", exactly like the card.
+      showConfirmation(String(params.tool || ""), String(params.summary || ""),
+        Number(params.timeout_sec || 0), 0)
+      break
+    case "tool.confirmation_deadline":
+      confirmDeadlineMs = Number(params.deadline_ms || 0)
+      confirmNowMs = Date.now()
+      break
+    case "tool.confirmed":
+    case "tool.declined":
+      // Resolved on any surface — this one, the card, voice, text, CLI, or
+      // the timeout: the daemon's event is the single source of truth, so
+      // the surface returns to its normal state the same moment the card
+      // marks its outcome.
+      clearConfirmation()
+      break
+    case "session.finished":
+      // The daemon never lets a confirmation outlive its session; clearing
+      // here only covers this overlay having been a slow client that missed
+      // the resolution event.
+      clearConfirmation()
+      break
     case "session.cancelled":
+      clearConfirmation()
       lingerTimer.stop()
       lingering = false
       break
@@ -87,7 +173,26 @@ Item {
         } else if (frame.result && frame.result.state !== undefined) {
           // Response to the status.get sent on connect.
           root.sessionState = String(frame.result.state)
+          // A pending confirmation rides status.get (issue #119) for the
+          // same reason it rides conversation.get for the window (issue
+          // #76): attaching mid-wait must not leave this surface blind to a
+          // question that is already open. Null when nothing is pending, so
+          // the same read clears a stale card after a reconnect.
+          if (frame.result.confirmation) {
+            root.showConfirmation(
+              String(frame.result.confirmation.tool || ""),
+              String(frame.result.confirmation.summary || ""),
+              Number(frame.result.confirmation.timeout_sec || 0),
+              Number(frame.result.confirmation.deadline_ms || 0))
+          } else {
+            root.clearConfirmation()
+          }
         }
+        // A session.confirm reply that lost the race — the confirmation
+        // already resolved elsewhere — comes back as an error, and is
+        // deliberately ignored: the resolution event has already returned
+        // the surface to normal, and alarming over "a moment late" informs
+        // nobody (same stance as the window card).
       }
     }
 
@@ -99,6 +204,10 @@ Item {
       } else {
         root.sessionState = "idle"
         root.lingering = false
+        // A question cannot be answered over a dead socket, and it may have
+        // resolved while we were away; the status.get on reconnect restores
+        // it if it is genuinely still open.
+        root.clearConfirmation()
         reconnect.start()
       }
     }
@@ -242,6 +351,7 @@ Item {
     case "thinking":     return "Jarvix is thinking"
     case "responding":   return "Responding"
     case "speaking":     return "Speaking"
+    case "awaiting_confirmation": return "Waiting for your go-ahead"
     case "cancelling":   return "Cancelled"
     default:             return ""
     }
@@ -264,8 +374,12 @@ Item {
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
-    // Display-only: never intercept clicks meant for the desktop below.
-    mask: Region {}
+    // Never intercept clicks meant for the desktop below — except the
+    // approve/decline controls while a confirmation is pending (issue #119),
+    // which are the one thing on this surface that is *for* clicking. The
+    // mask is exactly their rectangle, so everything else stays click-through
+    // even mid-question, and returns to fully click-through on resolution.
+    mask: Region { item: root.confirmPending ? confirmControls : null }
 
     BorderSurface {
       id: card
@@ -287,8 +401,9 @@ Item {
         id: content
         x: card.borderLeft + root.pad
         y: card.borderTop + root.pad
-        width: Math.max(statusRow.width, body.visible ? body.width : 0)
-        spacing: body.visible ? Style.space(10) : 0
+        width: Math.max(statusRow.width, body.visible ? body.width : 0,
+          confirmBlock.visible ? confirmBlock.width : 0)
+        spacing: body.visible || confirmBlock.visible ? Style.space(10) : 0
 
         Row {
           id: statusRow
@@ -335,7 +450,111 @@ Item {
           font.pixelSize: Style.font.subtitle
           color: Util.alpha(Color.popups.text, root.response !== "" || root.errorMessage !== "" ? 1.0 : 0.7)
         }
+
+        // The compact confirmation request (issue #119): the daemon's
+        // one-sentence question, approve/decline, and the countdown. The
+        // command itself is elided by design — the window card shows it
+        // verbatim (ADR 0014), and this block says where to look rather than
+        // truncating ground truth into something misreadable.
+        Column {
+          id: confirmBlock
+          visible: root.confirmPending
+          spacing: Style.space(8)
+
+          Text {
+            id: confirmGist
+            text: root.confirmSummary
+            width: Math.min(implicitWidth, root.maxTextWidth)
+            wrapMode: Text.Wrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          Row {
+            id: confirmControls
+            spacing: Style.space(8)
+
+            Rectangle {
+              id: confirmApprove
+              width: confirmApproveLabel.width + Style.space(24)
+              height: confirmApproveLabel.height + Style.space(10)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.accent, 0.18)
+              border.color: Color.accent
+              border.width: 1
+              Accessible.role: Accessible.Button
+              Accessible.name: "Approve — run it"
+              Text {
+                id: confirmApproveLabel
+                anchors.centerIn: parent
+                text: "✓ Approve"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea {
+                anchors.fill: parent
+                onClicked: root.answerConfirmation(true)
+              }
+            }
+
+            Rectangle {
+              id: confirmDecline
+              width: confirmDeclineLabel.width + Style.space(24)
+              height: confirmDeclineLabel.height + Style.space(10)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.popups.text, 0.08)
+              border.color: Util.alpha(Color.popups.text, 0.5)
+              border.width: 1
+              Accessible.role: Accessible.Button
+              Accessible.name: "Decline — do not run it"
+              Text {
+                id: confirmDeclineLabel
+                anchors.centerIn: parent
+                text: "✗ Decline"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea {
+                anchors.fill: parent
+                onClicked: root.answerConfirmation(false)
+              }
+            }
+          }
+
+          // Tool identity, the countdown, and the pointer at the full
+          // details — text, never colour alone, deriving from the daemon's
+          // deadline exactly as the card does: before the clock starts only
+          // the configured maximum can honestly be said.
+          Text {
+            width: Math.min(implicitWidth, root.maxTextWidth)
+            wrapMode: Text.Wrap
+            text: root.confirmTool
+              + (root.confirmRemainingSec >= 0
+                ? " · " + root.confirmRemainingSec + "s left — no answer declines"
+                : " · up to " + root.confirmTimeoutSec + "s once asked")
+              + " · full command in the Jarvix window"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.7)
+          }
+        }
       }
     }
+  }
+
+  // Ticks the countdown on the pending confirmation. The remaining time is a
+  // pure function of the daemon's deadline and the current time; this timer
+  // only refreshes "now" — it decides nothing, and only the daemon declines.
+  Timer {
+    id: confirmTick
+    interval: 500
+    repeat: true
+    running: root.active && root.confirmPending && root.confirmDeadlineMs > 0
+    onTriggered: root.confirmNowMs = Date.now()
   }
 }

@@ -50,7 +50,7 @@ to each field in the settings screen:
 | Class | Options | When it takes effect |
 |---|---|---|
 | **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new) | Immediately on save, even mid-session |
-| **idle** | `assistant.aliases`, `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
+| **idle** | `assistant.aliases`, `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `confirmations.speak_details`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `assistant.name`, `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
 
 A reload that fails validation keeps the running configuration and reports
@@ -269,6 +269,14 @@ shell_deny = []                  # extra command prefixes that never run,
                                  # [tools.policy], [advisors] and
                                  # [[intents.custom]] spaces are not writable
                                  # by the assistant at all, under any policy.
+
+[confirmations]                  # how the permission gate's question is SPOKEN
+speak_details = false            # false (default): a short prompt naming the
+                                 # kind of action ("May I run a shell command?
+                                 # The details are on screen."); true: the full
+                                 # question, quoting the command, read aloud.
+                                 # Audio only — the card and overlay always
+                                 # show the verbatim command either way
 
 [intents]                        # the deterministic intent router (Phase 3)
 enabled = true                   # false = every utterance goes to the AI
@@ -1424,14 +1432,15 @@ Every tool call is classified **allow / ask / deny** before it executes
   `git status`, `journalctl`, pipelines of those, …) runs silently, exactly
   as before the gate existed. `shell_allow` extends it with your own
   command prefixes.
-- **ask** — everything else: Jarvix speaks a one-sentence summary generated
-  from the command itself ("I want to run 'rm -rf ./build'…"), the overlay
-  shows the exact command, and nothing runs until you say **yes / go ahead**
-  (push-to-talk while it waits), type an answer, or run `jarvix confirm`
-  (`jarvix deny` declines). No answer within `confirm_timeout_sec` declines.
-  Risky command words (`rm`, `dd`, `mkfs`, `sudo`, output redirection `>`)
-  always ask, even inside an otherwise-allowed pipeline — a compound command
-  is judged by its riskiest part.
+- **ask** — everything else: Jarvix asks out loud, the conversation window's
+  card shows the exact command verbatim, the mid-screen overlay shows the
+  question compactly with its own ✓ / ✗ controls, and nothing runs until you
+  say **yes / go ahead** (push-to-talk while it waits), type an answer, click
+  either surface's buttons, or run `jarvix confirm` (`jarvix deny` declines).
+  No answer within `confirm_timeout_sec` declines. Risky command words (`rm`,
+  `dd`, `mkfs`, `sudo`, output redirection `>`) always ask, even inside an
+  otherwise-allowed pipeline — a compound command is judged by its riskiest
+  part.
 - **deny** — catastrophic patterns (`rm -rf /`, `dd` onto a device, fork
   bombs) and anything in `shell_deny` never run, with or without
   confirmation. Deny beats allow, always.
@@ -1439,6 +1448,30 @@ Every tool call is classified **allow / ask / deny** before it executes
 Classification happens in the daemon on the parsed command; the model's own
 description of what it is doing is never trusted, so a model cannot describe
 `rm -rf ~` as "tidying up". Unknown tools default to `ask`.
+
+### What the ask sounds like (`[confirmations]`)
+
+By default the spoken question is short: it names the kind of action and
+points at the screen — "May I run a shell command? The details are on
+screen." — because the exact command is already in front of you, verbatim, on
+the confirmation card (and identified on the overlay). Set
+`[confirmations] speak_details = true` to have the full generated question —
+the one that quotes the command — read aloud instead, exactly as Jarvix
+always used to.
+
+This is an audio knob only ([ADR 0014](adr/0014-tool-permission-gate.md), as
+amended): what the visual surfaces display is not configurable, the events
+and the conversation record always carry the full question and the verbatim
+command, and the safety decision is identical in both modes. It lives in the
+settings registry (idle reload), so the Settings tab and the assistant's own
+settings tool can flip it — "read commands out in full before asking" works
+by voice.
+
+However the question was asked, answering it from **any** surface — overlay
+tick/cross, the window card, voice, a typed reply, the CLI — resolves the one
+pending confirmation everywhere at once, and if the question is still being
+read out when you answer, the rest of the read-out is dropped and speech
+moves straight on.
 
 `remember_for_conversation = true` re-runs a command you already approved
 without asking again — scoped strictly to the current conversation:

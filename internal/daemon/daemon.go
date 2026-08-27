@@ -948,17 +948,7 @@ func (d *Daemon) registerMethods() {
 		// blindness the confirmation card exists to fix. deadline_ms is
 		// absent while the question is still being spoken — the clock has
 		// not started, so there is no deadline to count down from yet.
-		if pending, ok := d.engine.PendingConfirmation(); ok {
-			confirmation := map[string]any{
-				"tool":        pending.Tool,
-				"command":     pending.Command,
-				"summary":     pending.Summary,
-				"rule":        pending.Rule,
-				"timeout_sec": int(pending.Timeout.Seconds()),
-			}
-			if !pending.Deadline.IsZero() {
-				confirmation["deadline_ms"] = pending.Deadline.UnixMilli()
-			}
+		if confirmation := d.pendingConfirmationReport(); confirmation != nil {
 			snapshot["confirmation"] = confirmation
 		}
 		return snapshot, nil
@@ -1013,6 +1003,13 @@ func (d *Daemon) registerMethods() {
 			// model's context window fit the prompt?" is answerable after
 			// setup, not only under doctor (issue #71).
 			"prompt_budget": d.promptBudgetReport(),
+			// The pending tool confirmation, if any — the same facts the
+			// conversation.get snapshot carries (issue #76), here for the
+			// overlay (issue #119): it syncs with status.get on connect, and
+			// attaching mid-wait must not leave its approve/decline surface
+			// blind to a question that is already open. Nil (absent) when
+			// nothing is pending.
+			"confirmation": d.pendingConfirmationReport(),
 		}, nil
 	})
 	d.registerActivityMethods()
@@ -1030,6 +1027,32 @@ func (d *Daemon) registerMethods() {
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
 	d.registerEntryAdminMethods()
+}
+
+// pendingConfirmationReport renders the tool confirmation the session is
+// waiting on, or nil when none is pending. One rendering shared by
+// conversation.get (the window card, issue #76) and status.get (the overlay,
+// issue #119), so every surface counts down from the same daemon-computed
+// deadline and shows the same verbatim command — a client attaching mid-wait
+// on either verb sees exactly what the events announced. deadline_ms is
+// absent while the question is still being spoken: the clock has not started,
+// so there is no deadline to count down from yet.
+func (d *Daemon) pendingConfirmationReport() map[string]any {
+	pending, ok := d.engine.PendingConfirmation()
+	if !ok {
+		return nil
+	}
+	confirmation := map[string]any{
+		"tool":        pending.Tool,
+		"command":     pending.Command,
+		"summary":     pending.Summary,
+		"rule":        pending.Rule,
+		"timeout_sec": int(pending.Timeout.Seconds()),
+	}
+	if !pending.Deadline.IsZero() {
+		confirmation["deadline_ms"] = pending.Deadline.UnixMilli()
+	}
+	return confirmation
 }
 
 // promptBudgetReport measures what one turn sends before the user has said

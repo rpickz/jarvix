@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -52,6 +53,16 @@ type pendingConfirmation struct {
 	// engaged is set when a voice reply is being captured; the timeout no
 	// longer applies — the user is answering, however long whisper takes.
 	engaged bool
+	// stopPrompt cancels the spoken question's audio. A resolution can land
+	// while the question is still being read out — the overlay's tick, the
+	// window card, the CLI, a typed reply — and the user who has already
+	// answered must not sit through the rest of a sentence asking what they
+	// just decided (issue #119): the conversation's speech resumes the moment
+	// the answer lands. It cancels the prompt's context only — a child of the
+	// session's — so the turn itself, and any answer audio queued on the same
+	// speaker, is untouched. Nil until awaitConfirmation arms it; called under
+	// Engine.mu, which is safe because cancelling a context never blocks.
+	stopPrompt context.CancelFunc
 }
 
 // resumeState is where a resolved confirmation returns the session, defaulting
@@ -89,6 +100,11 @@ func (e *Engine) resolveConfirmationLocked(approved bool, source string) {
 	if p == nil {
 		return
 	}
+	// Silence the question first: the user has answered, so any of it still
+	// unsaid is noise between them and the speech that should resume.
+	if p.stopPrompt != nil {
+		p.stopPrompt()
+	}
 	e.pending = nil
 	e.forceStateLocked(p.resumeState())
 	eventType := "tool.confirmed"
@@ -114,6 +130,12 @@ func (e *Engine) clearPendingLocked(source string) {
 	p := e.pending
 	if p == nil {
 		return
+	}
+	// The session is ending; its context cancellation kills the audio too,
+	// but stopping the prompt explicitly keeps the invariant simple: no
+	// resolution path leaves the question playing.
+	if p.stopPrompt != nil {
+		p.stopPrompt()
 	}
 	e.pending = nil
 	// Recorded as declined (issue #118), like any other resolution: the
@@ -359,15 +381,23 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 			"session_id": s.id, "tool": req.tool, "command": req.command, "source": "unavailable"}})
 		return confirmUnavailable, true
 	}
+	// The prompt's own context, a child of the session's: resolving the
+	// confirmation cancels it so a mid-read-out answer silences the rest of
+	// the question (issue #119), while a session-ending cancel still kills it
+	// like everything else. Created before the pending is visible so no
+	// resolution can ever find stopPrompt unarmed.
+	promptCtx, stopPrompt := context.WithCancel(s.ctx)
+	defer stopPrompt()
 	p := &pendingConfirmation{
-		tool:    req.tool,
-		command: req.command,
-		key:     req.key,
-		summary: req.summary,
-		rule:    req.rule,
-		timeout: timeout,
-		resume:  req.resume,
-		outcome: make(chan bool, 1),
+		tool:       req.tool,
+		command:    req.command,
+		key:        req.key,
+		summary:    req.summary,
+		rule:       req.rule,
+		timeout:    timeout,
+		resume:     req.resume,
+		outcome:    make(chan bool, 1),
+		stopPrompt: stopPrompt,
 	}
 	e.pending = p
 	// The exact command goes on the bus before anything is spoken: the
@@ -383,7 +413,7 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 
 	// Speak first, then start the clock: the user's 30 seconds begin when
 	// the question has been asked, not while it is still being said.
-	e.speakPrompt(s, req.summary, req.speaker)
+	e.speakPrompt(s, promptCtx, e.spokenConfirmationPrompt(req), req.speaker)
 
 	// The clock is starting *now*, which is later than the event above went
 	// out — so the deadline gets an announcement of its own rather than a
@@ -452,6 +482,63 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 	}
 }
 
+// spokenConfirmationPrompt is the question actually said aloud for one
+// confirmation request (issue #119). Two modes, chosen by configuration:
+//
+//   - default: a short prompt naming the kind of action and pointing at the
+//     screen. Honest by construction — the card and the overlay really do
+//     show the details, verbatim, because the events and the snapshot carry
+//     req.summary and the exact command whatever is spoken (ADR 0014's
+//     display doctrine is untouched; only the audio is abbreviated).
+//   - confirmations.speak_details = true: the full generated summary, exactly
+//     as it has always been read out — the wording is composed in
+//     internal/tools from the parsed command and is not re-derived here.
+//
+// The mode never changes what is displayed, recorded, or allowed: the record
+// keeps the full summary as its text, and the safety decision waits on the
+// same answer either way.
+func (e *Engine) spokenConfirmationPrompt(req confirmRequest) string {
+	if e.opts.SpeakConfirmationDetails {
+		return req.summary
+	}
+	return shortConfirmationPrompt(req.tool)
+}
+
+// shortConfirmationPrompt words the default spoken ask for a tool identity:
+// the action class in plain words, then "the details are on screen" — which
+// is where the verbatim command actually is. Keyed on the gate's tool
+// identities (internal/tools), not on anything the model said; an identity
+// not listed here names itself, so a future tool is never announced as
+// something friendlier than its own name.
+func shortConfirmationPrompt(tool string) string {
+	class := fmt.Sprintf("use the %s tool", tool)
+	switch tool {
+	case "shell.run":
+		class = "run a shell command"
+	case tools.IntentToolName:
+		class = "run your custom command"
+	case tools.ScriptToolName:
+		class = "run one of your scripts"
+	case tools.RoutineToolName:
+		class = "run one of your routines"
+	case tools.AdvisorToolName:
+		class = "consult another assistant"
+	case tools.KnowledgeRefreshToolName:
+		class = "refresh one of your feeds"
+	case tools.TypeTextToolName, tools.PressKeyToolName:
+		class = "type on your keyboard"
+	case tools.MemoryForgetToolName:
+		class = "forget one of your saved facts"
+	case tools.ConfigWriteSettingToolName:
+		class = "change one of your settings"
+	case tools.ConfigWriteEntryToolName:
+		class = "save a configuration entry"
+	case tools.ConfigDeleteEntryToolName:
+		class = "delete a configuration entry"
+	}
+	return fmt.Sprintf("May I %s? The details are on screen.", class)
+}
+
 // speakPrompt asks the confirmation question out loud.
 //
 // When the turn has a streaming speaker it goes on that speaker's queue, and
@@ -468,10 +555,14 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 // anything — there is nothing to overlap with, and the question synthesizes and
 // plays directly here, with no state change and no tts.* events.
 //
+// ctx is the prompt's own context (a child of the session's): a resolution
+// arriving mid-read-out cancels it, which stops the remaining audio on either
+// path without touching the turn (issue #119).
+//
 // Failures degrade to silence either way: the overlay still shows the question
 // and the timeout still declines, so a broken voice never blocks the safety
 // decision.
-func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
+func (e *Engine) speakPrompt(s *sess, ctx context.Context, text string, speaker *streamingSpeaker) {
 	// A quiet session (ADR 0032) never reaches a confirmation on the intended
 	// path — the daemon refuses an ask-tier clockfire before a session exists
 	// — but belt and braces: if one ever does, the overlay still shows the
@@ -481,7 +572,7 @@ func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 		return
 	}
 	if speaker != nil {
-		speaker.interject(text)
+		speaker.interject(ctx, text)
 		return
 	}
 	spoken := e.spokenForm(text)
@@ -502,7 +593,10 @@ func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 		s.promptAudio = false
 		e.mu.Unlock()
 	}()
-	format, chunks, err := e.tts.Speak(s.ctx, tts.Request{Text: spoken})
+	// Everything below runs under the prompt's context, not the session's: a
+	// resolution mid-read-out cancels ctx and the synthesis and playback both
+	// unwind here, while the session — and whatever it says next — carries on.
+	format, chunks, err := e.tts.Speak(ctx, tts.Request{Text: spoken})
 	if err != nil {
 		e.log.Warn("confirmation prompt could not be spoken", "component", "tts", "error", err.Error())
 		return
@@ -510,11 +604,11 @@ func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 	pcm := make(chan []byte, 8)
 	playDone := make(chan error, 1)
 	go func() {
-		playDone <- e.player.Play(s.ctx, format.SampleRate, format.Channels, pcm)
+		playDone <- e.player.Play(ctx, format.SampleRate, format.Channels, pcm)
 	}()
 	var synthErr error
 	for c := range chunks {
-		if synthErr != nil || s.ctx.Err() != nil {
+		if synthErr != nil || ctx.Err() != nil {
 			continue // drain so the synthesizer can exit
 		}
 		if c.Err != nil {
@@ -523,12 +617,14 @@ func (e *Engine) speakPrompt(s *sess, text string, speaker *streamingSpeaker) {
 		}
 		select {
 		case pcm <- c.PCM:
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 		}
 	}
 	close(pcm)
 	playErr := <-playDone
-	if s.ctx.Err() != nil {
+	if ctx.Err() != nil {
+		// Cancelled: the session ended, or the answer arrived while the
+		// question was still being said — a stopped prompt, not a broken voice.
 		return
 	}
 	if synthErr == nil {

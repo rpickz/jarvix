@@ -32,7 +32,13 @@ type Config struct {
 	STT          STT          `toml:"stt"`
 	TTS          TTS          `toml:"tts"`
 	Conversation Conversation `toml:"conversation"`
-	Intents      Intents      `toml:"intents"`
+	// Confirmations is how the permission gate's question is spoken (issue
+	// #119). Its own table rather than a [tools.policy] key on purpose: the
+	// policy tables are structurally unreachable from the settings surface
+	// (AssistantExcludedSettingReason), and this knob must be editable there
+	// — it changes what is *said*, never what is allowed.
+	Confirmations Confirmations `toml:"confirmations"`
+	Intents       Intents       `toml:"intents"`
 	// Routines are the named app-placement sequences ([[routines]], ADR
 	// 0026), triggered through the intent router and executed by
 	// internal/routine.
@@ -433,6 +439,20 @@ type Conversation struct {
 	// history_turns, which only governs what the model is sent — and "off"
 	// stops all archive writing without removing anything already kept.
 	Retention string `toml:"retention"`
+}
+
+// Confirmations configures how the permission gate's question is put to the
+// user (issue #119). It governs the *audio* only: what the card and overlay
+// display is not configurable — the verbatim command is always on the visual
+// surfaces (ADR 0014), which is exactly what lets the spoken side be brief.
+type Confirmations struct {
+	// SpeakDetails reads the full generated question aloud — the one that
+	// quotes the command — instead of the short prompt that names the kind of
+	// action and points at the screen. Off by default: the verbatim text is
+	// already in front of the user, and hearing it repeated makes every ask
+	// slow. The safety decision is unchanged either way — nothing runs until
+	// the user answers, and the timeout still declines.
+	SpeakDetails bool `toml:"speak_details"`
 }
 
 // Retention values. Strings rather than a bool so the file reads as the
