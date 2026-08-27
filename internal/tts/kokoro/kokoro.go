@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -209,13 +210,17 @@ func (s *Synthesizer) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 		return tts.Format{}, nil, fmt.Errorf("start kokoro helper: %w", err)
 	}
 
-	sampleRate, rateErr := readSampleRate(stderr)
+	// The tail keeps the helper's last words — a Python traceback, an ONNX
+	// load error — so every failure below can quote the engine itself rather
+	// than a bare exit status (issue #113).
+	tail := tts.NewTail(stderrTailBytes)
+	sampleRate, rateErr := readSampleRate(stderr, tail)
 	if rateErr != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return tts.Format{}, nil, fmt.Errorf("kokoro: %w", rateErr)
 	}
-	go drain(stderr) // keep the pipe from filling and blocking the helper
+	go drain(stderr, tail) // keep the pipe from filling and blocking the helper
 
 	format := tts.Format{SampleRate: sampleRate, Channels: 1}
 	ch := make(chan tts.Chunk)
@@ -245,30 +250,46 @@ func (s *Synthesizer) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 			return
 		}
 		if err != nil {
+			if detail := tail.String(); detail != "" {
+				ch <- tts.Chunk{Err: fmt.Errorf("kokoro helper failed: %w: %s", err, detail)}
+				return
+			}
 			ch <- tts.Chunk{Err: fmt.Errorf("kokoro helper failed: %w", err)}
 		}
 	}()
 	return format, ch, nil
 }
 
-// readSampleRate consumes stderr lines until the SAMPLE_RATE marker.
-func readSampleRate(r io.Reader) (int, error) {
+// stderrTailBytes bounds how much helper stderr is retained for error
+// messages: enough for the end of a traceback, never the whole thing.
+const stderrTailBytes = 2048
+
+// readSampleRate consumes stderr lines until the SAMPLE_RATE marker,
+// recording what it read into tail so a helper that dies first is quoted in
+// the error rather than summarized away.
+func readSampleRate(r io.Reader, tail *tts.Tail) (int, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if rate, ok := strings.CutPrefix(line, "SAMPLE_RATE="); ok {
 			return strconv.Atoi(rate)
 		}
+		tail.Add(line)
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, err
 	}
-	return 0, fmt.Errorf("helper exited before producing audio " +
-		"(is kokoro-onnx installed in the venv, and is the installed helper current? re-run scripts/setup-kokoro.sh)")
+	const died = "helper exited before producing audio " +
+		"(is kokoro-onnx installed in the venv, and is the installed helper current? re-run scripts/setup-kokoro.sh)"
+	if detail := tail.String(); detail != "" {
+		return 0, fmt.Errorf("%s: %s", died, detail)
+	}
+	return 0, errors.New(died)
 }
 
-func drain(r io.Reader) {
+func drain(r io.Reader, tail *tts.Tail) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
+		tail.Add(strings.TrimSpace(scanner.Text()))
 	}
 }

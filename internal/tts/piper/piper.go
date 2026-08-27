@@ -137,7 +137,11 @@ func (s *Synthesizer) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 	if err != nil {
 		return tts.Format{}, nil, err
 	}
-	cmd.Stderr = nil
+	// Keep the end of stderr so a failure quotes piper's own explanation —
+	// "piper failed: exit status 1" alone names nothing anyone can fix, and
+	// the doctor probe (issue #113) exists to surface the engine's words.
+	stderr := tts.NewTail(stderrTailBytes)
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return tts.Format{}, nil, fmt.Errorf("start piper: %w", err)
 	}
@@ -170,8 +174,17 @@ func (s *Synthesizer) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 			return
 		}
 		if err != nil {
+			if detail := stderr.String(); detail != "" {
+				ch <- tts.Chunk{Err: fmt.Errorf("piper failed: %w: %s", err, detail)}
+				return
+			}
 			ch <- tts.Chunk{Err: fmt.Errorf("piper failed: %w", err)}
 		}
 	}()
 	return format, ch, nil
 }
+
+// stderrTailBytes bounds how much of piper's stderr is retained for error
+// messages. Enough for the actual complaint, small enough that a looping
+// engine cannot grow the daemon.
+const stderrTailBytes = 2048

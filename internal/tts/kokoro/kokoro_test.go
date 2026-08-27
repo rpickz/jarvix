@@ -3,6 +3,8 @@ package kokoro
 import (
 	"strings"
 	"testing"
+
+	"github.com/rpickz/jarvix/internal/tts"
 )
 
 func TestReadySurfacesMissingFiles(t *testing.T) {
@@ -19,12 +21,16 @@ func TestReadySurfacesMissingFiles(t *testing.T) {
 }
 
 func TestReadSampleRate(t *testing.T) {
-	rate, err := readSampleRate(strings.NewReader("some log line\nSAMPLE_RATE=24000\nmore\n"))
+	rate, err := readSampleRate(strings.NewReader("some log line\nSAMPLE_RATE=24000\nmore\n"), tts.NewTail(256))
 	if err != nil || rate != 24000 {
 		t.Errorf("rate=%d err=%v", rate, err)
 	}
-	if _, err := readSampleRate(strings.NewReader("no marker here\n")); err == nil {
-		t.Error("missing marker should error")
+	// A helper that dies without the marker is quoted in the error: its last
+	// stderr lines are the diagnosis (issue #113).
+	tail := tts.NewTail(256)
+	if _, err := readSampleRate(strings.NewReader("ImportError: no module named kokoro_onnx\n"), tail); err == nil ||
+		!strings.Contains(err.Error(), "ImportError: no module named kokoro_onnx") {
+		t.Errorf("err = %v, want the helper's stderr quoted", err)
 	}
 }
 

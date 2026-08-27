@@ -50,8 +50,13 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkOutput,
 		checkWhisperBinary,
 		checkWhisperModel,
+		// The probe sits beside the existence checks it corrects for: an
+		// installed binary and a present model file can still add up to an
+		// engine that aborts on every call (issue #113).
+		checkSTTProbe,
 		checkNameRecognition,
 		checkTTS,
+		checkTTSProbe,
 		checkVoiceLanguage,
 		checkSpeechLanguage,
 		checkKokoroHelperLanguage,

@@ -338,7 +338,12 @@ Start with `jarvix doctor` — it checks PipeWire, microphone, speakers,
 whisper.cpp, the model, Piper, the voice, the daemon, the AI provider, the
 Omarchy plugin, and that no other Hyprland binding (Omarchy default or
 personal) shares a Jarvix key chord — and tells you how to fix whatever is
-broken. The bindings installer performs the same conflict check and refuses
+broken. It does not stop at "installed": the voice loop is probed for real —
+whisper-cli transcribes a generated wav against your configured model, and
+the configured TTS engine speaks a short phrase into a discarded sink (no
+mic, no speakers, 30s budget per probe) — so an engine whose libraries broke
+under an update fails the report with its own stderr instead of passing as
+"installed" while every session dies. The bindings installer performs the same conflict check and refuses
 to leave a clashing chord in place.
 
 Daemon logs:
