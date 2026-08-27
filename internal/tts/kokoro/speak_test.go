@@ -110,6 +110,11 @@ func TestSpeakHelperDyingBeforeAudioIsActionable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "helper exited before producing audio") {
 		t.Errorf("err = %v", err)
 	}
+	// The helper's dying words ride along: a Python traceback names the
+	// broken piece, where the summary alone can only guess (issue #113).
+	if err == nil || !strings.Contains(err.Error(), "kokoro_onnx not installed") {
+		t.Errorf("err = %v, want the helper's own stderr quoted", err)
+	}
 }
 
 func TestSpeakSurfacesHelperFailure(t *testing.T) {

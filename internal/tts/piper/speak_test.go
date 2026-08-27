@@ -18,6 +18,9 @@ import (
 const piperStub = `#!/bin/sh
 printf '%s\n' "$@" > "$PIPER_STUB_DIR/piper.args"
 cat > "$PIPER_STUB_DIR/piper.stdin"
+if [ -n "$PIPER_STUB_STDERR" ]; then
+  printf '%s\n' "$PIPER_STUB_STDERR" >&2
+fi
 printf 'PIPER-PCM-STREAM'
 exit "${PIPER_STUB_EXIT:-0}"
 `
@@ -117,6 +120,23 @@ func TestSpeakSurfacesProcessFailure(t *testing.T) {
 	_, streamErr := drainChunks(t, ch)
 	if streamErr == nil || !strings.Contains(streamErr.Error(), "piper failed") {
 		t.Errorf("stream err = %v", streamErr)
+	}
+}
+
+// A failing piper's own stderr rides along in the error: "exit status 1"
+// names nothing, while the line piper printed names the missing dependency.
+// The doctor probe (issue #113) quotes exactly this.
+func TestSpeakFailureQuotesPipersStderr(t *testing.T) {
+	s, _ := installPiperStub(t)
+	t.Setenv("PIPER_STUB_EXIT", "1")
+	t.Setenv("PIPER_STUB_STDERR", "phonemize: espeak-ng data not found")
+	_, ch, err := s.Speak(context.Background(), tts.Request{Text: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, streamErr := drainChunks(t, ch)
+	if streamErr == nil || !strings.Contains(streamErr.Error(), "espeak-ng data not found") {
+		t.Errorf("stream err = %v, want piper's own stderr quoted", streamErr)
 	}
 }
 
