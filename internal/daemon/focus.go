@@ -19,16 +19,20 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/focus"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
+	"github.com/rpickz/jarvix/internal/tools"
 )
 
 // focusWindowsTimeout bounds one inventory read for anchors: a wedged
@@ -54,12 +58,144 @@ func newFocusService(paths config.Paths, compositor desktop.Compositor, bus *ses
 }
 
 // bindFocus completes the service once the daemon exists: the firing path,
-// and the midpoint switch read from the running config at fire time so a
-// reload lands without a restart.
+// the midpoint switch, and the AI-session recap's capture and summarise
+// halves (#124, ADR 0042) — all of which read the running config at call
+// time so a reload lands without a restart.
 func (d *Daemon) bindFocus() {
 	d.focus.Bind(d.fireFocus, func() bool {
 		return d.runningConfig().Focus.MidpointCheckin
 	})
+	d.focus.BindRecap(d.recapCapture, d.recapSummarise)
+}
+
+// The AI-session recap's model call (#124). The token cap and temperature
+// are pinned rather than configurable: three short sentences fit far inside
+// the cap, and a recap wants faithful, not creative.
+const (
+	recapMaxTokens   = 200
+	recapTemperature = 0.2
+)
+
+// recapCapture reads what is visible in one anchored window for the
+// AI-session recap, through the same consent, bound, and redaction rules as
+// desktop context (ADR 0019): the window source's opt-in gates it entirely,
+// the [context] char cap bounds it, and anything that looks like a secret is
+// replaced wholesale before it can reach a prompt. What is readable today is
+// the window's identity line — app and live title, which AI CLIs keep
+// updated with their state — from the shared compositor seam; a richer
+// gatherer slots in here without the focus package changing.
+func (d *Daemon) recapCapture(ctx context.Context, a focus.Anchor) (focus.Capture, error) {
+	cfg := d.runningConfig()
+	if !cfg.Context.Window {
+		// The user keeps Jarvix's eyes closed; the recap must not open them.
+		return focus.Capture{}, focus.ErrRecapUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, focusWindowsTimeout)
+	defer cancel()
+	inventory, err := d.compositor.Windows(ctx)
+	if err != nil {
+		return focus.Capture{}, fmt.Errorf("the desktop could not be read: %w", err)
+	}
+	for _, w := range inventory {
+		if w.Address != a.Address {
+			continue
+		}
+		text := desktop.AppName(w.Class)
+		if title := strings.TrimSpace(w.Title); title != "" && title != text {
+			if text != "" {
+				text += " — "
+			}
+			text += title
+		}
+		// Redact before clamp, the collector's own ordering: a key cut in
+		// half is still a leak.
+		if redacted, ok := desktop.Redact(text); ok {
+			text = redacted
+		}
+		maxChars := cfg.Context.MaxChars
+		if maxChars <= 0 {
+			maxChars = desktop.DefaultMaxChars
+		}
+		return focus.Capture{
+			Text:     clampCaptureRunes(text, maxChars),
+			Terminal: terminalClass(cfg, w),
+		}, nil
+	}
+	return focus.Capture{}, fmt.Errorf("the anchored window is gone")
+}
+
+// terminalClass reports whether a window's contents are a command line — the
+// recap's auto-trigger — against the same list typing escalates on
+// (tools.typing.terminal_classes, shipped default when unset), so "is this a
+// terminal?" has one answer across the daemon.
+func terminalClass(cfg config.Config, w desktop.Window) bool {
+	classes := cfg.Tools.Typing.TerminalClasses
+	if len(classes) == 0 {
+		classes = tools.DefaultTerminalClasses
+	}
+	class := strings.ToLower(strings.TrimSpace(w.Class))
+	app := strings.ToLower(desktop.AppName(w.Class))
+	for _, entry := range classes {
+		e := strings.ToLower(strings.TrimSpace(entry))
+		if e != "" && (e == class || e == app) {
+			return true
+		}
+	}
+	return false
+}
+
+// clampCaptureRunes bounds captured text at n runes — runes, not bytes, so
+// the clamp can never tear a multi-byte character (the context truncation
+// rule, restated for the one capture that does not ride the collector).
+func clampCaptureRunes(text string, n int) string {
+	if utf8.RuneCountInString(text) <= n {
+		return text
+	}
+	kept := 0
+	for i := range text {
+		if kept == n {
+			return text[:i]
+		}
+		kept++
+	}
+	return text
+}
+
+// recapSummarise asks the current provider for the pinned-style session
+// summary: one user message, no tools, no history — the prompt (composed in
+// internal/focus) is the whole exchange, so nothing here can leak a
+// conversation into a recap or a recap into a conversation. The provider and
+// model are read at call time, so a reload's swap lands on the next recap.
+func (d *Daemon) recapSummarise(ctx context.Context, prompt string) (string, error) {
+	d.cfgMu.Lock()
+	provider, model := d.provider, d.cfg.AI.Model
+	d.cfgMu.Unlock()
+	if provider == nil {
+		return "", fmt.Errorf("no assistant provider is configured")
+	}
+	events, err := provider.Chat(ctx, ai.ChatRequest{
+		Model:       model,
+		Messages:    []ai.Message{{Role: ai.RoleUser, Content: prompt}},
+		MaxTokens:   recapMaxTokens,
+		Temperature: recapTemperature,
+	})
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for ev := range events {
+		switch ev.Type {
+		case ai.EventDelta:
+			b.WriteString(ev.Content)
+		case ai.EventError:
+			return "", ev.Err
+		default:
+			// EventDone ends the stream; a tool call cannot arrive for a
+			// request that advertised no tools, and would be ignored if one
+			// did.
+		}
+	}
+	return b.String(), nil
 }
 
 // fireFocus speaks one scheduled focus moment through the ordinary session
@@ -296,6 +432,9 @@ func focusViewReport(v focus.View) map[string]any {
 		}
 		if tv.RemindEveryMin > 0 {
 			entry["remind_every_min"] = tv.RemindEveryMin
+		}
+		if tv.Recap != "" {
+			entry["recap"] = tv.Recap
 		}
 		if len(tv.Anchors) > 0 {
 			anchors := make([]map[string]any, 0, len(tv.Anchors))
