@@ -9,6 +9,15 @@ package daemon
 // Transcript contents travel here and nowhere else: it is the user's own
 // record, asked for over their own 0600 socket. Events and logs carry ids and
 // counts only.
+//
+// Every read here starts at the engine's archive barrier (SyncArchive,
+// issue #115). The archive flush runs on the session tail *after*
+// session.finished (ADR 0011), so without the barrier a client that just
+// watched a turn finish could list or search the archive and miss it — the
+// live conversation absent from its own search, or active_id "" for a
+// conversation already on disk. The guarantee these methods give is
+// read-your-acknowledged-writes: a turn whose session.finished has been
+// published is visible to every conversation.* read that starts afterwards.
 
 import (
 	"encoding/json"
@@ -20,6 +29,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/session"
 )
 
 func (d *Daemon) registerConversationMethods() {
@@ -28,6 +38,12 @@ func (d *Daemon) registerConversationMethods() {
 	// Unreadable conversations are reported beside the readable rest: one bad
 	// file never hides the library, and never hides itself either.
 	d.server.Handle("conversation.list", func(json.RawMessage) (any, error) {
+		// The barrier before either read: the listing and active_id must agree
+		// with each other and with any turn the client has seen acknowledged.
+		// Without it, a listing racing a just-finished turn showed the new
+		// conversation with active_id still "" — the long-running
+		// TestConversationListOverSocket flake (issue #115).
+		d.engine.SyncArchive()
 		metas, unreadable, err := d.conversations.List()
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInternalError, "%v", err)
@@ -56,6 +72,9 @@ func (d *Daemon) registerConversationMethods() {
 		if err != nil {
 			return nil, err
 		}
+		// The barrier, so the transcript view opened right after a turn
+		// finishes includes that turn (issue #115).
+		d.engine.SyncArchive()
 		conv, err := d.conversations.Read(id)
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
@@ -80,6 +99,9 @@ func (d *Daemon) registerConversationMethods() {
 		if err != nil {
 			return nil, err
 		}
+		// The barrier, so reopening a conversation right after its last turn
+		// finished adopts the whole record, that turn included (issue #115).
+		d.engine.SyncArchive()
 		conv, err := d.conversations.Read(id)
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
@@ -115,6 +137,11 @@ func (d *Daemon) registerConversationMethods() {
 		if strings.TrimSpace(p.Query) == "" {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "conversation.search needs a query")
 		}
+		// No explicit barrier here: d.searcher is the syncedSearcher, which
+		// runs it inside Search — so the model's conversations.search tool,
+		// which holds the same Searcher, gets the identical guarantee. The
+		// active_id read below is ordered after it for the same reason
+		// `current` must be truthful: both happen behind the flush.
 		matches, stats, err := d.searcher.Search(conversations.Query{Text: p.Query, Limit: p.Limit})
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInternalError, "%v", err)
@@ -156,6 +183,12 @@ func (d *Daemon) registerConversationMethods() {
 		if err != nil {
 			return nil, err
 		}
+		// The barrier matters most here: the active-id checks below decide
+		// whether deleting also resets the live thread. Without it, deleting
+		// the conversation the user is in right after a turn — before the tail
+		// flush had adopted its id — would skip the reset, and the record they
+		// just destroyed would quietly rebuild from working memory (issue #115).
+		d.engine.SyncArchive()
 		if all {
 			if d.engine.ActiveConversationID() != "" {
 				d.engine.ResetConversation()
@@ -231,6 +264,24 @@ func metaReport(m conversations.Meta) map[string]any {
 		"turns":       m.TurnCount,
 		"preview":     m.Preview,
 	}
+}
+
+// syncedSearcher is the daemon's Searcher: the engine's archive barrier
+// (SyncArchive, issue #115) in front of the real search, so a query never
+// scans the archive while an acknowledged turn's flush is still in flight.
+// It wraps once, in New, rather than as a call at each surface — the IPC
+// method, and the model's conversations.search tool registered beside it,
+// share this one value, so a future surface cannot take the searcher and
+// forget the barrier.
+type syncedSearcher struct {
+	engine *session.Engine
+	inner  conversations.Searcher
+}
+
+// Search implements conversations.Searcher.
+func (s *syncedSearcher) Search(q conversations.Query) ([]conversations.Match, conversations.SearchStats, error) {
+	s.engine.SyncArchive()
+	return s.inner.Search(q)
 }
 
 // adoptableMessages converts archived turns into the engine's message shape.

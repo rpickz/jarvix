@@ -79,6 +79,37 @@ func (e *Engine) persistArchive() {
 		"conversation_id", landed, "turns", len(turns)/2)
 }
 
+// SyncArchive is the archive's read-side write barrier: on return, every
+// exchange committed before the call — which includes every turn whose
+// session.finished a client has already seen, because commitTurn stages the
+// exchange before finishLocked publishes the event — has been flushed to the
+// archive, and a flush that created the conversation has adopted its id as
+// the live thread's.
+//
+// It exists because the flush itself deliberately runs *after*
+// session.finished, off the latency path (ADR 0011). That is right for the
+// write side, but it leaves a window in which a client that just watched a
+// turn finish can search or list the archive and not find it: the window's
+// search box missing the conversation the user is in, or active_id coming
+// back "" while the conversation it names is plainly on disk — because the
+// append that creates a conversation is also what adopts its id, and both
+// happen on the session tail after the event (issue #115; the
+// TestConversationSearchOverSocket and TestConversationListOverSocket CI
+// flakes were this window, held open by a starved runner). The daemon closes
+// the window by calling this barrier before it reads, putting the wait on the
+// reader who needs the guarantee instead of the speaker who does not.
+//
+// It is persistArchive under a public name, and that is the whole mechanism:
+// archiveMu makes flushes whole, so either the tail's flush already ran (and
+// adopted any new id) and this call finds nothing pending, or this call is
+// blocked until an in-flight flush completes, or this call does the flush
+// itself and the tail's later one becomes the no-op. A latched archive
+// failure keeps the barrier a no-op too — degraded exactly like the write
+// path, the reader sees whatever made it to disk before the disk broke.
+func (e *Engine) SyncArchive() {
+	e.persistArchive()
+}
+
 // flushArchiveDetached writes turns that belong to a thread the engine has
 // already moved on from — the staged tail a reset or reopen found in flight.
 // No id is adopted: the thread is over, the record just has to be complete.

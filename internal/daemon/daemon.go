@@ -513,6 +513,10 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	engOpts.Capture = capture
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
+	// Every search — the IPC method and the model's tool alike — goes through
+	// the engine's archive barrier, so a query issued after a turn was
+	// acknowledged always sees that turn (issue #115; see syncedSearcher).
+	searcher = &syncedSearcher{engine: engine, inner: searcher}
 
 	// The memory tools are registered after the engine exists because a
 	// stored fact carries its source turn, and only the engine knows which
