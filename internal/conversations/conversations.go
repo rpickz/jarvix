@@ -38,6 +38,17 @@ type Turn struct {
 	Role string    `json:"role"`
 	Text string    `json:"text"`
 	Time time.Time `json:"ts"`
+	// Interrupted marks both halves of an exchange the user cut off before
+	// the assistant finished — a new push-to-talk, `jarvix cancel`, or the
+	// stop word (issue #117). The exchange is committed rather than dropped,
+	// because the archive's whole promise is that a conversation only ends
+	// when the user says so, and an interruption is not the user saying so.
+	//
+	// Additive on purpose: omitempty keeps every completed turn's line — and
+	// the golden files — byte-identical, an old archive without the key
+	// unmarshals to false, and SchemaVersion stays 1 because a reader that
+	// ignores the key still reads the turn correctly.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // Meta describes one archived conversation without its turns — everything a
