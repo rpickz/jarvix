@@ -50,9 +50,12 @@ type threadRecord struct {
 	// thought, a timebox, a reminder change.
 	LastActivity time.Time `toml:"last_activity"`
 	// RemindEveryMin is the check-in interval in minutes, 0 for none.
-	RemindEveryMin int            `toml:"remind_every_min,omitzero"`
-	Anchors        []anchorRecord `toml:"anchor,omitempty"`
-	Parked         []parkedRecord `toml:"parked,omitempty"`
+	RemindEveryMin int `toml:"remind_every_min,omitzero"`
+	// Recap is the AI-session recap trigger (#124): "always", "never", or
+	// absent for the default (only a terminal anchor is read).
+	Recap   string         `toml:"recap,omitempty"`
+	Anchors []anchorRecord `toml:"anchor,omitempty"`
+	Parked  []parkedRecord `toml:"parked,omitempty"`
 }
 
 type anchorRecord struct {
@@ -102,8 +105,11 @@ const header = `# Jarvix's focus threads — the named pieces of work behind "ne
 # needs a name; ids and timestamps are filled in when missing. [[thread.parked]]
 # entries are the thoughts parked into that thread, [[thread.anchor]] entries
 # the windows it is anchored to (at most two), and remind_every_min is the
-# check-in interval in minutes (0 or absent for none). "active" names the
-# thread you are on; [session] is a live timeboxed focus session.
+# check-in interval in minutes (0 or absent for none). recap = "always" or
+# "never" overrides when Jarvix reads an anchored AI session's window for a
+# spoken summary (absent: only when the anchored window is a terminal).
+# "active" names the thread you are on; [session] is a live timeboxed focus
+# session.
 # Jarvix rewrites this file whenever a thread changes; comments not preserved.
 
 `
@@ -140,7 +146,7 @@ func readStore(path string) (persisted, error) {
 		th := Thread{
 			ID: r.ID, Name: r.Name,
 			Created: r.Created, LastSwitched: r.LastSwitched, LastActivity: r.LastActivity,
-			RemindEveryMin: r.RemindEveryMin,
+			RemindEveryMin: r.RemindEveryMin, Recap: r.Recap,
 		}
 		for _, a := range r.Anchors {
 			th.Anchors = append(th.Anchors, Anchor(a))
@@ -201,7 +207,7 @@ func writeStore(path string, p persisted) error {
 		r := threadRecord{
 			ID: th.ID, Name: th.Name,
 			Created: th.Created.UTC(), LastActivity: th.LastActivity.UTC(),
-			RemindEveryMin: th.RemindEveryMin,
+			RemindEveryMin: th.RemindEveryMin, Recap: th.Recap,
 		}
 		if !th.LastSwitched.IsZero() {
 			r.LastSwitched = th.LastSwitched.UTC()

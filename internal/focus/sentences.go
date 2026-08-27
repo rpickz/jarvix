@@ -13,8 +13,9 @@ import (
 // Every sentence the focus feature speaks is composed here, daemon-side, from
 // the thread's own record (ADR 0013, restated by ADR 0041): a recap can be
 // wrong only if the record is, never because something was invented. The
-// sibling ticket's model-composed session summaries are deliberately absent —
-// this slice is fast, predictable, and honest, and stays that way.
+// AI-session summary (#124) lives in recap.go behind its own gates — these
+// templated sentences remain the floor every recap falls back to, fast,
+// predictable, and honest.
 //
 // Numbers are rendered with intent.SpokenNumber and ages with
 // knowledge.SpokenAge, so a thread recap counts and dates things on exactly

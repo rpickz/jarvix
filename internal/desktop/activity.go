@@ -268,6 +268,8 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Detail: joinActivity(activityString(data, "type"), activityString(data, "path"))})
 	case "context.captured":
 		return contextCapturedRows(data)
+	case "focus.recap":
+		return one(focusRecapRow(data))
 	case "memory.injected":
 		return one(memoryInjectedRow(data))
 	case "session.timings":
@@ -591,6 +593,32 @@ func routineStepRow(data map[string]any) ActivityRow {
 // sizes, and flags — never text. The event itself already keeps content off
 // the bus (ADR 0019); this function reads only the fields that cannot carry
 // it, so a future field could not leak through the feed either.
+// focusRecapRow says an AI-session recap was generated — and only that. The
+// captured screen content and the spoken summary never ride the event (the
+// #124 transient-content contract holds at the source), so the row carries
+// the thread's name, the outcome, and sizes. It shares the context kind: a
+// recap is a desktop-context read on the model path, and the glyph should
+// say so.
+func focusRecapRow(data map[string]any) ActivityRow {
+	name := activityString(data, "name")
+	chars, _ := activityInt(data, "chars")
+	total, _ := activityInt(data, "total_ms")
+	switch activityString(data, "outcome") {
+	case "spoken":
+		return ActivityRow{Kind: ActivityKindContext,
+			Label:  "Session recap spoken",
+			Detail: joinActivity(name, fmt.Sprintf("%d chars read · %d ms", chars, total))}
+	case "capture_failed":
+		return ActivityRow{Kind: ActivityKindContext,
+			Label:  "Session recap fell back",
+			Detail: joinActivity(name, "the session window could not be read; spoke the thread's own record")}
+	default: // model_failed, and any outcome a newer daemon adds
+		return ActivityRow{Kind: ActivityKindContext,
+			Label:  "Session recap fell back",
+			Detail: joinActivity(name, "no summary in time; spoke the thread's own record")}
+	}
+}
+
 func contextCapturedRows(data map[string]any) []ActivityRow {
 	sources, _ := data["sources"].([]any)
 	if len(sources) == 0 {

@@ -13,7 +13,7 @@ package daemon
 //   - vocabulary.forget_gated is the section's Delete button: deletion
 //     destroys the entry's taught history, so it routes through the
 //     permission gate exactly as the Memory tab's Forget does (the ADR 0025
-//     reversibility split, recorded for vocabulary in ADR 0042).
+//     reversibility split, recorded for vocabulary in ADR 0043).
 //   - vocabularyVoice is the engine's VocabularyTeacher seam: the spoken
 //     sentences for "when i say X i mean Y", "listen for the word X", and
 //     "what words have i taught you" live here, once, so voice and any

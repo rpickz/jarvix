@@ -175,6 +175,11 @@ type Daemon struct {
 	injected Deps
 	cfgMu    sync.Mutex
 	cfg      config.Config
+	// provider is the assistant backend the running configuration built —
+	// the same instance the engine holds — kept here for the daemon's own
+	// one-shot model calls (the AI-session recap, #124). Guarded by cfgMu
+	// and replaced alongside cfg when a reload swaps collaborators.
+	provider ai.Provider
 	// warm are the supervised engine processes the running configuration
 	// built. They are the daemon's children in the literal sense: killed on
 	// shutdown, and replaced (old ones killed) whenever a reload rebuilds the
@@ -656,6 +661,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor, windows: windows, router: router,
 		paths: paths, injected: injected, cfg: cfg, warm: workers,
+		provider:      deps.Provider,
 		shutdownGrace: DefaultShutdownGrace,
 	}
 	capture.committed = d.captureCommitted

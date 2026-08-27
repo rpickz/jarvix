@@ -221,6 +221,46 @@ func TestReminderIsSkippedWhileATimeboxRuns(t *testing.T) {
 	}
 }
 
+// TestCheckInDueInsideATimeboxNeverFiresAtItsEnd pins the boundary of
+// do-not-nag: a check-in whose due moment fell inside a timebox is
+// rescheduled a whole interval when the session ends — even when the loop
+// never processed the due tick mid-session, because the session ended
+// between the tick's delivery and its dispatch. Nothing pours out the
+// instant the floor clears; the first interval heard is a whole one.
+func TestCheckInDueInsideATimeboxNeverFiresAtItsEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "focus.toml")
+	h := startSchedule(t, path, false)
+	ctx := context.Background()
+	if _, _, err := h.s.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.s.RemindThread("deploy", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.s.StartSession(ctx, "deploy", 60); err != nil {
+		t.Fatal(err)
+	}
+	// The reminder falls due inside the session, and the session ends before
+	// the loop ever gets a tick for it — the exact escape a racing dispatch
+	// used to find.
+	h.clock.advance(11 * time.Minute)
+	if _, err := h.s.EndSession(); err != nil {
+		t.Fatal(err)
+	}
+	// A tick now must not fire the silenced check-in at the boundary.
+	h.timers.fire(t)
+	// One whole interval after the session's end is the first one heard.
+	h.clock.advance(11 * time.Minute)
+	h.timers.fire(t)
+	h.awaitFiring(t, FiringReminder)
+	h.settle(t)
+	select {
+	case f := <-h.firings:
+		t.Fatalf("a check-in silenced by the timebox poured out: %+v", f)
+	default:
+	}
+}
+
 func TestTimeboxMidpointAndCloseLatchBeforeTheySpeak(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "focus.toml")
 	h := startSchedule(t, path, true)

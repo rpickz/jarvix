@@ -129,7 +129,11 @@ func (s *Service) Anchor(ctx context.Context, anchorWindows int) (string, error)
 // Switch makes the referenced thread active and returns its recap — at most
 // two sentences, every clause read from the record: last time here, parked
 // count and newest, the anchor and whether it still exists. Never invented;
-// a thread with no history says "fresh thread".
+// a thread with no history says "fresh thread". A thread anchored to an AI
+// session earns the model-composed recap instead (#124, recap.go): the
+// switch itself has already committed by then, so a slow capture or model
+// can only ever delay the sentence, never the switch — and only up to the
+// recap budget.
 func (s *Service) Switch(ctx context.Context, ref string) (Thread, string, error) {
 	gone := s.goneAnchors(ctx)
 	s.mu.Lock()
@@ -153,7 +157,8 @@ func (s *Service) Switch(ctx context.Context, ref string) (Thread, string, error
 	s.mu.Unlock()
 	s.log.Info("thread switched", "component", "focus", "thread", th.ID)
 	s.emit("switched", map[string]any{"thread": th.ID})
-	return th, switchRecap(prior, gone, now), nil
+	base := switchRecap(prior, gone, now)
+	return th, s.enrich(ctx, th, base, gone), nil
 }
 
 // Park adds a thought to the active thread. The acknowledgement is a soft
@@ -214,17 +219,25 @@ func (s *Service) Status() string {
 
 // Check speaks the referenced thread's recap without switching to it — the
 // same sentence a check-in reminder speaks, because a reminder is exactly
-// this question asked by the clock.
+// this question asked by the clock. The AI-session enrichment (#124) applies
+// here identically, clock or voice: the check-in is the user's own standing
+// question, and the trigger and consent gates hold for it unchanged.
 func (s *Service) Check(ctx context.Context, ref string) (string, error) {
 	gone := s.goneAnchors(ctx)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.refreshLocked()
 	i, err := s.resolveLocked(ref)
 	if err != nil {
+		s.mu.Unlock()
 		return "", err
 	}
-	return checkRecap(cloneThread(s.st.threads[i]), gone, s.now()), nil
+	th := cloneThread(s.st.threads[i])
+	now := s.now()
+	s.mu.Unlock()
+	// Enrichment runs off the lock: a capture or a model call must never
+	// hold the store against every other operation.
+	base := checkRecap(th, gone, now)
+	return s.enrich(ctx, th, base, gone), nil
 }
 
 // End removes the referenced thread — deletion is deletion, the memory
@@ -250,7 +263,8 @@ func (s *Service) End(ref string) (string, error) {
 	if next.active == ended.ID {
 		next.active = ""
 	}
-	if next.session.ThreadID == ended.ID {
+	endedSession := next.session.ThreadID == ended.ID
+	if endedSession {
 		next.session = Session{}
 	}
 	if err := s.saveLocked(next); err != nil {
@@ -258,6 +272,11 @@ func (s *Service) End(ref string) (string, error) {
 		return "", err
 	}
 	delete(s.reminderNext, ended.ID)
+	if endedSession {
+		// Ending the thread ended its timebox too: the other threads'
+		// silenced check-ins reschedule rather than fire at the boundary.
+		s.rescheduleSilencedLocked()
+	}
 	s.mu.Unlock()
 	s.log.Info("thread ended", "component", "focus", "thread", ended.ID,
 		"parked", len(ended.Parked))

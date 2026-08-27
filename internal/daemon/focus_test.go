@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,12 +32,21 @@ type focusHarness struct {
 
 func startFocusDaemon(t *testing.T) *focusHarness {
 	t.Helper()
+	return startFocusDaemonWith(t, testConfig(), desktop.Window{
+		Address: "0xa", Class: "Alacritty", Title: "make test", Focused: true,
+	})
+}
+
+// startFocusDaemonWith is the harness with the configuration and the desktop
+// chosen by the test — the AI-session recap tests (#124) need the context
+// window source on and a window class of their choosing.
+func startFocusDaemonWith(t *testing.T, cfg config.Config, windows ...desktop.Window) *focusHarness {
+	t.Helper()
 	dir := t.TempDir()
 	paths := config.Paths{
 		Config: dir, Data: dir, State: dir, Runtime: dir,
 		Socket: filepath.Join(dir, "j.sock"),
 	}
-	cfg := testConfig()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -49,9 +59,7 @@ func startFocusDaemon(t *testing.T) *focusHarness {
 		Player:      &audio.FakePlayer{},
 		Notifier:    &desktop.FakeNotifier{},
 		OpenWindow:  func(context.Context) error { return nil },
-		Compositor: desktop.NewFakeCompositor(desktop.Window{
-			Address: "0xa", Class: "Alacritty", Title: "make test", Focused: true,
-		}),
+		Compositor:  desktop.NewFakeCompositor(windows...),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -258,5 +266,119 @@ func TestFocusFiringWithAnUnroutableNameIsSkippedNotSentToTheModel(t *testing.T)
 	}
 	if len(h.provider.Requests) != 0 {
 		t.Error("an unroutable firing reached the model")
+	}
+}
+
+// TestFocusSwitchRecapsAnAnchoredAISession is the AI-session recap (#124)
+// end to end through the daemon's wiring: the anchored terminal's live
+// identity line reaches the model inside the pinned prompt, the spoken
+// recap is the model's summary, and nothing transient lands in the store.
+// The model is the provider fake — the repo's provider seam — and the
+// desktop is the compositor fake, so the test runs headless and offline.
+func TestFocusSwitchRecapsAnAnchoredAISession(t *testing.T) {
+	cfg := testConfig()
+	// The recap rides the desktop-context window consent; the compositor is
+	// a fake, so enabling it runs no hyprctl anywhere.
+	cfg.Context.Window = true
+	h := startFocusDaemonWith(t, cfg, desktop.Window{
+		Address: "0xa", Class: "Alacritty",
+		Title: "✳ fixing the CI workflow — claude", Focused: true,
+	})
+	summary := "The CI fix is committed and the workflow is green. Next step is pushing the branch."
+	h.provider.Response = summary
+
+	ctx := context.Background()
+	if _, _, err := h.d.focus.Create(ctx, "the ci refactor", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.d.focus.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, recap, err := h.d.focus.Switch(ctx, "ci refactor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recap != summary {
+		t.Errorf("recap = %q\nwant    %q", recap, summary)
+	}
+
+	req := h.provider.LastRequest
+	if len(req.Messages) != 1 || req.Messages[0].Role != ai.RoleUser {
+		t.Fatalf("recap request shape = %+v", req.Messages)
+	}
+	if !strings.Contains(req.Messages[0].Content, "✳ fixing the CI workflow — claude") {
+		t.Errorf("the live window title never reached the prompt:\n%s", req.Messages[0].Content)
+	}
+	if !strings.Contains(req.Messages[0].Content, "--- window content ---") {
+		t.Errorf("the capture is not delimited in the prompt")
+	}
+	if req.MaxTokens != recapMaxTokens {
+		t.Errorf("recap MaxTokens = %d, want %d", req.MaxTokens, recapMaxTokens)
+	}
+	if len(req.Tools) != 0 {
+		t.Errorf("a recap request advertised tools: %+v", req.Tools)
+	}
+
+	// Transient means transient: the summary exists in speech alone.
+	stored, err := os.ReadFile(h.d.focus.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stored), "green") {
+		t.Errorf("the summary reached the thread store:\n%s", string(stored))
+	}
+}
+
+// TestFocusSwitchLeavesABrowserAnchorAlone is the trigger policy's daemon
+// half: a thread anchored to a browser keeps the core ticket's templated
+// recap, and the page is never read to the model — even with the window
+// source enabled.
+func TestFocusSwitchLeavesABrowserAnchorAlone(t *testing.T) {
+	cfg := testConfig()
+	cfg.Context.Window = true
+	h := startFocusDaemonWith(t, cfg, desktop.Window{
+		Address: "0xb", Class: "firefox", Title: "GitHub — pull request #124", Focused: true,
+	})
+
+	ctx := context.Background()
+	if _, _, err := h.d.focus.Create(ctx, "reviews", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.d.focus.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, recap, err := h.d.focus.Switch(ctx, "reviews")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(recap, "Back on reviews") {
+		t.Errorf("a browser anchor changed the recap: %q", recap)
+	}
+	if len(h.provider.Requests) != 0 {
+		t.Error("a browser anchor was read to the model")
+	}
+}
+
+// TestFocusRecapRespectsTheWindowConsent: with the desktop-context window
+// source off — Jarvix's eyes closed by configuration — a terminal anchor
+// gets the templated recap, silently, and the model is never asked.
+func TestFocusRecapRespectsTheWindowConsent(t *testing.T) {
+	h := startFocusDaemon(t) // testConfig keeps every context source off
+	ctx := context.Background()
+	if _, _, err := h.d.focus.Create(ctx, "the ci refactor", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.d.focus.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, recap, err := h.d.focus.Switch(ctx, "ci refactor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(recap, "Back on the ci refactor") {
+		t.Errorf("recap = %q", recap)
+	}
+	if len(h.provider.Requests) != 0 {
+		t.Error("the recap read a window the user had switched off")
 	}
 }

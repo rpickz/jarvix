@@ -395,6 +395,9 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	previous := d.warm
 	d.cfg = merged
 	d.warm = workers
+	// The recap's one-shot calls (#124) must follow the engine to the new
+	// provider, or a reload would leave them speaking through the old one.
+	d.provider = deps.Provider
 	d.cfgMu.Unlock()
 	previous.Close()
 	d.log.Info("configuration applied", "component", "daemon",

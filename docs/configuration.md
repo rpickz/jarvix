@@ -1364,6 +1364,21 @@ The Focus tab in the conversation window lists the threads (anchors, parked
 thoughts, last activity, the live session) and offers Switch and End; the
 `focus.*` IPC verbs behind it are documented in [ipc.md](ipc.md).
 
+**The AI-session recap** ([ADR 0042](adr/0042-ai-session-recap.md)) is the
+one exception to "recaps are templated": a thread whose anchored window is a
+**terminal** — where AI sessions live — answers "switch to X" and "where am
+I on X" with a model-composed summary of what is visible there instead: at
+most three short sentences, present state first, then the next step. It
+rides two consents (the `[context] window` opt-in gates it entirely, and a
+browser or any other non-terminal anchor is never silently read to the
+model), a per-thread override in `focus.toml` (`recap = "always"` or
+`"never"`), and a hard 3-second deadline — capture gone, model late, or the
+answer off contract all fall back to the thread's own record behind an
+honest admission, and a late summary is dropped rather than spoken over
+whatever you moved on to. The captured text and the summary are transient:
+spoken, never stored — the activity feed says a recap happened, with sizes
+and timings only.
+
 ```toml
 [focus]
 midpoint_checkin = false   # speak a halfway line during a timeboxed session;

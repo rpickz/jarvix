@@ -202,6 +202,10 @@ func (s *Service) dispatchDue(ctx context.Context) {
 			th, _ := threadByID(next.threads, next.session.ThreadID)
 			next.session = Session{}
 			if err := s.saveLocked(next); err == nil {
+				// A quiet end is still an end: check-ins silenced by the
+				// lapsed session reschedule a whole interval out rather
+				// than firing the moment the record clears.
+				s.rescheduleSilencedLocked()
 				s.log.Info("focus session close went unanswered; ended quietly",
 					"component", "focus", "thread", th.ID)
 				events = append(events, struct {
@@ -278,4 +282,28 @@ func (s *Service) dispatchDue(ctx context.Context) {
 // midpointEnabled reads the config seam; nil means the shipped default, off.
 func (s *Service) midpointEnabled() bool {
 	return s.midpoint != nil && s.midpoint()
+}
+
+// rescheduleSilencedLocked applies the do-not-nag rule at the moment a focus
+// session leaves the floor: a check-in whose due moment fell inside the
+// silenced stretch costs one whole interval from now, exactly as if the loop
+// had processed and skipped it mid-session. Without this, a due tick the
+// loop had not yet dispatched escapes the silence — the session ends between
+// the tick's delivery and its dispatch, and a check-in from inside the
+// timebox pours out the instant it closes. Every session-end transition
+// (EndSession, Break, an unanswered close, ending the session's thread)
+// calls this under the lock, so the first interval heard after a session is
+// always a whole one. Callers hold s.mu.
+func (s *Service) rescheduleSilencedLocked() {
+	now := s.now()
+	for _, th := range s.st.threads {
+		if th.RemindEveryMin <= 0 {
+			continue
+		}
+		due, armed := s.reminderNext[th.ID]
+		if !armed || due.After(now) {
+			continue
+		}
+		s.reminderNext[th.ID] = now.Add(time.Duration(th.RemindEveryMin) * time.Minute)
+	}
 }

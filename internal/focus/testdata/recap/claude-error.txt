@@ -1,0 +1,10 @@
+✳ Claude Code — migrating the sessions table
+
+● Running: goose up
+  ⎿ ERROR: migration 0007_add_sessions.sql failed:
+     pq: column "user_id" of relation "sessions" already exists
+
+The migration conflicts with 0005, which already added user_id. I need a
+decision: drop the duplicate column from 0007, or rebase it onto 0005.
+
+esc to interrupt
