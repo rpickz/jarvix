@@ -1209,6 +1209,24 @@ FloatingWindow {
     }) + "\n")
   }
 
+  // --- new chat ------------------------------------------------------------
+  // The Chat tab's New chat button is a thin client of the daemon's one
+  // explicit-end verb, `conversation.new` (issue #117) — the same verb
+  // "start a new conversation" (voice), `jarvix new`, and the bar menu reach.
+  // The window decides nothing (ADR 0013): the daemon cancels any session in
+  // flight (committing its exchange, marked interrupted, into the ending
+  // thread), archives, and resets; this view refreshes on the
+  // conversation.changed event like every other thread change.
+  property int newChatRequestId: 0
+  function startNewChat() {
+    if (!daemon.connected) return
+    newChatRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: newChatRequestId, method: "conversation.new"
+    }) + "\n")
+  }
+
   // returnTypedText puts an unsent question back in the composer, unless the
   // user has already started typing the next one — their keystrokes win.
   function returnTypedText() {
@@ -3604,13 +3622,31 @@ FloatingWindow {
       anchors.right: parent.right
       spacing: Style.space(4)
 
-      Text {
-        id: composerLabel
-        text: win.socketReady ? "Ask Jarvix" : "Ask Jarvix — start jarvixd to type"
-        font.family: Style.font.family
-        font.bold: true
-        font.pixelSize: Style.font.subtitle
-        color: Util.alpha(Color.popups.text, 0.7)
+      // Label on the left, New chat on the right: the affordance that ends a
+      // conversation lives where conversations happen, beside the composer.
+      Item {
+        width: parent.width
+        height: Math.max(composerLabel.height, newChatButton.height)
+
+        Text {
+          id: composerLabel
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: win.socketReady ? "Ask Jarvix" : "Ask Jarvix — start jarvixd to type"
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.subtitle
+          color: Util.alpha(Color.popups.text, 0.7)
+        }
+
+        JarvixFormButton {
+          id: newChatButton
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          label: "New chat"
+          name: "New chat — archive this conversation and start a fresh one"
+          onClicked: win.startNewChat()
+        }
       }
 
       Rectangle {
