@@ -102,7 +102,10 @@ FloatingWindow {
     if (id === "library") requestHistory()
     else if (id === "automations") requestAutomations()
     else if (id === "knowledge") requestKnowledge()
-    else if (id === "memory") requestMemory()
+    else if (id === "memory") {
+      requestMemory()
+      requestVocabulary()
+    }
     else if (id === "chat" && pendingCardIndex >= 0) {
       // A permission question must never be hidden by tab state: coming back
       // to Chat lands on the card, wherever the list had been scrolled.
@@ -1218,6 +1221,175 @@ FloatingWindow {
     return meta
   }
 
+  // --- vocabulary ---------------------------------------------------------
+  // The Vocabulary section (issue #129) lives INSIDE the Memory tab, as the
+  // second collection under the facts: both are "what Jarvix keeps about
+  // you", taught explicitly, stored in a hand-editable file, and a seventh
+  // tab for a list that is usually short would cost more navigation than it
+  // buys. Same thin-client shape as the facts: vocabulary.list for the
+  // listing, teach/update through the store's own write path (ungated — the
+  // reversibility split), Delete through the gated tool path so the standard
+  // confirmation card names the exact phrase.
+  property var vocabEntries: []
+  property bool vocabEnabled: true
+  property int vocabCount: 0
+  property int vocabMax: 0
+  property int vocabBiasCount: 0
+  property int vocabBiasMax: 0
+  // The daemon's over-budget sentence: non-empty when taught words are being
+  // left out of the prompt. Rendered verbatim — a trim is never silent —
+  // and decided entirely daemon-side; this window only relays it.
+  property string vocabWarning: ""
+  property int vocabRequestId: 0
+  property int vocabForgetRequestId: 0
+
+  function requestVocabulary() {
+    if (!daemon.connected) return
+    vocabRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: vocabRequestId,
+      method: "vocabulary.list" }) + "\n")
+  }
+
+  function loadVocabulary(result) {
+    vocabEnabled = result.enabled !== false
+    vocabEntries = result.entries || []
+    vocabCount = Number(result.count || 0)
+    vocabMax = Number(result.max || 0)
+    vocabBiasCount = Number(result.bias_count || 0)
+    vocabBiasMax = Number(result.bias_max || 0)
+    vocabWarning = String(result.warning || "")
+  }
+
+  // forgetVocabEntry starts the gated delete. Nothing changes here on the
+  // reply: the confirmation card appears in Chat via the ordinary events,
+  // and the resolution events refresh this list (the forgetFact shape).
+  function forgetVocabEntry(id) {
+    if (!daemon.connected) return
+    vocabForgetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: vocabForgetRequestId,
+      method: "vocabulary.forget_gated", params: { id: id } }) + "\n")
+  }
+
+  // --- vocabulary entry form ----------------------------------------------
+  // Add ("Teach a word…") and Edit share one form on the #100 machinery:
+  // saves go to vocabulary.teach / vocabulary.update — the store's own path,
+  // the same one the voice teach takes — and refusals arrive field-keyed in
+  // the entry-form wire shape this pane pins like the config forms do.
+  property bool vocabFormOpen: false
+  property string vocabFormId: "" // "" while teaching a new word
+  property string vocabFormPhrase: ""
+  property string vocabFormMeaning: ""
+  property string vocabFormNote: ""
+  property bool vocabFormHard: false
+  property var vocabFormProblems: [] // [{field, message}] from the daemon
+  property string vocabFormError: ""
+  property int vocabSaveRequestId: 0
+
+  // One flag for "a Memory-tab form is open": the facts form and the
+  // vocabulary form each take over the whole tab, so every listing element
+  // hides behind either.
+  readonly property bool memoryTabFormOpen: memoryFormOpen || vocabFormOpen
+
+  function openVocabAdd() {
+    vocabFormId = ""
+    vocabFormPhrase = ""
+    vocabFormMeaning = ""
+    vocabFormNote = ""
+    vocabFormHard = false
+    vocabFormProblems = []
+    vocabFormError = ""
+    vocabFormOpen = true
+  }
+
+  // openVocabEdit opens the form on one entry. The listing already carries
+  // every field (vocabulary.list serves them), so no round trip is needed.
+  function openVocabEdit(entry) {
+    vocabFormId = String(entry.id)
+    vocabFormPhrase = String(entry.phrase || "")
+    vocabFormMeaning = String(entry.meaning || "")
+    vocabFormNote = String(entry.note || "")
+    vocabFormHard = entry.hard_to_hear === true
+    vocabFormProblems = []
+    vocabFormError = ""
+    vocabFormOpen = true
+  }
+
+  function closeVocabForm() {
+    vocabFormOpen = false
+    requestVocabulary()
+  }
+
+  function saveVocabForm() {
+    if (!daemon.connected) return
+    vocabSaveRequestId = nextRequestId
+    nextRequestId++
+    var frame = { jsonrpc: "2.0", id: vocabSaveRequestId }
+    var params = { phrase: vocabFormPhrase, meaning: vocabFormMeaning,
+      note: vocabFormNote, hard_to_hear: vocabFormHard }
+    if (vocabFormId === "") {
+      // Teach, not a bare add: the daemon supersedes an existing phrase in
+      // place, so typing a known word updates it — never a second entry.
+      frame.method = "vocabulary.teach"
+    } else {
+      frame.method = "vocabulary.update"
+      params.id = vocabFormId
+    }
+    frame.params = params
+    daemon.write(JSON.stringify(frame) + "\n")
+  }
+
+  // handleVocabFormReply lands a save exactly as the fact form's does: a
+  // refusal pins the daemon's field-keyed problems, success closes the form
+  // and re-requests the listing, and any warning (near-cap, bias budget)
+  // lands in the shared banner so a cap is never a surprise.
+  function handleVocabFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) {
+        vocabFormProblems = data.problems || []
+      }
+      vocabFormError = String(frame.error.message || "the save failed")
+      return
+    }
+    vocabFormOpen = false
+    requestVocabulary()
+    var warning = String((frame.result || {}).warning || "")
+    if (warning !== "") {
+      errorStage = "vocabulary"
+      errorMessage = warning
+    }
+  }
+
+  function vocabProblemFor(field) {
+    var out = []
+    for (var i = 0; i < vocabFormProblems.length; i++) {
+      if (String(vocabFormProblems[i].field || "") === field) {
+        out.push(String(vocabFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
+  // vocabMeta words one entry's state for its row: the note, the taught /
+  // re-taught dates, the listen flag (words, not colour), and the length of
+  // its supersede trail — the factMeta shape.
+  function vocabMeta(entry) {
+    var meta = "taught " + String(entry.taught || "").substring(0, 10)
+    var updated = String(entry.updated || "").substring(0, 10)
+    if (updated !== "" && updated !== String(entry.taught || "").substring(0, 10)) {
+      meta += " · re-taught " + updated
+    }
+    if (entry.hard_to_hear === true) meta += " · listened for"
+    var previous = entry.previous || []
+    if (previous.length > 0) {
+      meta += " · " + previous.length
+        + (previous.length === 1 ? " earlier meaning" : " earlier meanings")
+    }
+    return meta
+  }
+
   // --- typed turns --------------------------------------------------------
   // Request id 1 is the conversation snapshot; everything else takes dynamic
   // ids from this counter so a reply can be matched to exactly the request
@@ -1628,11 +1800,13 @@ FloatingWindow {
       // list is unchanged, but re-requesting it is how this window stays a
       // mirror rather than a guesser (ADR 0013).
       if (params.tool === "memory.forget") requestMemory()
+      if (params.tool === "vocabulary.forget") requestVocabulary()
       break
     case "tool.finished":
       // The gated forget executed (from this window's button or the model's
       // own call — the store changed either way): refresh the listing.
       if (params.tool === "memory.forget") requestMemory()
+      if (params.tool === "vocabulary.forget") requestVocabulary()
       break
     case "knowledge.updated":
       // A fetch completed — scheduled or Refresh now. The event carries the
@@ -1644,6 +1818,12 @@ FloatingWindow {
       // client's. The event carries id and size only; the listing reply is
       // where content travels (ADR 0025's privacy split).
       requestMemory()
+      break
+    case "vocabulary.entry_changed":
+      // A word was taught, edited, or flagged — from this window's form, a
+      // spoken "when I say X I mean Y", or the model's teach tool. Same
+      // privacy split: the event carries id and size only.
+      requestVocabulary()
       break
     case "routine.started":
       // Live progress for the Automations tab (issue #93): the run events
@@ -1775,6 +1955,18 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
           if (frame.result) win.loadMemory(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.vocabSaveRequestId) {
+          win.handleVocabFormReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.vocabForgetRequestId) {
+          // Success needs no handling — the confirmation card's events carry
+          // the flow — but a refusal (unknown id, vocabulary disabled) must
+          // be seen.
+          if (frame.error) {
+            win.errorStage = "vocabulary"
+            win.errorMessage = String(frame.error.message || "the word could not be forgotten")
+          }
+        } else if (frame.id !== undefined && frame.id === win.vocabRequestId) {
+          if (frame.result) win.loadVocabulary(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
                    frame.id === win.historyReadRequestId ||
                    frame.id === win.historyOpenRequestId ||
@@ -1821,6 +2013,7 @@ FloatingWindow {
         // conversation.changed, here).
         win.requestKnowledge()
         win.requestMemory()
+        win.requestVocabulary()
         // The transcript's typography settings (issue #121) load with the
         // rest of the connect snapshot; until they arrive the property
         // defaults render the shipped look.
@@ -3317,7 +3510,7 @@ FloatingWindow {
 
       Rectangle {
         id: memoryFilterBox
-        visible: win.memoryEnabled && !win.memoryFormOpen
+        visible: win.memoryEnabled && !win.memoryTabFormOpen
           && (win.memoryFacts.length > 0 || win.memoryQuery !== "")
         anchors.top: parent.top
         anchors.left: parent.left
@@ -3361,9 +3554,13 @@ FloatingWindow {
         }
       }
 
+      // Anchored inside the facts half rather than centred in the tab: the
+      // Vocabulary section (#129) owns the lower part of this pane, and an
+      // empty-facts sentence floating over it would read as its caption.
       JarvixEmptyState {
-        visible: win.memoryFacts.length === 0 && !win.memoryFormOpen
-        anchors.centerIn: parent
+        visible: win.memoryFacts.length === 0 && !win.memoryTabFormOpen
+        anchors.top: parent.top
+        anchors.topMargin: Style.space(48)
         width: parent.width
         text: !win.memoryEnabled
           ? "Memory is switched off (memory.enabled = false)."
@@ -3374,7 +3571,7 @@ FloatingWindow {
 
       Text {
         id: memoryCountLine
-        visible: win.memoryFacts.length > 0 && !win.memoryFormOpen
+        visible: win.memoryFacts.length > 0 && !win.memoryTabFormOpen
         anchors.top: memoryFilterBox.visible ? memoryFilterBox.bottom : parent.top
         anchors.topMargin: memoryFilterBox.visible ? Style.space(8) : 0
         width: parent.width
@@ -3391,7 +3588,7 @@ FloatingWindow {
       // exactly when the daemon sent one; a trim is never silent here.
       Text {
         id: memoryWarningLine
-        visible: win.memoryWarning !== "" && !win.memoryFormOpen
+        visible: win.memoryWarning !== "" && !win.memoryTabFormOpen
         anchors.top: memoryCountLine.visible ? memoryCountLine.bottom
           : (memoryFilterBox.visible ? memoryFilterBox.bottom : parent.top)
         anchors.topMargin: Style.space(6)
@@ -3405,7 +3602,7 @@ FloatingWindow {
 
       ListView {
         id: memoryList
-        visible: win.memoryFacts.length > 0 && !win.memoryFormOpen
+        visible: win.memoryFacts.length > 0 && !win.memoryTabFormOpen
         anchors.top: memoryWarningLine.visible ? memoryWarningLine.bottom : memoryCountLine.bottom
         anchors.topMargin: Style.space(8)
         anchors.left: parent.left
@@ -3481,11 +3678,13 @@ FloatingWindow {
       }
 
       // The Add button (#100). Hidden with memory disabled — the daemon
-      // would refuse, and the empty state already says why.
+      // would refuse, and the empty state already says why. Since #129 it
+      // bottoms out on the Vocabulary section rather than the pane.
       Row {
         id: memoryNewRow
-        visible: win.memoryEnabled && !win.memoryFormOpen
-        anchors.bottom: parent.bottom
+        visible: win.memoryEnabled && !win.memoryTabFormOpen
+        anchors.bottom: vocabSection.top
+        anchors.bottomMargin: Style.space(12)
         anchors.left: parent.left
         spacing: Style.space(8)
 
@@ -3494,6 +3693,147 @@ FloatingWindow {
           name: "Add a new remembered fact"
           accent: true
           onClicked: win.openMemoryAdd()
+        }
+      }
+
+      // The Vocabulary section (issue #129): the second collection of the
+      // Memory tab — the words the user taught, from vocabulary.list, with
+      // Teach/Edit through the shared form machinery and Delete through the
+      // gated tool path. A fixed share of the pane rather than a flow: both
+      // collections keep their own scroll, and neither can push the other
+      // off screen.
+      Item {
+        id: vocabSection
+        visible: !win.memoryTabFormOpen
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Math.round(parent.height * 0.45)
+
+        Text {
+          id: vocabHeader
+          anchors.top: parent.top
+          width: parent.width
+          text: {
+            if (!win.vocabEnabled) return "Vocabulary"
+            var line = "Vocabulary — " + win.vocabCount + " of " + win.vocabMax
+              + (win.vocabCount === 1 ? " word" : " words") + " taught"
+            if (win.vocabBiasCount > 0) {
+              line += " · " + win.vocabBiasCount + " of " + win.vocabBiasMax + " listened for"
+            }
+            return line
+          }
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+
+        // The over-budget disclosure: the daemon's sentence, verbatim, in
+        // words — urgent colour flags it but never carries it alone.
+        Text {
+          id: vocabWarningLine
+          visible: win.vocabWarning !== ""
+          anchors.top: vocabHeader.bottom
+          anchors.topMargin: Style.space(6)
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: "Warning: " + win.vocabWarning
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.urgent
+        }
+
+        JarvixEmptyState {
+          visible: win.vocabEntries.length === 0
+          anchors.top: vocabWarningLine.visible ? vocabWarningLine.bottom : vocabHeader.bottom
+          anchors.topMargin: Style.space(24)
+          width: parent.width
+          text: !win.vocabEnabled
+            ? "Vocabulary is switched off (vocabulary.enabled = false)."
+            : "No words taught yet — say “when I say quid I mean pounds”, or teach one with the button below."
+        }
+
+        ListView {
+          id: vocabList
+          visible: win.vocabEntries.length > 0
+          anchors.top: vocabWarningLine.visible ? vocabWarningLine.bottom : vocabHeader.bottom
+          anchors.topMargin: Style.space(8)
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: vocabNewRow.top
+          anchors.bottomMargin: Style.space(8)
+          clip: true
+          spacing: Style.space(10)
+          model: win.vocabEntries
+
+          // One taught word: the shared row plus, when expanded, the
+          // supersede trail — the meanings this phrase held before, straight
+          // from the `previous` the daemon serves (the facts' idiom).
+          delegate: Column {
+            id: vocabDelegate
+            required property var modelData
+            property bool expanded: false
+            width: vocabList.width
+            spacing: Style.space(4)
+
+            JarvixCollectionRow {
+              width: parent.width
+              title: "“" + vocabDelegate.modelData.phrase + "” — " + vocabDelegate.modelData.meaning
+              subtitle: String(vocabDelegate.modelData.note || "")
+              meta: win.vocabMeta(vocabDelegate.modelData)
+                + ((vocabDelegate.modelData.previous || []).length > 0
+                  ? (vocabDelegate.expanded ? " · press to fold the history" : " · press to unfold the history")
+                  : "")
+              interactive: (vocabDelegate.modelData.previous || []).length > 0
+              onActivated: vocabDelegate.expanded = !vocabDelegate.expanded
+              actionLabel: "Edit"
+              actionName: "Edit: " + vocabDelegate.modelData.phrase
+              onActionTriggered: win.openVocabEdit(vocabDelegate.modelData)
+              // Delete keeps its confirmation card (the gated path): the one
+              // destructive act on this list, quieter than Edit.
+              action2Label: "Delete"
+              action2Name: "Delete: " + vocabDelegate.modelData.phrase
+              onAction2Triggered: win.forgetVocabEntry(String(vocabDelegate.modelData.id))
+            }
+
+            Column {
+              visible: vocabDelegate.expanded
+              width: parent.width
+              spacing: Style.space(2)
+
+              Repeater {
+                model: vocabDelegate.expanded ? (vocabDelegate.modelData.previous || []) : []
+                delegate: Text {
+                  required property var modelData
+                  width: vocabDelegate.width - Style.space(16)
+                  x: Style.space(16)
+                  wrapMode: Text.Wrap
+                  text: "meant: “" + String(modelData.meaning) + "” — "
+                    + String(modelData.taught || "").substring(0, 10)
+                    + " until " + String(modelData.superseded || "").substring(0, 10)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.subtitle
+                  color: Util.alpha(Color.popups.text, 0.7)
+                }
+              }
+            }
+          }
+        }
+
+        Row {
+          id: vocabNewRow
+          visible: win.vocabEnabled
+          anchors.bottom: parent.bottom
+          anchors.left: parent.left
+          spacing: Style.space(8)
+
+          JarvixFormButton {
+            label: "Teach a word…"
+            name: "Teach a new word or phrase"
+            accent: true
+            onClicked: win.openVocabAdd()
+          }
         }
       }
 
@@ -3516,6 +3856,30 @@ FloatingWindow {
           anchors.fill: parent
           active: win.memoryFormOpen
           sourceComponent: memoryFormBody
+        }
+      }
+
+      // The vocabulary form (#129): phrase, meaning, note, and the listen
+      // toggle on the same scaffold. Back cancels, Save goes to the store's
+      // own write path (teach or update — the daemon supersedes, never
+      // duplicates).
+      JarvixDetailPane {
+        id: vocabFormPane
+        visible: win.vocabFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the vocabulary"
+        actionLabel: "Save"
+        actionName: "Save the word"
+        note: (win.vocabFormId === ""
+          ? "New word"
+          : "Editing word " + win.vocabFormId)
+        onBackRequested: win.closeVocabForm()
+        onActionTriggered: win.saveVocabForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.vocabFormOpen
+          sourceComponent: vocabFormBody
         }
       }
     }
@@ -3560,6 +3924,75 @@ FloatingWindow {
           detail: "A pinned fact rides every prompt; unpinned facts are found on demand with memory.search."
           checked: win.memoryFormPinned
           onToggled: function(checked) { win.memoryFormPinned = checked }
+        }
+      }
+    }
+
+    // The vocabulary form body (#129), built per open. Each field pins the
+    // daemon's problems; the general area carries whole-store refusals (the
+    // caps) and transport errors — all verbatim, never colour alone.
+    Component {
+      id: vocabFormBody
+
+      Column {
+        spacing: Style.space(10)
+
+        Text {
+          visible: win.vocabFormError !== "" || win.vocabProblemFor("") !== ""
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: (win.vocabFormError !== "" ? win.vocabFormError + "\n" : "")
+            + win.vocabProblemFor("")
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.urgent
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "The word or phrase, as you say it"
+          placeholder: "quid"
+          problem: win.vocabProblemFor("phrase")
+          hint: win.vocabFormId === ""
+            ? "Teaching a phrase you already taught updates its meaning instead."
+            : "Renaming keeps the entry; its history stays with it."
+          Component.onCompleted: text = win.vocabFormPhrase
+          onEdited: function(value) { win.vocabFormPhrase = value }
+          onCommitted: {}
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "What it means when you say it"
+          placeholder: "pounds"
+          problem: win.vocabProblemFor("meaning")
+          hint: "Saving a meaning change keeps the old meaning on the word's history."
+          Component.onCompleted: text = win.vocabFormMeaning
+          onEdited: function(value) { win.vocabFormMeaning = value }
+          onCommitted: {}
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "Note (optional)"
+          placeholder: "UK money slang"
+          problem: win.vocabProblemFor("note")
+          Component.onCompleted: text = win.vocabFormNote
+          onEdited: function(value) { win.vocabFormNote = value }
+          onCommitted: {}
+        }
+
+        // The listen toggle: the STT-bias flag, in words — including that
+        // the budget is small, so its refusal (field-keyed from the daemon)
+        // never arrives unexplained.
+        JarvixFormToggle {
+          width: parent.width
+          label: "Listen for it"
+          detail: "Biases speech recognition toward the phrase when it keeps being misheard. "
+            + "Only a few words fit (" + win.vocabBiasCount + " of " + win.vocabBiasMax + " used)."
+          problem: win.vocabProblemFor("hard_to_hear")
+          checked: win.vocabFormHard
+          onToggled: function(checked) { win.vocabFormHard = checked }
         }
       }
     }
