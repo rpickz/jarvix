@@ -35,8 +35,9 @@ import (
 //     overlay state machines never see a superseded turn as a second (or a
 //     missing) answer.
 //
-// Every ordering is gated (tts.Fake.SetHold, the speakerQueued seam),
-// never slept for.
+// Every ordering is gated (tts.Fake.SetHold, the speakerQueued seam, and for
+// the engine-driven test a tool round held open until the voice has provably
+// started), never slept for.
 
 // recordingSynth wraps the fake synthesizer to keep every text it was asked
 // to speak, in order — tts.Fake only retains the last. What reached Speak is
@@ -46,14 +47,29 @@ type recordingSynth struct {
 	*tts.Fake
 	mu     sync.Mutex
 	spoken []string
+	// started is closed the first time any sentence reaches Speak, giving a
+	// test a real happens-before edge for "the voice has begun" rather than a
+	// count to poll. tts.Fake.Speaks() counts calls but names none of them,
+	// and that anonymity is what let issue #154's ordering go unestablished:
+	// "at least one synthesis has happened" is satisfied just as well by the
+	// answer that was supposed to arrive *second*. Closed under startOnce so
+	// the edge exists exactly once, however many sentences follow.
+	startOnce sync.Once
+	started   chan struct{}
 }
 
 func (r *recordingSynth) Speak(ctx context.Context, req tts.Request) (tts.Format, <-chan tts.Chunk, error) {
 	r.mu.Lock()
 	r.spoken = append(r.spoken, req.Text)
 	r.mu.Unlock()
+	r.startOnce.Do(func() { close(r.started) })
 	return r.Fake.Speak(ctx, req)
 }
+
+// firstSpeak returns a channel closed once a sentence has actually reached the
+// synthesizer — the gate anything that must happen *after* the voice starts
+// waits on.
+func (r *recordingSynth) firstSpeak() <-chan struct{} { return r.started }
 
 func (r *recordingSynth) texts() []string {
 	r.mu.Lock()
@@ -70,7 +86,7 @@ func newRecordedHarness(t *testing.T, reg *tools.Registry) (*harness, *recording
 	t.Helper()
 	h := newHarness(t, Options{SpeakResponses: true})
 	h.tools = reg
-	synth := &recordingSynth{Fake: h.tts}
+	synth := &recordingSynth{Fake: h.tts, started: make(chan struct{})}
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
 	t.Cleanup(h.cancel)
@@ -166,10 +182,34 @@ func speakerUnderTest(t *testing.T, h *harness) (*streamingSpeaker, *sess) {
 // timings, and the tts.started/finished pair stays exactly one.
 func TestStaleSpeechFromAnEarlierTurnIsSuperseded(t *testing.T) {
 	reg := tools.NewRegistry(nil)
-	rec := &recordingTool{result: "checked"}
-	reg.Register(rec)
 	h, synth := newRecordedHarness(t, reg)
 	release := holdFirstSentence(t, h)
+
+	// The tool round is held open until the first sentence has provably
+	// reached the synthesizer, and that gate is the whole point of this
+	// arrangement.
+	//
+	// The behaviour under test is "the voice is still on turn one's sentence
+	// when turn two commits". Turn two only exists once the tool returns, so
+	// parking the tool on the synthesizer's own start signal makes that
+	// premise a fact: while the tool is blocked, no round two exists, nothing
+	// can raise the supersession floor, and the speaker has the exchange to
+	// itself to dequeue sentence one and park on the hold gate inside Speak.
+	//
+	// It used to be asserted instead of established (issue #154). The test
+	// waited for tts.Fake.Speaks() >= 1 on its own goroutine — a count with no
+	// ordering to the engine's, and no name on the sentence it counted. The
+	// engine can finish *both* rounds before the speaker goroutine dequeues
+	// anything at all, and then all three narration sentences are stale at
+	// dequeue and drop; the one synthesis the count saw was the answer's.
+	// That is #120 working exactly as designed — a stale utterance is dropped
+	// at dequeue, and only the *in-flight* sentence is promised — so the
+	// failure was the assertion's, not the product's. It cost about one run in
+	// three without -race, and passed under -race only because the detector's
+	// scheduling happened to let the speaker run first, which is the only way
+	// CI runs it. Do not go back to sampling a count: gate on the sentence.
+	rec := &gatedTool{name: "run", result: "checked", gate: synth.firstSpeak()}
+	reg.Register(rec)
 
 	// Round one narrates three complete sentences, then calls the tool; round
 	// two is the final answer. The held synthesizer keeps the voice inside
@@ -188,14 +228,19 @@ func TestStaleSpeechFromAnEarlierTurnIsSuperseded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The first sentence must be *in flight* — inside the synthesizer —
-	// before the answer can supersede anything, or the assertion "the begun
-	// sentence finishes" would be sampling a race instead of pinning a rule.
-	waitUntil(t, "the first sentence reaches the synthesizer", func() bool { return h.tts.Speaks() >= 1 })
 	events := collectEvents(t, h, "assistant.finished")
 	// The whole answer is now committed to the queue (streamOnce flushed it
-	// before assistant.finished was published), so releasing the audio lets
-	// the queue drain against a floor that has already risen.
+	// before assistant.finished was published) and the floor has risen — while
+	// the voice is still inside sentence one, because the hold gate has not
+	// been released and the speaker cannot reach a second Speak until it is.
+	// Exactly one synthesis is therefore both a fact and the situation the
+	// rest of this test is about.
+	if n := h.tts.Speaks(); n != 1 {
+		t.Fatalf("syntheses when the answer committed = %d, want 1: the voice must still be "+
+			"inside the first sentence for supersession to have anything to drop", n)
+	}
+	// Releasing the audio now lets the queue drain against a floor that has
+	// already risen.
 	h.tts.SetHold(nil)
 	release()
 	events = append(events, collectEvents(t, h, "session.finished")...)
@@ -242,11 +287,20 @@ func TestStaleSpeechFromAnEarlierTurnIsSuperseded(t *testing.T) {
 	if n := eventCount(events, "tts.finished"); n != 1 {
 		t.Errorf("tts.finished published %d times, want 1", n)
 	}
-	if _, plays := h.player.Played(); plays != 1 {
+	chunks, plays := h.player.Played()
+	if plays != 1 {
 		t.Errorf("playback streams opened = %d, want 1 for the whole turn", plays)
 	}
-	if rec.calls != 1 {
-		t.Errorf("tool ran %d times, want 1", rec.calls)
+	// Supersession pays at the queue, never at the device: the sentence that
+	// was in flight when the floor rose delivered all of its audio. The fake
+	// synthesizer emits one chunk per Speak, so one chunk per surviving
+	// sentence is "neither was cut short" stated where a user would hear it.
+	if len(chunks) != len(want) {
+		t.Errorf("chunks reaching the player = %d, want %d: the in-flight sentence was cut mid-audio",
+			len(chunks), len(want))
+	}
+	if got := rec.callCount(); got != 1 {
+		t.Errorf("tool ran %d times, want 1", got)
 	}
 }
 

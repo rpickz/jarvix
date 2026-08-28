@@ -66,10 +66,15 @@ func (p *parkedSynth) Speak(ctx context.Context, req tts.Request) (tts.Format, <
 // gatedTool blocks Execute until released (or the session dies), so a test
 // can hold the tool round open and assert what the session looks like while
 // a tool is genuinely running.
+//
+// The gate is receive-only because a test does not have to own it: the
+// supersession test hands over a channel the *synthesizer* closes, which
+// makes "the tool round stays open until the voice has started" an ordering
+// rather than a hope (issue #154).
 type gatedTool struct {
 	name   string
 	result string
-	gate   chan struct{}
+	gate   <-chan struct{}
 
 	mu    sync.Mutex
 	calls int
