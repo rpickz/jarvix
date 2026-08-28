@@ -68,6 +68,11 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkWindowControl,
 		checkTyping,
 		checkDaemon,
+		// Beside the daemon check because it asks the next question: the
+		// daemon answered, but is it the same build generation as this CLI?
+		// A torn install (interrupted upgrade, partial make install) is
+		// invisible until a call fails strangely; this names it (#139).
+		checkProtocol,
 		checkWarmEngines,
 		checkProviderConfigured,
 		checkProviderReachable,

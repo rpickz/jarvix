@@ -159,6 +159,7 @@ func TestRunOnHealthyMachineHasNoFailures(t *testing.T) {
 		"Piper voice available",
 		"piper synthesizes",
 		"jarvixd running",
+		"protocol match",
 		"AI provider configured",
 		"provider authentication succeeded",
 		"Omarchy plugin installed",

@@ -46,6 +46,10 @@ Usage:
   jarvix artifacts [--json]     List recent artifacts (diagrams, documents, sheets, sketches)
   jarvix voices [--json]        List installed voices by language, accent, and gender
   jarvix doctor                 Check every dependency and explain failures
+  jarvix doctor --gate          Run only the upgrade health gate's critical subset
+  jarvix upgrade                Update to origin/main: build, install, restart,
+                                health-gate — rolled back automatically on failure
+  jarvix upgrade --check        Report available vs installed, changing nothing
   jarvix setup                  First-run wizard: voice, activation, AI, advisors
   jarvix setup whisper [model]  Download a Whisper model (default: base.en)
   jarvix setup input            Grant keyboard access for real hold-to-talk
@@ -195,7 +199,23 @@ func run(args []string) int {
 		}
 		err = cmdVoices(cfg, paths, len(rest) > 0)
 	case "doctor":
-		err = cmdDoctor(cfg, paths)
+		switch {
+		case len(rest) == 0:
+			err = cmdDoctor(cfg, paths, false)
+		case len(rest) == 1 && rest[0] == "--gate":
+			err = cmdDoctor(cfg, paths, true)
+		default:
+			return fail(fmt.Errorf("usage: jarvix doctor [--gate]"))
+		}
+	case "upgrade":
+		switch {
+		case len(rest) == 0:
+			err = cmdUpgrade(paths, false)
+		case len(rest) == 1 && rest[0] == "--check":
+			err = cmdUpgrade(paths, true)
+		default:
+			return fail(fmt.Errorf("usage: jarvix upgrade [--check]"))
+		}
 	case "setup":
 		switch {
 		case len(rest) >= 1 && rest[0] == "whisper":
