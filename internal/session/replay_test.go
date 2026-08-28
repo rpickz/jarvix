@@ -161,6 +161,7 @@ func TestReplayIsSupersededByNewLiveSession(t *testing.T) {
 
 func TestSecondReplaySupersedesFirst(t *testing.T) {
 	h := replayHarness(t)
+	spokenBefore := h.tts.Speaks()
 	hold := make(chan struct{})
 	h.tts.SetHold(hold)
 	defer close(hold)
@@ -168,6 +169,18 @@ func TestSecondReplaySupersedesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitFor(t, "tts.started")
+	// tts.started is published at enqueue, with the Speaking claim (issue
+	// #111), so it says the sentence is committed to the queue — not that the
+	// synthesizer has been reached. Last() below names the *most recent* Speak
+	// of the whole fake, so a first replay whose call has not happened yet can
+	// still make it after the second replay's and leave Last() reporting the
+	// superseded text ("Recursion is a function calling itself.", about one
+	// run in twenty). Park the first replay inside Speak on the hold gate
+	// before superseding it: its one sentence is then provably already spoken
+	// for, and cannot reappear behind the second's. Same unestablished
+	// ordering as issue #154, same fix.
+	waitUntil(t, "the first replay reaches the synthesizer",
+		func() bool { return h.tts.Speaks() > spokenBefore })
 
 	// Clicking another message wins: the first replay is superseded, the
 	// second plays whole.

@@ -79,6 +79,18 @@ func startSpeakingSession(t *testing.T, fire chan time.Time, cfg tools.PolicyCon
 		t.Fatal(err)
 	}
 	ss.waitForState(t, StateSpeaking)
+	// Speaking alone no longer proves the preamble reached the synthesizer.
+	// The claim moved onto the *enqueueing* goroutine (issue #111), so the
+	// state — and tts.started with it — now reports "committed to the playback
+	// queue", which can be true while the speaker goroutine has not run once.
+	// Every test built on this helper reasons about a sentence that is
+	// genuinely in flight: the confirmation question queues behind it, and the
+	// synthesis counts assume it survives to be spoken. Left unestablished,
+	// the speaker can still be un-scheduled when the answer's round commits,
+	// and the preamble is then dropped at dequeue as stale narration — #120
+	// working exactly as designed, failing assertions that are about something
+	// else entirely. That is the shape of issue #154; do not remove this gate.
+	waitUntil(t, "the preamble reaches the synthesizer", func() bool { return h.tts.Speaks() > 0 })
 	close(speaking) // the model may now ask for its tool
 	return ss
 }
