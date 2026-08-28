@@ -1,7 +1,8 @@
 # Soaking, the coverage floor, and the two test guards
 
 The PR gate runs `go test -race -count=2 ./...`. In one week, four real defects
-walked straight through it:
+walked straight through it — and the soak's first scheduled nights added two
+more that had been walking through it for months:
 
 | | what it was | what found it |
 | --- | --- | --- |
@@ -9,6 +10,7 @@ walked straight through it:
 | #155 / ADR 0049 | the focus scheduler's park branch — a loop that parked forever and stopped reading its own store. The same defect again in `internal/reminders` (#166) | `GOMAXPROCS=2 -race -count=25`, run by hand under CPU load |
 | #156 | supersession / replay / confirm tests that passed **only** under `-race`, because the detector changed their timing | running the suite without `-race` |
 | #170 | an archive adoption window: `awaitAppend` observed an append and assumed the engine had adopted the id | `-race -count=50` whole-package, 2 failures in 100 |
+| #179 | a daemon harness that called a daemon ready as soon as its socket existed, so tests reaching past the socket raced the rest of `Run`'s boot; and a leak assertion whose salt was not exclusive to the feature it guarded, so another feature's honest record was reported as a privacy leak | `-race -count=60` whole-package, 3 failures in 60 — the soak's own first find |
 
 Coverage was 83.3% throughout and did not help with any of them. These are
 ordering faults, and statement coverage does not measure ordering.
@@ -98,6 +100,20 @@ it away and leave you with "the job was cancelled".
 4. Fix the test's synchronisation, or the production ordering, and say which in
    the commit message. #170's fix was in a test helper because production was
    already correct; #155's was in production because it was not.
+5. **A leak assertion that trips is not automatically a leak.** Before believing
+   the report, check that the salt is exclusive to the feature under test. In
+   #179 the briefing's salt was also the text of a live reminder, so the row
+   that "leaked the briefing" was the reminder feature recording its own spoken
+   delivery — legitimate, and nothing ADR 0050 forbids. The guarantee held; the
+   scan was unsound. Establish which before changing anything, because the two
+   have opposite fixes.
+6. **"The socket is up" is not "the daemon has booted."** `Run` binds the socket
+   before it starts the scheduled services, so a dial can be ahead of them, and
+   a test that then reaches past the socket into the daemon's own services is
+   racing a boot it never waited for (#179 again: a reminder planted in that gap
+   was read as a missed-while-down catch-up). One served round trip is the
+   barrier — `internal/daemon`'s `awaitDaemon` takes it for every test in the
+   package.
 
 ---
 
@@ -137,8 +153,8 @@ If the ratchet fails, the fix is to cover what the change added. If the drop is
 genuinely correct, lower the floor **in the same commit** and say why in the
 message.
 
-And keep it in proportion: coverage caught none of the four defects at the top
-of this page. What the floor buys is narrow and real — the number cannot slide
+And keep it in proportion: coverage caught none of the defects at the top of
+this page. What the floor buys is narrow and real — the number cannot slide
 quietly while the suite grows.
 
 ---
@@ -223,7 +239,7 @@ fails if an entry stops matching anything, so a paid-off debt has to be deleted
 rather than left to make the list look longer than it is. It may shrink. It must
 not grow.
 
-### Would any of this have caught the four?
+### Would any of this have caught the known defects?
 
 Asked honestly, and checked by running the scanners over the pre-fix source
 taken out of git history rather than by reasoning about them:
@@ -235,8 +251,10 @@ taken out of git history rather than by reasoning about them:
 | #156 | the soak, `unraced` mode | **no guard catches this either.** "Passes only under `-race`" is only visible by running without it |
 | #167 | the derived-state guard | reports `TestAPreApprovedRunAppearsInTheActivityFeed` in `internal/daemon/approvals_test.go` as it stood before `285a042` — the exact test that commit repaired |
 | #170 | the derived-state guard, and the soak | reports `TestResetDetachesAndTheNextThreadIsANewConversation` in `internal/session/archive_test.go` at `798d8d2` — the exact test that flaked — plus four sibling reads carrying the same latent window |
+| #179, the reminder | the soak, `repeat` mode | **no guard catches this.** The harness called a daemon ready as soon as its socket existed, which is a fact about `Run`'s boot order, not a shape in a test's source. `TestTheHarnessWaitsForTheDaemonToAnswer` pins the repaired rule instead |
+| #179, the leak assertion | the soak, `repeat` mode | **no guard catches this either.** The salt was planted on a record another feature legitimately owns, so the scan was unsound rather than mis-synchronised — no scanner can know which feature a string belongs to. The repaired test delivers that reminder on purpose, so the case is in every run rather than one in two hundred |
 
-Two of the five, then, are caught only by the soak, and that is the honest
+Four of the seven, then, are caught only by the soak, and that is the honest
 division of labour: the guards catch what is legible in the source, and the
 soak catches what is only legible in a schedule.
 
