@@ -50,7 +50,20 @@ else
   # cannot change. .github/workflows/soak.yml is where interleaving is
   # measured.
   echo "── measuring total statement coverage"
-  go test -coverprofile="$PROFILE" ./... >/dev/null
+  # The run's output is captured rather than discarded, and printed in full if
+  # it fails. Sending it to /dev/null cost a CI cycle the first day this script
+  # existed: the job exited 1 with nothing but "measuring total statement
+  # coverage" above it, and the failing test could not be named from the log.
+  # That is the same mistake, in miniature, that this whole change exists to
+  # stop making (see #170 and scripts/soak.sh).
+  run_log="$(mktemp)"
+  if ! go test -coverprofile="$PROFILE" ./... >"$run_log" 2>&1; then
+    echo "the coverage run itself failed; full output follows" >&2
+    cat "$run_log" >&2
+    rm -f "$run_log"
+    exit 1
+  fi
+  rm -f "$run_log"
   total="$(go tool cover -func="$PROFILE" | tail -1 | awk '{print $NF}' | tr -d '%')"
 fi
 
