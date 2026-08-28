@@ -189,7 +189,7 @@ FloatingWindow {
   property double stateSinceMs: 0
   property int pendingElapsedSec: 0
 
-  ListModel { id: turns } // { role: "user"|"assistant"|"confirmation", text, command, outcome, pos, pending }
+  ListModel { id: turns } // { role: "user"|"assistant"|"confirmation", text, command, outcome, pos, pending, provJson }
   // Activity rows, oldest first, exactly as the daemon rendered them.
   ListModel { id: activityRows } // { seq, time, kind, label, detail, failed }
   // Archived conversations, newest first. "cid" rather than "id" because id
@@ -1113,6 +1113,7 @@ FloatingWindow {
     knowledgeEnabled = result.enabled !== false
     knowledgeFingerprint = String(result.fingerprint || "")
     knowledgeFeeds = result.feeds || []
+    revealKnowledgeRow()
   }
 
   // refreshFeed asks for an immediate fetch. The reply only acknowledges the
@@ -1811,6 +1812,8 @@ FloatingWindow {
     memoryFactCount = Number(result.count || 0)
     memoryFactMax = Number(result.max || 0)
     memoryWarning = String(result.warning || "")
+    // A reveal that arrived before the listing did (issue #168) lands now.
+    revealMemoryRow()
   }
 
   // setFactPinned is the card's Pin/Unpin button (#104): one ungated verb,
@@ -1979,6 +1982,7 @@ FloatingWindow {
   function loadVocabulary(result) {
     vocabEnabled = result.enabled !== false
     vocabEntries = result.entries || []
+    revealMemoryRow()
     vocabCount = Number(result.count || 0)
     vocabMax = Number(result.max || 0)
     vocabBiasCount = Number(result.bias_count || 0)
@@ -2115,6 +2119,167 @@ FloatingWindow {
     return meta
   }
 
+  // --- what went into this answer (issue #168) ----------------------------
+  // One panel at a time: the expanded turn is named by its record position,
+  // and expanding another simply moves the pointer. That keeps the resolved
+  // list a single window-level fact rather than per-delegate state a recycled
+  // delegate could carry to the wrong turn.
+  //
+  // Nothing is resolved until the user asks. The turn carries references —
+  // ids, names, paths — and the words beside them, whether each source still
+  // exists, and which actions it has are all the daemon's answer, composed
+  // against the live stores at the moment of the press (ADR 0013). That is
+  // why a forgotten fact can say it was forgotten instead of offering a
+  // button that would do nothing.
+  property int provenancePos: -1
+  property var provenanceItems: []
+  property bool provenanceLoading: false
+  property string provenanceError: ""
+  property int provenanceRequestId: 0
+
+  // toggleProvenance opens the panel on a turn, or closes it if it is already
+  // open. The second press must not re-ask: a fold is a fold.
+  function toggleProvenance(pos, provJson) {
+    if (provenancePos === pos) {
+      provenancePos = -1
+      provenanceItems = []
+      provenanceError = ""
+      return
+    }
+    provenancePos = pos
+    provenanceItems = []
+    provenanceError = ""
+    if (!daemon.connected || provJson === "") return
+    var record = {}
+    try {
+      record = JSON.parse(provJson)
+    } catch (e) {
+      provenanceError = "This turn's sources could not be read."
+      return
+    }
+    provenanceLoading = true
+    provenanceRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: provenanceRequestId,
+      method: "provenance.resolve",
+      params: { sources: record.sources || [] } }) + "\n")
+  }
+
+  // provenanceCount is the number the collapsed control shows, read from the
+  // turn's own references so it needs no round trip.
+  function provenanceCount(provJson) {
+    if (provJson === "") return 0
+    try {
+      var record = JSON.parse(provJson)
+      return (record.sources || []).length
+    } catch (e) {
+      return 0
+    }
+  }
+
+  // provenanceTruncated is how many sources the turn's cap left out, so the
+  // panel can say the list is short rather than quietly being short.
+  function provenanceTruncated(provJson) {
+    if (provJson === "") return 0
+    try {
+      return Number(JSON.parse(provJson).truncated || 0)
+    } catch (e) {
+      return 0
+    }
+  }
+
+  // runProvenanceAction carries out one source's action. A tab action is this
+  // window's own navigation; anything else is the daemon's, because it leaves
+  // this process — a file in its viewer, a page in a browser, a window the
+  // compositor has to raise.
+  function runProvenanceAction(item, action) {
+    var tab = String(action.tab || "")
+    if (tab !== "") {
+      revealIn(tab, String(action.ref || ""))
+      return
+    }
+    if (!daemon.connected) return
+    provenanceError = ""
+    provenanceRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: provenanceRequestId,
+      method: "provenance.open",
+      params: { kind: String(item.kind || ""), ref: String(item.ref || ""),
+        action: String(action.id || "") } }) + "\n")
+  }
+
+  // revealIn opens a tab already showing one item. Each tab keeps its own
+  // idea of "showing an item" — the Library has a record id, the Focus tab a
+  // detail id, and the two flat listings are scrolled to the row — so the
+  // reveal is per tab rather than one mechanism pretending to fit all.
+  function revealIn(tab, ref) {
+    if (tab === "library") {
+      openTab("library")
+      requestHistoryDetail(ref)
+      return
+    }
+    if (tab === "focus") {
+      focusScreen.detailId = ref
+      openTab("focus")
+      return
+    }
+    if (tab === "memory") {
+      // A filter in the box would hide the row rather than find it, so the
+      // box is cleared and the list is scrolled instead.
+      memoryReveal = ref
+      if (memoryQuery !== "") {
+        memoryQuery = ""
+        memoryFilterInput.text = ""
+      }
+      openTab("memory")
+      revealMemoryRow()
+      return
+    }
+    if (tab === "knowledge") {
+      knowledgeReveal = ref
+      openTab("knowledge")
+      revealKnowledgeRow()
+    }
+  }
+
+  // The item a reveal is waiting to scroll to, cleared once it lands. The
+  // listing may still be in flight when the tab opens, so the position is
+  // attempted now and again when the listing arrives.
+  property string memoryReveal: ""
+  property string knowledgeReveal: ""
+
+  function revealMemoryRow() {
+    if (memoryReveal === "") return
+    for (var i = 0; i < memoryFacts.length; i++) {
+      if (String(memoryFacts[i].id) === memoryReveal) {
+        var index = i
+        Qt.callLater(function() { memoryList.positionViewAtIndex(index, ListView.Contain) })
+        memoryReveal = ""
+        return
+      }
+    }
+    for (var j = 0; j < vocabEntries.length; j++) {
+      if (String(vocabEntries[j].id) === memoryReveal) {
+        var vindex = j
+        Qt.callLater(function() { vocabList.positionViewAtIndex(vindex, ListView.Contain) })
+        memoryReveal = ""
+        return
+      }
+    }
+  }
+
+  function revealKnowledgeRow() {
+    if (knowledgeReveal === "") return
+    for (var i = 0; i < knowledgeFeeds.length; i++) {
+      if (String(knowledgeFeeds[i].name) === knowledgeReveal) {
+        var index = i
+        Qt.callLater(function() { knowledgeList.positionViewAtIndex(index, ListView.Contain) })
+        knowledgeReveal = ""
+        return
+      }
+    }
+  }
+
   // --- typed turns --------------------------------------------------------
   // Request id 1 is the conversation snapshot; everything else takes dynamic
   // ids from this counter so a reply can be matched to exactly the request
@@ -2222,7 +2387,7 @@ FloatingWindow {
     // the question having arrived after the wait it interrupted.
     takePendingTurn()
     turns.append({ role: "confirmation", text: summary, command: command,
-      outcome: "", pos: 0, pending: false })
+      outcome: "", pos: 0, pending: false, provJson: "" })
     pendingCardIndex = turns.count - 1
     confirmTimeoutSec = timeoutSec
     confirmDeadlineMs = deadlineMs
@@ -2724,7 +2889,7 @@ FloatingWindow {
     if (assistantStreaming) return
     if (pendingTurnIndex < 0) {
       turns.append({ role: "assistant", text: line, command: "", outcome: "",
-        pos: 0, pending: true })
+        pos: 0, pending: true, provJson: "" })
       pendingTurnIndex = turns.count - 1
       return
     }
@@ -2752,11 +2917,19 @@ FloatingWindow {
       if (String(snapshot[i].role) === "confirmation" && rec) {
         turns.append({ role: "confirmation", text: String(snapshot[i].text),
           command: String(rec.command || ""), outcome: confirmationRecordOutcome(rec),
-          pos: i + 1, pending: false })
+          pos: i + 1, pending: false, provJson: "" })
         continue
       }
+      // What went into this answer (issue #168) rides the turn as the
+      // references the daemon recorded. They are carried as text rather than
+      // as a nested list because a ListModel flattens nested objects, and
+      // because nothing here reads them: the panel hands them straight back
+      // to provenance.resolve, which is what turns them into words.
+      var prov = snapshot[i].provenance
       turns.append({ role: String(snapshot[i].role), text: String(snapshot[i].text),
-        command: "", outcome: "", pos: i + 1, pending: false })
+        command: "", outcome: "", pos: i + 1, pending: false,
+        provJson: (prov && prov.sources && prov.sources.length > 0)
+          ? JSON.stringify(prov) : "" })
     }
     if (keepY >= 0) list.contentY = keepY
     // A window opened *during* a confirmation wait missed the events that
@@ -2842,7 +3015,7 @@ FloatingWindow {
       // session is already listening, so there is usually one open.
       takePendingTurn()
       turns.append({ role: "user", text: String(params.text || ""), command: "",
-        outcome: "", pos: 0, pending: false })
+        outcome: "", pos: 0, pending: false, provJson: "" })
       syncPendingTurn()
       break
     case "assistant.delta":
@@ -2862,7 +3035,7 @@ FloatingWindow {
         } else {
           takePendingTurn()
           turns.append({ role: "assistant", text: "", command: "", outcome: "",
-            pos: 0, pending: false })
+            pos: 0, pending: false, provJson: "" })
         }
         assistantStreaming = true
       }
@@ -2891,7 +3064,7 @@ FloatingWindow {
         } else {
           takePendingTurn()
           turns.append({ role: "assistant", text: full, command: "", outcome: "",
-            pos: 0, pending: false })
+            pos: 0, pending: false, provJson: "" })
         }
       }
       assistantStreaming = false
@@ -3135,6 +3308,17 @@ FloatingWindow {
             win.errorMessage = String(frame.error.message || "the pin could not be changed")
           } else {
             win.requestMemory()
+          }
+        } else if (frame.id !== undefined && frame.id === win.provenanceRequestId) {
+          // One id serves both provenance verbs: resolve fills the panel, and
+          // open answers only to say it could not act. An error is rendered
+          // as words inside the panel rather than the window's error banner:
+          // a source that has since gone is about one row, not the daemon.
+          win.provenanceLoading = false
+          if (frame.error) {
+            win.provenanceError = String(frame.error.message || "That source could not be reached.")
+          } else if (frame.result && frame.result.items !== undefined) {
+            win.provenanceItems = frame.result.items || []
           }
         } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
           if (frame.result) win.loadMemory(frame.result)
@@ -6427,6 +6611,114 @@ FloatingWindow {
           // it says them without a single moving pixel, because unexplained
           // waiting is expensive and gratuitous motion is aversive.
           color: model.pending ? Util.alpha(Color.popups.text, 0.75) : Color.popups.text
+        }
+
+        // What went into this answer (issue #168): one control, collapsed,
+        // and nothing at all on a turn that consumed nothing — absence is
+        // information, and an affordance that is always there says nothing.
+        //
+        // The label is deliberately "what went into this", never "sources"
+        // or "citations": the daemon knows what it put in front of the model
+        // and what a tool returned, and it does not know which of those the
+        // model leaned on. Each row then says which of the two claims it is,
+        // in words, because they are two different claims.
+        Column {
+          id: provenancePanel
+          visible: model.role === "assistant" && win.provenanceCount(model.provJson) > 0
+          width: parent.width
+          spacing: Style.space(4)
+
+          readonly property bool open: win.provenancePos === model.pos && model.pos > 0
+          readonly property int count: win.provenanceCount(model.provJson)
+          readonly property int hidden: win.provenanceTruncated(model.provJson)
+
+          Rectangle {
+            id: provenanceToggle
+            width: provenanceToggleLabel.width + Style.space(12)
+            height: provenanceToggleLabel.height + Style.space(4)
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.popups.text, provenanceToggle.activeFocus ? 0.18 : 0.06)
+            border.color: Util.alpha(Color.popups.text, 0.5)
+            border.width: provenanceToggle.activeFocus ? 2 : 0
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: provenanceToggleLabel.text
+            Accessible.description: "Lists what was available to this answer and what a tool returned while it was being written"
+            Keys.onReturnPressed: win.toggleProvenance(model.pos, model.provJson)
+            Keys.onSpacePressed: win.toggleProvenance(model.pos, model.provJson)
+
+            Text {
+              id: provenanceToggleLabel
+              anchors.centerIn: parent
+              text: "What went into this · " + provenancePanel.count
+                + (provenancePanel.open ? " · press to fold" : " · press to unfold")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+            MouseArea {
+              anchors.fill: parent
+              onClicked: win.toggleProvenance(model.pos, model.provJson)
+            }
+          }
+
+          Text {
+            visible: provenancePanel.open && win.provenanceLoading
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Looking these up…"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.6)
+          }
+
+          Text {
+            visible: provenancePanel.open && win.provenanceError !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: win.provenanceError
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          // One row per source, on the shared collection row, so a source
+          // reads exactly like a fact or a feed does in its own tab. The
+          // wording, the liveness and the buttons are all the daemon's answer
+          // — this only draws them.
+          Repeater {
+            model: provenancePanel.open ? win.provenanceItems : []
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: provenancePanel.width
+              title: String(modelData.name || "")
+              subtitle: String(modelData.strength_phrase || "")
+              // A source that no longer exists says so here, and its actions
+              // were never sent — never a dead button, never a silent no-op.
+              meta: String(modelData.note || "")
+              flagged: Boolean(modelData.gone)
+              actionLabel: (modelData.actions || []).length > 0
+                ? String(modelData.actions[0].label) : ""
+              actionName: actionLabel + " for " + title
+              onActionTriggered: win.runProvenanceAction(modelData, modelData.actions[0])
+              action2Label: (modelData.actions || []).length > 1
+                ? String(modelData.actions[1].label) : ""
+              action2Name: action2Label + " for " + title
+              onAction2Triggered: win.runProvenanceAction(modelData, modelData.actions[1])
+            }
+          }
+
+          Text {
+            visible: provenancePanel.open && provenancePanel.hidden > 0
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: provenancePanel.hidden === 1
+              ? "One more source went unrecorded — this turn used more than Jarvix keeps."
+              : provenancePanel.hidden + " more sources went unrecorded — this turn used more than Jarvix keeps."
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.6)
+          }
         }
 
         // The confirmation card (issue #76): the question, the exact command

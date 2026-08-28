@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // This file is the engine half of focus threads (#123, ADR 0041): the router
@@ -45,9 +46,17 @@ func (e *Engine) runFocus(s *sess, m intent.Match) (ack string, runErr error, al
 		// silent shrug the user would read as a mishearing.
 		return "", fmt.Errorf("focus threads are not available on this daemon"), true
 	}
-	line, err := runner.RunFocus(s.ctx, m)
+	// A sink for what the action read (issue #168): the focus service names
+	// the thread its sentence was composed from, and nothing else — the
+	// recap's captured text and summary stay transient (ADR 0043/0047).
+	var sink provenance.Sink
+	line, err := runner.RunFocus(provenance.WithSink(s.ctx, &sink), m)
 	if s.ctx.Err() != nil {
 		return "", nil, false
+	}
+	for _, ref := range sink.Drain() {
+		ref.Strength = provenance.Returned
+		s.noteSources(ref)
 	}
 	return line, err, true
 }

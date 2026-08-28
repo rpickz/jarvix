@@ -58,6 +58,10 @@ func (e *Engine) gatherContext(s *sess) desktop.Snapshot {
 	e.lastContextTaken = true
 	e.mu.Unlock()
 
+	// Which capture sources contributed (issue #168) — the source word only,
+	// never the captured text, on the same rule as the event below.
+	s.noteSources(contextSources(snap)...)
+
 	sources := make([]map[string]any, 0, len(snap.Items))
 	for _, item := range snap.Items {
 		// Sizes and flags, never content: events fan out to every connected

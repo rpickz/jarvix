@@ -21,6 +21,7 @@ import (
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/memory"
+	"github.com/rpickz/jarvix/internal/provenance"
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -126,6 +127,13 @@ type Options struct {
 	// cannot see them is the worst possible answer to a question about
 	// permissions.
 	Approvals ApprovalsLister
+	// Provenance answers "where did that come from" (issue #168) from the
+	// record the engine already holds. Nil makes the matched phrase an honest
+	// spoken refusal rather than a confident "nothing" — the same asymmetry
+	// the approvals listing draws, and for the same reason: a listing that
+	// reports no sources because it cannot see them would be the one answer
+	// this feature must never give.
+	Provenance ProvenanceLister
 	// Knowledge supplies the live feed values block — cached readings from
 	// the user's configured feeds (ADR 0031) — for turns that reach the
 	// model. Nil disables it entirely: no consultation, no message, no cost.
@@ -286,6 +294,12 @@ type Engine struct {
 	// archive state, never model context: the model already hears about each
 	// outcome through the tool round itself. Guarded by mu.
 	confRecords []*confirmationRecord
+	// provRecords is what went into each answer of the live thread (issue
+	// #168), anchored to the assistant message it describes on the same
+	// counter and for the same reason as confRecords. Display and archive
+	// state, never model context — the model is not told what it was given
+	// twice. Guarded by mu. See provenance.go.
+	provRecords []provRecord
 
 	// The durable archive's view of the thread (ADR 0027; archive.go).
 	// archiveID is which archived conversation the live thread belongs to
@@ -368,6 +382,18 @@ type sess struct {
 	// Engine.mu — the ordering is always mu → streamedMu, never the reverse.
 	streamedMu sync.Mutex
 	streamed   strings.Builder
+
+	// prov accumulates what went into this turn (issue #168): the references
+	// noted by each injection as it is gathered, and by each tool call as it
+	// returns. Collected here rather than reconstructed later because here is
+	// the one point every one of them is already known.
+	//
+	// Its own mutex, on the streamed builder's terms and for the same reason:
+	// appends happen on the turn's goroutine while reads happen from commit
+	// paths that already hold Engine.mu, so the ordering is always
+	// mu → provMu, never the reverse.
+	provMu sync.Mutex
+	prov   []provenance.Reference
 
 	// replyCapture marks a voice capture that answers a pending tool
 	// confirmation rather than asking a new question: its transcript is
@@ -1566,7 +1592,7 @@ func (e *Engine) commitTurn(s *sess, userText, assistantText string) {
 		return
 	}
 	s.committed = true
-	e.commitTurnLocked(userText, assistantText, false)
+	e.commitTurnLocked(userText, assistantText, false, s.provenanceRecord())
 }
 
 // The wording an interrupted exchange carries into the record (issue #117).
@@ -1623,13 +1649,19 @@ func (e *Engine) commitInterruptedLocked(s *sess) bool {
 	if partial := strings.TrimSpace(s.streamedText()); partial != "" {
 		assistant = partial + "\n" + interruptedMidAnswer
 	}
-	e.commitTurnLocked(user, assistant, true)
+	e.commitTurnLocked(user, assistant, true, s.provenanceRecord())
 	return true
 }
 
 // commitTurnLocked is the one place an exchange enters the record, complete
 // or interrupted. Callers hold e.mu and have already claimed s.committed.
-func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bool) {
+//
+// prov is what went into the answer (issue #168), nil when the turn consumed
+// nothing retrievable. It rides the assistant half both on disk and in the
+// live view, anchored to that half's position for the same reason the
+// confirmation records are.
+func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bool,
+	prov *provenance.Record) {
 	// Any confirmations resolved during this exchange are claimed by it now:
 	// they were already visible to conversation.get the moment they resolved
 	// (issue #118), and here they take their archive position between the
@@ -1641,13 +1673,17 @@ func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bo
 	// The archive is staged before the cap can trim anything, and even with
 	// in-memory history disabled: history_turns governs what the model is
 	// sent, never what is kept (ADR 0027).
-	e.stageArchiveTurnLocked(userText, assistantText, interrupted, recs)
+	e.stageArchiveTurnLocked(userText, assistantText, interrupted, recs, prov)
+	// Anchored before the counter moves: noteProvenanceLocked reads msgCount
+	// as the user half's position and takes the next index for the answer.
+	e.noteProvenanceLocked(prov)
 	// The position counter advances even when in-memory history is disabled:
 	// it counts what was committed to the thread, not what was retained, so
 	// record anchors stay comparable to it either way.
 	e.msgCount += 2
 	if e.opts.HistoryTurns <= 0 {
 		e.pruneConfRecordsLocked()
+		e.pruneProvenanceLocked()
 		return
 	}
 	e.history = append(e.history,
@@ -1657,6 +1693,7 @@ func (e *Engine) commitTurnLocked(userText, assistantText string, interrupted bo
 		e.history = append([]ai.Message(nil), e.history[len(e.history)-max:]...)
 	}
 	e.pruneConfRecordsLocked()
+	e.pruneProvenanceLocked()
 	e.lastTurn = e.now()
 }
 
@@ -1694,6 +1731,12 @@ type Turn struct {
 	// conversations.RoleConfirmation, and is absent on every utterance —
 	// additive, so a client that ignores it sees the shape it always saw.
 	Confirmation *conversations.Confirmation `json:"confirmation,omitempty"`
+	// Provenance is what went into this answer (issue #168): present on an
+	// assistant turn that consumed something retrievable, absent everywhere
+	// else — including on every turn that used nothing, because absence is
+	// the information that nothing was consulted. Additive on the same terms
+	// as Confirmation.
+	Provenance *provenance.Record `json:"provenance,omitempty"`
 }
 
 // Conversation returns the turns of the current conversation, oldest first,
@@ -1736,7 +1779,10 @@ func (e *Engine) conversationLocked() []Turn {
 	base := e.msgCount - len(e.history)
 	for i, m := range e.history {
 		through(base + i)
-		turns = append(turns, Turn{Role: string(m.Role), Text: m.Content})
+		// Provenance is anchored to the message's global position, so the
+		// retention cap sliding the head cannot move it onto another answer.
+		turns = append(turns, Turn{Role: string(m.Role), Text: m.Content,
+			Provenance: e.provenanceAtLocked(base + i)})
 	}
 	// Records anchored at the committed tail — a confirmation whose turn
 	// died without committing an exchange around it — come before the
@@ -1804,6 +1850,9 @@ func (e *Engine) reset(cancelActive bool) {
 	// them too (issue #118).
 	e.finalizeConfRecordsLocked()
 	e.confRecords = nil
+	// Provenance dies with the head it described, and stays in the archive
+	// with the turns it belonged to — the confirmation records' rule.
+	e.provRecords = nil
 	e.msgCount = 0
 	archive, archivedID, pending := e.detachArchiveLocked()
 	e.mu.Unlock()

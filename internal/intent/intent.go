@@ -182,6 +182,11 @@ type Match struct {
 	// VocabList marks "what words have i taught you" (#129): the engine
 	// answers with the vocabulary seam's one spoken listing.
 	VocabList bool
+	// ProvenanceList marks "where did that come from" (#168): the engine
+	// answers with the same list of sources the window shows on the turn,
+	// read from the record rather than from the model — the whole point of
+	// the feature is that nothing here is the model's account of itself.
+	ProvenanceList bool
 	// ApprovalsList marks "what have i pre-approved" (#162): the engine
 	// answers with the approvals seam's one spoken listing. A read-only
 	// intent by construction — no phrase in this router adds or removes a
@@ -338,6 +343,8 @@ type rule struct {
 	vocabListen bool
 	// vocabList marks the "what words have i taught you" rules (#129).
 	vocabList bool
+	// provenanceList marks the "where did that come from" rules (#168).
+	provenanceList bool
 	// approvalsList marks the "what have i pre-approved" rules (#162).
 	approvalsList bool
 }
@@ -599,6 +606,21 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: ApprovalsListIntentName, pattern: p, approvalsList: true})
 	}
 	r.names = append(r.names, ApprovalsListIntentName)
+
+	// The provenance question (#168) is an owned literal on the same terms,
+	// and read-only for a stronger reason than the two above: it asks what
+	// the record already says, and there is no phrase — and never will be one
+	// — that changes it.
+	for _, raw := range provenancePatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the two above.
+			return nil, fmt.Errorf("provenance pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = ProvenanceIntentName
+		r.add(&rule{name: ProvenanceIntentName, pattern: p, provenanceList: true})
+	}
+	r.names = append(r.names, ProvenanceIntentName)
 
 	// taken maps a compiled phrase to a human description of what owns it, so
 	// a routine phrase collision is reported against whichever of the three
@@ -1106,9 +1128,10 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		WindowNames: ru.windowNames,
 		Briefing:    ru.briefing,
 		Focus:       ru.focus, FocusWindows: ru.focusWindows,
-		Reminder:      ru.reminder,
-		VocabList:     ru.vocabList,
-		ApprovalsList: ru.approvalsList,
+		Reminder:       ru.reminder,
+		VocabList:      ru.vocabList,
+		ApprovalsList:  ru.approvalsList,
+		ProvenanceList: ru.provenanceList,
 	}
 	// The one free-text value lands with the family that owns the rule, so a
 	// consumer can never read another feature's words by mistake.

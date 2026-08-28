@@ -174,6 +174,8 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runVocabList(s)
 	case m.ApprovalsList:
 		ack, runErr = e.runApprovalsList()
+	case m.ProvenanceList:
+		ack, runErr = e.runProvenanceList()
 	case m.Desktop != intent.DesktopNone:
 		runErr = e.runDesktopIntent(s, m)
 	case len(m.Argv) > 0:

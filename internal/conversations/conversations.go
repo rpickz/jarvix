@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // SchemaVersion is the on-disk document version, carried by both files of a
@@ -116,6 +118,25 @@ type Turn struct {
 	// still reads every utterance correctly — it merely does not render the
 	// approvals, which is all any reader could do before this field existed.
 	Confirmation *Confirmation `json:"confirmation,omitempty"`
+	// Provenance is what went into the answer (issue #168): the references
+	// the turn collected while it was assembled — what was injected, and what
+	// a tool returned. Set on assistant turns that consumed something
+	// retrievable, and nil everywhere else, including every user turn and
+	// every turn that used nothing.
+	//
+	// Additive on the same terms as the two fields above, and last in the
+	// struct so the key order of every line already on disk is untouched:
+	// omitempty keeps a turn that consumed nothing byte-identical to one
+	// written before this field existed, an old archive loads with nil, and
+	// SchemaVersion stays 1 because a reader that ignores the key still reads
+	// every utterance correctly.
+	//
+	// It holds references — ids, names, paths — and never content. Nothing a
+	// fact, a feed value, a captured window, or a session transcript said
+	// reaches this record; the readable name is resolved from the live store
+	// when somebody looks, which is also what lets a source that has since
+	// been deleted say so.
+	Provenance *provenance.Record `json:"provenance,omitempty"`
 }
 
 // Meta describes one archived conversation without its turns — everything a

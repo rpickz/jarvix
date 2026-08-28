@@ -270,7 +270,7 @@ func TestAdoptRestoresConfirmationRecordsUnderTheCap(t *testing.T) {
 		{Record: rec("rm -rf ./new", conversations.ConfirmationApproved),
 			Summary: "Run rm -rf ./new?", Time: base.Add(time.Minute), AfterMessages: 5},
 	}
-	h.engine.AdoptConversation("old-conv", msgs, confs)
+	h.engine.AdoptConversation("old-conv", msgs, confs, nil)
 
 	turns := h.engine.Conversation()
 	if len(turns) != 5 {

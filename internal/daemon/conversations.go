@@ -97,6 +97,13 @@ func (d *Daemon) registerConversationMethods() {
 			if t.Confirmation != nil {
 				turn["confirmation"] = t.Confirmation
 			}
+			// What went into the answer (issue #168), on the wire only when
+			// the turn consumed something — the same presence rule the disk
+			// keeps. References only; the readable names are resolved on
+			// demand by provenance.resolve, against the live stores.
+			if t.Provenance != nil {
+				turn["provenance"] = t.Provenance
+			}
 			turns = append(turns, turn)
 		}
 		report := metaReport(conv.Meta)
@@ -120,11 +127,11 @@ func (d *Daemon) registerConversationMethods() {
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
 		}
-		msgs, confs, err := adoptableMessages(conv.Turns)
+		msgs, confs, provs, err := adoptableMessages(conv.Turns)
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
 		}
-		d.engine.AdoptConversation(id, msgs, confs)
+		d.engine.AdoptConversation(id, msgs, confs, provs)
 		d.log.Info("conversation reopened", "component", "daemon", "conversation_id", id,
 			"turns", len(conv.Turns))
 		return map[string]any{"id": id, "turns": len(conv.Turns)}, nil
@@ -307,16 +314,23 @@ func (s *syncedSearcher) Search(q conversations.Query) ([]conversations.Match, c
 // or corruption the parser happened to accept, and refusing it here keeps the
 // corruption from becoming a malformed provider request mid-conversation
 // (the history precedent, ADR 0011).
-func adoptableMessages(turns []conversations.Turn) ([]ai.Message, []session.AdoptedConfirmation, error) {
+//
+// Provenance comes back the same way (issue #168): what went into an answer is
+// part of that answer's record, so reopening restores it beside the turn. It
+// is display state only, exactly like a confirmation record — the model is
+// never told a second time what it was once given.
+func adoptableMessages(turns []conversations.Turn) ([]ai.Message, []session.AdoptedConfirmation,
+	[]session.AdoptedProvenance, error) {
 	msgs := make([]ai.Message, 0, len(turns))
 	var confs []session.AdoptedConfirmation
+	var provs []session.AdoptedProvenance
 	for i, t := range turns {
 		if t.Role == conversations.RoleConfirmation {
 			// A record without its payload is not a shape this daemon ever
 			// writes; refuse it like an unknown role rather than adopting a
 			// blank approval.
 			if t.Confirmation == nil {
-				return nil, nil, fmt.Errorf("conversation turn %d is a confirmation record without its payload", i+1)
+				return nil, nil, nil, fmt.Errorf("conversation turn %d is a confirmation record without its payload", i+1)
 			}
 			confs = append(confs, session.AdoptedConfirmation{
 				Record:        *t.Confirmation,
@@ -328,9 +342,16 @@ func adoptableMessages(turns []conversations.Turn) ([]ai.Message, []session.Adop
 		}
 		role := ai.Role(t.Role)
 		if role != ai.RoleUser && role != ai.RoleAssistant {
-			return nil, nil, fmt.Errorf("conversation turn %d has unknown role %q", i+1, t.Role)
+			return nil, nil, nil, fmt.Errorf("conversation turn %d has unknown role %q", i+1, t.Role)
+		}
+		if t.Provenance != nil {
+			// Anchored to this message's own position, so the context
+			// window's cut moves the record and its provenance together.
+			provs = append(provs, session.AdoptedProvenance{
+				Record: t.Provenance, AfterMessages: len(msgs),
+			})
 		}
 		msgs = append(msgs, ai.Message{Role: role, Content: t.Text})
 	}
-	return msgs, confs, nil
+	return msgs, confs, provs, nil
 }

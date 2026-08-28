@@ -17,6 +17,7 @@ package session
 import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/conversations"
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // stageArchiveTurnLocked records an exchange for the archive. Callers hold
@@ -33,8 +34,13 @@ import (
 // woven between its halves — after the question that provoked the tool call,
 // before the answer that followed it — which is the position the live card
 // occupied and the position every rebuilt view puts the record back in.
+// prov is what went into the answer (issue #168), nil when the turn consumed
+// nothing. It rides the assistant half alone, additively and with omitempty,
+// so a turn that used nothing is byte-identical to one written before the
+// field existed — and it holds references, never content, so nothing a fact,
+// a feed or a captured window said is copied into the archive.
 func (e *Engine) stageArchiveTurnLocked(userText, assistantText string, interrupted bool,
-	recs []*confirmationRecord) {
+	recs []*confirmationRecord, prov *provenance.Record) {
 	if e.opts.Archive == nil {
 		return // retention off: nothing is ever staged, so nothing is written
 	}
@@ -45,7 +51,8 @@ func (e *Engine) stageArchiveTurnLocked(userText, assistantText string, interrup
 		e.pendingArchive = append(e.pendingArchive, r.archiveTurn())
 	}
 	e.pendingArchive = append(e.pendingArchive,
-		conversations.Turn{Role: string(ai.RoleAssistant), Text: assistantText, Time: now, Interrupted: interrupted})
+		conversations.Turn{Role: string(ai.RoleAssistant), Text: assistantText, Time: now,
+			Interrupted: interrupted, Provenance: prov})
 }
 
 // persistArchive flushes staged turns to the archive. It runs after
@@ -187,7 +194,12 @@ func (e *Engine) ActiveConversationID() string {
 // Like ResetConversation it does not cancel a session in flight; a turn that
 // completes after the switch commits into the adopted thread, which is what
 // an explicit "continue this conversation" means.
-func (e *Engine) AdoptConversation(id string, msgs []ai.Message, confs []AdoptedConfirmation) {
+// provs are the turns' provenance (issue #168), restored on the same terms:
+// what went into an answer comes back with the answer, rebased to the context
+// window's cut, and falls away with the turns the cap dropped — the archive
+// keeps it all.
+func (e *Engine) AdoptConversation(id string, msgs []ai.Message, confs []AdoptedConfirmation,
+	provs []AdoptedProvenance) {
 	e.mu.Lock()
 	// Records the ending thread had not yet archived go with it, not with
 	// the adopted one — the same rule reset applies.
@@ -208,9 +220,17 @@ func (e *Engine) AdoptConversation(id string, msgs []ai.Message, confs []Adopted
 	e.msgCount = len(e.history)
 	dropped := len(msgs) - len(e.history)
 	e.confRecords = nil
+	e.provRecords = nil
 	// With memory disabled nothing of the record is displayed, so nothing of
 	// it is restored either — the archive still holds it all.
 	if e.opts.HistoryTurns > 0 {
+		for _, p := range provs {
+			at := p.AfterMessages - dropped
+			if at < 0 || p.Record == nil {
+				continue
+			}
+			e.provRecords = append(e.provRecords, provRecord{at: at, rec: p.Record})
+		}
 		for _, c := range confs {
 			after := c.AfterMessages - dropped
 			if after < 0 {

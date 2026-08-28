@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // IntentRunner is the focus service dressed as the session engine's intent
@@ -53,12 +54,14 @@ func (r *IntentRunner) RunFocus(ctx context.Context, m intent.Match) (string, er
 	}
 	switch m.Focus {
 	case intent.FocusNew:
-		_, ack, err := svc.Create(ctx, m.FocusText, m.FocusWindows)
+		th, ack, err := svc.Create(ctx, m.FocusText, m.FocusWindows)
+		noteThread(ctx, th, err)
 		return ack, err
 	case intent.FocusAnchor:
 		return svc.Anchor(ctx, m.FocusWindows)
 	case intent.FocusSwitch:
-		_, ack, err := svc.Switch(ctx, m.FocusText)
+		th, ack, err := svc.Switch(ctx, m.FocusText)
+		noteThread(ctx, th, err)
 		return ack, err
 	case intent.FocusPark:
 		return svc.Park(m.FocusText)
@@ -89,4 +92,22 @@ func (r *IntentRunner) RunFocus(ctx context.Context, m intent.Match) (string, er
 		// case here must be a spoken failure, never a silent success.
 		return "", fmt.Errorf("I do not know that focus action")
 	}
+}
+
+// noteThread records the thread an answer was composed from (issue #168).
+//
+// These are the two actions whose spoken sentence *is* the thread's record —
+// a switch reads it and, when the thread is anchored and opted in, recaps the
+// session in that window (ADR 0043/0047). That is mechanically causal, so the
+// reference is the strong one; and it is a reference, an id, so nothing the
+// recap said or the window showed goes anywhere near it. The transient rule
+// stands unchanged: the captured text and the summary exist in the spoken
+// sentence and nowhere else.
+func noteThread(ctx context.Context, th Thread, err error) {
+	if err != nil || th.ID == "" {
+		return
+	}
+	provenance.Note(ctx, provenance.Reference{
+		Kind: provenance.KindThread, Ref: th.ID,
+	})
 }

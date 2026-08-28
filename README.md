@@ -376,6 +376,26 @@ that argued with someone making it stricter is a gate people route around; and
 **removing** a deny rule asks first, with a sentence naming what that rule
 protected ([ADR 0054](docs/adr/0054-the-last-config-file-holdouts.md)).
 
+**Where did that come from.** Every answer that used something you can get
+back to carries a **What went into this** control in the window: unfold it and
+each source is listed, and each one takes you there — the Knowledge tab at that
+feed, the Memory tab at that fact or taught phrase, that conversation opened in
+the Library, the window a focus thread is anchored to, an artifact opened in
+its viewer. An answer that used nothing shows nothing. Ask "where did that come
+from?" out loud for the same list.
+
+The label is deliberately *what went into this*, never *what I cited*: which
+remembered fact an assistant actually leaned on is not knowable, and asking a
+model to attribute its own answer invites it to invent a citation that reads
+exactly like a real one. So the list is derived from what Jarvix put in front
+of the model and what a tool returned, and it says which of the two each source
+is — **available to the answer** for something that was in context, **returned
+during this turn** for a tool that ran and produced output. It stores
+references only, never copies: a fact you have since forgotten says it was
+forgotten rather than quoting a stale copy back at you, a deleted feed or a
+removed file says so too, and neither offers a button that would do nothing
+([ADR 0055](docs/adr/0055-answer-provenance.md)).
+
 Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
 `jarvix new` archives the thread instead of destroying it, whole — the
 `history_turns` cap only limits what the model is sent, never what is kept.

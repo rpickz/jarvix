@@ -351,6 +351,11 @@ func RememberableApproval(tool string) bool { return !neverSilent[tool] }
 
 const shellToolName = "shell.run"
 
+// ShellToolName is the registry name of the shell tool, exported so callers
+// outside this package — the turn's provenance among them (issue #168) — can
+// name it without repeating the literal.
+const ShellToolName = shellToolName
+
 // AdvisorToolName is the registry name of the delegation tool, exported so
 // configuration and status reporting can name it without guessing.
 const AdvisorToolName = advisorToolName

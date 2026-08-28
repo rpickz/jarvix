@@ -70,6 +70,9 @@ func (e *Engine) gatherVocabulary(s *sess) vocabulary.Injection {
 	e.lastVocabularyTaken = true
 	e.mu.Unlock()
 
+	// The taught words this turn was given (issue #168), by id.
+	s.noteSources(vocabularySources(inj)...)
+
 	// Counts and estimates, never content: events fan out to every connected
 	// client and anything in them may be displayed or logged by one.
 	e.publish(Event{Type: "vocabulary.injected", Data: map[string]any{

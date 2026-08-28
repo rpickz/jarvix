@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/conversations"
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // This file is the model's access to the conversation archive (issue #59):
@@ -140,7 +141,7 @@ const (
 // Execute implements Tool. Every way the archive can disappoint — nothing
 // stored, nothing matching, retention off — comes back as a result the
 // assistant can speak in one sentence; only malformed arguments are an err.
-func (t *ConversationSearch) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *ConversationSearch) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Query string `json:"query"`
 	}
@@ -182,7 +183,32 @@ func (t *ConversationSearch) Execute(_ context.Context, input json.RawMessage) (
 		}
 		return result, nil
 	}
+	// What went into the answer (issue #168): the conversations that actually
+	// answered, so each one can be opened. Reported here rather than derived
+	// from the call because only the search knows which records matched — and
+	// the *query* is never reported, for the reason the audit line above
+	// gives: a query can quote what it is looking for.
+	for _, id := range matchedConversations(matches) {
+		provenance.Note(ctx, provenance.Reference{
+			Kind: provenance.KindConversation, Ref: id,
+		})
+	}
 	return t.renderMatches(matches, retentionOn), nil
+}
+
+// matchedConversations lists the distinct conversations a search matched, in
+// rank order — several passages from one conversation are one source.
+func matchedConversations(matches []conversations.Match) []string {
+	seen := make(map[string]bool, len(matches))
+	ids := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if m.ConversationID == "" || seen[m.ConversationID] {
+			continue
+		}
+		seen[m.ConversationID] = true
+		ids = append(ids, m.ConversationID)
+	}
+	return ids
 }
 
 // renderMatches formats ranked passages for the model: where, when in spoken
