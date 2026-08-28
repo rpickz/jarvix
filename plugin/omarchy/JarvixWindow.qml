@@ -84,6 +84,9 @@ FloatingWindow {
     { id: "library", label: "Library" },
     { id: "automations", label: "Automations" },
     { id: "knowledge", label: "Knowledge" },
+    // providers — the endpoints and advisor CLIs Jarvix uses (#163), on the
+    // generic entry-admin verbs with family "ai" and "advisors".
+    { id: "providers", label: "Providers" },
     { id: "memory", label: "Memory" },
     { id: "settings", label: "Settings" }
   ]
@@ -110,6 +113,7 @@ FloatingWindow {
       requestReminders()
     }
     else if (id === "knowledge") requestKnowledge()
+    else if (id === "providers") requestProviders()
     else if (id === "memory") {
       requestMemory()
       requestVocabulary()
@@ -1113,6 +1117,367 @@ FloatingWindow {
       }
     }
     return out.join("\n")
+  }
+
+  // --- providers ----------------------------------------------------------
+  // The Providers tab (issue #163): the endpoints Jarvix thinks with
+  // ([ai.<name>]) and the assistant CLIs it consults ([advisors.<name>]),
+  // listed, added, edited, tested and removed through the SAME entry-admin
+  // verbs the automations and knowledge forms use (ADR 0033) — two registry
+  // rows daemon-side, no window logic of their own. config.list_entries
+  // populates the lists, config.get_entry / validate_entry / upsert_entry /
+  // delete_entry drive the form, config.test_entry runs the probe.
+  //
+  // The credential is the part this window is deliberately unable to get
+  // wrong: it never receives one. A row carries only whether a key is set,
+  // where it comes from, and — for the environment indirection — which
+  // variable is expected and whether it currently resolves. The form's
+  // credential control ships an INSTRUCTION (keep / set / clear), so the
+  // draft that round-trips through here has no field to lose or leak.
+  //
+  // Every judgement stays daemon-side (ADR 0013): which permission tier an
+  // advisor earns, whether an endpoint may be deleted, whether a base URL is
+  // usable, what a probe found. This renders fields, ships drafts, and pins
+  // returned problems and notes.
+  property var providerEndpoints: []
+  property var providerAdvisors: []
+  property string providerInUse: "" // the endpoint ai.provider names
+  // The config file's fingerprint as of the last listing, passed back on
+  // every write so a hand edit made while the window sat open is a refused
+  // conflict, never a clobber.
+  property string providersFingerprint: ""
+  property int providersEndpointsRequestId: 0
+  property int providersAdvisorsRequestId: 0
+
+  function requestProviders() {
+    if (!daemon.connected) return
+    providersEndpointsRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providersEndpointsRequestId,
+      method: "config.list_entries", params: { family: "ai" } }) + "\n")
+    providersAdvisorsRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providersAdvisorsRequestId,
+      method: "config.list_entries", params: { family: "advisors" } }) + "\n")
+  }
+
+  function loadProviderEndpoints(result) {
+    providerEndpoints = result.entries || []
+    providerInUse = String(result.in_use || "")
+    providersFingerprint = String(result.fingerprint || "")
+  }
+
+  function loadProviderAdvisors(result) {
+    providerAdvisors = result.entries || []
+    providersFingerprint = String(result.fingerprint || providersFingerprint)
+  }
+
+  // endpointCredentialLine words one endpoint's credential state — presence
+  // and provenance only, because presence and provenance are all the window
+  // is given. There is no masked prefix here on purpose: a prefix is a
+  // fragment of the key, and a mask of the right length is its length.
+  function endpointCredentialLine(row) {
+    var secrets = row.secrets || {}
+    var state = secrets.api_key || {}
+    if (state.source === "env") {
+      return "key set — read from $" + String(state.env || "")
+    }
+    if (state.source === "config") {
+      return "key set — stored in config.toml"
+    }
+    if (String(state.env || "") !== "") {
+      return "no key — $" + String(state.env) + " is expected but is not set in this session"
+    }
+    return "no key set"
+  }
+
+  // providerNoteLine joins the daemon's notes for a listing row — the
+  // advisor's earned permission tier, stated where it can be read without
+  // opening the form.
+  function providerNoteLine(row) {
+    var notes = row.notes || []
+    var out = []
+    for (var i = 0; i < notes.length; i++) out.push(String(notes[i].message || ""))
+    return out.join(" ")
+  }
+
+  // --- providers form -----------------------------------------------------
+  // One form serves both families, exactly as the automations form serves
+  // routines and scripts: the family travels in a property and the fields
+  // shown follow it.
+  property bool providerFormOpen: false
+  property string providerFormFamily: "" // "ai" | "advisors"
+  property string providerFormOriginalName: "" // "" while creating
+  property var providerDraft: ({})
+  property var providerFormOriginal: ({}) // keys the loaded entry carried
+  property var providerFormSecrets: ({}) // the daemon's presence report
+  property var providerFormProblems: [] // [{field, message}] from the daemon
+  property var providerFormNotes: [] // [{field, message}] — earned, not wrong
+  property string providerFormError: "" // transport/conflict line, verbatim
+  property bool providerDeleteConfirm: false
+  // The credential instruction the next save will carry: "keep" (the daemon's
+  // default too), "set" with the typed value, or "clear".
+  property string providerSecretAction: "keep"
+  property string providerSecretValue: ""
+  property var providerTestResult: ({}) // the last probe's own words
+  property bool providerTestRunning: false
+  property int providerGetRequestId: 0
+  property int providerValidateRequestId: 0
+  property int providerSaveRequestId: 0
+  property int providerDeleteRequestId: 0
+  property int providerTestRequestId: 0
+
+  function resetProviderForm(family) {
+    providerFormFamily = family
+    providerFormProblems = []
+    providerFormNotes = []
+    providerFormError = ""
+    providerDeleteConfirm = false
+    providerSecretAction = "keep"
+    providerSecretValue = ""
+    providerTestResult = ({})
+    providerTestRunning = false
+  }
+
+  function openProviderCreate(family) {
+    resetProviderForm(family)
+    providerFormOriginalName = ""
+    providerFormOriginal = {}
+    providerFormSecrets = {}
+    providerDraft = family === "ai"
+      ? { name: "", base_url: "", api_key_env: "" }
+      : { name: "", binary: "" }
+    providerFormOpen = true
+  }
+
+  // openProviderEdit asks the daemon for the whole entry — the listing rows
+  // carry no credential state beyond presence, and the form needs the keys it
+  // has no column for — and opens when it answers.
+  function openProviderEdit(family, name) {
+    if (!daemon.connected) return
+    providerFormFamily = family
+    providerGetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providerGetRequestId,
+      method: "config.get_entry", params: { family: family, name: name } }) + "\n")
+  }
+
+  function loadProviderEntry(frame) {
+    if (frame.error) {
+      errorStage = "providers"
+      errorMessage = String(frame.error.message || "the entry could not be read")
+      requestProviders()
+      return
+    }
+    var result = frame.result || {}
+    resetProviderForm(String(result.family || providerFormFamily))
+    providerDraft = result.entry || {}
+    providerFormOriginal = result.entry || {}
+    providerFormSecrets = result.secrets || {}
+    providerFormNotes = result.notes || []
+    providerFormOriginalName = String((result.entry || {}).name || "")
+    providersFingerprint = String(result.fingerprint || providersFingerprint)
+    providerFormOpen = true
+    validateProviderDraft()
+  }
+
+  function closeProviderForm() {
+    providerFormOpen = false
+    providerDeleteConfirm = false
+    requestProviders()
+  }
+
+  // reassignProviderDraft clones the draft so Repeaters see a structural
+  // change — the automations pattern, one reassignment per add/remove.
+  function reassignProviderDraft() {
+    var clone = {}
+    for (var key in providerDraft) clone[key] = providerDraft[key]
+    providerDraft = clone
+    validateProviderDraft()
+  }
+
+  // providerDraftEntry serialises the draft for the wire: shown fields as
+  // typed (trimmed), unshown keys carried verbatim. The credential is NOT
+  // here and cannot be — the daemon refuses an entry that carries one, and
+  // this form has nothing to put in it.
+  function providerDraftEntry() {
+    var d = providerDraft
+    var entry = { name: String(d.name || "").trim() }
+    if (providerFormFamily === "ai") {
+      entry.base_url = String(d.base_url || "").trim()
+      var env = String(d.api_key_env || "").trim()
+      if (env !== "" || "api_key_env" in providerFormOriginal) entry.api_key_env = env
+      return entry
+    }
+    entry.binary = String(d.binary || "").trim()
+    // An absent args key is not an empty one: absence is what inherits the
+    // shipped preset, and inheriting the preset is what earns the allow tier
+    // (ADR 0016). The form only sends args once the user has added a row.
+    if (d.args !== undefined) {
+      var args = []
+      for (var i = 0; i < d.args.length; i++) args.push(String(d.args[i] || "").trim())
+      entry.args = args
+    }
+    var timeout = String(d.timeout_sec === undefined ? "" : d.timeout_sec).trim()
+    if (timeout !== "") entry.timeout_sec = automationFormNumber(timeout)
+    var description = String(d.description || "").trim()
+    if (description !== "" || "description" in providerFormOriginal) {
+      entry.description = description
+    }
+    return entry
+  }
+
+  // providerSecretParam is the write-only credential channel: an instruction,
+  // never a copy of what is stored. "keep" is sent explicitly so the wire
+  // says what the form means rather than relying on an omission.
+  function providerSecretParam() {
+    if (providerFormFamily !== "ai") return undefined
+    if (providerSecretAction === "set") {
+      return { api_key: { action: "set", value: providerSecretValue } }
+    }
+    if (providerSecretAction === "clear") return { api_key: { action: "clear" } }
+    return { api_key: { action: "keep" } }
+  }
+
+  function validateProviderDraft() {
+    if (!daemon.connected || !providerFormOpen) return
+    providerValidateRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providerValidateRequestId,
+      method: "config.validate_entry",
+      params: { family: providerFormFamily, name: providerFormOriginalName,
+        entry: providerDraftEntry(), secrets: providerSecretParam() } }) + "\n")
+  }
+
+  function handleProviderValidateReply(frame) {
+    if (frame.error) {
+      providerFormError = String(frame.error.message || "validation failed")
+      return
+    }
+    var result = frame.result || {}
+    providerFormProblems = result.problems || []
+    providerFormNotes = result.notes || []
+    providerFormError = ""
+  }
+
+  function saveProviderForm() {
+    if (!daemon.connected) return
+    providerSaveRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providerSaveRequestId,
+      method: "config.upsert_entry",
+      params: { family: providerFormFamily, name: providerFormOriginalName,
+        entry: providerDraftEntry(), secrets: providerSecretParam(),
+        fingerprint: providersFingerprint } }) + "\n")
+  }
+
+  function deleteProviderEntry() {
+    if (!daemon.connected) return
+    providerDeleteRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providerDeleteRequestId,
+      method: "config.delete_entry",
+      params: { family: providerFormFamily, name: providerFormOriginalName,
+        fingerprint: providersFingerprint } }) + "\n")
+  }
+
+  // testProviderEndpoint asks the daemon to make a real request to the
+  // endpoint AS SAVED. It reports what happened; this window never decides
+  // that something worked, and shows nothing at all until an answer arrives.
+  function testProviderEndpoint(name) {
+    if (!daemon.connected) return
+    providerTestRunning = true
+    providerTestResult = ({})
+    providerTestRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: providerTestRequestId,
+      method: "config.test_entry", params: { family: "ai", name: name } }) + "\n")
+  }
+
+  function handleProviderTestReply(frame) {
+    providerTestRunning = false
+    if (frame.error) {
+      providerTestResult = { outcome: "unreachable",
+        summary: String(frame.error.message || "the test could not run") }
+      return
+    }
+    providerTestResult = frame.result || {}
+  }
+
+  // providerTestLine words the last probe: the daemon's own summary, then the
+  // service's own error text when there was one. Never a verdict of this
+  // window's own making.
+  function providerTestLine() {
+    if (providerTestRunning) return "Testing…"
+    var r = providerTestResult || {}
+    if (!r.outcome) return ""
+    var line = String(r.summary || r.outcome)
+    if (r.status) line += " (HTTP " + r.status + ")"
+    if (r.detail) line += "\n" + String(r.detail)
+    return line
+  }
+
+  function handleProviderFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) providerFormProblems = data.problems || []
+      providerFormError = String(frame.error.message || "the save failed")
+      providerDeleteConfirm = false
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) providersFingerprint = String(result.fingerprint)
+    providerFormOpen = false
+    providerDeleteConfirm = false
+    requestProviders()
+    if (result.applied === false) {
+      errorStage = "providers"
+      errorMessage = "Saved to config.toml, but not applied yet: "
+        + String(result.reason || "the daemon is busy") + "."
+    }
+  }
+
+  // providerProblemFor collects the daemon's messages for one field key.
+  // Field "" is the form-level area.
+  function providerProblemFor(field) {
+    var out = []
+    for (var i = 0; i < providerFormProblems.length; i++) {
+      if (String(providerFormProblems[i].field || "") === field) {
+        out.push(String(providerFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
+  // providerNoteFor is the same lookup over the notes: what the draft EARNS,
+  // shown beside the field that decides it rather than as a problem.
+  function providerNoteFor(field) {
+    var out = []
+    for (var i = 0; i < providerFormNotes.length; i++) {
+      if (String(providerFormNotes[i].field || "") === field) {
+        out.push(String(providerFormNotes[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
+  // providerFormSecretLine words the stored credential inside the form, from
+  // the same presence report the listing uses.
+  function providerFormSecretLine() {
+    var state = (providerFormSecrets || {}).api_key || {}
+    if (providerSecretAction === "set") return "A new key will be saved when you save this endpoint."
+    if (providerSecretAction === "clear") return "The stored key will be removed when you save this endpoint."
+    if (state.source === "env") {
+      return "A key is set: read from $" + String(state.env || "") + " (Jarvix never displays it)."
+    }
+    if (state.source === "config") {
+      return "A key is set: stored in config.toml (Jarvix never displays it)."
+    }
+    if (String(state.env || "") !== "") {
+      return "No key is available: $" + String(state.env)
+        + " is expected but is not set in the session Jarvix runs in."
+    }
+    return "No key is set."
   }
 
   // --- memory -------------------------------------------------------------
@@ -2208,6 +2573,10 @@ FloatingWindow {
       // config.toml.
       requestAutomations()
       requestKnowledge()
+      // The endpoints and advisors are config tables too (#163), so a save
+      // from any surface — this form, a hand edit, the settings screen
+      // pointing ai.provider elsewhere — refreshes the Providers lists.
+      requestProviders()
       // And it may have moved the reading-comfort typography (issue #121):
       // re-reading the settings snapshot here is what makes a change apply
       // to the open transcript live, whatever surface saved it.
@@ -2256,6 +2625,19 @@ FloatingWindow {
         } else if (frame.id !== undefined && (frame.id === win.knowledgeSaveRequestId ||
                    frame.id === win.knowledgeDeleteRequestId)) {
           win.handleKnowledgeFormReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.providersEndpointsRequestId) {
+          if (frame.result) win.loadProviderEndpoints(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.providersAdvisorsRequestId) {
+          if (frame.result) win.loadProviderAdvisors(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.providerGetRequestId) {
+          win.loadProviderEntry(frame)
+        } else if (frame.id !== undefined && frame.id === win.providerValidateRequestId) {
+          win.handleProviderValidateReply(frame)
+        } else if (frame.id !== undefined && (frame.id === win.providerSaveRequestId ||
+                   frame.id === win.providerDeleteRequestId)) {
+          win.handleProviderFormReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.providerTestRequestId) {
+          win.handleProviderTestReply(frame)
         } else if (frame.id !== undefined && frame.id === win.memorySaveRequestId) {
           win.handleMemoryFormReply(frame)
         } else if (frame.id !== undefined && frame.id === win.memoryForgetRequestId) {
@@ -2339,6 +2721,7 @@ FloatingWindow {
         // be large, and every route to it refreshes it (openTab,
         // conversation.changed, here).
         win.requestKnowledge()
+        win.requestProviders()
         win.requestMemory()
         win.requestVocabulary()
         // The transcript's typography settings (issue #121) load with the
@@ -3907,6 +4290,541 @@ FloatingWindow {
                 label: "Keep it"
                 name: "Keep " + win.knowledgeFormOriginalName
                 onClicked: win.knowledgeDeleteConfirm = false
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // The Providers tab (#163): two lists on one screen — the endpoints
+    // Jarvix thinks with, and the assistant CLIs it can consult — each row
+    // saying what a user needs before opening anything: which endpoint is in
+    // use, whether a credential is available and where from, and which
+    // permission tier an advisor's configuration earns.
+    Item {
+      id: providersScreen
+      visible: win.socketReady && win.currentTab === "providers"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      Flickable {
+        id: providersScroll
+        visible: !win.providerFormOpen
+        anchors.fill: parent
+        contentHeight: providersColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: providersColumn
+          width: providersScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Endpoints — where Jarvix sends what you say"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.title
+            font.bold: true
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.providerEndpoints.length === 0
+            width: parent.width
+            text: "No endpoints are configured — the New endpoint button below adds one."
+          }
+
+          Repeater {
+            model: win.providerEndpoints
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              readonly property var entry: modelData.entry || ({})
+              readonly property bool inUse: String(entry.name || "") === win.providerInUse
+              width: providersColumn.width
+              title: String(entry.name || "")
+              subtitle: inUse
+                ? "in use — ai.provider points here"
+                : "configured, not selected"
+              detail: String(entry.base_url || "")
+              meta: win.endpointCredentialLine(modelData)
+              interactive: true
+              onActivated: win.openProviderEdit("ai", String(entry.name || ""))
+              // Test is offered on the row as well as in the form: proving an
+              // endpoint answers is the thing a user wants to do before they
+              // trust it, and making them open a form first would put a step
+              // between the doubt and the answer.
+              actionLabel: "Test"
+              actionName: "Test the " + String(entry.name || "") + " endpoint"
+              onActionTriggered: win.testProviderEndpoint(String(entry.name || ""))
+            }
+          }
+
+          Text {
+            visible: win.providerTestRunning || String(win.providerTestResult.outcome || "") !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: win.providerTestLine()
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            // Words first: the outcome is spelled out in the sentence, so the
+            // colour is never the only thing carrying it.
+            color: String(win.providerTestResult.outcome || "") === "reachable"
+              ? Color.popups.text : Color.urgent
+          }
+
+          JarvixFormButton {
+            label: "New endpoint…"
+            name: "Add a new AI endpoint"
+            accent: true
+            onClicked: win.openProviderCreate("ai")
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Advisors — stronger assistants Jarvix can consult"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.title
+            font.bold: true
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.providerAdvisors.length === 0
+            width: parent.width
+            text: "No advisors are configured — the New advisor button below adds one."
+          }
+
+          Repeater {
+            model: win.providerAdvisors
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              readonly property var entry: modelData.entry || ({})
+              width: providersColumn.width
+              title: String(entry.name || "")
+              subtitle: String(entry.description || "an assistant CLI on this computer")
+              detail: String(entry.binary || "")
+                + (entry.args ? " " + entry.args.join(" ") : "")
+              // The earned permission tier, in the daemon's own words, on the
+              // row — so "this one asks first" is readable without opening
+              // anything (ADR 0016).
+              meta: win.providerNoteLine(modelData)
+              interactive: true
+              onActivated: win.openProviderEdit("advisors", String(entry.name || ""))
+            }
+          }
+
+          JarvixFormButton {
+            label: "New advisor…"
+            name: "Add a new advisor"
+            accent: true
+            onClicked: win.openProviderCreate("advisors")
+          }
+        }
+      }
+
+      // The provider form: a pane that replaces the lists, on the shared
+      // detail scaffold. Loaded fresh per open so every input initialises
+      // from the draft rather than binding to it.
+      JarvixDetailPane {
+        id: providerFormPane
+        visible: win.providerFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the providers"
+        actionLabel: "Save"
+        actionName: "Save this provider"
+        note: (win.providerFormOriginalName === ""
+          ? (win.providerFormFamily === "ai" ? "New endpoint" : "New advisor")
+          : "Editing “" + win.providerFormOriginalName + "”")
+        onBackRequested: win.closeProviderForm()
+        onActionTriggered: win.saveProviderForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.providerFormOpen
+          sourceComponent: providerFormBody
+        }
+      }
+    }
+
+    // The provider form body, built per open (see the Loader above). Every
+    // field pins the daemon's own message for its key — providerProblemFor —
+    // and the general area shows whole-entry problems and conflicts, so a
+    // refused save is never silent and never colour-only.
+    Component {
+      id: providerFormBody
+
+      Flickable {
+        id: providerFormScroll
+        contentHeight: providerFormColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: providerFormColumn
+          width: providerFormScroll.width
+          spacing: Style.space(10)
+
+          // The form-level area: transport errors, the fingerprint
+          // conflict's "changed outside the window" sentence, the in-use
+          // delete refusal, and problems the daemon could not pin to a field
+          // — all verbatim.
+          Text {
+            visible: win.providerFormError !== "" || win.providerProblemFor("") !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: (win.providerFormError !== "" ? win.providerFormError + "\n" : "")
+              + win.providerProblemFor("")
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.urgent
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: win.providerFormFamily === "ai"
+              ? "Name (what ai.provider selects this endpoint by)"
+              : "Name (the advisor you ask for by name)"
+            placeholder: win.providerFormFamily === "ai" ? "openai" : "claude"
+            problem: win.providerProblemFor("name")
+            Component.onCompleted: text = String(win.providerDraft.name || "")
+            onEdited: function(value) { win.providerDraft.name = value }
+            onCommitted: win.validateProviderDraft()
+          }
+
+          // ----- endpoint fields -----
+          JarvixFormField {
+            visible: win.providerFormFamily === "ai"
+            width: parent.width
+            label: "Base URL (the API root, ending in /v1 for most services)"
+            placeholder: "https://api.openai.com/v1"
+            monospace: true
+            problem: win.providerProblemFor("base_url")
+            Component.onCompleted: text = String(win.providerDraft.base_url || "")
+            onEdited: function(value) { win.providerDraft.base_url = value }
+            onCommitted: win.validateProviderDraft()
+          }
+
+          Column {
+            visible: win.providerFormFamily === "ai"
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Credential"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              color: Color.popups.text
+            }
+            // What the daemon reports about the stored key: whether one is
+            // available and where from. Never the key, never a prefix of it,
+            // never a mask the length of it — this window is not sent one.
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: win.providerFormSecretLine()
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+            Text {
+              visible: win.providerProblemFor("api_key") !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Problem: " + win.providerProblemFor("api_key")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.urgent
+            }
+
+            JarvixFormField {
+              width: parent.width
+              label: "Environment variable holding the key (the safer choice — "
+                + "the key stays out of config.toml and out of every backup of it)"
+              placeholder: "OPENAI_API_KEY"
+              monospace: true
+              problem: win.providerProblemFor("api_key_env")
+              Component.onCompleted: text = String(win.providerDraft.api_key_env || "")
+              onEdited: function(value) { win.providerDraft.api_key_env = value }
+              onCommitted: win.validateProviderDraft()
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                visible: win.providerSecretAction !== "set"
+                label: "Set a key…"
+                name: "Type a new API key for this endpoint"
+                onClicked: {
+                  win.providerSecretValue = ""
+                  win.providerSecretAction = "set"
+                }
+              }
+              JarvixFormButton {
+                visible: win.providerSecretAction === "set"
+                label: "Cancel key change"
+                name: "Keep the stored key"
+                onClicked: {
+                  win.providerSecretValue = ""
+                  win.providerSecretAction = "keep"
+                  win.validateProviderDraft()
+                }
+              }
+              JarvixFormButton {
+                visible: win.providerSecretAction !== "clear"
+                  && ((win.providerFormSecrets.api_key || {}).inline_key === true)
+                label: "Clear the stored key"
+                name: "Remove the key stored in config.toml"
+                onClicked: {
+                  win.providerSecretValue = ""
+                  win.providerSecretAction = "clear"
+                  win.validateProviderDraft()
+                }
+              }
+              JarvixFormButton {
+                visible: win.providerSecretAction === "clear"
+                label: "Keep the stored key"
+                name: "Keep the key stored in config.toml"
+                onClicked: {
+                  win.providerSecretAction = "keep"
+                  win.validateProviderDraft()
+                }
+              }
+            }
+
+            // The one input in this form that carries a credential, and it
+            // only ever travels outward: what is typed here is sent with the
+            // save and is never read back, because nothing sends it back.
+            JarvixFormField {
+              visible: win.providerSecretAction === "set"
+              width: parent.width
+              label: "New API key (stored in config.toml; it is never displayed again)"
+              placeholder: "sk-…"
+              monospace: true
+              Component.onCompleted: text = String(win.providerSecretValue || "")
+              onEdited: function(value) { win.providerSecretValue = value }
+              onCommitted: win.validateProviderDraft()
+            }
+          }
+
+          Column {
+            visible: win.providerFormFamily === "ai" && win.providerFormOriginalName !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            JarvixFormButton {
+              label: "Test this endpoint"
+              name: "Make a real request to " + win.providerFormOriginalName
+              onClicked: win.testProviderEndpoint(win.providerFormOriginalName)
+            }
+            // The probe tests what is SAVED, so an unsaved edit would be
+            // tested against the old values — saying so beats a result that
+            // quietly answers a different question.
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: win.providerTestLine() !== ""
+                ? win.providerTestLine()
+                : "Tests the endpoint as it is saved — save your changes first to test them."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: String(win.providerTestResult.outcome || "") === ""
+                ? Util.alpha(Color.popups.text, 0.7)
+                : (String(win.providerTestResult.outcome) === "reachable"
+                  ? Color.popups.text : Color.urgent)
+            }
+          }
+
+          // ----- advisor fields -----
+          JarvixFormField {
+            visible: win.providerFormFamily === "advisors"
+            width: parent.width
+            label: "Binary (an absolute path, or a name found on PATH)"
+            placeholder: "/usr/bin/claude"
+            monospace: true
+            problem: win.providerProblemFor("binary")
+            Component.onCompleted: text = String(win.providerDraft.binary || "")
+            onEdited: function(value) { win.providerDraft.binary = value }
+            onCommitted: win.validateProviderDraft()
+          }
+
+          Column {
+            visible: win.providerFormFamily === "advisors"
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Arguments"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              color: Color.popups.text
+            }
+            // The tier the current configuration earns, in the daemon's own
+            // words, next to the field that decides it — so nobody loosens or
+            // tightens a permission gate by typing a flag without seeing it
+            // (ADR 0016).
+            Text {
+              visible: win.providerNoteFor("args") !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: win.providerNoteFor("args")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+            Text {
+              visible: win.providerProblemFor("args") !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Problem: " + win.providerProblemFor("args")
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.urgent
+            }
+
+            Repeater {
+              model: (win.providerDraft.args || []).length
+
+              delegate: Row {
+                required property int index
+                width: parent.width
+                spacing: Style.space(8)
+
+                JarvixFormField {
+                  width: parent.width - argRemove.width - Style.space(8)
+                  label: "Argument " + (index + 1)
+                  placeholder: index === 0 ? "-p" : "{question}"
+                  monospace: true
+                  Component.onCompleted: text = String((win.providerDraft.args || [])[index] || "")
+                  onEdited: function(value) { win.providerDraft.args[index] = value }
+                  onCommitted: win.validateProviderDraft()
+                }
+                JarvixFormButton {
+                  id: argRemove
+                  label: "Remove"
+                  name: "Remove argument " + (index + 1)
+                  onClicked: {
+                    win.providerDraft.args.splice(index, 1)
+                    if (win.providerDraft.args.length === 0) delete win.providerDraft.args
+                    win.reassignProviderDraft()
+                  }
+                }
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                label: "Add argument"
+                name: "Add an argument to this advisor's command line"
+                onClicked: {
+                  if (win.providerDraft.args === undefined) win.providerDraft.args = []
+                  win.providerDraft.args.push("")
+                  win.reassignProviderDraft()
+                }
+              }
+              JarvixFormButton {
+                visible: win.providerDraft.args !== undefined
+                label: "Use the shipped preset"
+                name: "Drop these arguments and use the shipped preset for this advisor"
+                onClicked: {
+                  delete win.providerDraft.args
+                  win.reassignProviderDraft()
+                }
+              }
+            }
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Write {question} as an argument of its own to pass the question there; "
+                + "with no {question} the question goes to the program's standard input."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+          }
+
+          JarvixFormField {
+            visible: win.providerFormFamily === "advisors"
+            width: parent.width
+            label: "Timeout in seconds (empty for the default)"
+            placeholder: "120"
+            problem: win.providerProblemFor("timeout_sec")
+            Component.onCompleted: text = win.providerDraft.timeout_sec === undefined
+              ? "" : String(win.providerDraft.timeout_sec)
+            onEdited: function(value) {
+              if (value.trim() === "") delete win.providerDraft.timeout_sec
+              else win.providerDraft.timeout_sec = value.trim()
+            }
+            onCommitted: win.validateProviderDraft()
+          }
+
+          JarvixFormField {
+            visible: win.providerFormFamily === "advisors"
+            width: parent.width
+            label: "Description (tells the model what this advisor is good for)"
+            placeholder: "deep reasoning, code review, long-context analysis"
+            problem: win.providerProblemFor("description")
+            Component.onCompleted: text = String(win.providerDraft.description || "")
+            onEdited: function(value) { win.providerDraft.description = value }
+            onCommitted: win.validateProviderDraft()
+          }
+
+          // Delete, behind a confirm. The daemon refuses the endpoint
+          // ai.provider is using, with that reason — which lands in the
+          // form-level area above rather than being predicted here.
+          Column {
+            visible: win.providerFormOriginalName !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            JarvixFormButton {
+              visible: !win.providerDeleteConfirm
+              label: win.providerFormFamily === "ai" ? "Delete this endpoint…" : "Delete this advisor…"
+              name: "Delete " + win.providerFormOriginalName
+              onClicked: win.providerDeleteConfirm = true
+            }
+            Text {
+              visible: win.providerDeleteConfirm
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Delete “" + win.providerFormOriginalName + "”? "
+                + "It is removed from config.toml; everything else in the file is left alone."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Row {
+              visible: win.providerDeleteConfirm
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                label: "Delete"
+                name: "Delete " + win.providerFormOriginalName
+                accent: true
+                onClicked: win.deleteProviderEntry()
+              }
+              JarvixFormButton {
+                label: "Keep it"
+                name: "Keep " + win.providerFormOriginalName
+                onClicked: win.providerDeleteConfirm = false
               }
             }
           }

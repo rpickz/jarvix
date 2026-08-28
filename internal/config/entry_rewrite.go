@@ -214,6 +214,13 @@ func entryNames(doc []byte, family string) ([]string, error) {
 	return names, nil
 }
 
+// EntryNames lists the `name` key of every [[family]] entry, in document
+// order — the listing order an array family can promise, exported for the
+// generic listing verb (#163) that serves both document shapes.
+func EntryNames(doc []byte, family string) ([]string, error) {
+	return entryNames(doc, family)
+}
+
 // entryFieldValue reads one field of the index-th [[family]] entry back from
 // the document — the read-back half of the safety guard.
 func entryFieldValue(doc []byte, family string, index int, field string) (any, bool, error) {
@@ -232,17 +239,9 @@ func entryFieldValue(doc []byte, family string, index int, field string) (any, b
 // family name through plain tables ("knowledge.feeds" → [knowledge] → feeds).
 // Absent segments mean no entries, not an error.
 func decodeEntries(doc []byte, family string) ([]map[string]any, error) {
-	var raw map[string]any
-	if _, err := toml.Decode(string(doc), &raw); err != nil {
-		return nil, fmt.Errorf("config.toml does not parse; fix it by hand first: %w", err)
-	}
-	node := any(raw)
-	for _, part := range strings.Split(family, ".") {
-		table, ok := node.(map[string]any)
-		if !ok {
-			return nil, nil
-		}
-		node = table[part]
+	node, err := decodeNode(doc, family)
+	if err != nil {
+		return nil, err
 	}
 	switch list := node.(type) {
 	case []map[string]any:
@@ -257,6 +256,28 @@ func decodeEntries(doc []byte, family string) ([]map[string]any, error) {
 		return out, nil
 	}
 	return nil, nil
+}
+
+// decodeNode decodes the document and walks the dotted family name down to
+// the node that holds the family ("knowledge.feeds" → [knowledge] → feeds,
+// "ai" → [ai]). An absent segment yields a nil node, not an error: a family
+// with no entries yet is an ordinary state, not a broken file. Shared with the
+// keyed editor (keyed_rewrite.go) so both shapes resolve a family name through
+// exactly one piece of code.
+func decodeNode(doc []byte, family string) (any, error) {
+	var raw map[string]any
+	if _, err := toml.Decode(string(doc), &raw); err != nil {
+		return nil, fmt.Errorf("config.toml does not parse; fix it by hand first: %w", err)
+	}
+	node := any(raw)
+	for _, part := range strings.Split(family, ".") {
+		table, ok := node.(map[string]any)
+		if !ok {
+			return nil, nil
+		}
+		node = table[part]
+	}
+	return node, nil
 }
 
 // UpsertEntryTOML returns doc with one [[family]] entry written whole. A

@@ -1,0 +1,12 @@
+[ai]
+provider = "ollama"
+model = "llama3.2:3b"
+
+# Stronger assistants installed on this machine.
+[advisors.claude]
+binary = "/usr/bin/claude"
+
+[[scripts]]
+name = "backup notes"
+phrases = ["back up my notes"]
+path = "/bin/true"

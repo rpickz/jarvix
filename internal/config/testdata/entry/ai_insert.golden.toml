@@ -1,0 +1,16 @@
+# What Jarvix thinks with.
+[ai]
+provider = "ollama"
+model = "llama3.2:3b"
+
+# Local ollama — no credential needed.
+[ai.ollama]
+base_url = "http://127.0.0.1:11434/v1"
+
+[ai.openai]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[[routines]]
+name = "evening"
+phrases = ["wind down"]

@@ -320,6 +320,14 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	speakBack := merged.Vocabulary.SpeakBack
 	merged.Vocabulary = running.Vocabulary
 	merged.Vocabulary.SpeakBack = speakBack
+	// Advisors are restart-class with the rest of the tool registry: the
+	// advisor tool and its per-advisor permission tiers are built in New from
+	// the booted configuration (ADR 0016), and a reload rebuilds the engine's
+	// collaborators, not the registry. Pinning them here is what makes
+	// config.get honest about what this daemon actually consults — and the
+	// family's `pending` note (entry_admin_providers.go) is what makes a save
+	// say so out loud instead of showing a saved advisor that is never asked.
+	merged.Advisors = running.Advisors
 	// Knowledge feeds are idle-class *once the service exists*: the tables
 	// swap through Reconfigure below. With no feeds at boot there is no
 	// service and no registered tool, so the section is pinned like memory —
@@ -452,6 +460,13 @@ func idleClassChanged(running, next config.Config) bool {
 	return !reflect.DeepEqual(running.Routines, next.Routines) ||
 		!reflect.DeepEqual(running.Scripts, next.Scripts) ||
 		!reflect.DeepEqual(running.Intents.Custom, next.Intents.Custom) ||
+		// The [ai.<name>] endpoint tables are structured on the same terms
+		// (#163): `ai.provider` and `ai.model` are registry settings, but the
+		// endpoints they select are a map with no registry entry, so without
+		// this a corrected base_url would land in the file and the daemon
+		// would keep talking to the old address — the exact failure the
+		// Providers form's Test button exists to prevent.
+		!reflect.DeepEqual(running.AI.Endpoints, next.AI.Endpoints) ||
 		// [knowledge] is a structured table on the same terms as [[routines]]:
 		// no settings-registry entry, compared directly so a hand edit plus
 		// reload actually reschedules the feeds (ADR 0031). With no service

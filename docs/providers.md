@@ -34,8 +34,23 @@ the endpoint is configuration, not code:
 
 It speaks SSE (`stream: true`), forwards `choices[].delta.content` fragments
 as `delta` events, treats `data: [DONE]` or EOF as completion, and surfaces
-API error payloads as readable messages. `Probe()` (used by `jarvix doctor`)
-checks reachability and auth via `GET /models`.
+API error payloads as readable messages.
+
+`ProbeEndpoint()` makes the cheapest request that proves both halves of an
+endpoint — `GET /models`, which costs no tokens and answers 401 rather than 200
+for a wrong key — and classifies the result as **reachable** (a 2xx that
+actually arrived), **unauthorised** (401/402/403: the URL is right, the key is
+not), or **unreachable** (a refused dial, a timeout, or a status meaning this
+is not an API root). `Probe()` is the boolean form `jarvix doctor` uses; the
+window's Providers section (#163) uses the classified one behind
+`config.test_entry`, so a mistyped base URL fails in the form rather than
+mid-conversation. Neither ever reports success it did not observe, and neither
+puts the credential in an error: the response body is read, the request is not
+echoed.
+
+Endpoints are administered in the window's Providers section — base URL and
+credential, with `api_key_env` offered as the safer choice. A stored key is
+never displayed, returned, or quoted; see ADR 0052.
 
 ### Planned
 

@@ -95,7 +95,7 @@ func adminErrorProblems(data any) []tools.ConfigProblem {
 // verbs edit the file — a listing that disagreed with what get/upsert see
 // would send the model editing entries that "aren't there".
 func (a *assistantConfigAdmin) ListEntries(family string) ([]tools.ConfigEntrySummary, error) {
-	if _, ipcErr := entryFamily(family); ipcErr != nil {
+	if _, ipcErr := assistantEntryFamily(family); ipcErr != nil {
 		return nil, translateAdminError(ipcErr)
 	}
 	raw, err := os.ReadFile(a.d.paths.ConfigFile())
@@ -144,7 +144,7 @@ func (a *assistantConfigAdmin) ListEntries(family string) ([]tools.ConfigEntrySu
 // as a typed NotFound the tool can word ("no routine is named…") instead of
 // a generic error.
 func (a *assistantConfigAdmin) GetEntry(family, name string) (tools.ConfigEntry, error) {
-	spec, ipcErr := entryFamily(family)
+	spec, ipcErr := assistantEntryFamily(family)
 	if ipcErr != nil {
 		return tools.ConfigEntry{}, translateAdminError(ipcErr)
 	}
@@ -181,6 +181,12 @@ func (a *assistantConfigAdmin) GetEntry(family, name string) (tools.ConfigEntry,
 // fingerprint guard, atomic write, reload, events).
 func (a *assistantConfigAdmin) UpsertEntry(family, name string, entry map[string]any,
 	fingerprint string) (tools.ConfigWriteReceipt, error) {
+	// The exclusion wall, re-checked here for the reason WriteSetting states:
+	// this bridge is the last code before the shared write path, so even a
+	// tool bug cannot hand an [ai] or [advisors] family through (#163).
+	if _, ipcErr := assistantEntryFamily(family); ipcErr != nil {
+		return tools.ConfigWriteReceipt{}, translateAdminError(ipcErr)
+	}
 	params, err := json.Marshal(map[string]any{
 		"family": family, "name": name, "entry": entry, "fingerprint": fingerprint,
 	})
@@ -197,6 +203,9 @@ func (a *assistantConfigAdmin) UpsertEntry(family, name string, entry map[string
 // DeleteEntry implements tools.ConfigAdmin by invoking the window's own
 // config.delete_entry handler with the assistant source.
 func (a *assistantConfigAdmin) DeleteEntry(family, name, fingerprint string) (tools.ConfigWriteReceipt, error) {
+	if _, ipcErr := assistantEntryFamily(family); ipcErr != nil {
+		return tools.ConfigWriteReceipt{}, translateAdminError(ipcErr)
+	}
 	params, err := json.Marshal(map[string]any{
 		"family": family, "name": name, "fingerprint": fingerprint,
 	})

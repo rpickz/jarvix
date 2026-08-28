@@ -831,10 +831,7 @@ func parse(data []byte, cfg Config) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
-	reserved := map[string]bool{
-		"provider": true, "model": true, "system_prompt": true,
-		"max_tokens": true, "temperature": true,
-	}
+	reserved := ReservedAIKeys()
 	for name, prim := range loose.AI {
 		if reserved[name] {
 			continue
@@ -892,6 +889,11 @@ func (c Config) Validate() error {
 	if c.AI.Model == "" {
 		problems = append(problems, "ai.model is empty; set the model name your provider should use")
 	}
+	// Every [ai.<name>] table, not only the selected one (#163): the window
+	// edits endpoints one at a time and validates the WHOLE document, so a
+	// half-typed base URL on an endpoint nobody is using yet is still refused
+	// at the form that typed it rather than discovered when it is chosen.
+	problems = append(problems, c.validateEndpoints()...)
 	if c.STT.Provider != "whisper" {
 		problems = append(problems, fmt.Sprintf(
 			"stt.provider %q is not supported; use \"whisper\"", c.STT.Provider))

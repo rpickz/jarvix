@@ -66,8 +66,14 @@ func tomlKeys(t *testing.T, v any) []string {
 	keys := make([]string, 0, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
 		tag := strings.Split(typ.Field(i).Tag.Get("toml"), ",")[0]
-		if tag == "" || tag == "-" {
+		if tag == "" {
 			t.Fatalf("%s.%s carries no toml tag", typ.Name(), typ.Field(i).Name)
+		}
+		if tag == "-" {
+			// A field the loader deliberately never reads from the file —
+			// Advisor.ReadOnly is computed from the preset table (ADR 0016) —
+			// so it is not a key any form can write either.
+			continue
 		}
 		keys = append(keys, tag)
 	}
@@ -80,11 +86,19 @@ func tomlKeys(t *testing.T, v any) []string {
 // exactly the config struct's toml tag set. A field added to a struct
 // without a registry row entry would silently block form-saving any entry a
 // hand edit gave that key — this test makes the drift loud instead.
+//
+// Two shape-driven adjustments, each of them a rule rather than an excuse
+// (#163): a KEYED family carries `name` on the wire although the struct has
+// no such field, because the table key is the identity; and a declared SECRET
+// key is a struct field the form deliberately cannot write, because it is
+// written through the credential channel instead.
 func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
 	structs := map[string]any{
 		"routines":        config.Routine{},
 		"scripts":         config.Script{},
 		"knowledge.feeds": config.KnowledgeFeed{},
+		"ai":              config.Endpoint{},
+		"advisors":        config.Advisor{},
 	}
 	if len(structs) != len(entryAdminFamilies) {
 		t.Fatalf("registry has %d families, this test knows %d — extend both together",
@@ -96,7 +110,16 @@ func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
 			t.Errorf("family %q is not in the registry", family)
 			continue
 		}
-		want := tomlKeys(t, example)
+		want := make([]string, 0, len(spec.keys))
+		for _, key := range tomlKeys(t, example) {
+			if spec.secretFor(key) == nil {
+				want = append(want, key)
+			}
+		}
+		if spec.shape == entryShapeKeyed {
+			want = append(want, "name")
+		}
+		sort.Strings(want)
 		keys := make([]string, 0, len(spec.keys))
 		for k := range spec.keys {
 			keys = append(keys, k)
@@ -142,10 +165,10 @@ func TestConfigGetEntryOverSocket(t *testing.T) {
 	}
 
 	err := client.Call("config.get_entry",
-		map[string]any{"family": "advisors", "name": "x"}, nil)
+		map[string]any{"family": "intents.custom", "name": "x"}, nil)
 	var rpcErr *ipc.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != ipc.CodeInvalidParams ||
-		!strings.Contains(rpcErr.Message, `"advisors"`) {
+		!strings.Contains(rpcErr.Message, `"intents.custom"`) {
 		t.Errorf("unknown family err = %v, want CodeInvalidParams naming it", err)
 	}
 	err = client.Call("config.get_entry",
