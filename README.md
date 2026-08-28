@@ -191,7 +191,11 @@ Jarvix lives in the top-right of the Omarchy bar, next to the tray and the
 network and audio widgets. The icon says what Jarvix is doing at a glance —
 ready, listening, thinking, responding, speaking, waiting for a confirmation,
 or stopped — with a different **shape** for each state, and the same thing in
-words on hover, so it never depends on colour alone. With background listening
+words on hover, so it never depends on colour alone. While a turn is running
+the words are on the bar itself, next to the icon — "Thinking 4s", "Listening",
+"Confirm? 6s" — so a wait is legible without hovering and without reading a
+glyph; at rest the chip is gone and the widget is the bare icon it always was.
+With background listening
 on it is also the microphone indicator: a hollow microphone whenever a capture
 process is open, struck through when muted. A stopped daemon dims the
 icon and offers the start command; it never disappears, because an icon that
@@ -262,6 +266,15 @@ the answer spoken the same way — as if you had said it. Use it for the things
 speech is bad at (`summarise https://example.com/some/long/path`), for the
 times speaking is not an option, and to correct a bad transcription by
 retyping instead of repeating yourself louder.
+
+Between pressing Enter and the first word of the answer, the conversation
+shows a pending turn from Jarvix saying what it is doing — "Thinking",
+"Running a shell command", "Consulting claude" — and, once the wait passes a
+couple of seconds, how long it has been doing it. It turns into the answer in
+place when the first token arrives, so there is never a placeholder to watch
+disappear, and it says what happened instead of freezing if the turn fails or
+is cancelled. A window opened halfway through a long think shows the same
+thing, counting from the same instant, as one that was already open.
 
 Typing while Jarvix is answering interrupts it and starts the new turn, just
 like speaking over it. If Jarvix is waiting on a tool confirmation, typing

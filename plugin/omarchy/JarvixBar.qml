@@ -332,10 +332,13 @@ Panel {
   }
 
   // --- bar icon -----------------------------------------------------------
-  // The widget is the icon plus, while a focus thread is active, the static
-  // thread chip beside it; the widget's width follows so the bar lays its
-  // neighbours out correctly either way.
+  // The widget is the icon, plus the status chip while something is happening
+  // (issue #158), plus the static thread chip while a focus thread is active;
+  // the widget's width follows so the bar lays its neighbours out correctly in
+  // every combination. At rest both chips are absent and the widget is the
+  // icon it always was.
   implicitWidth: button.implicitWidth
+    + (statusChip.visible ? statusChip.implicitWidth + Style.space(4) : 0)
     + (threadChip.visible ? threadChip.implicitWidth + Style.space(4) : 0)
   implicitHeight: button.implicitHeight
 
@@ -391,6 +394,41 @@ Panel {
     }
   }
 
+  // The status chip (issue #158): what Jarvix is doing, in words, beside the
+  // glyph. The glyph alone was a monochrome swap in a dense bar — a shape
+  // change nobody notices and a screen reader only reaches by hovering, which
+  // is not a thing you do to a bar you are not already suspicious of. So the
+  // state says itself, in the fewest words that still say it: "Thinking 4s".
+  // The fuller sentence — which tool, which question — stays the tooltip's
+  // job; this is the headline, and it is the half that has to be readable
+  // without doing anything.
+  //
+  // Every decision here was made in Go: which states earn a chip, what each
+  // one says, and when the elapsed count joins it (desktop.BarChipLabel →
+  // BarState.chipLabel). Empty text means the resting states — idle, muted,
+  // wake-armed, daemon down — draw the bare icon exactly as they always did,
+  // so nothing is added to the bar in normal use.
+  //
+  // Static by the same rule as the thread chip: no animation of its own. The
+  // icon's pulse is the only motion, it is opacity-only, and the words here
+  // carry the state without it.
+  Text {
+    id: statusChip
+    readonly property string label: BarState.chipLabel(root.status, root.elapsedSec)
+    visible: label !== ""
+    text: label
+    anchors.left: button.right
+    anchors.leftMargin: Style.space(4)
+    anchors.verticalCenter: parent.verticalCenter
+    color: root.status.urgent ? root.urgent : root.foreground
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    // The tooltip's fuller sentence is the icon's; this is the same fact in
+    // fewer words, and a reader that lands on it must not be told twice.
+    Accessible.role: Accessible.StaticText
+    Accessible.name: statusChip.label
+  }
+
   // The active-thread chip (#123's deferred bar surface): the current
   // thread's name, in text, always in peripheral vision — "which front am I
   // on?" answered without opening anything. Static by rule: no timer, no
@@ -401,7 +439,7 @@ Panel {
   Rectangle {
     id: threadChip
     visible: root.socketReady && root.activeThreadName !== ""
-    anchors.left: button.right
+    anchors.left: statusChip.visible ? statusChip.right : button.right
     anchors.leftMargin: Style.space(4)
     anchors.verticalCenter: parent.verticalCenter
     implicitWidth: chipRow.implicitWidth + Style.space(12)

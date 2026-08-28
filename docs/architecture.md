@@ -321,6 +321,16 @@ and live-appends from the same event stream as the overlay; its socket is
 connected only while it is open. It also **takes input**: a composer at the
 bottom sends what you type as a turn (`session.text`), so the window is
 somewhere you talk to Jarvix and not only somewhere you read what it said.
+While Jarvix works, the message list carries a **pending assistant turn**
+(issue #158): a row that says what is happening — the state, or the tool step
+in flight — with the elapsed seconds past a threshold, and that *becomes* the
+answer in place on the first token rather than being replaced by a second
+bubble. Its words and the bar widget's status chip are decided in Go
+(`internal/desktop/pending.go`) and compiled into `BarState.js` alongside the
+bar's own vocabulary; the elapsed count is measured from the daemon's phase
+start, which rides `state.changed` and `conversation.get`
+([ADR 0051](adr/0051-the-daemon-owns-the-phase-clock.md)), so a window opened
+mid-thought shows the same thing as one that was already open.
 Notifications go out via `notify-send`
 (`org.freedesktop.Notifications`) from a bus subscriber inside the daemon —
 `ui.notifications` / `ui.notification_preview` control them (see

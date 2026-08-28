@@ -11,6 +11,11 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "ActivityState.js" as ActivityState
+// The pending assistant turn's wording (issue #158) is compiled from
+// internal/desktop/pending.go into the same generated library the bar reads.
+// The window imports it to render a string, not to decide one — what a wait
+// says, and when it starts saying how long, is tested in Go (ADR 0013).
+import "BarState.js" as BarState
 
 // Jarvix conversation window: the persistent, reviewable surface for the
 // current conversation. Like the overlay it is a thin view over jarvixd —
@@ -144,7 +149,35 @@ FloatingWindow {
   // True while assistant.delta events are building the newest turn.
   property bool assistantStreaming: false
 
-  ListModel { id: turns } // { role: "user"|"assistant"|"confirmation", text, command, outcome }
+  // --- the pending assistant turn (issue #158) ----------------------------
+  // Between submitting a question and the first token the message list used to
+  // show the user's turn and then blank space — measured at ~6 seconds on the
+  // current model stack, with nothing in the list to say why. The header's
+  // "— Thinking" was too far away to be noticed, and the bar swapped a
+  // monochrome glyph. So the wait gets a turn of its own, in the place the
+  // user is actually looking.
+  //
+  // It is one row in `turns`, marked pending, always the last one, and it
+  // *becomes* the answer: the first assistant.delta clears the flag and
+  // streams into the same row rather than appending a second bubble. That is
+  // the whole no-double-bubble/no-flash mechanism — there is only ever one row
+  // to see, and a fast answer simply replaces short-lived text in it.
+  //
+  // What it says comes from BarState.pendingTurnLine (generated from
+  // internal/desktop/pending.go): the session state, the tool in flight, and
+  // how long the daemon says this phase has been running.
+  property int pendingTurnIndex: -1   // index into turns; -1 when none is open
+  property string currentTool: ""     // tool.started / tool.finished
+  property string toolDetail: ""      // the tool's own progress label, when it has one
+  // When the current state began, on the daemon's clock (state.changed's
+  // since_ms, conversation.get's state_since_ms). Elapsed is measured from
+  // here rather than from when this window saw the transition, so a window
+  // opened five seconds into a long think says "5s" instead of starting its
+  // own clock at zero and telling a comfortable lie.
+  property double stateSinceMs: 0
+  property int pendingElapsedSec: 0
+
+  ListModel { id: turns } // { role: "user"|"assistant"|"confirmation", text, command, outcome, pos, pending }
   // Activity rows, oldest first, exactly as the daemon rendered them.
   ListModel { id: activityRows } // { seq, time, kind, label, detail, failed }
   // Archived conversations, newest first. "cid" rather than "id" because id
@@ -1537,11 +1570,17 @@ FloatingWindow {
     ? Math.max(0, Math.ceil((confirmDeadlineMs - confirmNowMs) / 1000)) : -1
 
   function appendConfirmationCard(summary, command, timeoutSec, deadlineMs) {
-    turns.append({ role: "confirmation", text: summary, command: command, outcome: "", pos: 0 })
+    // The pending turn steps aside and comes back underneath (issue #158): a
+    // card that landed *below* the row still saying "Thinking" would read as
+    // the question having arrived after the wait it interrupted.
+    takePendingTurn()
+    turns.append({ role: "confirmation", text: summary, command: command,
+      outcome: "", pos: 0, pending: false })
     pendingCardIndex = turns.count - 1
     confirmTimeoutSec = timeoutSec
     confirmDeadlineMs = deadlineMs
     confirmNowMs = Date.now()
+    syncPendingTurn()
   }
 
   // resolveConfirmationCard marks the open card with its outcome and stops
@@ -1783,11 +1822,87 @@ FloatingWindow {
   // confirmation reply shows as a row the record does not keep. The
   // turn-boundary re-request in handleEvent replaces the approximation with
   // the record, which is when every row gains its address.
+  // --- pending turn mechanics ---------------------------------------------
+  // The pending row is always the *last* row. Everything that appends to the
+  // transcript takes it off first and puts it back afterwards, so a user turn
+  // or a confirmation card can never land underneath the thing that is still
+  // waiting. Removing it loses nothing: it holds no user content, only a
+  // rendering of daemon state this window can recompute at any moment.
+
+  // takePendingTurn removes the pending row if one is open, and reports
+  // whether it did.
+  function takePendingTurn() {
+    if (pendingTurnIndex < 0) return false
+    turns.remove(pendingTurnIndex)
+    pendingTurnIndex = -1
+    return true
+  }
+
+  // resolvePendingTurn ends a wait in words — "Cancelled", or the failure —
+  // and stops the clock by closing the index. The row stays in the transcript
+  // reading as the quiet non-answer it is, until the snapshot re-requested at
+  // the turn boundary replaces this window's live approximation with the
+  // daemon's record.
+  function resolvePendingTurn(outcome) {
+    if (pendingTurnIndex < 0) return
+    turns.setProperty(pendingTurnIndex, "text", String(outcome || ""))
+    pendingTurnIndex = -1
+  }
+
+  // refreshPendingElapsed recomputes how long the current phase has run, from
+  // the daemon's phase start. Both clocks are this machine's, so the
+  // subtraction is honest; a snapshot that carried no start (an older daemon)
+  // simply never shows a count rather than inventing one.
+  function refreshPendingElapsed() {
+    if (stateSinceMs <= 0) {
+      pendingElapsedSec = 0
+      return
+    }
+    pendingElapsedSec = Math.max(0, Math.floor((Date.now() - stateSinceMs) / 1000))
+  }
+
+  // syncPendingTurn brings the pending row into line with what the daemon is
+  // doing now: opened when there is something to say, updated in place while
+  // it stays true, and closed the moment the daemon stops being in a phase of
+  // a session (BarState.pendingTurnLine answers "" for idle, error, and every
+  // non-session state). The closing half is the important one — an indicator
+  // that stops updating but stays on screen reads as a hang, which is the
+  // failure this whole feature exists to remove.
+  //
+  // Nothing opens while an answer is streaming: that row *is* the pending turn,
+  // adopted on the first delta.
+  function syncPendingTurn() {
+    // The error state is *held*, not closed. failLocked publishes the state
+    // transition before the `error` event that explains it, so closing here
+    // would make the row vanish a millisecond before it could say why — and
+    // the transition to idle that follows closes it anyway if the error event
+    // never reaches this window.
+    if (sessionState === "error") return
+    // Computed here rather than read off a binding: this runs inside the same
+    // call that just assigned sessionState, and a line that lagged one event
+    // behind would word the wait wrongly for as long as nothing else changed.
+    var line = BarState.pendingTurnLine(sessionState, currentTool, toolDetail,
+      pendingElapsedSec)
+    if (line === "") {
+      takePendingTurn()
+      return
+    }
+    if (assistantStreaming) return
+    if (pendingTurnIndex < 0) {
+      turns.append({ role: "assistant", text: line, command: "", outcome: "",
+        pos: 0, pending: true })
+      pendingTurnIndex = turns.count - 1
+      return
+    }
+    turns.setProperty(pendingTurnIndex, "text", line)
+  }
+
   function loadSnapshot(result) {
     // A reader scrolled back must stay where they are through the rebuild;
     // the tail-follower is repositioned by the count/height handlers.
     var keepY = list.followTail ? -1 : list.contentY
     turns.clear()
+    pendingTurnIndex = -1
     pendingCardIndex = -1
     confirmDeadlineMs = 0
     var snapshot = result.turns || []
@@ -1803,11 +1918,11 @@ FloatingWindow {
       if (String(snapshot[i].role) === "confirmation" && rec) {
         turns.append({ role: "confirmation", text: String(snapshot[i].text),
           command: String(rec.command || ""), outcome: confirmationRecordOutcome(rec),
-          pos: i + 1 })
+          pos: i + 1, pending: false })
         continue
       }
       turns.append({ role: String(snapshot[i].role), text: String(snapshot[i].text),
-        command: "", outcome: "", pos: i + 1 })
+        command: "", outcome: "", pos: i + 1, pending: false })
     }
     if (keepY >= 0) list.contentY = keepY
     // A window opened *during* a confirmation wait missed the events that
@@ -1822,10 +1937,23 @@ FloatingWindow {
     }
     sessionState = String(result.state || "idle")
     assistantStreaming = false
+    // Everything the pending turn needs to be rebuilt from scratch (issue
+    // #158): when this phase began, and the tool call in flight if there is
+    // one. A window opened during a long think — or rebuilt after a
+    // compositor kill (#108) — therefore shows exactly what a window that was
+    // open all along shows, counting from the same instant.
+    stateSinceMs = Number(result.state_since_ms || 0)
+    currentTool = String(result.tool || "")
+    toolDetail = String(result.tool_detail || "")
+    refreshPendingElapsed()
     // A window opened by clicking an error notification connects after the
     // `error` event has already gone out, so the snapshot carries it.
     errorStage = String(result.error_stage || "")
     errorMessage = String(result.error_message || "")
+
+    // The pending turn is rebuilt last, so it lands under the restored
+    // transcript and any confirmation card the snapshot carried.
+    syncPendingTurn()
 
     // Replay anything that arrived while the snapshot was in flight.
     snapshotPending = false
@@ -1845,18 +1973,61 @@ FloatingWindow {
         errorStage = ""
         errorMessage = ""
       }
+      // No session, no tool: a stale "Consulting claude" outliving the turn
+      // that ran it would be the pending turn's worst possible lie.
+      if (next === "idle" || next === "error") {
+        currentTool = ""
+        toolDetail = ""
+      }
       sessionState = next
+      // The phase's start on the daemon's own clock (issue #158). The elapsed
+      // count is derived from it rather than from when this window noticed,
+      // which is what lets a window opened mid-think agree with one that was
+      // already open.
+      stateSinceMs = Number(params.since_ms || 0)
+      refreshPendingElapsed()
+      syncPendingTurn()
+      break
+    case "tool.started":
+      // The step the pending turn narrates. `detail` is the tool's own
+      // present-tense label where it has one ("Consulting claude…"); the
+      // wording rules are in Go and this only carries the facts to them.
+      currentTool = String(params.tool || "")
+      toolDetail = String(params.detail || "")
+      syncPendingTurn()
       break
     case "transcript.final":
       // One per submitted utterance — normally one a session, but a reply to
       // a pending tool confirmation ("yes", spoken or typed) is a second, and
       // showing it is right: the user answered and should see their answer.
       // Events never repeat, so appending cannot double a turn.
-      turns.append({ role: "user", text: String(params.text || ""), command: "", outcome: "", pos: 0 })
+      // The pending turn steps aside so the user's words land above it and it
+      // stays the last row (issue #158) — a spoken turn reaches this while the
+      // session is already listening, so there is usually one open.
+      takePendingTurn()
+      turns.append({ role: "user", text: String(params.text || ""), command: "",
+        outcome: "", pos: 0, pending: false })
+      syncPendingTurn()
       break
     case "assistant.delta":
       if (!assistantStreaming) {
-        turns.append({ role: "assistant", text: "", command: "", outcome: "", pos: 0 })
+        // The pending turn *becomes* the answer (issue #158): the same row,
+        // its text replaced. This is the whole no-double-bubble mechanism —
+        // appending here instead would put a second bubble under the one the
+        // user has been reading, and for an answer that starts inside the
+        // elapsed threshold the placeholder would flash into existence and
+        // straight back out. The index check keeps the invariant honest: the
+        // pending row is always the last one, and streaming writes to the
+        // last one.
+        if (pendingTurnIndex >= 0 && pendingTurnIndex === turns.count - 1) {
+          turns.setProperty(pendingTurnIndex, "pending", false)
+          turns.setProperty(pendingTurnIndex, "text", "")
+          pendingTurnIndex = -1
+        } else {
+          takePendingTurn()
+          turns.append({ role: "assistant", text: "", command: "", outcome: "",
+            pos: 0, pending: false })
+        }
         assistantStreaming = true
       }
       var chunk = String(params.content || "")
@@ -1875,7 +2046,17 @@ FloatingWindow {
           turns.setProperty(turns.count - 1, "text", full)
         }
       } else if (full !== "") {
-        turns.append({ role: "assistant", text: full, command: "", outcome: "", pos: 0 })
+        // No deltas reached us (a slow client the bus dropped): the final text
+        // adopts the pending row the same way a delta would have.
+        if (pendingTurnIndex >= 0 && pendingTurnIndex === turns.count - 1) {
+          turns.setProperty(pendingTurnIndex, "pending", false)
+          turns.setProperty(pendingTurnIndex, "text", full)
+          pendingTurnIndex = -1
+        } else {
+          takePendingTurn()
+          turns.append({ role: "assistant", text: full, command: "", outcome: "",
+            pos: 0, pending: false })
+        }
       }
       assistantStreaming = false
       break
@@ -1905,6 +2086,11 @@ FloatingWindow {
       if (params.tool === "vocabulary.forget") requestVocabulary()
       break
     case "tool.finished":
+      // Nothing is in flight any more, so the pending turn goes back to
+      // narrating the state (issue #158).
+      currentTool = ""
+      toolDetail = ""
+      syncPendingTurn()
       // The gated forget executed (from this window's button or the model's
       // own call — the store changed either way): refresh the listing.
       if (params.tool === "memory.forget") requestMemory()
@@ -1967,15 +2153,33 @@ FloatingWindow {
       errorStage = String(params.stage || "")
       errorMessage = String(params.message || "something went wrong")
       assistantStreaming = false
+      // A wait that ends badly says so where the waiting was shown (issue
+      // #158). Leaving the last "Thinking · 41s" on screen would go on
+      // claiming Jarvix is working towards an answer that will never arrive;
+      // the words are the activity feed's own sentence for the same failure.
+      resolvePendingTurn(BarState.pendingTurnFailed(errorStage, errorMessage))
       break
-    case "session.finished":
     case "session.cancelled":
+      // Cancelled is an outcome, not an absence. Usually the transition to
+      // idle has already closed the pending row by the time this arrives, and
+      // the record re-requested below carries the interrupted turn's own
+      // annotation — the better answer. This covers the path where there was
+      // no transition to close it: a session cancelled before it ever left
+      // idle publishes no state.changed at all, and the row would otherwise
+      // sit there until something else happened.
+      resolvePendingTurn(BarState.pendingTurnCancelled)
+      // fall through to the shared turn-boundary handling
+    case "session.finished":
       // The daemon never lets a confirmation outlive its session; a card
       // still open here means its resolution event was dropped (this window
       // was a slow client). Close it as ended rather than leaving buttons
       // that look answerable — the daemon would refuse them anyway.
       resolveConfirmationCard("Declined — the session ended")
       assistantStreaming = false
+      // A turn that ended with the pending row still open produced no answer
+      // of its own — an intent acknowledgement, or a failure already worded
+      // above. Drop it: the snapshot re-requested below carries the record.
+      takePendingTurn()
       // A turn boundary: re-request the snapshot so the transcript becomes
       // the daemon's record rather than this window's live approximation —
       // which omits intent acknowledgements, keeps confirmation replies the
@@ -2145,6 +2349,15 @@ FloatingWindow {
       } else {
         win.sessionState = "idle"
         win.assistantStreaming = false
+        // The wait died with the connection that reported it. A pending turn
+        // left counting up against a daemon that is gone would be the one
+        // thing this indicator must never do; the "daemon is not running"
+        // panel is the explanation now.
+        win.takePendingTurn()
+        win.currentTool = ""
+        win.toolDetail = ""
+        win.stateSinceMs = 0
+        win.pendingElapsedSec = 0
         // A disconnect mid-request means the snapshot will never arrive;
         // leaving the flag set would queue every event of the next
         // connection unrendered.
@@ -2165,6 +2378,24 @@ FloatingWindow {
     interval: 2000
     repeat: false
     onTriggered: { if (win.visible && !daemon.connected) daemon.connected = true }
+  }
+
+  // Ticks the pending turn's elapsed count. Twice a second rather than once,
+  // so crossing the two-second threshold is prompt rather than looking like a
+  // hiccup; it runs only while a pending turn is actually open, so a window
+  // sitting at rest costs nothing. Like the confirmation countdown below, the
+  // figure is always *derived* from the daemon's absolute phase start — this
+  // timer only refreshes the arithmetic, so a missed or slow tick can never
+  // drift it.
+  Timer {
+    id: pendingClock
+    interval: 500
+    repeat: true
+    running: win.visible && win.socketReady && win.pendingTurnIndex >= 0
+    onTriggered: {
+      win.refreshPendingElapsed()
+      win.syncPendingTurn()
+    }
   }
 
   // Ticks the countdown on the open confirmation card. The remaining time is
@@ -4288,7 +4519,14 @@ FloatingWindow {
           font.letterSpacing: messageBody.font.pixelSize * win.chatLetterSpacing
           lineHeight: win.chatLineSpacing
           lineHeightMode: Text.ProportionalHeight
-          color: Color.popups.text
+          // The pending turn (issue #158) reads a shade quieter than an
+          // answer, so a glance can tell "still working" from "here it is"
+          // without reading. It is never the *only* signal and never a colour
+          // one: the row says "Thinking", "Running a shell command",
+          // "Consulting claude · 8s" in words, which is the whole point — and
+          // it says them without a single moving pixel, because unexplained
+          // waiting is expensive and gratuitous motion is aversive.
+          color: model.pending ? Util.alpha(Color.popups.text, 0.75) : Color.popups.text
         }
 
         // The confirmation card (issue #76): the question, the exact command

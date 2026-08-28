@@ -35,6 +35,12 @@ type BarState struct {
 	Glyph string
 	// Label is the short headline: "Listening", "Jarvix is not running".
 	Label string
+	// Short is the same fact in the fewest words that still say it — the chip
+	// the bar widget draws beside its glyph (issue #158), where a full label
+	// would crowd out the user's actual bar. Empty means "draw the bare icon":
+	// the resting states carry no chip, because a permanent one stops being an
+	// indicator and becomes furniture. See BarChipLabel (pending.go).
+	Short string
 	// Detail is the second line — what to do about it, or what is happening.
 	Detail string
 	// Urgent asks the bar to paint the icon in the theme's urgent colour
@@ -162,49 +168,61 @@ var barStates = map[string]BarState{
 	"listening": {
 		Key: "listening", Glyph: glyphMicrophone,
 		Label:  "Listening",
+		Short:  "Listening",
 		Detail: "The microphone is open",
 		Pulse:  true,
 	},
 	"transcribing": {
 		Key: "transcribing", Glyph: glyphWaveform,
 		Label:  "Transcribing",
+		Short:  "Transcribing",
 		Detail: "Turning what you said into text",
 	},
 	"thinking": {
 		Key: "thinking", Glyph: glyphBrain,
 		Label:  "Thinking",
+		Short:  "Thinking",
 		Detail: "Working out an answer",
 		Pulse:  true,
 	},
 	"responding": {
 		Key: "responding", Glyph: glyphMessage,
 		Label:  "Responding",
+		Short:  "Responding",
 		Detail: "Writing the answer",
 	},
 	"awaiting_confirmation": {
 		Key: "awaiting_confirmation", Glyph: glyphHelp,
 		Label:  "Waiting for your answer",
+		Short:  "Confirm?",
 		Detail: "A tool call needs confirming",
 		Urgent: true, Pulse: true,
 	},
 	"acting": {
 		Key: "acting", Glyph: glyphFlash,
 		Label:  "Running a command",
+		Short:  "Running",
 		Detail: "A matched intent is executing",
 	},
 	"speaking": {
 		Key: "speaking", Glyph: glyphVolume,
 		Label:  "Speaking",
+		Short:  "Speaking",
 		Detail: "Reading the answer aloud",
 	},
 	"cancelling": {
 		Key: "cancelling", Glyph: glyphCancel,
 		Label:  "Cancelling",
+		Short:  "Cancelling",
 		Detail: "Stopping the current turn",
 	},
 	BarKeyError: {
 		Key: BarKeyError, Glyph: glyphAlert,
-		Label:  "Jarvix hit a problem",
+		Label: "Jarvix hit a problem",
+		// The one non-session state that earns a chip: a held error stands
+		// until the next session starts, and it is the thing the user most
+		// needs told in words rather than in the theme's urgent colour.
+		Short:  "Problem",
 		Detail: defaultErrorDetail,
 		Urgent: true,
 	},
@@ -217,6 +235,7 @@ var barStates = map[string]BarState{
 	BarKeyUnknown: {
 		Key: BarKeyUnknown, Glyph: glyphDots,
 		Label:  "Working",
+		Short:  "Working",
 		Detail: "Jarvix is busy",
 	},
 	BarKeyWakeArmed: {
@@ -448,15 +467,17 @@ func RenderBarStateJS() string {
 // One record per state. Keys match the ` + "`state`" + ` field of a state.changed
 // event (docs/ipc.md), plus the three the widget synthesises — not-running,
 // error, and working — and the two background-listening rows the wake state
-// selects.
+// selects. ` + "`short`" + ` is the bar chip's word, empty where a state carries no
+// chip at all.
 var states = {
 `)
 	keys := BarStateKeys()
 	for i, key := range keys {
 		s := barStates[key]
-		fmt.Fprintf(&b, "  %s: { key: %s, glyph: %s, label: %s, detail: %s, urgent: %t, pulse: %t, dim: %t }%s\n",
+		fmt.Fprintf(&b, "  %s: { key: %s, glyph: %s, label: %s, short: %s, detail: %s, urgent: %t, pulse: %t, dim: %t }%s\n",
 			jsString(key), jsString(s.Key), jsString(s.Glyph), jsString(s.Label),
-			jsString(s.Detail), s.Urgent, s.Pulse, s.Dim, jsSeparator(i, len(keys)))
+			jsString(s.Short), jsString(s.Detail), s.Urgent, s.Pulse, s.Dim,
+			jsSeparator(i, len(keys)))
 	}
 	b.WriteString(`}
 
@@ -474,7 +495,8 @@ function statusFor(connected, state, errorMessage, wake) {
     var failed = states["error"]
     return {
       key: failed.key, glyph: failed.glyph, label: failed.label,
-      detail: message, urgent: failed.urgent, pulse: failed.pulse, dim: failed.dim
+      short: failed.short, detail: message, urgent: failed.urgent,
+      pulse: failed.pulse, dim: failed.dim
     }
   }
   var name = String(state || "")
@@ -531,6 +553,87 @@ function liveTooltip(status, elapsedSec, tool, toolDetail, question) {
   if (Math.floor(elapsedSec || 0) > 0) detail = formatElapsed(elapsedSec) + " · " + detail
   if (detail === "") return status.label
   return status.label + " — " + detail
+}
+
+// chipLabel mirrors desktop.BarChipLabel: the short words the bar draws beside
+// its glyph, with the elapsed count on the states that earn one, and "" where
+// the widget should draw the bare icon alone (issue #158).
+function chipLabel(status, elapsedSec) {
+  if (!status || !status.short) return ""
+  if (busyStates[status.key] && Math.floor(elapsedSec || 0) > 0) {
+    return status.short + " " + formatElapsed(elapsedSec)
+  }
+  return status.short
+}
+
+// The conversation window's pending assistant turn (issue #158). Everything
+// below mirrors internal/desktop/pending.go, which is where it is tested; the
+// window renders the string and decides nothing (ADR 0013).
+
+// The present-tense action class per tool, mirroring desktop.toolPhrases —
+// the same table the permission gate asks its short question from, so the two
+// surfaces cannot name one capability two ways.
+var toolDoing = {
+`)
+	for i, tool := range toolPhraseNames() {
+		fmt.Fprintf(&b, "  %s: %s%s\n", jsString(tool),
+			jsString(toolPhrases[tool].doing), jsSeparator(i, len(toolPhrases)))
+	}
+	b.WriteString(`}
+
+// toolActionDoing mirrors desktop.ToolActionDoing. An unlisted tool names
+// itself rather than borrowing a friendlier word.
+function toolActionDoing(tool) {
+  var name = String(tool || "")
+  if (name === "") return ""
+  return toolDoing[name] || ("Running " + name)
+}
+
+// pendingTurnLabel mirrors desktop.PendingTurnLabel: what Jarvix is doing, from
+// the session state and the tool in flight. "" means there is no pending turn —
+// which is how the window knows to stop showing one rather than leave it
+// counting up after the turn ended.
+function pendingTurnLabel(state, tool, toolDetail) {
+  var s = states[String(state || "")]
+  if (!s || !busyStates[s.key]) return ""
+  if (s.key === "awaiting_confirmation") return s.label
+  var name = String(tool || "").trim()
+  var td = String(toolDetail || "").trim()
+  if (s.key === "speaking" && name === "" && td === "") return ""
+  var detail = td.replace(/…$/, "").trim()
+  if (detail !== "") return detail
+  var phrase = toolActionDoing(name)
+  if (phrase !== "") return phrase
+  return s.label
+}
+
+// How long a wait must run before it starts saying how long. Mirrors
+// desktop.PendingElapsedThresholdSec.
+var pendingElapsedThresholdSec = ` + fmt.Sprint(PendingElapsedThresholdSec) + `
+
+// pendingTurnLine mirrors desktop.PendingTurnLine. elapsedSec is measured from
+// the daemon's own phase start (state.changed's since_ms, conversation.get's
+// state_since_ms), never from when this window happened to start watching.
+function pendingTurnLine(state, tool, toolDetail, elapsedSec) {
+  var label = pendingTurnLabel(state, tool, toolDetail)
+  if (label === "") return ""
+  var sec = Math.floor(elapsedSec || 0)
+  if (sec >= pendingElapsedThresholdSec) return label + " · " + formatElapsed(sec)
+  return label
+}
+
+// How a pending turn resolves when the user cancelled. Mirrors
+// desktop.PendingTurnCancelled.
+var pendingTurnCancelled = ` + jsString(PendingTurnCancelled) + `
+
+// pendingTurnFailed mirrors desktop.PendingTurnFailed: the activity feed's own
+// sentence for the same failure, so one error is never worded twice.
+function pendingTurnFailed(stage, message) {
+  var text = String(message || "").trim()
+  if (text === "") text = ` + jsString(defaultErrorDetail) + `
+  var at = String(stage || "").trim()
+  if (at === "") return text
+  return ` + jsString(activityErrorLabel("")) + ` + at + " — " + text
 }
 
 // The panel's menu, in draw order. Every command already exists: the plugin's
