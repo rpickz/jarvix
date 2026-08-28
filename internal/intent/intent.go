@@ -151,6 +151,20 @@ type Match struct {
 	// 2), fixed by which pattern matched — "with this window" versus "with
 	// these two windows" — never parsed from free text.
 	FocusWindows int
+	// Reminder is the one-shot reminder action this utterance asks for
+	// (#141, ADR 0046), ReminderNone for every other intent. The engine
+	// performs none of these itself — it hands the whole match to the
+	// reminder runner, which owns the store and every sentence spoken.
+	Reminder ReminderAction
+	// ReminderWhen is the raw time words a set phrase carried ("at three",
+	// "in twenty minutes") — already known to parse, because the {when} slot
+	// only matches what ParseWhen accepts. The service parses the same words
+	// again and resolves them against its own clock; no clock lives here.
+	ReminderWhen string
+	// ReminderText is the bounded free text of a set or cancel phrase — the
+	// reminder's words. It goes nowhere but the reminder store: never an
+	// argv, never a shell, never a dispatch.
+	ReminderText string
 	// VocabPhrase and VocabMeaning carry a spoken teach — "when i say
 	// {phrase} i mean {meaning}" (#129). Both empty for every other intent.
 	// Only the raw words travel: the router decides *whether* the utterance
@@ -302,6 +316,9 @@ type rule struct {
 	// FocusNone for every other rule.
 	focus        FocusAction
 	focusWindows int
+	// reminder carries a reminder rule's action (#141); ReminderNone for
+	// every other rule.
+	reminder ReminderAction
 	// vocabTeach marks the "when i say {phrase} i mean {meaning}" rules
 	// (#129): a match hands both slots to the engine via matchVocab.
 	vocabTeach bool
@@ -503,6 +520,23 @@ func New(opts Options) (*Router, error) {
 			}
 			builtinNames[p.key()] = fb.name
 			r.add(&rule{name: fb.name, pattern: p, focus: fb.action, focusWindows: fb.windows})
+		}
+	}
+
+	// The fixed half of the reminder grammar (#141) compiles with the
+	// built-ins on the focus table's exact terms: whole-utterance, in the
+	// collision map, refused to any custom intent or routine that wants one.
+	// The free-text half compiles at the very end, beside the other slot
+	// patterns, for the same precedence reason those do.
+	for _, rb := range reminderFixedTable() {
+		r.names = append(r.names, rb.name)
+		for _, raw := range rb.patterns {
+			p, err := compile(raw)
+			if err != nil {
+				return nil, fmt.Errorf("built-in intent %q pattern %q: %w", rb.name, raw, err)
+			}
+			builtinNames[p.key()] = rb.name
+			r.add(&rule{name: rb.name, pattern: p, reminder: rb.action})
 		}
 	}
 
@@ -723,6 +757,22 @@ func New(opts Options) (*Router, error) {
 				return nil, fmt.Errorf("focus pattern %q: %w", raw, err)
 			}
 			r.add(&rule{name: ft.name, pattern: p, focus: ft.action, focusWindows: ft.windows})
+		}
+	}
+	// The free-text reminder patterns (#141) compile last for the same
+	// reason: every literal phrase — the focus grammar's own "remind me
+	// where i am every {minutes} minutes" included — sits ahead of the slots
+	// in insertion order and wins its exact words.
+	for _, rt := range reminderTextTable() {
+		r.names = append(r.names, rt.name)
+		for _, raw := range rt.patterns {
+			p, err := compileReminder(raw)
+			if err != nil {
+				// Unreachable for the shipped table; a bad pattern added later
+				// must fail compilation, not silently never match.
+				return nil, fmt.Errorf("reminder pattern %q: %w", raw, err)
+			}
+			r.add(&rule{name: rt.name, pattern: p, reminder: rt.action})
 		}
 	}
 	return r, nil
@@ -965,7 +1015,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		}
 		return Match{Name: ru.name, VocabListen: phrase}, true
 	}
-	slot, hasSlot, text, ok := ru.pattern.match(fields)
+	slot, hasSlot, text, when, ok := ru.pattern.match(fields)
 	if !ok {
 		return Match{}, false
 	}
@@ -975,8 +1025,16 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Command: ru.command, UserDefined: ru.userDefined,
 		Routine: ru.routine, Script: ru.script,
 		WindowNames: ru.windowNames,
-		Focus:       ru.focus, FocusText: text, FocusWindows: ru.focusWindows,
+		Focus:       ru.focus, FocusWindows: ru.focusWindows,
+		Reminder:  ru.reminder,
 		VocabList: ru.vocabList,
+	}
+	// The one free-text value lands with the family that owns the rule, so a
+	// consumer can never read another feature's words by mistake.
+	if ru.reminder != ReminderNone {
+		m.ReminderText, m.ReminderWhen = text, when
+	} else {
+		m.FocusText = text
 	}
 	if ru.argv != nil {
 		m.Argv = ru.argv(slot)
@@ -997,11 +1055,18 @@ const (
 	slotVolume
 	slotWorkspace
 	slotMinutes
-	// slotText is the one non-numeric slot: bounded free text (a thread name
-	// or a parked thought, #123). Only compileFocus can produce it, so free
-	// text stays impossible in custom intents and routine phrases. min and
-	// max bound how many words it may swallow.
+	// slotText is a non-numeric slot: bounded free text (a thread name, a
+	// parked thought (#123), or a reminder's words (#141)). Only compileFocus
+	// and compileReminder can produce it, so free text stays impossible in
+	// custom intents and routine phrases. min and max bound how many words it
+	// may swallow.
 	slotText
+	// slotWhen is a time expression (#141): bounded words that must parse
+	// under the ParseWhen table (when.go). Validation at match time is what
+	// makes the slot deterministic the way the number slots are — an
+	// expression the table does not recognise is a miss, and the utterance
+	// belongs to the model. Only compileReminder can produce it.
+	slotWhen
 )
 
 // token is one element of a pattern: a literal word, or a bounded slot.
@@ -1048,7 +1113,7 @@ func (p pattern) maxFields() int {
 		switch t.kind {
 		case slotNone:
 			n++
-		case slotText:
+		case slotText, slotWhen:
 			n += t.max
 		default:
 			n += maxSlotWords
@@ -1080,9 +1145,9 @@ func (p pattern) matchText(fields []string) (string, bool) {
 	return strings.Join(fields[len(p.tokens):], " "), true
 }
 
-func (p pattern) match(fields []string) (slot int, hasSlot bool, text string, ok bool) {
-	ok = p.matchFrom(fields, 0, 0, &slot, &hasSlot, &text)
-	return slot, hasSlot, text, ok
+func (p pattern) match(fields []string) (slot int, hasSlot bool, text, when string, ok bool) {
+	ok = p.matchFrom(fields, 0, 0, &slot, &hasSlot, &text, &when)
+	return slot, hasSlot, text, when, ok
 }
 
 // matchFrom walks pattern token pi against field fi. A slot backtracks over
@@ -1090,8 +1155,11 @@ func (p pattern) match(fields []string) (slot int, hasSlot bool, text string, ok
 // to 35 rather than failing after greedily reading "thirty", and a text slot
 // (#123) backtracks the same way, so the literal words after it — "with this
 // window", "thread", "for {minutes} minutes" — anchor exactly one reading.
-// The recursion is bounded by the pattern length, which is single digits.
-func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool, text *string) bool {
+// A when slot (#141) backtracks too, and only a reading its table actually
+// parses can win, so the time words and the reminder's words split exactly
+// once. The recursion is bounded by the pattern length, which is single
+// digits.
+func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool, text, when *string) bool {
 	for pi < len(p.tokens) {
 		t := p.tokens[pi]
 		if t.kind == slotNone {
@@ -1110,10 +1178,27 @@ func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool
 			for n := t.min; n <= t.max && fi+n+remaining <= len(fields); n++ {
 				prev := *text
 				*text = strings.Join(fields[fi:fi+n], " ")
-				if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text) {
+				if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text, when) {
 					return true
 				}
 				*text = prev
+			}
+			return false
+		}
+		if t.kind == slotWhen {
+			// A time expression: like the number slots, validation is the
+			// match — words the ParseWhen table refuses simply do not fill
+			// the slot, and the whole utterance stays the model's.
+			for n := t.min; n <= t.max && fi+n+remaining <= len(fields); n++ {
+				if _, ok := parseWhenWords(fields[fi : fi+n]); !ok {
+					continue
+				}
+				prev := *when
+				*when = strings.Join(fields[fi:fi+n], " ")
+				if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text, when) {
+					return true
+				}
+				*when = prev
 			}
 			return false
 		}
@@ -1126,7 +1211,7 @@ func (p pattern) matchFrom(fields []string, pi, fi int, slot *int, hasSlot *bool
 			}
 			prevSlot, prevHas := *slot, *hasSlot
 			*slot, *hasSlot = v, true
-			if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text) {
+			if p.matchFrom(fields, pi+1, fi+n, slot, hasSlot, text, when) {
 				return true
 			}
 			*slot, *hasSlot = prevSlot, prevHas
