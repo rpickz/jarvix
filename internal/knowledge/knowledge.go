@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/quiesce"
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // Mode is when a feed's value is fetched.
@@ -103,6 +104,9 @@ type Options struct {
 	// as the knowledge.updated event so open windows refresh. Names only,
 	// never values (values travel over knowledge.status on request).
 	Notify func(name string)
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through.
+	Gate *statehold.Gate
 }
 
 // Service owns the feeds: the cached values, the persistence, and the eager
@@ -116,7 +120,9 @@ type Service struct {
 	timer          func(d time.Duration) (<-chan time.Time, func())
 	runner         func(ctx context.Context, feed Feed, env []string) FetchResult
 	notify         func(name string)
-	log            *slog.Logger
+	// gate is the backup write barrier (ADR 0045); nil never blocks.
+	gate *statehold.Gate
+	log  *slog.Logger
 
 	// group tracks every scheduler goroutine from the moment it starts —
 	// never a bare `go` (the #74 lesson). Drain waits on it.
@@ -225,6 +231,7 @@ func NewService(path string, opts Options, log *slog.Logger) *Service {
 		timer:          opts.Timer,
 		runner:         opts.Runner,
 		notify:         opts.Notify,
+		gate:           opts.Gate,
 		log:            log,
 		feeds:          append([]Feed(nil), opts.Feeds...),
 		states:         make(map[string]*feedState),
@@ -708,6 +715,9 @@ func (s *Service) loadLocked() {
 // still served from memory and rewritten on the next fetch. Callers hold
 // s.mu.
 func (s *Service) saveLocked() {
+	// Entered before the first byte moves, released once the values file is
+	// settled: `jarvix backup` holds this gate for its coherent cut.
+	defer s.gate.Enter()()
 	if err := writeValues(s.path, s.feeds, s.states); err != nil {
 		s.log.Warn("feed values could not be persisted; the daemon will boot cold",
 			"component", "knowledge", "error", err.Error())

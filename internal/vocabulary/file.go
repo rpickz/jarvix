@@ -108,6 +108,14 @@ func readStore(path string) ([]Entry, int, error) {
 	return entries, doc.NextID, nil
 }
 
+// ValidateFile reports whether the store at path would load: parseable TOML,
+// no unknown keys, a supported schema version. `jarvix restore` (ADR 0045)
+// proves a staged archive with it before swapping anything into place.
+func ValidateFile(path string) error {
+	_, _, err := readStore(path)
+	return err
+}
+
 // writeStore persists entries atomically: temp file in the same directory,
 // fsync, rename, fsync the directory — a crash mid-write leaves the old
 // store or the new one, never a torn file (the ADR 0011 discipline, applied

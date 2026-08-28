@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // FileStore is a Store backed by one directory: two files per conversation,
@@ -39,6 +41,11 @@ type FileStore struct {
 	// Dir is the archive directory, conventionally
 	// $XDG_STATE_HOME/jarvix/conversations.
 	Dir string
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through. It
+	// matters most here: a transcript append plus its metadata rewrite is
+	// the one multi-file mutation in the state root, held as a unit.
+	Gate *statehold.Gate
 	// Now is the clock, injectable so tests control every timestamp. Nil
 	// means time.Now. It only backstops turns that arrive without their own
 	// timestamp; the engine stamps turns as they complete.
@@ -113,6 +120,7 @@ func (s *FileStore) Append(id string, turns []Turn) (string, error) {
 	if len(turns) == 0 {
 		return id, nil
 	}
+	defer s.Gate.Enter()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureDir(); err != nil {
@@ -276,6 +284,7 @@ func (s *FileStore) SetActive(id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
+	defer s.Gate.Enter()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureDir(); err != nil {
@@ -423,6 +432,7 @@ func (s *FileStore) Delete(id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
+	defer s.Gate.Enter()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	metaErr := os.Remove(s.metaPath(id))
@@ -458,6 +468,7 @@ func (s *FileStore) clearActiveLocked(id string) {
 // unreadable ones are exactly the records a user wiping the archive would
 // least want left behind.
 func (s *FileStore) DeleteAll() (int, error) {
+	defer s.Gate.Enter()()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.Dir)

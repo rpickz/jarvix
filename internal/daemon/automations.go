@@ -42,6 +42,7 @@ import (
 func (d *Daemon) newAutomationService(cfg config.Config) *automation.Service {
 	entries := cfg.AutomationEntries()
 	svc := automation.NewService(d.paths.AutomationsFile(), automation.Options{
+		Gate:    d.stateGate,
 		Entries: entries,
 		Fire:    d.fireAutomation,
 		Publish: func(event string, data map[string]any) {

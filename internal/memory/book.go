@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // Book caps and defaults.
@@ -59,6 +61,9 @@ type BookOptions struct {
 	MaxInjectedTokens int
 	// Now is the clock, injectable so tests control every timestamp.
 	Now func() time.Time
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through.
+	Gate *statehold.Gate
 }
 
 // Book is the in-memory view of the fact store, backed by one TOML file. All
@@ -71,7 +76,9 @@ type Book struct {
 	maxFacts          int
 	maxInjectedTokens int
 	now               func() time.Time
-	log               *slog.Logger
+	// gate is the backup write barrier (ADR 0045); nil never blocks.
+	gate *statehold.Gate
+	log  *slog.Logger
 	// write persists a fact list; always writeStore outside tests. It is a
 	// field for one reason: the write-failure contracts (a failed stats
 	// write must cost exactly the stats, never the book) need a disk that
@@ -111,6 +118,7 @@ func NewBook(path string, opts BookOptions, log *slog.Logger) *Book {
 		maxFacts:          opts.MaxFacts,
 		maxInjectedTokens: opts.MaxInjectedTokens,
 		now:               opts.Now,
+		gate:              opts.Gate,
 		log:               log,
 	}
 	if b.maxFacts <= 0 {
@@ -236,6 +244,9 @@ func nextID(facts []Fact) int {
 // success, so a failed write can never leave the Book claiming a fact is
 // stored when it is not. Callers hold b.mu.
 func (b *Book) saveLocked(facts []Fact) error {
+	// Entered before the first byte moves, released once the store is
+	// settled: `jarvix backup` holds this gate for its coherent cut.
+	defer b.gate.Enter()()
 	if b.corrupt {
 		// The file on disk is one the user may be mid-way through fixing.
 		// Move it aside rather than overwrite it: the write proceeds, and

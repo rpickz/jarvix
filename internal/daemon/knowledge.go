@@ -20,6 +20,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/session"
+	"github.com/rpickz/jarvix/internal/statehold"
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
@@ -53,12 +54,13 @@ func feedSpecs(cfg config.Config) []knowledge.Feed {
 // gate is consulted here, once: the tools section is restart-class, so the
 // background-refresh decision holds for the daemon's life.
 func newKnowledgeService(cfg config.Config, paths config.Paths, policy *tools.Policy,
-	bus *session.Bus, log *slog.Logger) *knowledge.Service {
+	bus *session.Bus, gate *statehold.Gate, log *slog.Logger) *knowledge.Service {
 	if len(cfg.Knowledge.Feeds) == 0 {
 		return nil
 	}
 	refreshAllowed := policy.ToolDecision(tools.KnowledgeRefreshToolName) == tools.PolicyAllow
 	svc := knowledge.NewService(paths.FeedsFile(), knowledge.Options{
+		Gate:              gate,
 		Feeds:             feedSpecs(cfg),
 		MaxInjectedTokens: cfg.Knowledge.MaxInjectedTokens,
 		RefreshAllowed:    refreshAllowed,
