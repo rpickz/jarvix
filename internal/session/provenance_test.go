@@ -279,7 +279,7 @@ func TestTurnRecordsWhatWentIntoIt(t *testing.T) {
 	}
 
 	h.ask(t, "where do I deploy?")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	rec := lastArchivedProvenance(t, fake)
 	claims := map[string]string{}
@@ -334,7 +334,7 @@ func TestATurnThatConsumedNothingCarriesNoProvenance(t *testing.T) {
 	h := newHarness(t, archiveOptions(fake, 5))
 
 	h.ask(t, "say something")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	for _, turn := range fake.Turns(fake.Active()) {
 		if turn.Provenance != nil {
@@ -386,7 +386,7 @@ func TestCapturedContentNeverReachesTheRecordOrAnEvent(t *testing.T) {
 	// ordering this test relies on is one it establishes, not the
 	// scheduler's.
 	seen := h.collectAll(t, "what is on screen?")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	archived, err := json.Marshal(fake.Turns(fake.Active()))
 	if err != nil {
@@ -435,9 +435,9 @@ func TestProvenanceFollowsItsTurnUnderTheCap(t *testing.T) {
 	h := provenanceHarness(t, opts, nil)
 
 	h.ask(t, "first question")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 	h.ask(t, "second question")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	turns := h.engine.Conversation()
 	if len(turns) != 2 {

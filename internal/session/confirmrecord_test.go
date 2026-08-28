@@ -63,7 +63,7 @@ func TestResolvedConfirmationIsRecordedBetweenItsTurns(t *testing.T) {
 	}
 	h.countUntil(t, "session.finished")
 	h.waitIdle(t)
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 	if rec.calls != 1 {
 		t.Fatalf("approved tool ran %d times, want 1", rec.calls)
 	}
@@ -153,7 +153,7 @@ func TestTimedOutConfirmationRecordsItsOwnOutcome(t *testing.T) {
 	fire <- time.Time{} // the user never answered
 	h.countUntil(t, "session.finished")
 	h.waitIdle(t)
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	archived := fake.Turns(h.engine.ActiveConversationID())
 	if len(archived) != 3 {
@@ -188,7 +188,7 @@ func TestFailedTurnStillArchivesItsConfirmationRecord(t *testing.T) {
 	}
 	h.countUntil(t, "session.finished")
 	h.waitIdle(t)
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 	if rec.calls != 1 {
 		t.Fatalf("approved tool ran %d times, want 1", rec.calls)
 	}
@@ -226,7 +226,7 @@ func TestInterruptedTurnCarriesItsConfirmationRecord(t *testing.T) {
 		t.Fatal("expected a fresh session")
 	}
 	h.waitFor(t, "session.cancelled")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 	if rec.calls != 0 {
 		t.Fatalf("abandoned tool ran %d times", rec.calls)
 	}
