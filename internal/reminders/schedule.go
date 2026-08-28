@@ -118,10 +118,36 @@ func (s *Service) Owed() int {
 	return n
 }
 
+// idleSweep is the longest the loop will go without looking at the store when
+// nothing at all is schedulable. It is not a poll for due moments — every due
+// moment has an arm of its own — it is the store's hand-edit promise applied
+// to the one reader with no other way of hearing about a change (ADR 0049).
+const idleSweep = time.Minute
+
 // run is the loop: find the next due moment, wait for it (or for a rearm),
 // dispatch what came due, repeat. Every wait goes through the timer seam
 // and every attempt through the generation context, so tests drive it
 // deterministically and shutdown ends it promptly.
+//
+// The loop is **always armed**. This scheduler shipped with a park branch —
+// "nothing schedulable, sleep until somebody pokes me" — which the focus
+// sibling had already been cured of (ADR 0049, #152) before this one was
+// written; the two landed in parallel and the lesson missed the merge. The
+// same two failures follow from a park, and both are real here:
+//
+//   - The loop stops reading the store. Every other entry point refreshes
+//     from disk on its way in, which is what makes `reminders.toml`
+//     hand-editable without a restart. A parked loop is the one reader that
+//     never returns, so a reminder added by hand while nothing else is
+//     pending arms nothing until some unrelated verb happens to Rearm.
+//   - "Armed" becomes unobservable: a park drops `<-fire` from the select, so
+//     a tick delivered to a parked loop is never received, and a caller
+//     holding the timer waits forever rather than late.
+//
+// Deferred reminders still belong to a boundary, not to a timer — that
+// stance is unchanged and lives where it is enforced, in nextWait (which
+// skips them) and dispatchDue (which will not attempt them). Waking every
+// minute cannot fire one early; it only lets the loop notice the file.
 func (s *Service) run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -130,15 +156,7 @@ func (s *Service) run(ctx context.Context) {
 		s.dispatchDue(ctx)
 		wait, any := s.nextWait()
 		if !any {
-			// Nothing schedulable: sleep until a mutation or boundary says
-			// otherwise. Deferred reminders park here on purpose — their next
-			// chance is a boundary, not a timer.
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.rearm:
-			}
-			continue
+			wait = idleSweep
 		}
 		fire, stop := s.timer(wait)
 		select {
