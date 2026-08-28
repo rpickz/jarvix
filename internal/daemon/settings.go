@@ -367,6 +367,11 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		// The overlay switch is live-class on the same terms: turning the
 		// window overlays off must not wait for an idle engine.
 		d.cfg.Overlays = merged.Overlays
+		// And the briefing switches (#150, ADR 0050), for the reason that
+		// makes them live at all: "stop offering me briefings" is a sentence
+		// about the very next answer, and an engine that refused to rebuild
+		// is no reason for it to go unheard.
+		d.cfg.Briefing = merged.Briefing
 		d.cfgMu.Unlock()
 		return false, err.Error()
 	}

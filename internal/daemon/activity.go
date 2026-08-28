@@ -64,6 +64,12 @@ func (d *Daemon) watchActivity(ctx context.Context, events <-chan session.Event,
 			if ev.Type == "speech.replayed" {
 				d.appendActivity(ev, replayActivityRow(ev.Data))
 			}
+			// The return briefing's row (#150, ADR 0050), worded beside its
+			// own verb for the replay row's reason. It records that a
+			// briefing was given and never a word of what it said.
+			if ev.Type == "briefing.given" {
+				d.appendActivity(ev, briefingActivityRow(ev.Data))
+			}
 			for _, row := range desktop.ActivityRowsFor(ev.Type, ev.Data) {
 				d.appendActivity(ev, row)
 			}

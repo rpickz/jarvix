@@ -137,6 +137,11 @@ type Match struct {
 	// WindowNames marks "what are my windows called" (#126): the engine
 	// answers with the window-name seam's one spoken listing.
 	WindowNames bool
+	// Briefing marks "what did i miss" (#150, ADR 0050): the engine answers
+	// with the return briefing's one composed account of the absence. Like
+	// the listing above it is a flag rather than an argv — nothing about
+	// what happened while the user was away can live in this table.
+	Briefing bool
 	// Focus is the focus-thread action this utterance asks for (#123),
 	// FocusNone for every other intent. The engine performs none of these
 	// itself — it hands the whole match to the focus runner, which owns the
@@ -312,6 +317,8 @@ type rule struct {
 	windowName bool
 	// windowNames marks the "what are my windows called" rules (#126).
 	windowNames bool
+	// briefing marks the "what did i miss" rules (#150).
+	briefing bool
 	// focus and focusWindows carry a focus rule's action (#123); focus is
 	// FocusNone for every other rule.
 	focus        FocusAction
@@ -500,6 +507,22 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: WindowNamesIntentName, pattern: p, windowNames: true})
 	}
 	r.names = append(r.names, WindowNamesIntentName)
+	// The return briefing (#150, ADR 0050) compiles on exactly the same
+	// terms as the listing above, and for the same reason: a flag-carrying
+	// built-in whose answer is composed elsewhere. It is in the router at all
+	// because ADR 0017's rule applies — a fixed phrase with one right outcome
+	// must not spend a provider round-trip deciding it did.
+	for _, raw := range briefingPatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list; a bad pattern added later must
+			// fail compilation, not silently never match.
+			return nil, fmt.Errorf("briefing pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = BriefingIntentName
+		r.add(&rule{name: BriefingIntentName, pattern: p, briefing: true})
+	}
+	r.names = append(r.names, BriefingIntentName)
 	// The fixed half of the focus grammar (#123) compiles with the built-ins
 	// and enters the same collision world: a custom intent or routine
 	// claiming "take a break" is a config error naming both owners. The
@@ -858,6 +881,30 @@ var windowNamesPatterns = []string{
 	"list my window names",
 }
 
+// BriefingIntentName identifies the return briefing (#150, ADR 0050) in logs
+// and the intent.executed event.
+const BriefingIntentName = "briefing.speak"
+
+// briefingPatterns are the utterances that ask for the return briefing.
+// Fully literal, like every built-in: a near-synonym is a code change with a
+// test, not a similarity threshold. The list is deliberately anchored on
+// "miss" and "briefing" and takes no free text — "what did I miss in the
+// standup" is a question for the model about a meeting, not a request for
+// this account, and ambiguity belongs to the model. The model reaches the
+// same answer for every phrasing this table does not claim, through the
+// briefing tool.
+var briefingPatterns = []string{
+	"what did i miss",
+	"what have i missed",
+	"what did i miss while i was away",
+	"what happened while i was away",
+	"what happened while i was out",
+	"give me the briefing",
+	"give me my briefing",
+	"brief me",
+	"catch me up",
+}
+
 // Owner reports whether the router's grammar already claims this exact
 // utterance, and names the owner in the wording a config collision error
 // uses ("the built-in intent \"volume.mute\"", "the trigger for routine
@@ -1025,6 +1072,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Command: ru.command, UserDefined: ru.userDefined,
 		Routine: ru.routine, Script: ru.script,
 		WindowNames: ru.windowNames,
+		Briefing:    ru.briefing,
 		Focus:       ru.focus, FocusWindows: ru.focusWindows,
 		Reminder:  ru.reminder,
 		VocabList: ru.vocabList,

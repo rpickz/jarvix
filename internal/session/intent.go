@@ -85,6 +85,12 @@ func (e *Engine) routeIntentLocked(s *sess) bool {
 // remember, finish. It runs on its own goroutine for the same reason think()
 // does — speaking blocks, and mu must never be held across audio.
 func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started time.Time) {
+	// A matched intent is still the user being here, and the return briefing
+	// counts it as one (#150): "volume thirty" spoken at nine in the morning
+	// ends the night just as surely as a question does. The sighting is
+	// recorded before the intent runs, so a briefing asked for in the same
+	// breath is about the absence that just ended.
+	e.arrive(s)
 	if m.Control == intent.ControlStopSpeech {
 		// "Stop" is answered with silence: an acknowledgement would be the
 		// one thing the user just asked for less of. Speech is halted through
@@ -146,6 +152,8 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runNicknameAssign(s, m)
 	case m.WindowNames:
 		ack, runErr = e.runNicknameList(s)
+	case m.Briefing:
+		ack, runErr = e.runBriefing(s)
 	case m.Focus != intent.FocusNone:
 		var alive bool
 		ack, runErr, alive = e.runFocus(s, m)
@@ -202,6 +210,17 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 			// empty messages, and the archive would hold a shrug where an
 			// action happened. The ear stays silent; the history says "Done."
 			recorded = "Done."
+		}
+		if m.Briefing && runErr == nil {
+			// The composed briefing is transient (#150, ADR 0050): it is not
+			// written to any store, and it does not become conversation
+			// memory. What is recorded is that a briefing was given — the
+			// silent-script's shape above, for a different reason: the
+			// exchange belongs in the record, its content does not. The
+			// refusal path is exempt because "the return briefing is not
+			// available on this daemon" is an ordinary spoken failure with
+			// nothing to keep out of anything.
+			recorded = briefingRecord
 		}
 		e.commitTurn(s, utterance, recorded)
 	}

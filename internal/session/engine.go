@@ -148,6 +148,11 @@ type Options struct {
 	// ([tts.lexicon]). Merged over the shipped defaults; nil is the defaults
 	// alone. Spoken output only — the overlay shows the original text.
 	Lexicon map[string]string
+	// Returning is the return briefing's seam (#150, ADR 0050). Nil — a
+	// daemon built without the briefing service — makes every hook a no-op
+	// and a matched briefing phrase an honest spoken refusal, the same
+	// disabled-means-absent rule the other collaborators follow.
+	Returning Returning
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -341,6 +346,16 @@ type sess struct {
 	// session's first submit and immutable after, so it is read without the
 	// lock like wake.
 	quiet bool
+
+	// scheduled marks a session a clock started rather than a person — a
+	// routine's firing, a reminder's moment, a focus check-in. The return
+	// briefing (#150) reads it to answer the one question the wall clock
+	// cannot: whether the user is actually here. Counting a reminder that
+	// spoke at three in the morning as a sighting would erase the very
+	// absence the briefing exists to describe. Set before the session's
+	// first submit and immutable after, so it is read without the lock like
+	// wake and quiet.
+	scheduled bool
 
 	// replay marks a session that only re-speaks a recorded turn (issue
 	// #122): no transcript, no model call, and — enforced by claiming
@@ -549,6 +564,9 @@ func (e *Engine) StartScheduledSession(announce bool) (string, error) {
 		return "", err
 	}
 	e.current.quiet = !announce
+	// A clockfire is the daemon talking to itself, however loudly: it is
+	// never evidence that the user came back (#150).
+	e.current.scheduled = true
 	return id, nil
 }
 
@@ -1089,6 +1107,11 @@ const maxToolRounds = 6
 // continues, until the model produces a final answer or the round budget is
 // exhausted. Prior exchanges are carried in as conversation context.
 func (e *Engine) think(s *sess) {
+	// The user is demonstrably here, and this is where the return briefing
+	// finds that out (#150, ADR 0050). Before anything else in the turn, so
+	// the absence is measured against the previous sighting rather than
+	// against this one.
+	e.arrive(s)
 	// Desktop context is gathered here and nowhere earlier: this function is
 	// the one path that opens a provider request, so a transcript the intent
 	// router already claimed never waits on hyprctl or wl-paste (ADR 0019).
@@ -1193,6 +1216,31 @@ func (e *Engine) think(s *sess) {
 		}
 	}
 
+	// The return briefing's offer rides the first answer after an absence
+	// (#150, ADR 0050): one sentence, appended here so it reaches the ear and
+	// the overlay as part of the answer the user actually asked for — never as
+	// a separate turn nobody invited. After the loop and before the event, so
+	// what is published is what is spoken; before speaker.close(), so it is
+	// spoken at all.
+	//
+	// recordedText is what the conversation keeps, and it diverges from what
+	// was said in exactly one case: with briefing.speak_on_return the whole
+	// account is spoken here, and a briefing is transient — recording it would
+	// put into conversation memory precisely what the explicit-ask path takes
+	// care to keep out of it.
+	recordedText := finalText
+	if finalText != "" {
+		if offer, transient := e.offerLine(s); offer != "" {
+			finalText = strings.TrimSpace(finalText) + " " + offer
+			if !transient {
+				recordedText = finalText
+			}
+			if speaker != nil {
+				speaker.speak(offer)
+			}
+		}
+	}
+
 	e.publish(Event{Type: "assistant.finished", Data: map[string]any{
 		"session_id": s.id, "content": finalText, "tool_calls": toolCalls}})
 	if finalText == "" {
@@ -1211,7 +1259,7 @@ func (e *Engine) think(s *sess) {
 			return
 		}
 	}
-	e.commitTurn(s, s.userText, finalText)
+	e.commitTurn(s, s.userText, recordedText)
 
 	e.mu.Lock()
 	e.finishLocked(s)
