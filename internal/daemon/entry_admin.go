@@ -2,12 +2,21 @@ package daemon
 
 // This file is the window form dialog's daemon half (issue #99): the generic
 // entry-administration surface that lets a client read, dry-run-validate,
-// write, and delete one [[family]] entry of config.toml as a whole — the
+// write, and delete one family entry of config.toml as a whole — the
 // machinery behind the Automations tab's New/Edit/Delete forms, built with
-// zero automations-specific logic so the knowledge/memory forms (#100) are a
-// registry row here, not a new surface.
+// zero automations-specific logic so the knowledge form (#100) and the
+// Providers section (#163) are registry rows here, not new surfaces.
 //
-// Four verbs, one discipline (the settings discipline, ADR 0015, as
+// Two document shapes, one pipeline (ADR 0052). The array families
+// (`[[routines]]`, `[[scripts]]`, `[[knowledge.feeds]]`) address an entry by
+// a `name` key inside it; the keyed families (`[ai.<name>]`,
+// `[advisors.<name>]`) address it by its table key. A family declares which
+// it is (entryFamilySpec.shape) and four one-line dispatch functions do the
+// rest, so everything below — the fingerprint guard, the whole-document
+// validation, the atomic write, the reload, the events — never learns which
+// shape it is serving.
+//
+// Six verbs, one discipline (the settings discipline, ADR 0015, as
 // automations.set_enabled already applies it):
 //
 //	config.get_entry      — the whole entry as the parser sees it, plus the
@@ -28,7 +37,19 @@ package daemon
 //	                        A validation failure returns the problems and
 //	                        writes NOTHING — never a half-write.
 //	config.delete_entry   — byte-preserving removal through the same
-//	                        validate-whole-then-write pipeline.
+//	                        validate-whole-then-write pipeline, plus the
+//	                        family's own in-use guard where it declares one.
+//	config.list_entries   — every entry of one family, in the same shape, so
+//	                        a listing screen for a new family needs no
+//	                        listing code either (#163).
+//	config.test_entry     — the family's live probe, where it declares one:
+//	                        a real request against the entry as SAVED, on the
+//	                        doctor's real-probe discipline (#114). A family
+//	                        without one is refused, never answered.
+//
+// A credential a family declares (entryFamilySpec.secrets) is stripped from
+// every read and written only through a separate instruction —
+// entry_admin_secrets.go holds that rule and nothing else does.
 //
 // Every rule lives here or below (ADR 0013): the QML form renders fields,
 // ships drafts, and pins returned problems to inputs — it decides nothing.
@@ -38,6 +59,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -76,28 +98,116 @@ const (
 	entryKeyTables
 )
 
-// entryFamilySpec declares one editable [[family]]: its wire keys with their
-// shapes, the rendering order (matching the documentation's worked examples),
-// and the word activity rows use for one of its entries. This registry is the
-// only family-specific code on the surface — #100 added knowledge feeds as a
-// row here, exactly as ADR 0033 planned. (Memory entries are NOT a row:
-// memory.toml is not config.toml, and the memory book's own write path
-// serves the window instead — memory_admin.go.)
+// entryFamilyShape names how a family's entries sit in the document. It is
+// the one thing the generic pipeline must branch on, so it is a declared
+// property of the family rather than a guess made per call site (#163).
+type entryFamilyShape int
+
+const (
+	// entryShapeArray is the [[family]] array of tables the surface shipped
+	// with (#99): an entry is one element of the array, carries its identity
+	// in its own `name` key, and is addressed case-insensitively — the rule
+	// every array family already uses for uniqueness.
+	entryShapeArray entryFamilyShape = iota
+	// entryShapeKeyed is the [family.<name>] map of tables (#163): the entry
+	// IS its table key. It is addressed EXACTLY, because TOML keys and the
+	// Go maps the loader decodes them into are case-sensitive, and matching
+	// "OpenAI" to "openai" would edit a different endpoint than the one
+	// `ai.provider` resolves. The wire shape is unchanged — a draft still
+	// carries `name` — but that key renders as the table header rather than
+	// as a stored field, so one form drives both shapes.
+	entryShapeKeyed
+)
+
+// entrySecretSpec declares one key of a family that holds a credential. It is
+// the registry's whole vocabulary for secrets, and everything the credential
+// rules require follows from it: the key is stripped from every read, refused
+// in every draft, and written only through the separate `secrets` instruction
+// (entrySecretWrite) — a channel with exactly one destination, the file.
+type entrySecretSpec struct {
+	// key is the TOML key holding the credential itself.
+	key string
+	// envKey names the sibling key that points at an environment variable to
+	// read the credential from instead — the preferred indirection, because a
+	// key that is never in the file is a key a backup cannot copy
+	// (config.Endpoint.Key prefers it).
+	envKey string
+	// label is what the form calls this credential in its own words.
+	label string
+}
+
+// entryNote is something true about a saved draft that is not a problem: a
+// consequence the user must SEE before they save, stated in their words and
+// keyed to the field that causes it. The advisor tier is the case that
+// demands it (ADR 0016) — a hand-written argv silently drops an advisor from
+// allow to ask, and a form that did not say so would let someone loosen or
+// tighten a permission gate without noticing.
+type entryNote struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// entryFamilySpec declares one editable family: its shape, its wire keys with
+// their value kinds, the rendering order (matching the documentation's worked
+// examples), and the word activity rows use for one of its entries. This
+// registry is the only family-specific code on the surface — #100 added
+// knowledge feeds as a row here and #163 added the two map-shaped families,
+// exactly as ADR 0033 planned. (Memory entries are NOT a row: memory.toml is
+// not config.toml, and the memory book's own write path serves the window
+// instead — memory_admin.go.)
 type entryFamilySpec struct {
 	family   string
 	kind     string
+	shape    entryFamilyShape
 	keys     map[string]entryKeyKind
 	keyOrder []string
 	subKeys  map[string]map[string]entryKeyKind
 	subOrder map[string][]string
+	// reserved names the keys that share a keyed family's own table without
+	// being entries — [ai]'s provider, model, system_prompt and friends. Only
+	// the parser decides what is an entry; this set decides what an entry is
+	// not. Empty for every other family.
+	reserved map[string]bool
+	// secrets lists this family's credential keys. Empty for a family that
+	// holds none, which is what keeps the machinery inert rather than
+	// conditional everywhere.
+	secrets []entrySecretSpec
 	// pending, when set, reports why a validly written entry cannot go live
-	// on this daemon ("" when it can). It exists for the one family with a
+	// on this daemon ("" when it can). It exists for the families with a
 	// restart-class boundary: with zero feeds at boot there is no knowledge
-	// service to adopt the first one (ADR 0031), and the save's reply must
-	// say so rather than let the window show a saved feed that never fetches.
-	// A registry field, not a family-specific branch in the flow — the
-	// pressure valve ADR 0033 prescribed.
+	// service to adopt the first one (ADR 0031), and the advisor tool is
+	// wired once at construction (ADR 0016), so the save's reply must say so
+	// rather than let the window show a saved entry that never runs. A
+	// registry field, not a family-specific branch in the flow — the pressure
+	// valve ADR 0033 prescribed.
 	pending func(d *Daemon) string
+	// guardDelete, when set, reports why one entry of this family cannot be
+	// removed ("" when it can), judged against the document as it stands. It
+	// exists because whole-document validation cannot make every in-use
+	// check: deleting the [ai.<name>] table of a PRESET endpoint still
+	// validates, because the preset's defaults survive the file — while
+	// leaving the user's chosen provider pointing at something they can no
+	// longer see or edit.
+	guardDelete func(cfg config.Config, name string) string
+	// notes, when set, states what the draft's configuration EARNS, so the
+	// form can show it beside the field that decides it.
+	notes func(name string, draft map[string]any) []entryNote
+	// nameProblems lists substrings that mark a whole-document problem as
+	// belonging on the name field even though it carries no `family.name.key`
+	// label — the validators that word a bad name as a sentence about the
+	// name rather than about a key of the entry.
+	nameProblems []string
+	// probe, when set, is this family's live Test action: a minimal real
+	// request against the entry as the file configures it, on the doctor's
+	// real-probe discipline (#114). Nil means config.test_entry refuses the
+	// family rather than inventing a result for it.
+	probe func(ctx context.Context, cfg config.Config, name string) map[string]any
+	// assistantReason, when non-empty, is why the assistant's own config
+	// tools may not reach this family at all — the entry half of #109's
+	// exclusion wall, worded for speaking. A family carrying it is not
+	// denied to the model, it is absent from the surface the model operates
+	// on (config_admin_tools.go), exactly as an excluded SETTING is.
+	assistantReason string
 }
 
 // entryAdminFamilies lists the families the window may edit (#99: the
@@ -158,6 +268,65 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 			return ""
 		},
 	},
+	// The two map-shaped families (#163, ADR 0052), declared in
+	// entry_admin_providers.go because what they add beyond a key list —
+	// a credential, a live probe, an in-use guard, an earned permission tier
+	// — is family knowledge, and this map is the index, not the encyclopaedia.
+	"ai":       aiEndpointFamily,
+	"advisors": advisorFamily,
+}
+
+// assistantEntryFamily resolves a family name for the ASSISTANT's config
+// tools. It is entryFamily minus the families the model may not administer at
+// all (#109's exclusion wall, the entry half): [ai] is the brain and the
+// credentials that buy it, and [advisors] are commands the daemon executes
+// with the user's own authentication and whose tiers feed the permission gate.
+// Both are refused structurally — a family the tool surface does not have —
+// with the spoken-ready reason the registry declares, exactly as an excluded
+// SETTING is refused by AssistantExcludedSettingReason.
+func assistantEntryFamily(family string) (entryFamilySpec, *ipc.Error) {
+	spec, ipcErr := entryFamily(family)
+	if ipcErr != nil {
+		return spec, ipcErr
+	}
+	if spec.assistantReason != "" {
+		return entryFamilySpec{}, ipc.Errorf(ipc.CodeInvalidParams, "%s", spec.assistantReason)
+	}
+	return spec, nil
+}
+
+// assistantEntryFamilies lists the families the assistant MAY administer,
+// sorted — the set the tool layer's own closed list is pinned to.
+func assistantEntryFamilies() []string {
+	names := make([]string, 0, len(entryAdminFamilies))
+	for name, spec := range entryAdminFamilies {
+		if spec.assistantReason == "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tableLabel is how this family's tables are written in config.toml, for
+// messages that name the shape rather than the entry: `[[routines]]` for an
+// array family, `[ai.<name>]` for a keyed one.
+func (s entryFamilySpec) tableLabel() string {
+	if s.shape == entryShapeKeyed {
+		return "[" + s.family + ".<name>]"
+	}
+	return "[[" + s.family + "]]"
+}
+
+// secretFor returns the declaration of key as a credential, or nil when the
+// family holds none by that name.
+func (s entryFamilySpec) secretFor(key string) *entrySecretSpec {
+	for i := range s.secrets {
+		if s.secrets[i].key == key {
+			return &s.secrets[i]
+		}
+	}
+	return nil
 }
 
 // entryFamily resolves a wire family name against the registry.
@@ -173,6 +342,102 @@ func entryFamily(family string) (entryFamilySpec, *ipc.Error) {
 	return entryFamilySpec{}, ipc.Errorf(ipc.CodeInvalidParams,
 		"family %q is not editable from the window; the editable families are %s",
 		family, strings.Join(names, ", "))
+}
+
+// The shape dispatch. Four one-line functions are the ENTIRE cost of a second
+// document shape on this surface: every handler below reads, rewrites, and
+// removes an entry through these, so the pipeline (fingerprint guard,
+// whole-document validation, atomic write, reload, events) is one piece of
+// code that never learns which shape it is serving.
+
+// entryReadValue reads one entry back as the parser sees it. For a keyed
+// family the table key is folded in as `name`, so both shapes hand the form
+// the same map: identity in `name`, everything else as written.
+func entryReadValue(spec entryFamilySpec, raw []byte, name string) (map[string]any, bool, error) {
+	if spec.shape == entryShapeKeyed {
+		entry, ok, err := config.KeyedEntryValue(raw, spec.family, name, spec.reserved)
+		if !ok || err != nil {
+			return nil, ok, err
+		}
+		out := make(map[string]any, len(entry)+1)
+		for k, v := range entry {
+			out[k] = v
+		}
+		out["name"] = strings.TrimSpace(name)
+		return out, true, nil
+	}
+	return config.EntryValue(raw, spec.family, name)
+}
+
+// entryRewriteUpsert writes one whole entry into the document, byte-preserving
+// everything outside its block.
+func entryRewriteUpsert(spec entryFamilySpec, raw []byte, name string, draft map[string]any) ([]byte, error) {
+	if spec.shape == entryShapeKeyed {
+		return config.UpsertKeyedEntryTOML(raw, spec.family, name, draft, spec.keyOrder, spec.reserved)
+	}
+	return config.UpsertEntryTOML(raw, spec.family, name, draft, spec.keyOrder, spec.subOrder)
+}
+
+// entryRewriteDelete removes one entry from the document.
+func entryRewriteDelete(spec entryFamilySpec, raw []byte, name string) ([]byte, error) {
+	if spec.shape == entryShapeKeyed {
+		return config.DeleteKeyedEntryTOML(raw, spec.family, name, spec.reserved)
+	}
+	return config.DeleteEntryTOML(raw, spec.family, name)
+}
+
+// entryNameCollision reports a keyed draft whose name is already a table, as
+// a problem on the name field.
+//
+// It exists because the shapes fail differently. An array family's duplicate
+// is caught by the loader's own validator, which words it and names the
+// entry. A keyed duplicate is a duplicate TOML TABLE — the rewritten document
+// simply does not parse, and the read-back guard would refuse the save with
+// "unparsable document", which is true and useless. The user typed a name
+// that is taken; the form should say so on the name field.
+func entryNameCollision(spec entryFamilySpec, raw []byte, target string, draft map[string]any) *entryProblem {
+	if spec.shape != entryShapeKeyed {
+		return nil
+	}
+	name, _ := draft["name"].(string)
+	name = strings.TrimSpace(name)
+	if name == "" || name == strings.TrimSpace(target) {
+		return nil
+	}
+	names, err := config.KeyedEntryNames(raw, spec.family, spec.reserved)
+	if err != nil {
+		return nil // the document does not parse; the pipeline says so with its own words
+	}
+	for _, existing := range names {
+		if existing == name {
+			return &entryProblem{Field: "name", Message: fmt.Sprintf(
+				"there is already a [%s.%s] table; choose another name, or open that one to edit it",
+				spec.family, name)}
+		}
+	}
+	return nil
+}
+
+// entryLabel is how this family's validators label one entry in a
+// whole-document problem — the prefix classifyEntryProblem strips to find the
+// field a message belongs to. Arrays label by position (`routines[2]`), keyed
+// tables by their key (`ai.openai`), because that is what each family's
+// validator already writes.
+func entryLabel(spec entryFamilySpec, index int, name string) (string, bool) {
+	if spec.shape == entryShapeKeyed {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return "", false
+		}
+		return spec.family + "." + trimmed, true
+	}
+	if index < 0 {
+		return "", false
+	}
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
+		return fmt.Sprintf("%s[%d] (%q)", spec.family, index, trimmed), true
+	}
+	return fmt.Sprintf("%s[%d]", spec.family, index), true
 }
 
 // Entry-change sources: who drove one write through this surface. On the
@@ -197,6 +462,78 @@ func (d *Daemon) registerEntryAdminMethods() {
 	d.server.Handle("config.delete_entry", func(params json.RawMessage) (any, error) {
 		return d.entryAdminDelete(params, entrySourceWindow)
 	})
+	d.server.Handle("config.test_entry", d.entryAdminTest)
+	d.server.Handle("config.list_entries", d.entryAdminList)
+}
+
+// entryAdminList serves config.list_entries: every entry of one family, from
+// the file, in the same secret-stripped shape config.get_entry returns one.
+//
+// It is registry-driven rather than summarised per family (the shape the
+// assistant's bridge builds, which needs typed fields for a spoken sentence):
+// a listing screen renders whichever keys it has widgets for, so handing it
+// the whole entry means a family added to the registry needs no listing code
+// at all — the same claim the form already makes about the four write verbs.
+func (d *Daemon) entryAdminList(params json.RawMessage) (any, error) {
+	var p struct {
+		Family string `json:"family"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "config.list_entries params: %v", err)
+		}
+	}
+	spec, ipcErr := entryFamily(p.Family)
+	if ipcErr != nil {
+		return nil, ipcErr
+	}
+	raw, err := os.ReadFile(d.paths.ConfigFile())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	names, err := entryNamesOf(spec, raw)
+	if err != nil {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+	}
+	entries := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		entry, ok, err := entryReadValue(spec, raw, name)
+		if err != nil || !ok {
+			continue
+		}
+		row := map[string]any{"entry": stripEntrySecrets(spec, entry)}
+		if states := entrySecretStates(spec, entry); len(states) > 0 {
+			row["secrets"] = states
+		}
+		if spec.notes != nil {
+			row["notes"] = spec.notes(name, entry)
+		}
+		entries = append(entries, row)
+	}
+	fp := config.FingerprintMissing
+	if raw != nil {
+		fp = config.Fingerprint(raw)
+	}
+	result := map[string]any{
+		"fingerprint": fp, "family": spec.family, "kind": spec.kind,
+		"entries": entries,
+	}
+	// The one fact a Providers listing needs that no entry carries: which
+	// endpoint `ai.provider` selects, so the row can say "in use" and the
+	// delete button can explain itself before it is pressed.
+	if spec.family == "ai" {
+		result["in_use"] = d.runningConfig().AI.Provider
+	}
+	return result, nil
+}
+
+// entryNamesOf lists one family's entry names in document order (arrays) or
+// sorted (keyed tables) — the order each shape can promise.
+func entryNamesOf(spec entryFamilySpec, raw []byte) ([]string, error) {
+	if spec.shape == entryShapeKeyed {
+		return config.KeyedEntryNames(raw, spec.family, spec.reserved)
+	}
+	return config.EntryNames(raw, spec.family)
 }
 
 // entryAdminGet serves config.get_entry: one whole entry, straight from the
@@ -220,18 +557,32 @@ func (d *Daemon) entryAdminGet(params json.RawMessage) (any, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
 	}
-	entry, ok, err := config.EntryValue(raw, spec.family, p.Name)
+	entry, ok, err := entryReadValue(spec, raw, p.Name)
 	if err != nil {
 		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
 	}
 	if !ok {
-		return nil, ipc.Errorf(ipc.CodeInvalidParams, "no [[%s]] entry is named %q", spec.family, p.Name)
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "no %s entry is named %q", spec.kind, p.Name)
 	}
 	fp := config.FingerprintMissing
 	if raw != nil {
 		fp = config.Fingerprint(raw)
 	}
-	return map[string]any{"fingerprint": fp, "family": spec.family, "entry": entry}, nil
+	// The credential leaves the entry here and goes no further: what the wire
+	// carries about it is presence, not value (entrySecretStates).
+	secrets := entrySecretStates(spec, entry)
+	result := map[string]any{
+		"fingerprint": fp, "family": spec.family,
+		"entry": stripEntrySecrets(spec, entry),
+	}
+	if len(secrets) > 0 {
+		result["secrets"] = secrets
+	}
+	if spec.notes != nil {
+		name, _ := entry["name"].(string)
+		result["notes"] = spec.notes(name, entry)
+	}
+	return result, nil
 }
 
 // entryAdminValidate serves config.validate_entry: the dry run behind live
@@ -248,19 +599,32 @@ func (d *Daemon) entryAdminValidate(params json.RawMessage) (any, error) {
 	if next, ok := entryNextFire(draft); ok {
 		result["next_fire"] = next
 	}
+	raw, err := os.ReadFile(d.paths.ConfigFile())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	// The credentials are folded into the draft before anything looks at it,
+	// so the dry run validates the document that a save would produce — and
+	// the scrubber below is what guarantees the values cannot come back out
+	// of it, whatever any validator chooses to quote.
+	scrub, secretProblems := d.applyEntrySecrets(spec, raw, p.Name, draft, p.Secrets)
+	problems = append(problems, secretProblems...)
+	if collision := entryNameCollision(spec, raw, p.Name, draft); collision != nil {
+		problems = append(problems, *collision)
+	}
 	if len(problems) == 0 {
-		raw, err := os.ReadFile(d.paths.ConfigFile())
-		if err != nil && !os.IsNotExist(err) {
-			return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
-		}
-		newRaw, err := config.UpsertEntryTOML(raw, spec.family, p.Name, draft, spec.keyOrder, spec.subOrder)
+		newRaw, err := entryRewriteUpsert(spec, raw, p.Name, draft)
 		if err != nil {
-			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%s", scrub(err.Error()))
 		}
 		problems = d.entryDocProblems(newRaw, spec, draft)
 	}
+	if spec.notes != nil {
+		name, _ := draft["name"].(string)
+		result["notes"] = spec.notes(name, draft)
+	}
 	result["valid"] = len(problems) == 0
-	result["problems"] = problems
+	result["problems"] = scrubProblems(scrub, problems)
 	return result, nil
 }
 
@@ -274,13 +638,22 @@ func (d *Daemon) entryAdminUpsert(params json.RawMessage, source string) (map[st
 	if ipcErr != nil {
 		return nil, ipcErr
 	}
+	raw, err := os.ReadFile(d.paths.ConfigFile())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+	}
+	scrub, secretProblems := d.applyEntrySecrets(spec, raw, p.Name, draft, p.Secrets)
+	problems = append(problems, secretProblems...)
+	if collision := entryNameCollision(spec, raw, p.Name, draft); collision != nil {
+		problems = append(problems, *collision)
+	}
 	if len(problems) > 0 {
-		return nil, entryProblemsError(problems)
+		return nil, entryProblemsError(scrubProblems(scrub, problems))
 	}
 	return d.writeEntryChange(spec, p.Fingerprint, p.Name == "",
 		func(raw []byte) ([]byte, error) {
-			return config.UpsertEntryTOML(raw, spec.family, p.Name, draft, spec.keyOrder, spec.subOrder)
-		}, draft, source)
+			return entryRewriteUpsert(spec, raw, p.Name, draft)
+		}, draft, source, scrub)
 }
 
 // entryAdminDelete serves config.delete_entry: confirmed removal. The same
@@ -301,10 +674,27 @@ func (d *Daemon) entryAdminDelete(params json.RawMessage, source string) (map[st
 	if ipcErr != nil {
 		return nil, ipcErr
 	}
+	// The in-use guard runs before anything is rewritten, against the file as
+	// it stands, so a refusal is a refusal with a reason rather than a
+	// document that failed to validate for a reason nobody would connect to
+	// the delete button they pressed.
+	if spec.guardDelete != nil {
+		raw, err := os.ReadFile(d.paths.ConfigFile())
+		if err != nil && !os.IsNotExist(err) {
+			return nil, ipc.Errorf(ipc.CodeInternalError, "read config: %v", err)
+		}
+		cfg, err := config.ParseBytes(raw)
+		if err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+		}
+		if reason := spec.guardDelete(cfg, p.Name); reason != "" {
+			return nil, entryProblemsError([]entryProblem{{Message: reason}})
+		}
+	}
 	result, err := d.writeEntryChange(spec, p.Fingerprint, false,
 		func(raw []byte) ([]byte, error) {
-			return config.DeleteEntryTOML(raw, spec.family, p.Name)
-		}, nil, source)
+			return entryRewriteDelete(spec, raw, p.Name)
+		}, nil, source, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -318,10 +708,11 @@ func (d *Daemon) entryAdminDelete(params json.RawMessage, source string) (map[st
 // whole number" to its input exactly like a validator message.
 func decodeEntryParams(method string, params json.RawMessage) (
 	p struct {
-		Family      string          `json:"family"`
-		Name        string          `json:"name"`
-		Entry       json.RawMessage `json:"entry"`
-		Fingerprint string          `json:"fingerprint"`
+		Family      string                      `json:"family"`
+		Name        string                      `json:"name"`
+		Entry       json.RawMessage             `json:"entry"`
+		Fingerprint string                      `json:"fingerprint"`
+		Secrets     map[string]entrySecretWrite `json:"secrets"`
 	}, spec entryFamilySpec, draft map[string]any, problems []entryProblem, ipcErr *ipc.Error) {
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -350,7 +741,11 @@ func decodeEntryParams(method string, params json.RawMessage) (
 // is the byte-preserving editor call; draft is nil for a delete. On any
 // refusal the file is untouched — the mutation tests pin it.
 func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, created bool,
-	rewrite func([]byte) ([]byte, error), draft map[string]any, source string) (map[string]any, error) {
+	rewrite func([]byte) ([]byte, error), draft map[string]any, source string,
+	scrub func(string) string) (map[string]any, error) {
+	if scrub == nil {
+		scrub = func(s string) string { return s }
+	}
 	path := d.paths.ConfigFile()
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -371,14 +766,14 @@ func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, crea
 
 	newRaw, err := rewrite(raw)
 	if err != nil {
-		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+		return nil, ipc.Errorf(ipc.CodeInvalidParams, "%s", scrub(err.Error()))
 	}
 	if problems := d.entryDocProblems(newRaw, spec, draft); len(problems) > 0 {
-		return nil, entryProblemsError(problems)
+		return nil, entryProblemsError(scrubProblems(scrub, problems))
 	}
 	fileCfg, err := config.ParseBytes(newRaw)
 	if err != nil {
-		return nil, ipc.Errorf(ipc.CodeInternalError, "rewrite config: %v", err)
+		return nil, ipc.Errorf(ipc.CodeInternalError, "rewrite config: %s", scrub(err.Error()))
 	}
 	fileCfg.Voices = fileCfg.InstalledVoices(d.paths)
 	if err := config.WriteFileAtomic(path, newRaw); err != nil {
@@ -386,6 +781,7 @@ func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, crea
 	}
 
 	applied, reason := d.applyRuntime(fileCfg)
+	reason = scrub(reason)
 	// A family behind a restart-class boundary (the first knowledge feed)
 	// was written and "applied" only in the sense that nothing else changed;
 	// the entry itself is not live, and honesty beats a row that pretends the
@@ -453,8 +849,21 @@ func sanitizeEntry(spec entryFamilySpec, loose map[string]any) (map[string]any, 
 	for key, value := range loose {
 		kind, ok := spec.keys[key]
 		if !ok {
+			if spec.secretFor(key) != nil {
+				// A credential in the draft is refused by SHAPE, not by
+				// policy: the entry map is echoed to the form, logged on the
+				// way through, and quoted in problems, and a secret must
+				// never travel in something with that many destinations. It
+				// has its own write-only channel (entrySecretWrite) and this
+				// message says so — without repeating what was sent.
+				problems = append(problems, entryProblem{Field: key, Message: fmt.Sprintf(
+					"%q is never sent inside the entry; set it through the credential field, "+
+						"which is write-only", key)})
+				continue
+			}
 			problems = append(problems, entryProblem{Field: key, Message: fmt.Sprintf(
-				"%q is not a [[%s]] key the window can write; remove it from the draft", key, spec.family)})
+				"%q is not a %s key the window can write; remove it from the draft",
+				key, spec.tableLabel())})
 			continue
 		}
 		if kind == entryKeyTables {
@@ -613,7 +1022,10 @@ func (d *Daemon) entryDocProblems(newRaw []byte, spec entryFamilySpec, draft map
 		return out
 	}
 	name, _ := draft["name"].(string)
-	index := entryIndexByName(newRaw, spec.family, name)
+	index := -1
+	if spec.shape == entryShapeArray {
+		index = entryIndexByName(newRaw, spec.family, name)
+	}
 	var phrases []string
 	if p, ok := draft["phrases"].([]string); ok {
 		phrases = p
@@ -652,16 +1064,33 @@ var entryStepField = regexp.MustCompile(`^steps\[(\d+)\]: `)
 func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases []string, msg string) entryProblem {
 	labelled := msg
 	prefixed := false
-	if index >= 0 {
-		label := fmt.Sprintf("%s[%d]", spec.family, index)
-		if trimmed := strings.TrimSpace(name); trimmed != "" {
-			label = fmt.Sprintf("%s[%d] (%q)", spec.family, index, trimmed)
+	if label, ok := entryLabel(spec, index, name); ok {
+		if spec.shape == entryShapeKeyed {
+			// A keyed family's validators write `family.name.key …` — the
+			// dotted path a user would type — so the label and the field are
+			// separated by a dot, not a colon or a bracket.
+			if rest, ok := strings.CutPrefix(msg, label+"."); ok {
+				token := strings.TrimSuffix(strings.SplitN(rest, " ", 2)[0], ":")
+				if _, known := spec.keys[token]; known {
+					return entryProblem{Field: token, Message: msg}
+				}
+				return entryProblem{Message: msg}
+			}
 		}
 		if rest, ok := strings.CutPrefix(msg, label+": "); ok {
 			labelled, prefixed = rest, true
 		} else if rest, ok := strings.CutPrefix(msg, label+" "); ok {
 			// The step labels: `routines[0] ("x") steps[1]: ...`.
 			labelled, prefixed = rest, true
+		}
+	}
+	// Some validators word a bad NAME as a sentence about the name rather
+	// than about a key of the entry, so they carry no label to strip. The
+	// registry names those wordings; the field where the fix happens is the
+	// name either way.
+	for _, hint := range spec.nameProblems {
+		if strings.Contains(msg, hint) && strings.Contains(msg, strconv.Quote(strings.TrimSpace(name))) {
+			return entryProblem{Field: "name", Message: msg}
 		}
 	}
 	if !prefixed {

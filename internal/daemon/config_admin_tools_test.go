@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
@@ -81,15 +80,28 @@ func lastToolResult(t *testing.T, provider *ai.Fake) string {
 
 // TestConfigToolFamiliesMirrorTheDaemonRegistry is the drift guard the tools'
 // family list promises: the closed set the tools refuse outside of is exactly
-// the set the daemon's entry registry administers.
+// the set of the daemon's registry the ASSISTANT may administer — the registry
+// minus the families behind the exclusion wall (#109, #163). A family added to
+// the registry without a decision about the model is caught here.
 func TestConfigToolFamiliesMirrorTheDaemonRegistry(t *testing.T) {
-	var daemonFamilies []string
-	for name := range entryAdminFamilies {
-		daemonFamilies = append(daemonFamilies, name)
-	}
-	sort.Strings(daemonFamilies)
+	daemonFamilies := assistantEntryFamilies()
 	if got := tools.ConfigEntryFamilies(); !reflect.DeepEqual(got, daemonFamilies) {
 		t.Errorf("tool families %v drifted from the daemon registry %v", got, daemonFamilies)
+	}
+	// And the wall itself is not empty: the families it holds back are named,
+	// so a future edit that quietly opened one would fail here rather than
+	// ship a model that can rewrite its own brain.
+	for _, family := range []string{"ai", "advisors"} {
+		spec, ok := entryAdminFamilies[family]
+		if !ok {
+			t.Fatalf("the registry lost the %q family", family)
+		}
+		if spec.assistantReason == "" {
+			t.Errorf("family %q is reachable by the assistant; it must not be", family)
+		}
+		if _, err := assistantEntryFamily(family); err == nil {
+			t.Errorf("assistantEntryFamily(%q) resolved; the exclusion wall is open", family)
+		}
 	}
 }
 

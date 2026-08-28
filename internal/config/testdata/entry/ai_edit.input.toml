@@ -1,0 +1,12 @@
+# What Jarvix thinks with.
+[ai]
+provider = "openai"
+model = "gpt-4o-mini"
+
+# The cloud endpoint.
+[ai.openai]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[ai.ollama]
+base_url = "http://127.0.0.1:11434/v1"

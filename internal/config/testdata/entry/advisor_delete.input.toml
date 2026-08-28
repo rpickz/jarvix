@@ -1,0 +1,10 @@
+[ai]
+provider = "ollama"
+model = "llama3.2:3b"
+
+[advisors.claude]
+binary = "/usr/bin/claude"
+
+# Uninstalled last week.
+[advisors.codex]
+binary = "/usr/bin/codex"

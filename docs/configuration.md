@@ -55,13 +55,26 @@ to each field in the settings screen:
 
 A reload that fails validation keeps the running configuration and reports
 why — the daemon never hot-swaps into a broken state. `[[intents.custom]]`
-entries are structured tables rather than single values, so like
-`[ai.<name>]` they stay hand-edited; they are picked up by the next
-idle-class reload or a restart. Secrets never pass
-through the settings surface: API keys are shown as presence only
-("OPENAI_API_KEY: set") and cannot be entered there; manage them via the
-environment as described below. Endpoint tables (`[ai.<name>]`) also stay
-hand-edited — the file remains authoritative for everything.
+entries are structured tables rather than single values, so they stay
+hand-edited; they are picked up by the next idle-class reload or a restart.
+
+Endpoint tables (`[ai.<name>]`) and advisor tables (`[advisors.<name>]`) are
+edited in the window's **Providers** section (issue #163) — added, changed,
+tested and removed through validated forms, written by the same
+byte-preserving editor the Automations and Knowledge forms use, so the file
+stays authoritative and everything you hand-wrote around them survives. An
+endpoint change is live on the standard idle-class reload; an advisor change
+is restart-class (the advisor tool is wired at daemon boot) and the form says
+so when you save.
+
+**Credentials are write-only from every surface.** A stored `api_key` is never
+displayed, never returned over IPC, and never quoted in an error — the window
+is told only whether a key is available, whether it comes from the environment
+or the file, and, for `api_key_env`, which variable is expected and whether it
+currently resolves. There is no masked preview, because a masked prefix is a
+prefix of the key and a mask of the right length is the key's length. The form
+offers Replace and Clear; `api_key_env` is offered as the safer choice, since a
+key that is never in the file is a key no backup of the file can copy.
 
 The settings screen shows each option's external readiness inline (Kokoro
 not set up, Whisper model missing, input access not granted), reusing
@@ -1972,7 +1985,11 @@ installed and speaks the answer back
 billing; Jarvix never passes its own API keys on.
 
 `jarvix setup` detects the known CLIs on PATH and writes a table per advisor
-you accept. That table is all it takes — the shipped preset supplies the
+you accept; the window's **Providers** section adds, edits and removes them
+afterwards, stating on the form which permission tier the configuration you
+are looking at earns — see below, and note that the form says it *before* you
+save, so a tier can never move without you seeing it. That table is all it
+takes — the shipped preset supplies the
 non-interactive command line, a description for the model, and a 120-second
 timeout:
 

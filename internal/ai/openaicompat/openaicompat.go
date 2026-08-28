@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -404,25 +405,81 @@ func parseNumCtx(parameters string) int {
 	return 0
 }
 
+// ProbeOutcome is what one endpoint probe found. Three outcomes, because
+// three are what a user can act on: the endpoint answered, the endpoint
+// answered and refused these credentials, or nothing usable answered at all.
+type ProbeOutcome string
+
+const (
+	// ProbeReachable: the endpoint listed its models. It is up and these
+	// credentials work.
+	ProbeReachable ProbeOutcome = "reachable"
+	// ProbeUnauthorised: the endpoint is up and rejected the credentials
+	// (401/402/403). The fix is the key, not the URL.
+	ProbeUnauthorised ProbeOutcome = "unauthorised"
+	// ProbeUnreachable: nothing usable answered — a refused dial, a timeout,
+	// a TLS failure, or an HTTP status that means this is not an
+	// OpenAI-compatible API root. The fix is the URL or the service.
+	ProbeUnreachable ProbeOutcome = "unreachable"
+)
+
+// ProbeReport is one probe's finding: the outcome, the HTTP status when there
+// was one (0 when the request never completed), and the service's own words
+// about it. Detail is never fabricated — on a failure it is the transport
+// error or the body the service returned, truncated, never invented — and it
+// never carries the credential: statusError reads only the response.
+type ProbeReport struct {
+	Outcome ProbeOutcome
+	Status  int
+	Detail  string
+}
+
+// probeTimeout bounds a probe that names no budget of its own.
+const probeTimeout = 10 * time.Second
+
 // Probe checks the endpoint is reachable and authenticated by listing models.
 // Used by jarvix doctor; not part of the ai.Provider interface.
 func (c *Client) Probe(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	report := c.ProbeEndpoint(ctx, probeTimeout)
+	if report.Outcome == ProbeReachable {
+		return nil
+	}
+	return errors.New(report.Detail)
+}
+
+// ProbeEndpoint performs the cheapest request that proves both halves of an
+// endpoint — that it answers, and that it accepts these credentials: GET
+// /models, which every OpenAI-compatible server implements, costs no tokens,
+// and returns 401 rather than 200 when the key is wrong.
+//
+// It never fabricates a success: a transport failure is unreachable, and only
+// a 2xx is reachable. timeout is a parameter rather than a constant so the
+// budget itself is testable (the doctor's probe discipline, #114).
+func (c *Client) ProbeEndpoint(ctx context.Context, timeout time.Duration) ProbeReport {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/models", nil)
 	if err != nil {
-		return err
+		return ProbeReport{Outcome: ProbeUnreachable,
+			Detail: fmt.Sprintf("%s: %s is not a usable address: %v", c.name, c.baseURL, err)}
 	}
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s unreachable at %s: %w", c.name, c.baseURL, err)
+		return ProbeReport{Outcome: ProbeUnreachable,
+			Detail: fmt.Sprintf("%s unreachable at %s: %v", c.name, c.baseURL, err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return c.statusError(resp)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return ProbeReport{Outcome: ProbeReachable, Status: resp.StatusCode}
 	}
-	return nil
+	outcome := ProbeUnreachable
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		outcome = ProbeUnauthorised
+	}
+	return ProbeReport{Outcome: outcome, Status: resp.StatusCode,
+		Detail: c.statusError(resp).Error()}
 }
