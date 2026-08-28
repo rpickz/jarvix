@@ -1,0 +1,14 @@
+{
+  "id": "prt_002",
+  "sessionID": "ses_new",
+  "messageID": "msg_002",
+  "type": "tool",
+  "callID": "call-1",
+  "tool": "bash",
+  "state": {
+    "status": "completed",
+    "input": {
+      "command": "php artisan migrate"
+    }
+  }
+}

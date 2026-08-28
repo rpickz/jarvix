@@ -1,0 +1,7 @@
+{
+  "id": "prt_001",
+  "sessionID": "ses_new",
+  "messageID": "msg_001",
+  "type": "text",
+  "text": "Write the sessions migration and run it."
+}

@@ -1,0 +1,12 @@
+{
+  "id": "msg_002",
+  "sessionID": "ses_new",
+  "role": "assistant",
+  "time": {
+    "created": 1787228010000,
+    "completed": 1787229000000
+  },
+  "modelID": "kimi-k2.5",
+  "providerID": "opencode",
+  "finish": "stop"
+}
