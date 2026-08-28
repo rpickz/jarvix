@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/placement"
 )
 
@@ -117,6 +118,11 @@ type Desktop struct {
 	// every consumer of a window reference, so a nickname means the same
 	// window in a tool call, a typed target, and a deterministic intent.
 	names *desktop.Nicknames
+	// screens is the monitor-nickname store (#180): the names the user gave
+	// their screens, persisted, and the table placement.Resolver consults.
+	// Nil is a daemon with no nicknames, which behaves exactly as one did
+	// before #180 — a nil *monitors.Store answers every lookup "not known".
+	screens *monitors.Store
 
 	mu sync.Mutex
 	// inventory is the last capture and when it was taken.
@@ -159,6 +165,9 @@ type DesktopOptions struct {
 	// intent grammar, naming the owner (#126) — intent.Router.Owner behind a
 	// func so this package never imports the router. Nil skips the check.
 	PhraseOwner func(phrase string) (owner string, taken bool)
+	// Screens is the monitor-nickname store (#180). Nil leaves every monitor
+	// reference resolving connector names and "current" only.
+	Screens *monitors.Store
 	// Log records each action. Nil uses slog.Default().
 	Log *slog.Logger
 
@@ -186,6 +195,7 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 			Reserved:    ReservedWindowWords(),
 			PhraseOwner: opts.PhraseOwner,
 		}),
+		screens: opts.Screens,
 		pending: make(map[string]pendingTarget),
 	}
 	if d.launcher == nil {
@@ -661,19 +671,24 @@ func (d *Desktop) place(ctx context.Context, w desktop.Window, args windowArgs) 
 		// a value nobody checked must never reach a compositor.
 		return fmt.Errorf("%s", problem)
 	}
-	monitors, err := d.comp.Monitors(ctx)
+	// present, not "monitors": the nickname store's package owns that name in
+	// this file now, and one shadowed identifier is how the wrong Resolve
+	// gets called six months from now.
+	present, err := d.comp.Monitors(ctx)
 	if err != nil {
 		if want.Monitor != "" || want.Sized() {
 			return fmt.Errorf("I cannot see which screens are attached: %w", err)
 		}
 		// Nothing here needs a monitor: place against the zero one, whose
 		// usable area is never consulted because no percentage was given.
-		monitors = nil
+		present = nil
 	}
-	mon := placement.ForWorkspace(want.Workspace, monitors)
+	mon := placement.ForWorkspace(want.Workspace, present)
 	if want.Monitor != "" {
-		// Nicknames is nil, the seam #180 extends — see placement.Resolver.
-		resolved, err := (placement.Resolver{}).Resolve(want.Monitor, monitors)
+		// The one monitor seam (#180): a connector, "current", or a name the
+		// user chose, resolved against the live inventory at the moment the
+		// window is placed.
+		resolved, err := d.MonitorResolver().Resolve(want.Monitor, present)
 		if err != nil {
 			return err
 		}

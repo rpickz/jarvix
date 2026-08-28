@@ -41,6 +41,10 @@ Usage:
   jarvix window                 Open/close the conversation window
   jarvix windows [--json]       List open windows with their nicknames
   jarvix windows name <nickname> [window]  Nickname a window (default: the focused one)
+  jarvix monitors [--json]      List the screens plugged in and what you call them
+  jarvix monitors name <nickname> [connector]  Name a screen (default: the current one)
+  jarvix monitors repoint <nickname> <connector>  Point an existing name at another screen
+  jarvix monitors forget <nickname>  Drop a screen name
   jarvix routines [--json]      List the configured routines and their phrases
   jarvix routines run "name"    Run one routine (same as speaking its phrase)
   jarvix scripts [--json]       List the configured scripts and their phrases
@@ -187,6 +191,25 @@ func run(args []string) int {
 			err = cmdWindowsName(paths, rest[1], strings.Join(rest[2:], " "))
 		default:
 			return fail(fmt.Errorf("usage: jarvix windows [--json] | jarvix windows name <nickname> [window]"))
+		}
+	case "monitors":
+		switch {
+		case len(rest) == 0:
+			err = cmdMonitors(paths, false)
+		case rest[0] == "--json" && len(rest) == 1:
+			err = cmdMonitors(paths, true)
+		case rest[0] == "name" && len(rest) >= 2:
+			// A connector after the name says which screen; none means the
+			// one holding focus, exactly as the spoken assignment works.
+			err = cmdMonitorsName(paths, "monitors.name", rest[1], strings.Join(rest[2:], " "))
+		case rest[0] == "repoint" && len(rest) == 3:
+			err = cmdMonitorsName(paths, "monitors.repoint", rest[1], rest[2])
+		case rest[0] == "forget" && len(rest) == 2:
+			err = cmdMonitorsName(paths, "monitors.forget", rest[1], "")
+		default:
+			return fail(fmt.Errorf("usage: jarvix monitors [--json] | jarvix monitors name <nickname> " +
+				"[connector] | jarvix monitors repoint <nickname> <connector> | " +
+				"jarvix monitors forget <nickname>"))
 		}
 	case "routines":
 		switch {

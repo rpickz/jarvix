@@ -630,7 +630,7 @@ func (p Placement) Problems(requireWorkspace bool) []Problem {
 			"workspace %d does not exist; workspaces are numbered %d to %d",
 			p.Workspace, MinWorkspace, MaxWorkspace)})
 	}
-	if problem := p.Monitor.problem(); problem != "" {
+	if problem := p.Monitor.Problem(); problem != "" {
 		problems = append(problems, Problem{FieldMonitor, problem})
 	}
 	if p.Focus != "" {

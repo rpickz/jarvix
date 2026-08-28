@@ -27,7 +27,7 @@ func TestContextCollectorIsAbsentWhenEverySourceIsOff(t *testing.T) {
 	if got := contextCollector(testConfig(), nil); got != nil {
 		t.Fatalf("collector = %#v, want nil with context disabled", got)
 	}
-	if opts := engineOptions(testConfig(), nil, nil, nil, nil, nil, nil, nil, nil); opts.Context != nil {
+	if opts := engineOptions(testConfig(), nil, nil, nil, nil, nil, nil, nil, nil, nil); opts.Context != nil {
 		t.Errorf("engine options carried a collector: %#v", opts.Context)
 	}
 }
@@ -38,7 +38,7 @@ func TestContextCollectorIsBuiltFromConfig(t *testing.T) {
 	if got := contextCollector(cfg, nil); got == nil {
 		t.Fatal("no collector built for an enabled source")
 	}
-	if opts := engineOptions(cfg, nil, nil, nil, nil, nil, nil, nil, nil); opts.Context == nil {
+	if opts := engineOptions(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil); opts.Context == nil {
 		t.Error("engine options carried no collector for an enabled source")
 	}
 }

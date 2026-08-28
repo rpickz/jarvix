@@ -10,13 +10,15 @@ import (
 // screen, and how that name becomes a real output with a usable area to
 // resolve percentages against.
 //
-// It is deliberately a seam rather than a lookup. Today a monitor is named by
-// its connector (`DP-2`) or as "current"; the monitor-identity issue (#180)
-// adds nicknames — "top", "bottom" — which resolve at run time so a routine
-// survives a cable moving. That issue extends Resolver.Nicknames and nothing
-// else: every consumer already goes through MonitorRef and Resolver, so the
-// nickname arrives everywhere at once. Nicknames are NOT implemented here, on
-// purpose; what is here is the shape they slot into.
+// It is deliberately a seam rather than a lookup. A monitor is named by its
+// connector (`DP-2`), as "current", or by a nickname the user chose — "top",
+// "bottom" — which resolves at run time so a routine survives a cable moving
+// (#180, ADR 0057). That issue extended Resolver.Nicknames and nothing else:
+// every consumer already went through MonitorRef and Resolver, so the
+// nickname arrived everywhere at once. Where the nicknames are KEPT is still
+// not here, on purpose — internal/monitors owns the store, this file owns the
+// vocabulary, and a lookup table compiled into the vocabulary could not be
+// re-read when the user edits it.
 
 // MonitorRef is how a placement names a screen. Three forms, one seam:
 //
@@ -37,14 +39,38 @@ const MonitorCurrent MonitorRef = "current"
 
 // reservedMonitorWords are the refs a nickname may never take (#180's
 // collision discipline, declared here because the vocabulary owns the words
-// and the nickname store will have to ask). "primary" is reserved although
-// nothing resolves it yet: it is the word a user is most likely to reach for
-// next, and taking it back later would break the routines written meanwhile.
-var reservedMonitorWords = []string{string(MonitorCurrent), "primary"}
+// and the nickname store will have to ask), each mapped to what owns it.
+//
+// The owner text lives beside the word rather than in the store, for the
+// reason the window matcher supplies its own reserved vocabulary (ADR 0040):
+// a refusal that names the owner is only useful if the name is right, and two
+// copies of "what does `current` mean" would eventually disagree.
+//
+// "primary" is reserved although nothing resolves it yet: it is the word a
+// user is most likely to reach for next, and taking it back later would break
+// the routines written meanwhile.
+var reservedMonitorWords = map[string]string{
+	string(MonitorCurrent): "it is the screen you are on",
+	"primary":              "it is kept for the main screen",
+}
 
-// ReservedMonitorWords returns the words a monitor nickname may not use.
+// ReservedMonitorWords returns the words a monitor nickname may not use,
+// sorted so a sentence listing them reads the same way twice.
 func ReservedMonitorWords() []string {
-	return append([]string(nil), reservedMonitorWords...)
+	out := make([]string, 0, len(reservedMonitorWords))
+	for word := range reservedMonitorWords {
+		out = append(out, word)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ReservedMonitorWord reports whether a name is reserved, and what owns it.
+// The comparison folds case for the reason Kind does: the user says the word,
+// and how it was capitalised on the way in is not a distinction they made.
+func ReservedMonitorWord(name string) (owner string, taken bool) {
+	owner, taken = reservedMonitorWords[strings.ToLower(strings.TrimSpace(name))]
+	return owner, taken
 }
 
 // RefKind is which of the three forms a ref is.
@@ -116,12 +142,17 @@ func (r MonitorRef) Kind() RefKind {
 // argument handed to the compositor.
 const maxRefLength = 64
 
-// problem reports what is wrong with the ref's spelling, or "" when it could
+// Problem reports what is wrong with the ref's spelling, or "" when it could
 // name something. Whether it names something that is plugged in right now is
 // Resolver's question, not this one's — a routine is allowed to mention a
 // monitor that is currently unplugged, and must say so at run time rather
 // than refusing to load.
-func (r MonitorRef) problem() string {
+//
+// It is exported because the nickname store (#180) has to refuse at
+// assignment exactly what the vocabulary would refuse at resolution: a name
+// that cannot be spelled as a ref could be stored and listed and would then
+// never resolve, which is a worse failure than the refusal it replaced.
+func (r MonitorRef) Problem() string {
 	trimmed := strings.TrimSpace(string(r))
 	if trimmed == "" {
 		return ""
@@ -208,11 +239,16 @@ func (m Monitor) Describe() string {
 // an interface because there is exactly one resolution rule and it belongs to
 // the vocabulary; what varies is the nickname table, which is a field.
 type Resolver struct {
-	// Nicknames resolves a user-chosen name to a connector name. Nil today —
-	// the monitor-identity issue (#180) fills it in, and until it does a ref
-	// that is not a connector or "current" resolves to nothing and says so.
-	// It is a func rather than a map so #180 can back it with the store's
-	// live state instead of a snapshot taken when the runner was built.
+	// Nicknames resolves a user-chosen name to a connector name — the
+	// monitor-nickname store's Lookup (#180, ADR 0057). Nil is legitimate and
+	// is what a daemon with no nicknames uses: a ref that is not a connector
+	// or "current" then resolves to nothing and says so, exactly as it did
+	// before nicknames existed.
+	//
+	// It is a func rather than a map so it can be backed by the store's LIVE
+	// state instead of a snapshot taken when the runner was built. That is the
+	// difference between a nickname the user assigned thirty seconds ago
+	// working and needing a restart.
 	Nicknames func(name string) (connector string, known bool)
 }
 
@@ -253,8 +289,14 @@ func (r Resolver) Resolve(ref MonitorRef, inventory []Monitor) (Monitor, error) 
 					return m, nil
 				}
 			}
-			return Monitor{}, fmt.Errorf("%q means %s, and no monitor is called that right now; "+
-				"the screens plugged in are %s", trimmed, connector, listMonitors(inventory))
+			// Worded to LEAD with "no monitor is called", which is not a
+			// stylistic choice: desktop.PlacementSentence extracts the
+			// speakable half of an error by finding a known prefix, so a
+			// sentence that opened with the nickname would arrive at the user
+			// with its most useful clause — what the name means — trimmed off.
+			return Monitor{}, fmt.Errorf("no monitor is called %q right now: it means %s, "+
+				"which is not plugged in; the screens plugged in are %s",
+				trimmed, connector, listMonitors(inventory))
 		}
 	}
 	return Monitor{}, fmt.Errorf("no monitor is called %q right now; the screens plugged in are %s",

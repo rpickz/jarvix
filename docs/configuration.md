@@ -312,7 +312,8 @@ announce = false                 # speak a scheduled run's summary (default fals
 [[routines.steps]]               # repeat per step, run in order
 app = "firefox"                  # program to launch if not already running
 workspace = 2                    # where its window goes (1-99)
-monitor = "HDMI-A-1"             # optional: a connector name, or "current"
+monitor = "HDMI-A-1"             # optional: a connector name, "current", or a
+                                 # name you gave a screen ("top") — see below
 mode = "tiled"                   # tiled | floating | pinned | fullscreen |
                                  # maximised
 width = "66%"                    # optional share: a percentage of the screen's
@@ -993,7 +994,7 @@ conversation window ([ADR 0056](adr/0056-window-placement-vocabulary.md)).
 | `position` | `[x, y]` pixels | floating modes only — a tiled window's position belongs to the layout |
 | `place_next` | `right`, `left`, `below`, `above` | where the **next** tiled window on this workspace goes, relative to this one. Step order is therefore part of the layout's meaning |
 | `master` | `true` | promote a tiled window into the layout's big pane (master-family layouts only) |
-| `monitor` | `"DP-2"`, `"current"` | which screen this step's **workspace** lives on |
+| `monitor` | `"DP-2"`, `"current"`, `"top"` | which screen this step's **workspace** lives on: a connector name, the screen you are on, or a name you gave one (#180) |
 | `focus` | `silent` (default), `follow` | whether your view follows the placed window |
 
 Everything is validated when the routine is **saved or loaded**, not when it
@@ -1008,7 +1009,56 @@ reporting a step placed:
   On the wrong layout the run reports *"this workspace's layout has no master
   pane"* and carries on with the other steps.
 - A `monitor` that is not plugged in reports *"no monitor is called DP-2 right
-  now"*, and names the screens that are.
+  now"*, and names the screens that are. A **name you gave a screen** that
+  points at an absent output says both — *"no monitor is called top right now:
+  it means DP-2, which is not plugged in"* — so you know which cable to find.
+  Either way the step fails and the rest of the routine still runs.
+
+#### Names for your screens (ADR 0057)
+
+Connector names are exact and brittle: move a cable or a dock and `DP-2`
+becomes something else, and every routine naming it breaks. So a screen can
+also be called whatever you call it.
+
+```
+Jarvix, call this monitor top          # names the screen you are on
+Jarvix, what are my screens called
+Jarvix, forget the monitor called top
+```
+
+or from a terminal:
+
+```
+jarvix monitors                        # what is plugged in, and what you call it
+jarvix monitors name top               # the screen holding focus
+jarvix monitors name bottom DP-2
+jarvix monitors repoint top DP-2       # after a cable moved
+jarvix monitors forget top
+```
+
+or in the conversation window: **Automations → Screens**, with a picker that
+offers every screen plugged in — with its size and any name it has — plus
+"the current monitor".
+
+The names live in `monitors.toml` under the state directory
+(`$XDG_STATE_HOME/jarvix`, default `~/.local/state/jarvix`), one
+`[[nickname]]` table each, documented in the file's own header. Edit it by
+hand if you prefer; changes are live on the next routine run, no restart.
+
+Three rules are worth knowing.
+
+- **A screen that is plugged in always wins its own name.** `monitor = "DP-2"`
+  means the output called `DP-2`, even if something else is nicknamed `DP-2`.
+  That is why a nickname can never quietly redirect a routine, and why naming
+  a screen after a connector — plugged in or not — is refused.
+- **Names resolve when the routine runs**, never when it is written. That is
+  the whole point: after a cable moves you correct one name, not every
+  routine.
+- **One word, and not a word that is already taken.** `current` and `primary`
+  are reserved; a name another screen answers to is refused naming that
+  screen. To move a name to a different screen, use Edit in the window or
+  `jarvix monitors repoint` — deliberately not something a misheard sentence
+  can do.
 - Grouped/tabbed windows, pseudotiling and scratchpads are **not** modes, each
   for a recorded reason — the compositor offers only a toggle for the first
   two, pseudotiling has no size of its own, and a scratchpad is summoned rather
