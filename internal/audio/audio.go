@@ -37,5 +37,12 @@ type Recorder interface {
 type Player interface {
 	// Play consumes PCM chunks until the channel closes, then returns once
 	// playback has drained. Cancelling ctx stops playback immediately.
+	//
+	// Play consumes the channel even when playback fails: producers block on
+	// the handoff and read the result only after the channel closes (the
+	// speaker's shape), so an implementation that returned early without
+	// draining would wedge its caller for the life of the session (issue
+	// #142). On failure, keep consuming until the channel closes or ctx is
+	// cancelled, then return the error.
 	Play(ctx context.Context, sampleRate, channels int, chunks <-chan []byte) error
 }

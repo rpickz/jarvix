@@ -166,7 +166,10 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, vocab *vocabular
 		}
 	}
 	if deps.Player == nil {
-		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice}
+		// Log wired so a playback restart — pw-play dying under a live answer
+		// and being respawned on the current default sink (issue #142) — is a
+		// journal line, not a silence the user has to diagnose.
+		deps.Player = &audio.PipeWirePlayer{Device: cfg.Audio.OutputDevice, Log: log}
 	}
 	return deps, workers, nil
 }

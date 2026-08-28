@@ -3,7 +3,7 @@ package audio
 import (
 	"context"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,13 +133,69 @@ func (r *pipewireRecording) Cancel() {
 // PipeWirePlayer renders PCM via pw-play.
 type PipeWirePlayer struct {
 	// Device is the PipeWire playback target; empty uses the default sink.
+	// Empty is the deliberate default: a stream that follows the default is
+	// one WirePlumber moves live when the default changes, so speech survives
+	// a headset being switched mid-sentence without Jarvix doing anything.
 	Device string
+	// Log receives playback-recovery lines. Nil uses the default logger.
+	Log *slog.Logger
+}
+
+// maxPlaybackRestarts bounds how many times one Play call respawns pw-play
+// after it dies mid-stream. Each respawn binds afresh — to whatever the
+// default sink is by then — so a device vanishing under a live utterance
+// costs at most the audio pw-play had buffered, not the rest of the answer.
+// The bound exists for the pathological case (no session manager, PipeWire
+// crash-looping) where every respawn dies instantly: past it the failure is
+// reported instead of retried forever.
+const maxPlaybackRestarts = 3
+
+func (p *PipeWirePlayer) logger() *slog.Logger {
+	if p.Log != nil {
+		return p.Log
+	}
+	return slog.Default()
 }
 
 // Play implements Player. It pipes chunks into pw-play's stdin; closing stdin
 // lets pw-play drain and exit, and cancellation kills the process for
 // immediate silence.
+//
+// A pw-play that dies mid-stream — its sink removed while pinned, PipeWire
+// restarting under it — is detected at the next write and replaced: a fresh
+// pw-play binds to the current default sink and playback resumes with the
+// exact bytes the dead process never accepted (issue #142). Bytes it had
+// accepted but not yet rendered die with it; that loss is logged, never
+// papered over, and nothing is ever written twice.
+//
+// On a terminal failure Play keeps consuming the channel until it closes, so
+// a producer feeding a dead stream is released rather than blocked forever —
+// the drain the Player contract promises and the fakes already honoured.
 func (p *PipeWirePlayer) Play(ctx context.Context, sampleRate, channels int, chunks <-chan []byte) error {
+	var leftover []byte
+	announced := false
+	for restarts := 0; ; restarts++ {
+		resume, resumable, err := p.playOnce(ctx, sampleRate, channels, chunks, leftover, &announced)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		if !resumable || restarts >= maxPlaybackRestarts {
+			drainChunks(ctx, chunks)
+			return err
+		}
+		leftover = resume
+		p.logger().Warn("pw-play died mid-stream; resuming on the current default sink",
+			"component", "audio", "error", err.Error(), "restart", restarts+1)
+	}
+}
+
+// playOnce runs one pw-play process. A clean end (or cancellation, or an exit
+// after every chunk was delivered) returns resumable false; a death with
+// bytes still to play returns resumable true and the unwritten remainder, so
+// the caller can hand it to a fresh process. announced keeps the FirstAudio
+// trace mark to once per Play, however many processes serve it.
+func (p *PipeWirePlayer) playOnce(ctx context.Context, sampleRate, channels int,
+	chunks <-chan []byte, leftover []byte, announced *bool) (resume []byte, resumable bool, err error) {
 	args := []string{
 		"--rate", strconv.Itoa(sampleRate),
 		"--channels", strconv.Itoa(channels),
@@ -155,47 +211,93 @@ func (p *PipeWirePlayer) Play(ctx context.Context, sampleRate, channels int, chu
 	cmd.Cancel = func() error { return cmd.Process.Kill() }
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start pw-play (is PipeWire running?): %w", err)
+		return nil, false, fmt.Errorf("start pw-play (is PipeWire running?): %w", err)
 	}
 
-	writeErr := func() error {
-		defer func() { _ = stdin.Close() }()
-		first := true
-		for {
-			select {
-			case c, ok := <-chunks:
-				if !ok {
-					return nil
-				}
-				if _, err := stdin.Write(c); err != nil {
-					// pw-play died (or was cancelled); stop feeding it.
-					return err
-				}
-				if first {
-					// The last mark of the latency budget: audio has left
-					// Jarvix. Everything after this is PipeWire's latency,
-					// which we neither own nor can observe.
-					first = false
-					firstAudio(ctx)
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+	// write feeds one buffer, marking the trace on the first byte that leaves
+	// Jarvix. On failure it returns the bytes the pipe did not accept — the
+	// byte-exact continuation point, so a resumed stream never skips a sample
+	// boundary and never repeats one.
+	write := func(b []byte) ([]byte, error) {
+		n, werr := stdin.Write(b)
+		if n > 0 && !*announced {
+			// The last mark of the latency budget: audio has left Jarvix.
+			// Everything after this is PipeWire's latency, which we neither
+			// own nor can observe.
+			*announced = true
+			firstAudio(ctx)
 		}
-	}()
+		if werr != nil {
+			if n < 0 || n > len(b) {
+				n = 0
+			}
+			return append([]byte(nil), b[n:]...), werr
+		}
+		return nil, nil
+	}
 
-	err = cmd.Wait()
-	if ctx.Err() != nil {
-		return ctx.Err()
+	// died reaps a process that failed mid-stream and reports the remainder.
+	died := func(rest []byte, werr error) ([]byte, bool, error) {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
+		if waitErr == nil {
+			waitErr = werr
+		}
+		return rest, true, fmt.Errorf("pw-play died mid-stream: %v", waitErr)
 	}
-	if err != nil {
-		return fmt.Errorf("pw-play failed: %w", err)
+
+	if len(leftover) > 0 {
+		if rest, werr := write(leftover); werr != nil {
+			return died(rest, werr)
+		}
 	}
-	if writeErr != nil && writeErr != io.ErrClosedPipe {
-		return writeErr
+	for {
+		select {
+		case c, ok := <-chunks:
+			if !ok {
+				_ = stdin.Close()
+				err := cmd.Wait()
+				if ctx.Err() != nil {
+					return nil, false, ctx.Err()
+				}
+				if err != nil {
+					return nil, false, fmt.Errorf("pw-play failed: %w", err)
+				}
+				return nil, false, nil
+			}
+			if rest, werr := write(c); werr != nil {
+				return died(rest, werr)
+			}
+		case <-ctx.Done():
+			_ = stdin.Close()
+			_ = cmd.Wait()
+			return nil, false, ctx.Err()
+		}
 	}
-	return nil
+}
+
+// drainChunks consumes the rest of a failed playback's stream so producers
+// blocked on the channel are released. Without it a synthesizer feeding a
+// dead player would block on the handoff until its session died — the exact
+// wedge issue #142's diagnosis found: the speaker only reads the player's
+// result after the chunk channel closes, so an early error return here left
+// the whole rest of the answer stuck behind a channel nobody was reading.
+func drainChunks(ctx context.Context, chunks <-chan []byte) {
+	for {
+		select {
+		case _, ok := <-chunks:
+			if !ok {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
