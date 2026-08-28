@@ -191,18 +191,47 @@ Two questions look like one and are not:
   desktop entry exists**. A missing entry is a name the routine invented and
   nothing on the machine can make it right, so it fails the load, naming the
   entry and the closest installed spellings.
-- **"Can this machine run it?"** — a fact about the machine. Asked when a
-  routine is **saved** (the window's form and the assistant's config tool
-  alike, through `config.validate_entry` / `config.upsert_entry`), and again a
-  moment before the run launches.
+- **"Can this machine run it *right now*?"** — a fact about the machine at
+  this moment. Reported when a routine is **saved** (the window's form and the
+  assistant's config tool alike) as a **note**, not a refusal, and enforced at
+  the run, where the step is skipped by name.
 
-Program existence is deliberately *not* a load-time rule. A routine naming an
-application the user uninstalled last week would otherwise stop the daemon
-from starting at all — the file did not change, the machine did, and the
-punishment would land on reminders, briefings and everything else. It would
-also make this repo's own documented examples invalid on any machine without
-`firefox`. Refusing the save and naming it at run time gets the criterion
-("it can never reach a run") without that cost.
+Program existence is deliberately *not* a load-time rule, and — after a first
+attempt got this wrong — deliberately not a save-time refusal either.
+
+A load-time rule would stop the daemon starting because the user uninstalled
+something a routine mentions: the file did not change, the machine did, and
+the punishment would land on reminders, briefings and everything else. It
+would also make this repo's own documented examples invalid on any machine
+without `firefox`.
+
+A save-time *refusal* is wrong for a different and more important reason. It
+makes `config.toml` unwritable exactly where it most needs editing — a new
+laptop, a machine being set up, an application the user is about to install.
+Authoring the routine first and installing the program second is ordinary, and
+a routine written on a desktop must stay editable from a machine that has none
+of it. (It also failed CI, which is the cheap version of the same lesson: the
+runner has no `alacritty`, and a routine naming one could no longer be
+written.)
+
+So it travels the **notes** channel the entry registry already has (#163) —
+"something true about a saved draft that is not a problem, stated in the
+user's words and keyed to the field that causes it". The form shows it as a
+caution worded about *this computer right now*, and the user saves through it.
+Reusing that channel rather than inventing a second one matters: the two are
+rendered differently on purpose, and a caution shown in the problem channel
+reads as a refusal on a draft the daemon will happily accept.
+
+The enforcement point is the **run**, which resolves the same way from the
+same code and says *"discord is not installed"* by name — skipping the step
+rather than starting nothing and waiting eight seconds for its window, which
+is the behaviour this ticket was actually reported for.
+
+A missing **desktop entry** stays a refusal, and stays in whole-document
+validation. An entry id is resolved out of the machine's own applications
+index; nothing will ever install one under a name the user invented, so there
+is no "not yet" reading of it — it is a typo, and telling the user at once
+with the closest installed spellings is the whole value of checking.
 
 ### 7. Failure is classified, not narrated
 
@@ -211,7 +240,7 @@ spoken summary, the `routine.step` event (`failure`), and the log:
 
 | kind | what the user hears | what to do about it |
 | --- | --- | --- |
-| `not_installed` | *"discord is not installed"* | install it, or fix the name |
+| `not_installed` | *"discord is not installed"* | install it, or fix the name. Decided before anything starts, so the feed calls the step **skipped** rather than failed |
 | `did_not_start` | *"chromium did not start"* | look at the journal |
 | `no_window` | *"chromium opened no window within 8 seconds"* | it is slow, or it crashed |
 | `no_match` | *"chromium opened a window, but nothing matched \"facebook\""* | fix `match` |

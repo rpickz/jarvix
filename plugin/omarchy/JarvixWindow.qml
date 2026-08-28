@@ -654,6 +654,12 @@ FloatingWindow {
   property var automationDraft: ({})
   property var automationFormOriginal: ({}) // keys the loaded entry carried
   property var automationFormProblems: [] // [{field, message}] from the daemon
+  // Notes are the daemon's "true, but not a reason to refuse" statements
+  // (#163's channel, reused by #175): a step naming a program this machine
+  // does not have saves fine and is skipped at run time, so the form says so
+  // as a caution rather than blocking the save. Authoring a routine for
+  // something you are about to install is a thing people do.
+  property var automationFormNotes: [] // [{field, message}] from the daemon
   property string automationFormNextFire: ""
   property string automationFormError: "" // transport/conflict line, verbatim
   property bool automationDeleteConfirm: false
@@ -676,6 +682,7 @@ FloatingWindow {
       ? { name: "", phrases: [""], steps: [{ app: "", args: [], workspace: 1 }] }
       : { name: "", phrases: [""], path: "" }
     automationFormProblems = []
+    automationFormNotes = []
     automationFormNextFire = ""
     automationFormError = ""
     automationDeleteConfirm = false
@@ -707,6 +714,7 @@ FloatingWindow {
     automationFormOriginalName = String((result.entry || {}).name || "")
     automationsFingerprint = String(result.fingerprint || automationsFingerprint)
     automationFormProblems = []
+    automationFormNotes = []
     automationFormNextFire = ""
     automationFormError = ""
     automationDeleteConfirm = false
@@ -838,6 +846,7 @@ FloatingWindow {
     }
     var result = frame.result || {}
     automationFormProblems = result.problems || []
+    automationFormNotes = result.notes || []
     automationFormNextFire = String(result.next_fire || "")
     automationFormError = ""
   }
@@ -902,6 +911,21 @@ FloatingWindow {
     return out.join("\n")
   }
 
+  // automationNoteFor is the same lookup over the NOTES: what is true about
+  // the draft without being a reason to refuse it. Kept separate from
+  // automationProblemFor so the two can never be shown in each other's words
+  // — a caution rendered as "Problem:" would read as a refusal, and a
+  // refusal rendered as a caution would look saveable.
+  function automationNoteFor(field) {
+    var out = []
+    for (var i = 0; i < automationFormNotes.length; i++) {
+      if (String(automationFormNotes[i].field || "") === field) {
+        out.push(String(automationFormNotes[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
   // automationGeneralProblems is the form-level area's catch-all: problems
   // with no field, plus problems on entry keys the form has no input for
   // (report rides along uneditable) — named so the message still says where
@@ -923,6 +947,20 @@ FloatingWindow {
   readonly property var automationPlacementKeys: [
     "monitor", "mode", "width", "height", "place_next", "master", "focus"
   ]
+
+  // automationStepNoteFor collects the notes for one step, whichever of its
+  // launching keys the daemon keyed them to — the caution belongs to the
+  // step, and which of `app` or `desktop_entry` carries it is the daemon's
+  // detail rather than something the form should have an opinion about.
+  function automationStepNoteFor(index) {
+    var out = []
+    var prefix = "steps[" + index + "]."
+    for (var i = 0; i < automationFormNotes.length; i++) {
+      var f = String(automationFormNotes[i].field || "")
+      if (f.indexOf(prefix) === 0) out.push(String(automationFormNotes[i].message || ""))
+    }
+    return out.join("\n")
+  }
 
   // automationStepExtraProblems catches a step's problems on the keys the
   // form carries through without an input (size, position, tile, and the
@@ -4890,6 +4928,21 @@ FloatingWindow {
                     Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).app || "")
                     onEdited: function(value) { win.automationDraft.steps[index].app = value }
                     onCommitted: win.validateAutomationDraft()
+                  }
+                  // What this machine cannot launch right now, in the
+                  // daemon's own words (#175). A caution, not a problem: the
+                  // routine saves either way, and the step is skipped by name
+                  // when it runs — authoring a routine for something you have
+                  // not installed yet is a thing people legitimately do, and
+                  // on a machine being set up it is the normal case.
+                  Text {
+                    visible: win.automationStepNoteFor(index) !== ""
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: "Not here yet: " + win.automationStepNoteFor(index)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.subtitle
+                    color: Util.alpha(Color.popups.text, 0.7)
                   }
                   // The desktop entry (#175): the name from the applications
                   // menu, for the many things on this desktop that have no

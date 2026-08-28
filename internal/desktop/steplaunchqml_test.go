@@ -64,6 +64,30 @@ func TestTheStepFormPinsEveryLaunchingProblemToItsField(t *testing.T) {
 	}
 }
 
+// TestTheStepFormShowsACautionItCanSaveThrough: "that program is not
+// installed here" is a NOTE, not a problem, and the form must render it as
+// one. Shown in the problem channel it would read as a refusal on a draft the
+// daemon will happily save — which is how a user concludes they cannot write
+// a routine for something they are about to install.
+func TestTheStepFormShowsACautionItCanSaveThrough(t *testing.T) {
+	section := strings.Join(strings.Fields(stepFormSection(t)), " ")
+	if !strings.Contains(section, "automationStepNoteFor(index)") {
+		t.Error("the step editor never renders the daemon's notes")
+	}
+	if strings.Contains(section, `"Problem: " + win.automationStepNoteFor`) {
+		t.Error("a note is rendered in the problem channel; a caution must not read as a refusal")
+	}
+	qml := stripQMLComments(readPlugin(t, "JarvixWindow.qml"))
+	if !strings.Contains(qml, "automationFormNotes = result.notes || []") {
+		t.Error("the validate reply's notes are never stored, so the form can never show one")
+	}
+	// Cleared when a form opens, like the problems beside them: a caution
+	// left over from the last entry would be attached to the wrong routine.
+	if strings.Count(qml, "automationFormNotes = []") < 2 {
+		t.Error("the notes are not cleared when a form opens")
+	}
+}
+
 // TestTheStepFormDecidesNothingAboutLaunching is the ADR 0013 guard proper.
 // The window must not spell a class flag, a launch-policy list it composed
 // itself, or any rule about what an argument may contain — those are the

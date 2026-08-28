@@ -1021,6 +1021,14 @@ routine is **saved or loaded**, naming it and the closest installed spellings
 `Terminal=true` is refused: it needs a terminal wrapped round it, so write
 your terminal in `app` and the command in `args` instead.
 
+**A program you have not installed yet is fine to write.** Naming something
+this machine does not have is *not* an error: you can author a routine for an
+application you are about to install, and edit a desktop's routine from a
+laptop that has none of it. Saving it tells you — *"chromium is not installed
+on this computer right now"* — and saves it. When the routine runs, that step
+is skipped by name and the summary says so, so nothing pretends to have
+happened.
+
 **Arguments come from you, never from the model.** The assistant can propose a
 routine, and every argument in it is shown verbatim on the confirmation card
 before anything is written. It still cannot hand arguments to the

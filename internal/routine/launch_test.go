@@ -398,10 +398,15 @@ func TestAMissingDesktopEntryFailsTheLoad(t *testing.T) {
 	}
 }
 
-// TestWhatTheMachineCannotRunIsRefusedAtSaveTime is the other half of that
-// split: InstallProblems is what the window's form and the assistant's config
-// tool call when a routine is SAVED, and it is where "not installed" lands.
-func TestWhatTheMachineCannotRunIsRefusedAtSaveTime(t *testing.T) {
+// TestWhatTheMachineCannotRunIsReportedNotRefused is the other half of that
+// split. InstallProblems is what the window's form and the assistant's config
+// tool call when a routine is saved — and what they do with the answer is
+// SHOW it, not refuse the save. Whether a program is installed is a fact
+// about this machine at this moment; a person authoring a routine for
+// something they are about to install, or editing a desktop's routine from a
+// laptop, must be able to write it. The refusal that would actually help
+// nobody is the one at save; the honest report is at the run.
+func TestWhatTheMachineCannotRunIsReportedNotRefused(t *testing.T) {
 	def := Definition{Name: "test", Phrases: []string{"test"}, Steps: []Step{
 		{App: "kitty", Placement: placement.Placement{Workspace: 1}},
 		{App: "discord", Placement: placement.Placement{Workspace: 1}},
@@ -409,6 +414,11 @@ func TestWhatTheMachineCannotRunIsRefusedAtSaveTime(t *testing.T) {
 	problems := InstallProblems(def, *missingResolver("kitty"))
 	if len(problems) != 1 {
 		t.Fatalf("problems = %+v, want only the uninstalled step", problems)
+	}
+	// The same routine is WELL FORMED — nothing about it is refused — which
+	// is what lets the save go through carrying the report as a note.
+	if refusals := ProblemsWith([]Definition{def}, *missingResolver("kitty")); len(refusals) != 0 {
+		t.Errorf("loading refused %v; what is installed must never be a refusal", refusals)
 	}
 	if problems[0].Step != 1 || problems[0].Field != FieldApp {
 		t.Errorf("problem = %+v, want it keyed to steps[1].app", problems[0])
@@ -537,5 +547,60 @@ func TestTheDefaultResolverReadsThisMachine(t *testing.T) {
 	// that gets executed.
 	if !strings.Contains(target.String(), "-c true") {
 		t.Errorf("Target.String() = %q, want the argv it would run", target.String())
+	}
+}
+
+// TestARoutineForAnUninstalledProgramSavesAndReportsAtRunTime is the whole
+// corrected contract in one place: authoring is permissive, running is
+// honest.
+//
+// The routine names something this machine does not have. It is well formed,
+// so it loads and it saves; the machine's own answer travels as a report the
+// user can act on rather than a wall. Then the run — the point where the
+// promise is actually being kept or broken — starts nothing, waits for
+// nothing, and says the application is not installed, by name, in the
+// sentence the user hears.
+func TestARoutineForAnUninstalledProgramSavesAndReportsAtRunTime(t *testing.T) {
+	def := Definition{Name: "test", Phrases: []string{"test"}, Steps: []Step{
+		{App: "not-here-yet", Args: []string{"--profile-directory=Later"},
+			Placement: placement.Placement{Workspace: 1}},
+	}}
+	machine := *missingResolver()
+
+	// Authoring: nothing about the entry is refused.
+	if problems := ProblemsWith([]Definition{def}, machine); len(problems) != 0 {
+		t.Fatalf("the routine was refused: %v", problems)
+	}
+	// …and the machine's answer is still available to whoever wants to show
+	// it, keyed to the field the user would change.
+	notes := InstallProblems(def, machine)
+	if len(notes) != 1 || notes[0].Step != 0 || notes[0].Field != FieldApp ||
+		notes[0].Message != "not-here-yet is not installed" {
+		t.Fatalf("report = %+v, want one naming the step and the program", notes)
+	}
+
+	// Running: nothing started, nothing waited for, and the sentence names it.
+	comp := desktop.NewFakeCompositor()
+	log := &eventLog{}
+	r, clk, launcher := newTestRunnerOn(comp, []Definition{def}, log, nil, &machine)
+	before := clk.now()
+	summary, err := r.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "Test: nothing could be placed — not-here-yet is not installed." {
+		t.Errorf("summary = %q", summary)
+	}
+	if started := launcher.launches(); len(started) != 0 {
+		t.Errorf("launched %+v for a program that is not installed", started)
+	}
+	// No wait was spent: the clock only advances when the runner polls for a
+	// window, and a step decided before the launch never gets that far.
+	if clk.now() != before {
+		t.Errorf("the run waited %s for a program it knew was not installed", clk.now().Sub(before))
+	}
+	step, ok := log.last("routine.step")
+	if !ok || step["failure"] != string(FailureNotInstalled) {
+		t.Errorf("routine.step = %v, want the not_installed kind for the feed", step)
 	}
 }

@@ -195,11 +195,17 @@ type InstallProblem struct {
 // now: a program that is not on PATH, a desktop entry whose program is gone.
 //
 // It is separate from Problems for the reason Resolver.Describe explains — it
-// is a question about the machine rather than about the file — and it is
-// exported because two surfaces must ask it and get the same answer: the
-// window's form and the assistant's config tool, when a routine is SAVED, so
-// a routine that cannot run is refused before it is written rather than
-// discovered by speaking to it.
+// is a question about the machine rather than about the file — and the
+// separation is load-bearing rather than tidy. Its answer is shown, never
+// used to refuse: the entry surface turns each of these into a NOTE beside
+// the field, so a routine can be written for an application that is not
+// installed yet. Authoring the routine first and installing the program
+// second is ordinary, and a routine written on a desktop has to stay editable
+// from a laptop that has none of it.
+//
+// The place this answer is enforced is the run, which asks the same question
+// through the same resolver a moment before launching and reports
+// FailureNotInstalled by name.
 func InstallProblems(def Definition, resolver Resolver) []InstallProblem {
 	var problems []InstallProblem
 	for i, step := range def.Steps {
