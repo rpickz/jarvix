@@ -158,10 +158,25 @@ func renderRoutineTOML(entry Routine, provenance string, notes []string) []strin
 		if i < len(notes) && notes[i] != "" {
 			lines = append(lines, "  # "+notes[i])
 		}
-		lines = append(lines, "  [[routines.steps]]",
-			"  app = "+encodeTOMLString(s.App))
+		lines = append(lines, "  [[routines.steps]]")
+		// What the step launches: one of the two keys, never both, in the
+		// order the schema declares them.
+		if s.DesktopEntry != "" {
+			lines = append(lines, "  desktop_entry = "+encodeTOMLString(s.DesktopEntry))
+		} else {
+			lines = append(lines, "  app = "+encodeTOMLString(s.App))
+		}
+		if len(s.Args) > 0 {
+			lines = append(lines, "  args = "+encodeTOMLStrings(s.Args))
+		}
+		if s.Identity != "" {
+			lines = append(lines, "  identity = "+encodeTOMLString(s.Identity))
+		}
 		if s.Match != "" {
 			lines = append(lines, "  match = "+encodeTOMLString(s.Match))
+		}
+		if s.Launch != "" {
+			lines = append(lines, "  launch = "+encodeTOMLString(s.Launch))
 		}
 		lines = append(lines, "  workspace = "+strconv.Itoa(s.Workspace))
 		// The placement keys, in the vocabulary's own presentation order and
@@ -224,6 +239,8 @@ func routinesEqual(got, want []Routine) bool {
 		for j := range got[i].Steps {
 			g, w := got[i].Steps[j], want[i].Steps[j]
 			if g.App != w.App || g.Match != w.Match || g.Workspace != w.Workspace ||
+				g.DesktopEntry != w.DesktopEntry || g.Identity != w.Identity ||
+				g.Launch != w.Launch || !stringSlicesEqual(g.Args, w.Args) ||
 				g.Float != w.Float || g.Tile != w.Tile ||
 				g.Monitor != w.Monitor || g.Mode != w.Mode ||
 				g.Width != w.Width || g.Height != w.Height ||

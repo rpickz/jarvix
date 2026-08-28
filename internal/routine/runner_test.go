@@ -57,6 +57,13 @@ func (l *eventLog) names() []string {
 	return append([]string(nil), l.events...)
 }
 
+// at returns the data of the i-th published event.
+func (l *eventLog) at(i int) map[string]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.data[i]
+}
+
 func (l *eventLog) last(event string) (map[string]any, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -68,16 +75,86 @@ func (l *eventLog) last(event string) (map[string]any, bool) {
 	return nil, false
 }
 
+// fakeLauncher records the argv a step would have started, and starts
+// nothing. It is what makes the argument guarantees provable: every assertion
+// about what reaches execve is an assertion about this slice, and no test in
+// this package can put a process on the user's desktop.
+//
+// launched is unexported and read through a mutex-taking accessor, which is
+// the rule internal/testdiscipline enforces: the runner writes it from the
+// goroutine driving the run while the test reads it.
+type fakeLauncher struct {
+	mu       sync.Mutex
+	launched []Target
+	fail     map[string]error
+}
+
+func (l *fakeLauncher) Launch(_ context.Context, target Target) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.launched = append(l.launched, target)
+	return l.fail[target.Label]
+}
+
+func (l *fakeLauncher) launches() []Target {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]Target(nil), l.launched...)
+}
+
+// installedResolver says every program named is on PATH and resolves to an
+// unsurprising place, with no desktop entries at all. It is the default a
+// test gets, because most tests are about placement and would otherwise have
+// to declare a machine.
+func installedResolver() *Resolver {
+	return &Resolver{LookPath: func(name string) (string, error) {
+		if strings.HasPrefix(name, "/") {
+			return name, nil
+		}
+		return "/usr/bin/" + name, nil
+	}}
+}
+
+// missingResolver says nothing is installed except the named programs.
+func missingResolver(installed ...string) *Resolver {
+	have := make(map[string]bool, len(installed))
+	for _, name := range installed {
+		have[name] = true
+	}
+	return &Resolver{LookPath: func(name string) (string, error) {
+		if have[name] {
+			return "/usr/bin/" + name, nil
+		}
+		return "", errors.New("not found in $PATH")
+	}}
+}
+
 // newTestRunner wires a runner to the fake compositor with a deterministic
 // clock. onPoll, when set, runs on every timer wait — tests use it to make a
 // window "appear" after a chosen number of polls.
 func newTestRunner(comp *desktop.FakeCompositor, defs []Definition, log *eventLog,
 	onPoll func(poll int)) (*Runner, *fakeClock) {
+	r, clk, _ := newTestRunnerOn(comp, defs, log, onPoll, installedResolver())
+	return r, clk
+}
+
+// newTestRunnerOn is newTestRunner against a chosen machine, returning the
+// launcher so a test can read the exact argv a step produced.
+func newTestRunnerOn(comp *desktop.FakeCompositor, defs []Definition, log *eventLog,
+	onPoll func(poll int), resolver *Resolver) (*Runner, *fakeClock, *fakeLauncher) {
 	var publish func(string, map[string]any)
 	if log != nil {
 		publish = log.publish
 	}
-	r := New(Options{Compositor: comp, Definitions: defs, Publish: publish})
+	launcher := &fakeLauncher{fail: map[string]error{}}
+	r := New(Options{Compositor: comp, Definitions: defs, Publish: publish,
+		Resolver: resolver, Launcher: launcher})
+	clk := withTestClock(r, onPoll)
+	return r, clk, launcher
+}
+
+// withTestClock replaces a runner's clock and timer with deterministic ones.
+func withTestClock(r *Runner, onPoll func(poll int)) *fakeClock {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	r.now = clk.now
 	polls := 0
@@ -91,7 +168,7 @@ func newTestRunner(comp *desktop.FakeCompositor, defs []Definition, log *eventLo
 		ch <- clk.now()
 		return ch, func() {}
 	}
-	return r, clk
+	return clk
 }
 
 func verbs(actions []desktop.FakeAction) []string {
@@ -289,7 +366,10 @@ func TestRoutineBoundsTheWaitForAWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary != "Morning setup: one app placed; ghostwindow's window did not appear." {
+	// The wording says WHICH failure it was (#175): the program started and
+	// mapped nothing, which is a different fix from "it is not installed" and
+	// from "it opened something my match did not recognise".
+	if summary != "Morning setup: one app placed; ghostwindow opened no window within 8 seconds." {
 		t.Errorf("summary = %q", summary)
 	}
 }

@@ -310,7 +310,16 @@ phrases = ["morning setup"]      # literal trigger phrases (intent grammar)
 schedule = "08:30 mon-fri"       # optional clock trigger; see "Schedules"
 announce = false                 # speak a scheduled run's summary (default false)
 [[routines.steps]]               # repeat per step, run in order
-app = "firefox"                  # program to launch if not already running
+app = "chromium"                 # program to launch; one bare executable name
+                                 # or absolute path, run directly
+                                 # desktop_entry = "ChatGPT"  — an entry from
+                                 # the applications menu, INSTEAD of `app`
+args = ["--profile-directory=Profile 3"]   # passed exactly as written: an
+                                 # argv, no shell, no word splitting
+identity = "personal-browser"    # give the window a class of its own, so the
+                                 # routine can find it again (see below)
+launch = "if_missing"            # if_missing (default: adopt a matching
+                                 # window) | always (open a new one every run)
 workspace = 2                    # where its window goes (1-99)
 monitor = "HDMI-A-1"             # optional: a connector name, "current", or a
                                  # name you gave a screen ("top") — see below
@@ -324,6 +333,8 @@ master = false                   # promote into the layout's big pane
 focus = "silent"                 # silent (default) or follow
 [[routines.steps]]               # the step place_next above makes room for
 app = "code"
+match = "code"                   # how an existing window is recognised, when
+                                 # the class differs from the binary's name
 workspace = 2
 mode = "tiled"
 
@@ -962,24 +973,95 @@ phrases = ["morning setup", "start my usual apps"]
 
 How a run behaves:
 
-- **Already running beats launching.** Each step first looks for an existing
-  window (matched the way `desktop.focus_window` matches, on `match` or the
-  app name) and places that window instead of starting a second copy. Re-run
-  the routine and it converges on the same layout rather than opening a
-  second browser.
-- **Launches go through the compositor**, exactly like "open a terminal":
-  `app` must be one bare executable name or absolute path — never a command
-  line, never a shell — and the window inherits your graphical session's
-  environment.
-- **One failure doesn't strand the rest.** An app that will not start, or
-  whose window never appears within the bounded wait, is skipped and named in
-  the single spoken summary at the end: "Morning setup: three apps placed;
-  slack did not start." There is no per-step monologue; the bar and the
+- **Already running beats launching, unless the step says otherwise.** Each
+  step first looks for an existing window (matched the way
+  `desktop.focus_window` matches, on `match`, the identity, or the app name)
+  and places that window instead of starting a second copy. Re-run the routine
+  and it converges on the same layout rather than opening a second browser. A
+  step that wants a fresh window every time says `launch = "always"`.
+- **Nothing here is a command line.** `app` is one bare executable name or
+  absolute path; `args` is a list, handed to the program as an argv. There is
+  no shell anywhere on the path, so `args = ["--flag=a;b"]` is one argument
+  containing a semicolon rather than two commands. (For a shell line behind a
+  phrase, that is what [`[[scripts]]`](#scripts-scripts) is for.)
+- **One failure doesn't strand the rest, and it says which failure it was.**
+  A step that produced no window is skipped and named in the single spoken
+  summary at the end, with the reason: *"discord is not installed"*,
+  *"chromium did not start"*, *"chromium opened no window within 8 seconds"*,
+  or *"chromium opened a window, but nothing matched \"facebook\""*. Those are
+  four different fixes. There is no per-step monologue; the bar and the
   conversation window show progress via `routine.*` events instead.
 - **"Jarvix, stop" aborts a run mid-placement**, and speaking the phrase
   again while a run is still placing windows is refused with one line rather
   than interleaving two sequences.
 - The run ends with your view on the **first step's workspace**.
+
+#### What a step launches: entries, arguments, identities
+
+The launching half of a step is the other five keys
+([ADR 0058](adr/0058-step-launching.md)). It exists because most of what a
+modern desktop launches is not a bare binary: the web apps in your
+applications menu are wrappers, some applications have no binary on `PATH` at
+all, and "my work browser" is the same binary as "my personal browser" with a
+different profile.
+
+| Key | Values | Meaning |
+| --- | --- | --- |
+| `app` | `"chromium"`, `"/opt/thing/bin/thing"` | one bare executable name or absolute path |
+| `desktop_entry` | `"ChatGPT"`, `"ChatGPT.desktop"` | an entry from the applications menu, launched through its own `Exec`. Use **instead of** `app` |
+| `args` | `["--profile-directory=Profile 3"]` | passed to the program as an argv — exactly as written, no shell, no word splitting, no globbing |
+| `identity` | `"work-browser"` | launch the window with a class of its own, so the routine recognises it later |
+| `launch` | `if_missing` (default), `always` | adopt a matching window that is already open, or start a new one every run |
+
+**Desktop entries.** Name the entry as the applications menu shows it, with or
+without `.desktop`. Its own `Exec` line is what runs, with the specification's
+field codes applied. An entry this machine does not have is an error when the
+routine is **saved or loaded**, naming it and the closest installed spellings
+— not an eight-second silence at run time. An entry that declares
+`Terminal=true` is refused: it needs a terminal wrapped round it, so write
+your terminal in `app` and the command in `args` instead.
+
+**Arguments come from you, never from the model.** The assistant can propose a
+routine, and every argument in it is shown verbatim on the confirmation card
+before anything is written. It still cannot hand arguments to the
+`desktop.launch_app` tool — that stance
+([ADR 0022](adr/0022-desktop-window-control.md)) is unchanged.
+
+**Identity, and the two-Chrome-profiles problem.** Chromium runs every profile
+in a single process, so a personal-profile window and a work-profile window
+have the same class, the same PID and the same command line. Nothing about a
+*running* desktop can tell them apart. The fix is to decide before the window
+exists:
+
+```toml
+[[routines]]
+name = "browsers"
+phrases = ["open my browsers"]
+
+  [[routines.steps]]
+  app = "chromium"
+  args = ["--profile-directory=Profile 3"]
+  identity = "personal-browser"     # the window opens with this class…
+  workspace = 1                     # …and the routine finds it by that name
+
+  [[routines.steps]]
+  app = "chromium"
+  args = ["--profile-directory=Default"]
+  identity = "work-browser"
+  workspace = 2
+```
+
+`identity` works for programs that accept a flag for it — the Chromium and
+Firefox families, Alacritty and Kitty (`--class=`), Foot (`--app-id=`). For
+anything else it is refused when you save, because a class that never lands is
+a step that launches correctly and then reports its own window as missing.
+Tell those two windows apart with a distinct `match` instead, or accept that
+they are interchangeable — for two terminals, they usually are.
+
+Two steps that launch **different things** and look for the **same** window
+are refused for the same reason: whichever ran first would take whichever
+window was listed first, and a layout that comes out backwards one morning in
+three is worse than one that will not save.
 
 #### Where a window goes: the placement vocabulary
 

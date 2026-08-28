@@ -74,6 +74,7 @@ import (
 	"github.com/rpickz/jarvix/internal/automation"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/session"
 )
 
@@ -220,6 +221,16 @@ type entryFamilySpec struct {
 	// notes, when set, states what the draft's configuration EARNS, so the
 	// form can show it beside the field that decides it.
 	notes func(name string, draft map[string]any) []entryNote
+	// machineProblems, when set, reports what a validly written entry cannot
+	// do on THIS machine, judged against the document the save would produce.
+	// It runs only on the save paths (validate_entry and upsert_entry) and
+	// never on a daemon's own config load, which is the whole point of it
+	// being separate from whole-document validation (#175): "this routine
+	// names an application that is not installed" must refuse the SAVE, and
+	// must not stop a daemon from starting because the user uninstalled
+	// something a routine mentions — the file did not change, the machine
+	// did, and everything else the daemon does is unrelated.
+	machineProblems func(cfg config.Config, name string) []entryProblem
 	// nameProblems lists substrings that mark a whole-document problem as
 	// belonging on the name field even though it carries no `family.name.key`
 	// label — the validators that word a bad name as a sentence about the
@@ -260,17 +271,22 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 		// renderer writes only the current vocabulary, so an entry the window
 		// touches comes back migrated.
 		subKeys: map[string]map[string]entryKeyKind{"steps": {
-			"app": entryKeyString, "match": entryKeyString, "workspace": entryKeyInt,
-			"monitor": entryKeyString, "mode": entryKeyString,
+			"app": entryKeyString, "desktop_entry": entryKeyString,
+			"args": entryKeyStringList, "identity": entryKeyString,
+			"match": entryKeyString, "launch": entryKeyString,
+			"workspace": entryKeyInt,
+			"monitor":   entryKeyString, "mode": entryKeyString,
 			"width": entryKeyString, "height": entryKeyString,
 			"position": entryKeyIntPair, "place_next": entryKeyString,
 			"master": entryKeyBool, "focus": entryKeyString,
 			"float": entryKeyBool, "size": entryKeyIntPair, "tile": entryKeyString,
 		}},
 		subOrder: map[string][]string{"steps": {
-			"app", "match", "workspace", "monitor", "mode", "width", "height",
+			"app", "desktop_entry", "args", "identity", "match", "launch",
+			"workspace", "monitor", "mode", "width", "height",
 			"position", "place_next", "master", "focus", "float", "size", "tile",
 		}},
+		machineProblems: routineMachineProblems,
 	},
 	"scripts": {
 		family: "scripts", kind: "script",
@@ -1121,7 +1137,10 @@ func (d *Daemon) entryDocProblems(newRaw []byte, spec entryFamilySpec, draft map
 	cfg.Voices = cfg.InstalledVoices(d.paths)
 	err = cfg.Validate()
 	if err == nil {
-		return nil
+		if spec.machineProblems == nil || draft == nil {
+			return nil
+		}
+		return spec.machineProblems(cfg, spec.entryName(draft))
 	}
 	if draft == nil {
 		var out []entryProblem
@@ -1139,6 +1158,29 @@ func (d *Daemon) entryDocProblems(newRaw []byte, spec entryFamilySpec, draft map
 	var out []entryProblem
 	for _, msg := range validationProblems(err) {
 		out = append(out, classifyEntryProblem(spec, index, name, phrases, msg))
+	}
+	return out
+}
+
+// routineMachineProblems asks this machine whether the routine just saved
+// could actually run: every step's program on PATH, every desktop entry's
+// program behind it (#175). The same resolution the runner performs a moment
+// before launching, from the same code, so a routine the form accepted is a
+// routine that starts — and one it refused never reaches a phrase.
+func routineMachineProblems(cfg config.Config, name string) []entryProblem {
+	var out []entryProblem
+	defs := cfg.RoutineDefinitions()
+	resolver := routine.MachineResolver(defs)
+	for _, def := range defs {
+		if !strings.EqualFold(strings.TrimSpace(def.Name), strings.TrimSpace(name)) {
+			continue
+		}
+		for _, p := range routine.InstallProblems(def, resolver) {
+			out = append(out, entryProblem{
+				Field:   fmt.Sprintf("steps[%d].%s", p.Step, p.Field),
+				Message: p.Message,
+			})
+		}
 	}
 	return out
 }
@@ -1239,7 +1281,16 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string,
 		field := "steps[" + m[1] + "]"
 		if sub, ok := spec.subKeys["steps"]; ok {
 			token := strings.TrimSuffix(strings.SplitN(rest, " ", 2)[0], ":")
-			if _, ok := sub[token]; ok {
+			// A step key may be a LIST, and a problem may name one element of
+			// it — `args[1] contains a null byte`. The key is the token with
+			// its subscript removed; the field keeps the subscript, so the
+			// form pins the message to the row it means, exactly as a
+			// `phrases[1]` problem already lands on the phrase it means.
+			key := token
+			if open := strings.IndexByte(token, '['); open > 0 && strings.HasSuffix(token, "]") {
+				key = token[:open]
+			}
+			if _, ok := sub[key]; ok {
 				field += "." + token
 			}
 		}

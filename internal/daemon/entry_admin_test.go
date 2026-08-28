@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -607,5 +608,109 @@ func TestConfigDeleteEntryRefusals(t *testing.T) {
 	}
 	if string(raw) != string(original) {
 		t.Error("a refused delete still changed the file")
+	}
+}
+
+// TestSavingARoutineRefusesWhatThisMachineCannotLaunch is issue #175's
+// save-time criterion, and the split it rests on.
+//
+// A routine naming an application that is not installed is refused when it is
+// SAVED — by the window's form and by the assistant's config tool alike,
+// because both come through this one pipeline — so it can never reach a run
+// and produce the eight-second silence the ticket was reported for. It is
+// deliberately not a whole-document load rule: a daemon must still start when
+// the user uninstalls something a routine mentions, because the file did not
+// change and everything else the daemon does is unrelated.
+func TestSavingARoutineRefusesWhatThisMachineCannotLaunch(t *testing.T) {
+	client, configFile, _ := startAutomationsDaemon(t, false)
+	original, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := entryCall(t, client, "config.validate_entry", map[string]any{
+		"family": "routines", "name": "evening",
+		"entry": map[string]any{"name": "evening", "phrases": []string{"evening mode"},
+			"steps": []map[string]any{
+				{"app": "definitely-not-installed-anywhere", "workspace": 5},
+			}},
+	})
+	if out["valid"] != false {
+		t.Fatalf("validate = %v, want the uninstalled step refused", out)
+	}
+	msg, ok := problemOn(entryProblemList(t, out), "steps[0].app")
+	if !ok || !strings.Contains(msg, "is not installed") {
+		t.Errorf("problem = %q (%v), want it on steps[0].app saying it is not installed", msg, ok)
+	}
+
+	// The save refuses too, and writes nothing.
+	err = client.Call("config.upsert_entry", map[string]any{
+		"family": "routines", "name": "evening",
+		"entry": map[string]any{"name": "evening", "phrases": []string{"evening mode"},
+			"steps": []map[string]any{
+				{"app": "definitely-not-installed-anywhere", "workspace": 5},
+			}},
+	}, nil)
+	if err == nil {
+		t.Fatal("the save was accepted")
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != string(original) {
+		t.Error("a refused save changed the file")
+	}
+}
+
+// TestSavingARoutineAcceptsArgumentsAndADesktopEntryStep: the other side of
+// the same surface. The new launching keys travel the generic pipeline with
+// no routine-specific code in the form — args as a string list, exactly as
+// phrases already do — and come back out of the file unchanged.
+func TestSavingARoutineAcceptsArgumentsAndADesktopEntryStep(t *testing.T) {
+	client, configFile, _ := startAutomationsDaemon(t, false)
+
+	// A program that certainly exists on any machine running these tests, so
+	// the test is about the SCHEMA rather than about what is installed.
+	program := filepath.Base(os.Args[0])
+	dir := filepath.Dir(os.Args[0])
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	entry := map[string]any{
+		"name": "evening", "phrases": []string{"evening mode"},
+		"steps": []map[string]any{{
+			"app":       program,
+			"args":      []string{"--profile-directory=Profile 3", "; rm -rf ~"},
+			"launch":    "always",
+			"match":     "evening",
+			"workspace": 5,
+		}},
+	}
+	out := entryCall(t, client, "config.validate_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	})
+	if out["valid"] != true {
+		t.Fatalf("validate = %v, want the launching keys accepted", out)
+	}
+
+	if err := client.Call("config.upsert_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	}, nil); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The argument containing shell metacharacters is written as data and
+	// read back as data. Nothing on this path ever renders it into a command
+	// line, so the semicolon is a character in an argv element.
+	for _, want := range []string{
+		`args = ["--profile-directory=Profile 3", "; rm -rf ~"]`,
+		`launch = "always"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("saved document does not carry %s:\n%s", want, raw)
+		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/desktopentry"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/placement"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -46,11 +47,22 @@ var ErrAlreadyRunning = errors.New("already running")
 
 // Options configure a Runner.
 type Options struct {
-	// Compositor is the seam every launch and placement goes through.
-	// Required.
+	// Compositor is the seam every placement — and every bare-program launch
+	// — goes through. Required.
 	Compositor desktop.Compositor
 	// Definitions are the validated routines this runner can execute.
 	Definitions []Definition
+	// Resolver decides what a step's launching half resolves to on this
+	// machine (issue #175). Nil reads the real machine, lazily, on the first
+	// run: PATH through exec.LookPath and the desktop entries under the XDG
+	// search path. Lazily rather than at construction because a runner is
+	// rebuilt on every config reload and the entry index is a directory walk.
+	Resolver *Resolver
+	// Launcher starts a resolved target — an argv, never a command line. Nil
+	// uses ExecLauncher, which starts a detached child the way
+	// desktop.launch_app does. Tests supply a recorder, so no test in this
+	// package can start a process.
+	Launcher Launcher
 	// Publish emits progress events (routine.started / routine.step /
 	// routine.finished) for the bar and the window. Nil publishes nothing.
 	Publish func(event string, data map[string]any)
@@ -86,6 +98,13 @@ type Runner struct {
 	// monitorNames is the nickname table every monitor reference resolves
 	// through (#180). Nil is the no-nicknames daemon.
 	monitorNames func(name string) (string, bool)
+	// launcher starts a resolved argv.
+	launcher Launcher
+
+	// resolverMu guards the lazily built default resolver. A run reads it;
+	// nothing else writes it after the first.
+	resolverMu sync.Mutex
+	resolver   *Resolver
 
 	// now and timer are the run's clock, injectable so the appear-wait is
 	// deterministic in tests — the same shape the session engine uses, because
@@ -107,6 +126,8 @@ func New(opts Options) *Runner {
 		callTimeout:   opts.CallTimeout,
 		appearTimeout: opts.AppearTimeout,
 		monitorNames:  opts.MonitorNicknames,
+		launcher:      opts.Launcher,
+		resolver:      opts.Resolver,
 		now:           time.Now,
 		timer: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTimer(d)
@@ -122,7 +143,23 @@ func New(opts Options) *Runner {
 	if r.appearTimeout <= 0 {
 		r.appearTimeout = DefaultAppearTimeout
 	}
+	if r.launcher == nil {
+		r.launcher = ExecLauncher{}
+	}
 	return r
+}
+
+// resolve returns the launch resolver, building the real machine's on first
+// use. Lazily because reading every desktop entry is a directory walk and a
+// daemon that has no routines carrying one should never pay for it.
+func (r *Runner) resolve() Resolver {
+	r.resolverMu.Lock()
+	defer r.resolverMu.Unlock()
+	if r.resolver == nil {
+		built := DefaultResolver()
+		r.resolver = &built
+	}
+	return *r.resolver
 }
 
 // Definitions returns the routines this runner knows, in configured order.
@@ -130,13 +167,55 @@ func (r *Runner) Definitions() []Definition {
 	return append([]Definition(nil), r.defs...)
 }
 
+// Failure classifies why a step did not produce a placed window.
+//
+// The classification is the reporting criterion of issue #175, and it is a
+// classification rather than a message because three different things were
+// being said with one sentence. "Nothing launched" covered an application
+// that is not installed (no wait will help), one that started and mapped
+// nothing (still starting, or it crashed), and one that mapped a window the
+// step's match did not recognise (the routine is looking for the wrong
+// thing) — three different fixes, reported identically, which is why the user
+// saw "placed=3 failed=3" and could not tell what to do about it.
+type Failure string
+
+// The failure kinds. Empty is a step that worked.
+const (
+	// FailureNotInstalled: the program or desktop entry is not on this
+	// machine. Nothing was started and nothing was waited for.
+	FailureNotInstalled Failure = "not_installed"
+	// FailureDidNotStart: the launch itself was refused.
+	FailureDidNotStart Failure = "did_not_start"
+	// FailureNoWindow: it was started, and no window appeared at all inside
+	// the bounded wait.
+	FailureNoWindow Failure = "no_window"
+	// FailureNoMatch: it was started, a window appeared, and nothing matched
+	// what the step is looking for.
+	FailureNoMatch Failure = "no_match"
+	// FailureNotPlaced: the window exists and the compositor refused some
+	// part of the placement — the #177 family, unchanged by this ticket.
+	FailureNotPlaced Failure = "not_placed"
+)
+
 // outcome is what happened to one step, kept so the summary can be composed
 // once at the end instead of spoken piecemeal.
 type outcome struct {
 	window   desktop.Window
 	resolved bool   // a window exists (found or appeared) to place
-	launched bool   // the app was spawned rather than deduped
+	launched bool   // the app was started rather than adopted
 	failure  string // one spoken clause, empty for a placed step
+	kind     Failure
+	// excluded is the set of windows this step may not take: empty for a step
+	// that adopts, and everything already open for one that insists on a
+	// fresh window. Without it, `launch = "always"` would start a new window
+	// and then place the old one, which is the instruction inverted.
+	excluded map[string]bool
+}
+
+// fail records one step's failure: the clause the user hears and the kind the
+// feed and the log carry.
+func (o *outcome) fail(kind Failure, clause string) {
+	o.kind, o.failure = kind, clause
 }
 
 // Run executes the named routine under ctx and returns the one-sentence
@@ -192,25 +271,36 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 	// and it is the price of being able to say what the desktop looks like.
 	arranged := def.arranges()
 	place := r.placer()
+	resolver := r.resolve()
 	outcomes := make([]outcome, len(def.Steps))
 	claimed := make(map[string]bool)
+	present := addressSet(inventory)
 	for i, step := range def.Steps {
-		if w, found := findUnclaimed(step, inventory, claimed); found {
-			claimed[w.Address] = true
-			outcomes[i].window, outcomes[i].resolved = w, true
-			continue
+		// Whether an already-open window may be adopted is the step's own
+		// decision now (#175). A step that says `launch = "always"` skips the
+		// search entirely: it is describing a window it wants started, and
+		// finding an existing one would be finding the wrong thing.
+		if step.Launch.Adopts() {
+			if w, found := findUnclaimed(step, inventory, claimed); found {
+				claimed[w.Address] = true
+				outcomes[i].window, outcomes[i].resolved = w, true
+				continue
+			}
 		}
 		outcomes[i].launched = true
+		if !step.Launch.Adopts() {
+			outcomes[i].excluded = present
+		}
 		if arranged {
 			continue
 		}
-		if err := r.spawn(ctx, step.App); err != nil {
+		if err := r.startStep(ctx, resolver, step); err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
 			}
 			r.log.Warn("routine step could not launch", "component", "routine",
-				"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-			outcomes[i].failure = step.App + " did not start"
+				"routine", def.Name, "step", i+1, "app", step.Launches(), "error", err.Error())
+			outcomes[i].fail(launchFailure(err), launchClause(step, err))
 		}
 	}
 
@@ -229,25 +319,43 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 				if ctx.Err() != nil {
 					return "", ctx.Err()
 				}
-				outcomes[i].failure = fmt.Sprintf("workspace %d could not be shown", step.Workspace)
-			} else if err := r.spawn(ctx, step.App); err != nil {
-				if ctx.Err() != nil {
-					return "", ctx.Err()
+				outcomes[i].fail(FailureNotPlaced,
+					fmt.Sprintf("workspace %d could not be shown", step.Workspace))
+			} else {
+				// Retaken here, not reused from phase two: an arranging
+				// routine launches one window at a time, so a step insisting
+				// on a fresh window must exclude everything open at THIS
+				// moment, including windows earlier steps of this same run
+				// opened.
+				if !step.Launch.Adopts() {
+					outcomes[i].excluded = r.addresses(ctx)
 				}
-				r.log.Warn("routine step could not launch", "component", "routine",
-					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-				outcomes[i].failure = step.App + " did not start"
+				if err := r.startStep(ctx, resolver, step); err != nil {
+					if ctx.Err() != nil {
+						return "", ctx.Err()
+					}
+					r.log.Warn("routine step could not launch", "component", "routine",
+						"routine", def.Name, "step", i+1, "app", step.Launches(), "error", err.Error())
+					outcomes[i].fail(launchFailure(err), launchClause(step, err))
+				}
 			}
 		}
 		if outcomes[i].failure == "" && !outcomes[i].resolved {
-			w, err := r.awaitWindow(ctx, step, claimed)
+			w, appeared, err := r.awaitWindow(ctx, step, claimed, outcomes[i].excluded)
 			if err != nil {
 				if ctx.Err() != nil {
 					return "", ctx.Err()
 				}
 				r.log.Warn("routine step window never appeared", "component", "routine",
-					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-				outcomes[i].failure = step.App + "'s window did not appear"
+					"routine", def.Name, "step", i+1, "app", step.Launches(),
+					"match", step.matchQuery(), "new_windows", appeared, "error", err.Error())
+				if appeared {
+					outcomes[i].fail(FailureNoMatch, fmt.Sprintf("%s opened a window, but nothing matched %q",
+						step.Launches(), step.matchQuery()))
+				} else {
+					outcomes[i].fail(FailureNoWindow, fmt.Sprintf("%s opened no window within %s",
+						step.Launches(), spokenSeconds(r.appearTimeout)))
+				}
 			} else {
 				claimed[w.Address] = true
 				outcomes[i].window, outcomes[i].resolved = w, true
@@ -258,21 +366,21 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 				// The screen the step named is not there. Say which one and
 				// why, and carry on with the remaining steps — the #180
 				// contract, and the ordinary "failure continues" rule.
-				outcomes[i].failure = failureClause(step, "placed", err)
+				outcomes[i].fail(FailureNotPlaced, failureClause(step, "placed", err))
 			} else if err := place.Apply(ctx, outcomes[i].window, step.Placement, targets[i].monitor); err != nil {
 				if ctx.Err() != nil {
 					return "", ctx.Err()
 				}
 				r.log.Warn("routine step could not be placed", "component", "routine",
-					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-				outcomes[i].failure = failureClause(step, "placed", err)
+					"routine", def.Name, "step", i+1, "app", step.Launches(), "error", err.Error())
+				outcomes[i].fail(FailureNotPlaced, failureClause(step, "placed", err))
 			} else if err := place.Preselect(ctx, outcomes[i].window, step.PlaceNext); err != nil {
 				if ctx.Err() != nil {
 					return "", ctx.Err()
 				}
 				r.log.Warn("routine step could not arrange the next window", "component", "routine",
-					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-				outcomes[i].failure = failureClause(step, "arranged", err)
+					"routine", def.Name, "step", i+1, "app", step.Launches(), "error", err.Error())
+				outcomes[i].fail(FailureNotPlaced, failureClause(step, "arranged", err))
 			}
 		}
 		r.emitStep(def.Name, i, step, outcomes[i])
@@ -291,8 +399,8 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 				return "", ctx.Err()
 			}
 			r.log.Warn("routine step could not be sized", "component", "routine",
-				"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-			outcomes[i].failure = failureClause(step, "sized", err)
+				"routine", def.Name, "step", i+1, "app", step.Launches(), "error", err.Error())
+			outcomes[i].fail(FailureNotPlaced, failureClause(step, "sized", err))
 			r.emitStep(def.Name, i, step, outcomes[i])
 		}
 	}
@@ -457,15 +565,99 @@ func (r *Runner) placer() desktop.Placer {
 	return desktop.Placer{Comp: r.comp, Timeout: r.callTimeout}
 }
 
-// spawn launches one step's application through the compositor, the same
-// validated path the terminal intent uses (ADR 0022's exec_cmd exception):
-// the name was bounded to one bare token at config load and the seam checks
-// it again before rendering, so a shell — where one is involved at all —
-// receives a string with nothing to chew on. Spawning through the compositor
-// rather than from the daemon is also what makes the window land with the
-// graphical session's environment and survive a daemon restart.
-func (r *Runner) spawn(ctx context.Context, app string) error {
-	return r.call(ctx, func(c context.Context) error { return r.comp.Spawn(c, app) })
+// startStep resolves one step's launching half and starts it.
+//
+// Resolution comes first even for the plainest step, and that is the whole of
+// the "not installed" report: a routine that names an application this
+// machine does not have used to spend eight seconds waiting for its window
+// and then say the window did not appear. Asking PATH — the same question
+// desktop.launch_app asks — turns that into one sentence with a name in it,
+// before anything is started or waited for.
+//
+// Then two paths, and the split is deliberate rather than tidy:
+//
+//   - A bare program with no arguments still goes through the compositor's
+//     spawn dispatcher, exactly as it has since ADR 0026. That path is the
+//     only one that starts the application as a child of the compositor, with
+//     the graphical session's environment, which matters for a daemon started
+//     outside that session — and it has worked for every routine in the
+//     field. Changing it for steps that did not ask for anything new would be
+//     spending a working feature on symmetry.
+//   - Anything carrying arguments — an argv, a desktop entry's Exec, an
+//     identity flag — cannot go that way at all, because the dispatcher takes
+//     a COMMAND LINE and hands it to a shell. Quoting a value for a shell is
+//     a much weaker promise than not having one, so those steps are started
+//     directly through the Launcher, with the argv reaching execve as a list.
+func (r *Runner) startStep(ctx context.Context, resolver Resolver, step Step) error {
+	target, err := resolver.Resolve(step)
+	if err != nil {
+		return err
+	}
+	if len(target.Argv) == 1 && strings.TrimSpace(step.App) != "" {
+		return r.call(ctx, func(c context.Context) error { return r.comp.Spawn(c, step.App) })
+	}
+	if err := r.call(ctx, func(c context.Context) error {
+		return r.launcher.Launch(c, target)
+	}); err != nil {
+		// The argv joins the ERROR rather than a second log line, so the one
+		// warning the caller writes carries what was actually attempted. It
+		// is operator material and never reaches the spoken clause, which
+		// launchClause words from the step's own name.
+		return fmt.Errorf("%s: %w", target, err)
+	}
+	return nil
+}
+
+// launchFailure classifies a launch error for the feed and the log.
+func launchFailure(err error) Failure {
+	var missing *desktopentry.NotFoundError
+	if errors.Is(err, ErrNotInstalled) || errors.As(err, &missing) {
+		return FailureNotInstalled
+	}
+	return FailureDidNotStart
+}
+
+// launchClause words a launch failure for the spoken summary.
+//
+// A resolver refusal is already a sentence written to be spoken ("chromium is
+// not installed", "there is no Signal desktop entry on this computer"), so it
+// is used as it stands. Anything else is the operating system's own error,
+// which belongs in the log line beside it and not in the user's ear.
+func launchClause(step Step, err error) string {
+	var missing *desktopentry.NotFoundError
+	if errors.Is(err, ErrNotInstalled) || errors.As(err, &missing) {
+		return err.Error()
+	}
+	return step.Launches() + " did not start"
+}
+
+// addressSet is the set of window addresses in an inventory.
+func addressSet(windows []desktop.Window) map[string]bool {
+	set := make(map[string]bool, len(windows))
+	for _, w := range windows {
+		set[w.Address] = true
+	}
+	return set
+}
+
+// addresses reads the live inventory as a set, or an empty one if the
+// compositor will not answer. An empty set makes the wait's diagnosis say
+// "opened nothing", which is the conservative reading when we could not look.
+func (r *Runner) addresses(ctx context.Context) map[string]bool {
+	windows, err := r.windows(ctx)
+	if err != nil {
+		return map[string]bool{}
+	}
+	return addressSet(windows)
+}
+
+// spokenSeconds renders a wait for a sentence: "8 seconds", not "8s".
+func spokenSeconds(d time.Duration) string {
+	seconds := int(d.Round(time.Second) / time.Second)
+	if seconds == 1 {
+		return "1 second"
+	}
+	return fmt.Sprintf("%d seconds", seconds)
 }
 
 // findUnclaimed matches a step against the windows no earlier step has
@@ -484,25 +676,63 @@ func findUnclaimed(step Step, inventory []desktop.Window, claimed map[string]boo
 // awaitWindow polls the inventory until a window matching the step appears,
 // the bounded wait expires, or ctx is cancelled. The clock and the timer are
 // injected, so tests drive this loop step by step instead of sleeping at it.
-func (r *Runner) awaitWindow(ctx context.Context, step Step, claimed map[string]bool) (desktop.Window, error) {
+//
+// appeared reports whether ANY window that was not on screen when this wait
+// began turned up while it ran. It is the difference between the two honest
+// diagnoses this ticket asks for: nothing appeared at all (the application is
+// still starting, or it died), or something appeared and the step's match did
+// not recognise it (the routine is looking for the wrong thing — the reported
+// case was `app = "chromium", match = "facebook"`, which launched a browser
+// and then waited for a window nothing had told it to open).
+//
+// The baseline is taken when the WAIT starts rather than when the launch was
+// dispatched, and that is deliberate. A routine that does not arrange its
+// windows launches everything at once and then waits in step order, so a
+// launch-time baseline would let step one's window count as step three's
+// evidence. Waits run one at a time, so "what turned up while I was waiting"
+// attributes each window to a single step — the best attribution an observer
+// of a window list can make, and the same one the user's own script made.
+//
+// excluded are windows this step may not take. It is empty for a step that
+// adopts (the ordinary case: any matching window will do) and the
+// pre-existing inventory for one that insists on a fresh window, which is
+// what makes `launch = "always"` mean what it says rather than picking up the
+// window it was told to ignore.
+func (r *Runner) awaitWindow(ctx context.Context, step Step, claimed map[string]bool,
+	excluded map[string]bool) (window desktop.Window, appeared bool, err error) {
 	deadline := r.now().Add(r.appearTimeout)
+	var atStart map[string]bool
 	for {
-		if windows, err := r.windows(ctx); err == nil {
-			if w, found := findUnclaimed(step, windows, claimed); found {
-				return w, nil
+		if windows, readErr := r.windows(ctx); readErr == nil {
+			if atStart == nil {
+				atStart = addressSet(windows)
+			}
+			eligible := make([]desktop.Window, 0, len(windows))
+			for _, w := range windows {
+				if claimed[w.Address] || excluded[w.Address] {
+					continue
+				}
+				if !atStart[w.Address] {
+					appeared = true
+				}
+				eligible = append(eligible, w)
+			}
+			if w, found := tools.FindWindow(step.matchQuery(), eligible); found {
+				return w, appeared, nil
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			return desktop.Window{}, err
+			return desktop.Window{}, appeared, err
 		}
 		if !r.now().Before(deadline) {
-			return desktop.Window{}, fmt.Errorf("no window appeared within %s", r.appearTimeout)
+			return desktop.Window{}, appeared,
+				fmt.Errorf("no window matching %q appeared within %s", step.matchQuery(), r.appearTimeout)
 		}
 		fire, stop := r.timer(appearPoll)
 		select {
 		case <-ctx.Done():
 			stop()
-			return desktop.Window{}, ctx.Err()
+			return desktop.Window{}, appeared, ctx.Err()
 		case <-fire:
 			stop()
 		}
@@ -525,9 +755,9 @@ func (r *Runner) awaitWindow(ctx context.Context, step Step, claimed map[string]
 // vocabulary's own words.
 func failureClause(step Step, clause string, err error) string {
 	if msg := desktop.PlacementSentence(err); msg != "" {
-		return step.App + ": " + msg
+		return step.Launches() + ": " + msg
 	}
-	return step.App + " could not be " + clause
+	return step.Launches() + " could not be " + clause
 }
 
 // emit publishes one bus event, if anyone is listening.
@@ -543,12 +773,17 @@ func (r *Runner) emitStep(routineName string, i int, step Step, out outcome) {
 	status := "placed"
 	data := map[string]any{
 		"routine": routineName, "step": i + 1,
-		"app": step.App, "workspace": step.Workspace,
+		"app": step.Launches(), "workspace": step.Workspace,
 		"launched": out.launched,
 	}
 	if out.failure != "" {
 		status = "failed"
 		data["detail"] = out.failure
+		// The kind rides beside the sentence so the feed can say what KIND of
+		// failure this was without parsing English out of the detail line —
+		// "not installed" is a different row from "opened nothing", and a
+		// surface that wants to offer a fix needs to know which.
+		data["failure"] = string(out.kind)
 	}
 	data["status"] = status
 	r.emit("routine.step", data)
@@ -571,7 +806,7 @@ func summarise(def Definition, outcomes []outcome) (summary string, placed int, 
 	switch {
 	case len(failed) == 0 && placed == 1:
 		// One step, and it landed: name the app rather than counting to one.
-		fmt.Fprintf(&b, "%s placed", def.Steps[0].App)
+		fmt.Fprintf(&b, "%s placed", def.Steps[0].Launches())
 	case len(failed) == 0:
 		fmt.Fprintf(&b, "all %s apps placed", intent.SpokenNumber(placed))
 	case placed == 0:

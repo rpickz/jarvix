@@ -1,10 +1,13 @@
 package config
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/rpickz/jarvix/internal/placement"
+	"github.com/rpickz/jarvix/internal/routine"
 )
 
 // parseValid parses a document and requires it to validate.
@@ -210,5 +213,83 @@ func TestRoutinesSurviveASettingsRewrite(t *testing.T) {
 	}
 	if len(cfg.Routines) != 1 || len(cfg.Routines[0].Steps) != 4 {
 		t.Errorf("routines after rewrite = %+v", cfg.Routines)
+	}
+}
+
+// TestLaunchingKeysRoundTripThroughTheFile is issue #175's schema, read and
+// written: the four new keys parse, convert into the runner's own Step, and
+// come back out of the renderer as the same TOML.
+//
+// The round trip matters more than the parse. The window edits one step of a
+// routine and saves the whole entry, so a key the conversion loses is a key
+// the window deletes the first time anyone renames a step — which is how a
+// user's profile argument would disappear without anyone touching it.
+func TestLaunchingKeysRoundTripThroughTheFile(t *testing.T) {
+	const doc = `
+[[routines]]
+name = "morning setup"
+phrases = ["morning setup"]
+
+  [[routines.steps]]
+  app = "chromium"
+  args = ["--profile-directory=Profile 3", "--restore-last-session"]
+  identity = "personal-browser"
+  launch = "always"
+  workspace = 1
+
+  [[routines.steps]]
+  desktop_entry = "ChatGPT.desktop"
+  match = "chrome-chatgpt.com"
+  workspace = 2
+`
+	cfg, err := ParseBytes([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := cfg.Routines[0].Steps
+	if steps[0].App != "chromium" || steps[0].Identity != "personal-browser" ||
+		steps[0].Launch != "always" ||
+		!slices.Equal(steps[0].Args, []string{"--profile-directory=Profile 3", "--restore-last-session"}) {
+		t.Fatalf("step one parsed as %+v", steps[0])
+	}
+	if steps[1].DesktopEntry != "ChatGPT.desktop" || steps[1].Match != "chrome-chatgpt.com" {
+		t.Fatalf("step two parsed as %+v", steps[1])
+	}
+
+	// Into the runner's own shape and back, which is the conversion the
+	// window's save runs through.
+	defs := cfg.RoutineDefinitions()
+	if got := defs[0].Steps[0]; got.Launch != routine.LaunchAlways ||
+		got.Identity != "personal-browser" ||
+		!slices.Equal(got.Args, []string{"--profile-directory=Profile 3", "--restore-last-session"}) {
+		t.Fatalf("converted step one = %+v", got)
+	}
+	if got := defs[0].Steps[1]; got.DesktopEntry != "ChatGPT.desktop" {
+		t.Fatalf("converted step two = %+v", got)
+	}
+	back := RoutineFromDefinition(defs[0])
+	if !reflect.DeepEqual(back.Steps, cfg.Routines[0].Steps) {
+		t.Errorf("round trip changed the steps:\n got %+v\nwant %+v", back.Steps, cfg.Routines[0].Steps)
+	}
+
+	// And the renderer writes exactly those keys back into the file.
+	written, err := UpsertRoutineTOML([]byte(doc), back, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`args = ["--profile-directory=Profile 3", "--restore-last-session"]`,
+		`identity = "personal-browser"`,
+		`launch = "always"`,
+		`desktop_entry = "ChatGPT.desktop"`,
+	} {
+		if !strings.Contains(string(written), want) {
+			t.Errorf("the rewritten document does not carry %s:\n%s", want, written)
+		}
+	}
+	// The default policy is written as absence, never as the word: a step
+	// that never asked for anything comes back looking exactly as it went in.
+	if strings.Contains(string(written), `launch = "if_missing"`) {
+		t.Error("the renderer wrote the default launch policy into a step that never named it")
 	}
 }

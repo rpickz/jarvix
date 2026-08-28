@@ -673,7 +673,7 @@ FloatingWindow {
     automationFormOriginalName = ""
     automationFormOriginal = {}
     automationDraft = family === "routines"
-      ? { name: "", phrases: [""], steps: [{ app: "", workspace: 1 }] }
+      ? { name: "", phrases: [""], steps: [{ app: "", args: [], workspace: 1 }] }
       : { name: "", phrases: [""], path: "" }
     automationFormProblems = []
     automationFormNextFire = ""
@@ -762,6 +762,31 @@ FloatingWindow {
         var s = drafted[j]
         var step = { app: String(s.app || "").trim(),
           workspace: automationFormNumber(String(s.workspace === undefined ? "" : s.workspace).trim()) }
+        // The launching half (#175). Each key is written only when it says
+        // something, so a step that names none of them is byte-identical to
+        // one written before they existed — and `app` is dropped entirely
+        // when a desktop entry is named, because the daemon refuses a step
+        // that says what to launch twice.
+        var entryName = String(s.desktop_entry || "").trim()
+        if (entryName !== "") {
+          step.desktop_entry = entryName
+          if (step.app === "") delete step.app
+        }
+        var args = []
+        var drafted_args = s.args || []
+        for (var a = 0; a < drafted_args.length; a++) {
+          // Passed exactly as typed, including spaces: the daemon hands these
+          // to the program as an argv and nothing splits them. Empty rows are
+          // dropped — an empty argument is a row someone added and did not
+          // fill in, never something a program wants.
+          var arg = String(drafted_args[a] || "")
+          if (arg !== "") args.push(arg)
+        }
+        if (args.length > 0) step.args = args
+        var identity = String(s.identity || "").trim()
+        if (identity !== "") step.identity = identity
+        var launch = String(s.launch || "").trim()
+        if (launch !== "") step.launch = launch
         var match = String(s.match || "").trim()
         if (match !== "") step.match = match
         if (s.float === true) step.float = true
@@ -903,7 +928,8 @@ FloatingWindow {
   // form carries through without an input (size, position, tile, and the
   // placement vocabulary) so they still land inside the step that owns them.
   function automationStepExtraProblems(index) {
-    var shown = { app: true, workspace: true, match: true, float: true }
+    var shown = { app: true, desktop_entry: true, args: true, identity: true,
+      match: true, launch: true, workspace: true, float: true }
     var prefix = "steps[" + index + "]"
     var out = []
     for (var i = 0; i < automationFormProblems.length; i++) {
@@ -4857,12 +4883,132 @@ FloatingWindow {
                   JarvixFormField {
                     width: parent.width
                     label: "App (one executable name or absolute path)"
-                    placeholder: "firefox"
+                    placeholder: "chromium"
                     monospace: true
+                    hint: "Leave empty and name a desktop entry below instead."
                     problem: win.automationProblemFor("steps[" + index + "].app")
                     Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).app || "")
                     onEdited: function(value) { win.automationDraft.steps[index].app = value }
                     onCommitted: win.validateAutomationDraft()
+                  }
+                  // The desktop entry (#175): the name from the applications
+                  // menu, for the many things on this desktop that have no
+                  // binary of their own — the web apps, Signal, Discord. The
+                  // daemon says whether it exists, on this field.
+                  JarvixFormField {
+                    width: parent.width
+                    label: "…or desktop entry"
+                    placeholder: "ChatGPT"
+                    monospace: true
+                    hint: "As it appears in the applications menu. Its own Exec line is what runs."
+                    problem: win.automationProblemFor("steps[" + index + "].desktop_entry")
+                    Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).desktop_entry || "")
+                    onEdited: function(value) { win.automationDraft.steps[index].desktop_entry = value }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  // Arguments, one per row, exactly as phrases are: a daemon
+                  // problem keyed "steps[2].args[1]" then sits under the
+                  // argument it means. Each row is ONE argument and is passed
+                  // as one — nothing here is split on spaces, which is why a
+                  // profile name with a space in it works.
+                  Column {
+                    id: argsColumn
+                    // The step this argument list belongs to, captured here
+                    // because the inner Repeater's delegate has an `index` of
+                    // its own — the argument's — and the two would otherwise
+                    // be the same word meaning two things.
+                    readonly property int stepIndex: index
+                    width: parent.width
+                    spacing: Style.space(6)
+
+                    Text {
+                      text: "Arguments (one per row, passed exactly as typed)"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.subtitle
+                      color: Color.popups.text
+                    }
+                    Repeater {
+                      model: ((win.automationDraft.steps[argsColumn.stepIndex] || {}).args || []).length
+                      delegate: Row {
+                        required property int index
+                        width: parent.width
+                        spacing: Style.space(8)
+
+                        JarvixFormField {
+                          width: parent.width - argRemove.width - Style.space(8)
+                          label: "Argument " + (index + 1)
+                          placeholder: "--profile-directory=Profile 3"
+                          monospace: true
+                          problem: win.automationProblemFor(
+                            "steps[" + argsColumn.stepIndex + "].args[" + index + "]")
+                          Component.onCompleted: text = String(
+                            (win.automationDraft.steps[argsColumn.stepIndex].args || [])[index] || "")
+                          onEdited: function(value) {
+                            win.automationDraft.steps[argsColumn.stepIndex].args[index] = value
+                          }
+                          onCommitted: win.validateAutomationDraft()
+                        }
+                        JarvixFormButton {
+                          id: argRemove
+                          label: "Remove"
+                          name: "Remove argument " + (index + 1)
+                          onClicked: {
+                            win.automationDraft.steps[argsColumn.stepIndex].args.splice(index, 1)
+                            win.reassignAutomationDraft()
+                          }
+                        }
+                      }
+                    }
+                    Text {
+                      visible: win.automationProblemFor("steps[" + argsColumn.stepIndex + "].args") !== ""
+                      width: parent.width
+                      wrapMode: Text.Wrap
+                      text: "Problem: " + win.automationProblemFor(
+                        "steps[" + argsColumn.stepIndex + "].args")
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.subtitle
+                      color: Color.urgent
+                    }
+                    JarvixFormButton {
+                      label: "Add argument"
+                      name: "Add an argument to step " + (argsColumn.stepIndex + 1)
+                      onClicked: {
+                        var step = win.automationDraft.steps[argsColumn.stepIndex]
+                        if (!step.args) step.args = []
+                        step.args.push("")
+                        win.reassignAutomationDraft()
+                      }
+                    }
+                  }
+                  // The identity (#175): a window class this step gives the
+                  // window it opens, so it can find its own afterwards. It is
+                  // the only way to tell two Chromium profiles apart —
+                  // Chromium runs them in one process, so class, PID and
+                  // command line are identical for both.
+                  JarvixFormField {
+                    width: parent.width
+                    label: "Window identity (optional)"
+                    placeholder: "work-browser"
+                    monospace: true
+                    hint: "Launches the window with a class of its own, for programs that accept one."
+                    problem: win.automationProblemFor("steps[" + index + "].identity")
+                    Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).identity || "")
+                    onEdited: function(value) { win.automationDraft.steps[index].identity = value }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  // Adopt or launch, per step (#175). A toggle rather than a
+                  // text field because there are exactly two answers, and the
+                  // daemon's word for the non-default one is what is written.
+                  JarvixFormToggle {
+                    width: parent.width
+                    label: "Always open a new window"
+                    detail: "Off re-uses a matching window when one is already open."
+                    problem: win.automationProblemFor("steps[" + index + "].launch")
+                    checked: String((win.automationDraft.steps[index] || {}).launch || "") === "always"
+                    onToggled: function(state) {
+                      win.automationDraft.steps[index].launch = state ? "always" : ""
+                      win.reassignAutomationDraft()
+                    }
                   }
                   JarvixFormField {
                     width: parent.width
@@ -4921,7 +5067,7 @@ FloatingWindow {
               name: "Add another step"
               onClicked: {
                 if (!win.automationDraft.steps) win.automationDraft.steps = []
-                win.automationDraft.steps.push({ app: "", workspace: 1 })
+                win.automationDraft.steps.push({ app: "", args: [], workspace: 1 })
                 win.reassignAutomationDraft()
               }
             }
