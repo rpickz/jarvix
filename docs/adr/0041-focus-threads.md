@@ -136,6 +136,13 @@ sibling** restating the shared discipline (the ADR 0032 stance on reuse):
 every goroutine in one tracked `quiesce.Group`, injected clock and timer so
 no test sleeps, a bounded `Drain` as its own shutdown stage.
 
+This is the first of the siblings whose schedule can be genuinely empty — no
+session, no thread with an interval — and the loop nonetheless stays armed
+through it, on a bounded idle sweep rather than sleeping until a mutation
+pokes it. **ADR 0049** owns that rule and why it is not optional: a parked
+loop is the one reader that never comes back to the store, so a hand-edited
+`remind_every_min` arms nothing at all (#152).
+
 State changes latch **before** speech is attempted: the midpoint marks
 itself due, the close marks the session `closing`, and only then is a firing
 dispatched — so a firing that cannot be spoken is a skipped announcement,

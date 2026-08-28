@@ -2,6 +2,8 @@ package focus
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -351,6 +353,105 @@ func TestUnansweredCloseExpiresQuietly(t *testing.T) {
 	case f := <-h.firings:
 		t.Fatalf("an expired close still spoke: %+v", f)
 	default:
+	}
+}
+
+// TestTheLoopStaysArmedWithNothingScheduled is the #152 invariant, stated as
+// baldly as it can be: a service with no session and no check-in interval has
+// nothing to fire, and must still be sitting in its select with a timer
+// armed. Before the fix the loop dropped <-fire from the select entirely and
+// slept on the rearm channel, so a tick delivered here was not late — it was
+// never received, and this rendezvous hangs out its full bound.
+//
+// Nothing here needs CPU pressure: the empty schedule is reached by the
+// ordinary route (a thread with no reminder), not by a race.
+func TestTheLoopStaysArmedWithNothingScheduled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "focus.toml")
+	h := startSchedule(t, path, false)
+	ctx := context.Background()
+	if _, _, err := h.s.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	// A thread with no interval and no session: the schedule is empty, and an
+	// empty schedule is still a wait.
+	h.timers.fire(t)
+	// Twice, because the first tick could have been taken by a pass that had
+	// not yet reached the empty state; the second cannot.
+	h.timers.fire(t)
+	h.settle(t)
+	select {
+	case f := <-h.firings:
+		t.Fatalf("an idle sweep spoke: %+v", f)
+	default:
+	}
+}
+
+// TestAHandEditedCheckInArmsWithNothingElseScheduled is the same invariant
+// seen from the user's chair, and the reason it is worth having (#152). The
+// store's own header promises "edit freely; Jarvix picks up changes without a
+// restart", and every entry point honours that by refreshing from disk on its
+// way in. The scheduler loop is the one reader with no caller to bring it
+// back, so a loop that parks on an empty schedule never picks the edit up:
+// the interval is in the file, the file is correct, and nothing ever fires.
+//
+// Unlike TestTheLoopStaysArmedWithNothingScheduled this one cannot be made to
+// fail on the parked loop on demand — whether the pre-fix loop was parked or
+// merely about to re-read depends on a rearm token still being in flight from
+// the Create, and no test can drain one. It earns its place as the regression
+// that states the behaviour: the sweep picks a hand edit up, and adopts it
+// from now rather than back-firing the ticks it never had.
+func TestAHandEditedCheckInArmsWithNothingElseScheduled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "focus.toml")
+	h := startSchedule(t, path, false)
+	ctx := context.Background()
+	if _, _, err := h.s.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	// The edit lands behind the service's back: no verb, no Rearm — exactly
+	// what a text editor does.
+	handEditRemindEvery(t, path, 10)
+
+	// Two ticks with the clock held still, which is what makes the moment the
+	// interval is adopted a fact rather than a race: the pass the first tick
+	// releases refreshes from disk and adopts, and its nextWait necessarily
+	// finishes before the loop can take the second tick. So by here the
+	// check-in is armed for exactly one interval past *this* instant — the
+	// boot stance, adopt from now, because an interval that appeared by hand
+	// has no missed ticks to back-fire.
+	h.timers.fire(t)
+	h.timers.fire(t)
+
+	// One whole interval later it is due like any other.
+	h.clock.advance(11 * time.Minute)
+	h.timers.fire(t)
+	f := h.awaitFiring(t, FiringReminder)
+	if f.Thread.Name != "deploy" {
+		t.Errorf("check-in fired for %+v", f.Thread)
+	}
+	h.settle(t)
+	select {
+	case f := <-h.firings:
+		t.Fatalf("a hand-edited interval back-fired the ticks it never had: %+v", f)
+	default:
+	}
+}
+
+// handEditRemindEvery rewrites the store file the way a person with an editor
+// would: read the TOML, add the key, write it back. Nothing in the Service is
+// told.
+func handEditRemindEvery(t *testing.T, path string, minutes int) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(data), "\n[[thread]]\n",
+		fmt.Sprintf("\n[[thread]]\n  remind_every_min = %d\n", minutes), 1)
+	if edited == string(data) {
+		t.Fatalf("the store did not look like one a person could edit:\n%s", data)
+	}
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
