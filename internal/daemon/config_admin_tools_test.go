@@ -349,9 +349,13 @@ func TestAssistantAttemptsLandInTheActivityRing(t *testing.T) {
 	if err := client.Call("session.confirm", map[string]bool{"approved": true}, nil); err != nil {
 		t.Fatal(err)
 	}
-	waitForActivityRow(t, client, "Approved: config.write_entry")
-	waitForActivityRow(t, client, "Script created: deploy")
-	waitForEvent(t, client, "session.finished")
+	// Both rows and the session's end, watched together rather than in turn:
+	// a row takes an extra hop through the daemon's watcher and the finish
+	// does not, so the finish can overtake a row and be swallowed by the drain
+	// waiting for it. See waitForRowsAndSessionEnd — this test is the one that
+	// failed that way.
+	waitForRowsAndSessionEnd(t, client,
+		"Approved: config.write_entry", "Script created: deploy")
 }
 
 // --------------------------------------------------------- the bridge alone

@@ -193,9 +193,11 @@ func TestAPreApprovedRunAppearsInTheActivityFeed(t *testing.T) {
 	// (docs/ipc.md says exactly this of every activity.row). Sampling
 	// activity.get on the event's heels races that watcher, which is how this
 	// passed locally and failed in CI. Wait for the row itself, as every
-	// other feed assertion in this package does.
-	waitForActivityRow(t, client, "Ran without asking: shell.run")
-	waitForEvent(t, client, "session.finished")
+	// other feed assertion in this package does — and watch for the session's
+	// end at the same time rather than after it, because that same extra hop
+	// lets session.finished overtake the row and be swallowed by the drain
+	// waiting for it (see waitForRowsAndSessionEnd).
+	waitForRowsAndSessionEnd(t, client, "Ran without asking: shell.run")
 
 	var feed struct {
 		Rows []struct {

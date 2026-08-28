@@ -114,7 +114,8 @@ var derivedRules = []derivedRule{
 		Reads:  []string{`Call("activity.get")`, "activityRowsOf"},
 		Causes: []string{"waitForEvent", "waitEvent", "awaitBus"},
 		Barriers: []string{
-			"waitForActivityRow", "waitActivityRow", "waitForRunObserved",
+			"waitForActivityRow", "waitActivityRow",
+			"waitForRunObserved", "waitForRowsAndSessionEnd",
 		},
 		Advice: "wait for the row itself (waitForActivityRow / waitActivityRow), " +
 			"not for the event the daemon's watcher derives it from",

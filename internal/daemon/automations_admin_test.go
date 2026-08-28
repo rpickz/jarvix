@@ -256,21 +256,60 @@ func TestAutomationsListCarriesLastRunAfterARun(t *testing.T) {
 // single-event drain consumes whatever else arrives first.
 func waitForRunObserved(t *testing.T, client *ipc.Client, label string) {
 	t.Helper()
+	waitForRowsAndSessionEnd(t, client, label)
+}
+
+// waitForRowsAndSessionEnd is the general form: every named activity row and
+// session.finished, in any order, off one channel.
+//
+// The order genuinely cannot be assumed, and this is the #167 mechanism seen
+// from the other side. A row is derived by the daemon's own watcher from the
+// event it saw, so it takes an extra hop before it reaches the client, while
+// session.finished goes straight out — so the end of the session can overtake
+// a row that logically precedes it. A test that waits for each thing in turn
+// then has the first drain swallow session.finished on its way past, and the
+// last one waits five seconds for an event that was consumed and discarded.
+//
+// That is not hypothetical: TestAssistantAttemptsLandInTheActivityRing waited
+// for two rows and then the finish, and failed as "no session.finished event"
+// on a CI runner under coverage instrumentation — the extra slowness being
+// enough to reorder the two. Every test that needs a row AND the finish uses
+// this.
+func waitForRowsAndSessionEnd(t *testing.T, client *ipc.Client, labels ...string) {
+	t.Helper()
 	timeout := time.After(5 * time.Second)
-	row, finished := false, false
-	for !row || !finished {
+	rows := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		rows[label] = false
+	}
+	finished := false
+	seen := func() bool {
+		if !finished {
+			return false
+		}
+		for _, ok := range rows {
+			if !ok {
+				return false
+			}
+		}
+		return true
+	}
+	for !seen() {
 		select {
 		case ev := <-client.Events():
-			switch {
-			case ev.Type == "error":
-				t.Fatalf("waiting for row %q and session.finished, got error event: %v", label, ev.Data)
-			case ev.Type == "activity.row" && ev.Data["label"] == label:
-				row = true
-			case ev.Type == "session.finished":
+			switch ev.Type {
+			case "error":
+				t.Fatalf("waiting for rows %v and session.finished, got error event: %v", labels, ev.Data)
+			case "activity.row":
+				label, _ := ev.Data["label"].(string)
+				if _, wanted := rows[label]; wanted {
+					rows[label] = true
+				}
+			case "session.finished":
 				finished = true
 			}
 		case <-timeout:
-			t.Fatalf("row %q seen: %v; session.finished seen: %v", label, row, finished)
+			t.Fatalf("rows seen: %v; session.finished seen: %v", rows, finished)
 		}
 	}
 }
