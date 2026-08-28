@@ -213,7 +213,15 @@ func TestCompositorUnavailableIsSpeakable(t *testing.T) {
 
 func TestMoveChecksTheWorkspaceRange(t *testing.T) {
 	h := newHarness(t)
-	for _, ws := range []int{0, -1, 100, 1 << 20} {
+	// Zero is no longer out of range — it means "leave the window on the
+	// workspace it is on", which is legitimate once a call can also name a
+	// monitor or a mode. A call that says NOTHING is still refused, and
+	// without dispatching, which is what the last assertion of the loop pins.
+	out := h.run(t, MoveWindowToolName, map[string]any{"window": "alacritty", "workspace": 0})
+	if !strings.Contains(out, "said nothing about where the window should go") {
+		t.Errorf("empty placement = %q", out)
+	}
+	for _, ws := range []int{-1, 100, 1 << 20} {
 		out := h.run(t, MoveWindowToolName, map[string]any{"window": "alacritty", "workspace": ws})
 		if !strings.Contains(out, "does not exist") {
 			t.Errorf("workspace %d = %q", ws, out)
@@ -222,7 +230,7 @@ func TestMoveChecksTheWorkspaceRange(t *testing.T) {
 			t.Fatalf("workspace %d was dispatched", ws)
 		}
 	}
-	out := h.run(t, MoveWindowToolName, map[string]any{"window": "alacritty", "workspace": 3})
+	out = h.run(t, MoveWindowToolName, map[string]any{"window": "alacritty", "workspace": 3})
 	if !strings.Contains(out, "Moved Alacritty") {
 		t.Errorf("move = %q", out)
 	}

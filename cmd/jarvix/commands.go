@@ -935,23 +935,50 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 }
 
 // describeRoutineStep renders one step the way it will execute.
+//
+// The placement half is described from the derived vocabulary rather than
+// from the raw TOML keys, so a step written with the superseded spellings
+// (`float = true`) prints as what it now means (`floating`) — the listing and
+// the run must agree, and the run reads the derived value.
 func describeRoutineStep(s config.RoutineStep) string {
 	desc := fmt.Sprintf("%s → workspace %d", s.App, s.Workspace)
 	if s.App == routine.PlaceholderApp {
 		desc = fmt.Sprintf("%s → workspace %d (set the app that launches this window)", s.App, s.Workspace)
 	}
+	if s.Monitor != "" {
+		desc += " on " + s.Monitor
+	}
+	def := config.Config{Routines: []config.Routine{{Steps: []config.RoutineStep{s}}}}.RoutineDefinitions()
+	if len(def) == 0 || len(def[0].Steps) == 0 {
+		return desc
+	}
+	p := def[0].Steps[0].Placement
+	var notes []string
+	if p.Mode != "" {
+		notes = append(notes, string(p.Mode))
+	}
 	switch {
-	case s.Float:
-		desc += " (floating"
-		if len(s.Size) == 2 {
-			desc += fmt.Sprintf(" %dx%d", s.Size[0], s.Size[1])
-		}
-		if len(s.Position) == 2 {
-			desc += fmt.Sprintf(" at %d,%d", s.Position[0], s.Position[1])
-		}
-		desc += ")"
-	case s.Tile != "":
-		desc += " (" + s.Tile + ")"
+	case p.Width.Set() && p.Height.Set():
+		notes = append(notes, p.Width.String()+" by "+p.Height.String())
+	case p.Width.Set():
+		notes = append(notes, p.Width.String()+" wide")
+	case p.Height.Set():
+		notes = append(notes, p.Height.String()+" tall")
+	}
+	if p.HasPosition {
+		notes = append(notes, fmt.Sprintf("at %d,%d", p.X, p.Y))
+	}
+	if p.Master {
+		notes = append(notes, "master pane")
+	}
+	if p.PlaceNext != "" {
+		notes = append(notes, "next window "+string(p.PlaceNext))
+	}
+	if p.Focus != "" {
+		notes = append(notes, string(p.Focus))
+	}
+	if len(notes) > 0 {
+		desc += " (" + strings.Join(notes, ", ") + ")"
 	}
 	return desc
 }

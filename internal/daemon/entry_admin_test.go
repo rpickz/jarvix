@@ -11,6 +11,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // The form dialog's daemon surface (issue #99) over a fully wired daemon:
@@ -157,6 +158,22 @@ func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
 	sort.Strings(keys)
 	if !reflect.DeepEqual(keys, want) {
 		t.Errorf("routines steps keys = %v, want the struct's %v", keys, want)
+	}
+	order := append([]string{}, entryAdminFamilies["routines"].subOrder["steps"]...)
+	sort.Strings(order)
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("routines steps order = %v, want every struct key exactly once",
+			entryAdminFamilies["routines"].subOrder["steps"])
+	}
+	// The placement half of a step is the window-placement vocabulary (ADR
+	// 0056), and the form must be able to write every field of it. A field
+	// added to the vocabulary and forgotten here would make the form silently
+	// unable to save an entry a hand edit gave that key.
+	for _, field := range placement.Fields() {
+		if _, ok := steps[field]; !ok {
+			t.Errorf("the placement vocabulary owns %q but the routines step registry has no "+
+				"such key; the form cannot save an entry carrying it", field)
+		}
 	}
 }
 

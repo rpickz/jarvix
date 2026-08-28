@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // This file implements the desktop window tools (ADR 0022): the assistant can
@@ -324,14 +325,8 @@ func (t *windowTool) Schema() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"window": ` + windowArgSchema + `,
-			"workspace": {
-				"type": "integer",
-				"minimum": 1,
-				"maximum": ` + strconv.Itoa(maxWorkspace) + `,
-				"description": "The workspace number to send the window to."
-			}
-		},
-		"required": ["workspace"]
+` + placementArgSchema() + `
+		}
 	}`)
 	case verbName:
 		return json.RawMessage(`{
@@ -355,6 +350,103 @@ func (t *windowTool) Schema() json.RawMessage {
 	}
 }
 
+// toolPlacementFields are the vocabulary's fields this tool offers the model,
+// in schema order. It is derived from placement.Fields rather than typed out,
+// so a field added to the vocabulary must be either offered here or written
+// into toolPlacementExclusions with a reason — the contract test
+// (placement's) fails until one of the two happens. That is the mechanism
+// behind "adding a placement option anywhere makes it available everywhere".
+var toolPlacementFields = []string{
+	placement.FieldWorkspace, placement.FieldMonitor,
+	placement.FieldMode, placement.FieldWidth, placement.FieldHeight,
+}
+
+// toolPlacementExclusions are the vocabulary's fields the model may NOT send,
+// each with the reason. They are not omissions: a spoken request is a
+// sentence about one window, and these three are decisions about a written
+// layout that only make sense with the rest of it in front of you.
+var toolPlacementExclusions = map[string]string{
+	placement.FieldPosition: "pixel coordinates are a thing a person points at, not a thing a " +
+		"model should guess; a spoken request says \"top left\", and the vocabulary has no " +
+		"word for that yet",
+	placement.FieldPlaceNext: "it decides where the NEXT window goes, which only means something " +
+		"inside a written sequence of steps — there is no next window in a spoken request",
+	placement.FieldMaster: "promoting a window into the master pane changes every other window on " +
+		"the workspace, which is more than the user asked for when they said \"put this over there\"",
+	placement.FieldFocus: "the tools already follow the user's own words: focus_window follows, " +
+		"move_window does not, and a third way to say it would be a way to get it wrong",
+}
+
+// PlacementFieldsWithheldFromTheModel returns the vocabulary's fields this
+// tool does not offer, keyed to the reason. Exported for the vocabulary's own
+// contract test, which fails when a field is neither offered nor excused —
+// the mechanism that keeps "one vocabulary, used everywhere" true as the
+// vocabulary grows.
+func PlacementFieldsWithheldFromTheModel() map[string]string {
+	withheld := make(map[string]string, len(toolPlacementExclusions))
+	for field, reason := range toolPlacementExclusions {
+		withheld[field] = reason
+	}
+	return withheld
+}
+
+// placementArgSchema renders the vocabulary's model-facing arguments, in
+// toolPlacementFields order. Built from placement's own tables so the enum the
+// model is shown and the enum the daemon accepts are the same list — a mode
+// added to the vocabulary appears in the tool without anyone editing this
+// file.
+func placementArgSchema() string {
+	fragments := make([]string, 0, len(toolPlacementFields))
+	for _, field := range toolPlacementFields {
+		fragments = append(fragments, "\t\t\t"+strconv.Quote(field)+": "+placementArgFragment(field))
+	}
+	return strings.Join(fragments, ",\n")
+}
+
+// placementArgFragment is one argument's JSON-schema object. Separate from the
+// order above so a field added to toolPlacementFields without a description
+// fails loudly at the first call rather than rendering an empty schema the
+// model would have to guess at.
+func placementArgFragment(field string) string {
+	describe := func(text string) string {
+		encoded, _ := json.Marshal(text)
+		return string(encoded)
+	}
+	switch field {
+	case placement.FieldWorkspace:
+		return `{"type": "integer", "minimum": ` + strconv.Itoa(placement.MinWorkspace) +
+			`, "maximum": ` + strconv.Itoa(maxWorkspace) + `, "description": ` +
+			describe("The workspace number to send the window to. Leave it out to leave the "+
+				"window on the workspace it is already on.") + `}`
+	case placement.FieldMonitor:
+		return `{"type": "string", "description": ` +
+			describe("Which screen, by the name the user used, or \"current\" for the one they "+
+				"are on. Leave it out unless they named a screen.") + `}`
+	case placement.FieldMode:
+		modes := make([]string, 0, len(placement.Modes()))
+		summaries := make([]string, 0, len(placement.Modes()))
+		for _, spec := range placement.Modes() {
+			modes = append(modes, strconv.Quote(string(spec.Name)))
+			summaries = append(summaries, string(spec.Name)+" — "+spec.Summary)
+		}
+		return `{"type": "string", "enum": [` + strings.Join(modes, ", ") + `], "description": ` +
+			describe("How the window should sit on the workspace. "+strings.Join(summaries, " ")) + `}`
+	case placement.FieldWidth:
+		return `{"type": "string", "description": ` +
+			describe("How much of the screen the window takes across, as a percentage (\"66%\", "+
+				"for \"two thirds\") or in pixels (\"1200px\"). Percentages are of the usable "+
+				"screen, so they are what the user means when they say a fraction.") + `}`
+	case placement.FieldHeight:
+		return `{"type": "string", "description": ` +
+			describe("How much of the screen the window takes down, in the same percentage or "+
+				"pixel form as width.") + `}`
+	}
+	// Unreachable while toolPlacementFields and this switch are edited
+	// together, which the vocabulary's contract test enforces from the other
+	// side: a field that is neither offered nor excused fails there.
+	panic("no schema fragment for placement field " + field)
+}
+
 // launchHint tells the model what it may name. With an allow list configured
 // it is the list, because anything else is a refusal the model should not have
 // to discover by trying.
@@ -367,12 +459,58 @@ func (d *Desktop) launchHint() string {
 
 // windowArgs is everything the model is allowed to say. Nothing here reaches
 // argv: window is matched against the inventory, workspace is range-checked,
-// and app is resolved against the allow list or PATH.
+// app is resolved against the allow list or PATH, and the placement values
+// are parsed by the vocabulary — which refuses anything it does not know
+// before a dispatch is built, and bounds the monitor name to the character
+// set the seam will interpolate.
 type windowArgs struct {
 	Window    string `json:"window"`
 	Workspace int    `json:"workspace"`
 	App       string `json:"app"`
 	Name      string `json:"name"`
+	Monitor   string `json:"monitor"`
+	Mode      string `json:"mode"`
+	Width     string `json:"width"`
+	Height    string `json:"height"`
+}
+
+// placement parses the model's placement arguments through the vocabulary,
+// returning the sentence to say when one of them is not a value.
+//
+// The parsing is the same code the config loader runs, which is the whole
+// point of ADR 0056: a mode a routine may not use is a mode the model may not
+// send, without either surface knowing about the other.
+func (a windowArgs) placement() (placement.Placement, string) {
+	p := placement.Placement{
+		Workspace: a.Workspace,
+		Monitor:   placement.MonitorRef(strings.TrimSpace(a.Monitor)),
+	}
+	var err error
+	if p.Mode, err = placement.ParseMode(a.Mode); err != nil {
+		return p, err.Error()
+	}
+	if p.Width, err = placement.ParseExtent(a.Width); err != nil {
+		return p, "width: " + err.Error()
+	}
+	if p.Height, err = placement.ParseExtent(a.Height); err != nil {
+		return p, "height: " + err.Error()
+	}
+	// requireWorkspace is false: this tool places a window the user is
+	// looking at, and "leave it where it is" is a legitimate request. A
+	// routine step, which is describing a whole desktop, passes true.
+	if problems := p.Problems(false); len(problems) > 0 {
+		return p, problems[0].Message
+	}
+	return p, ""
+}
+
+// placed reports whether the arguments ask for anything at all. A move_window
+// call with neither a workspace nor a placement is a call with nothing to do,
+// and saying so beats dispatching nothing and reporting success.
+func (a windowArgs) placed() bool {
+	return a.Workspace != 0 || strings.TrimSpace(a.Monitor) != "" ||
+		strings.TrimSpace(a.Mode) != "" || strings.TrimSpace(a.Width) != "" ||
+		strings.TrimSpace(a.Height) != ""
 }
 
 // Execute implements Tool. Every way the desktop can disappoint — no
@@ -393,10 +531,18 @@ func (t *windowTool) Execute(ctx context.Context, input json.RawMessage) (string
 	if t.verb == verbName {
 		return t.d.nameWindow(ctx, args.Window, args.Name)
 	}
-	if t.verb == verbMove && (args.Workspace < 1 || args.Workspace > maxWorkspace) {
-		return fmt.Sprintf("Workspace %d does not exist; workspaces are numbered 1 to %d. Tell the "+
-			"user which workspaces they can use, in one short sentence, and do not retry.",
-			args.Workspace, maxWorkspace), nil
+	if t.verb == verbMove {
+		if !args.placed() {
+			return "That call said nothing about where the window should go. Ask the user which " +
+				"workspace or screen they meant, in one short sentence.", nil
+		}
+		// Validation before resolution, and long before a dispatch: a value
+		// the vocabulary refuses must come back as a sentence the assistant
+		// can say, not as a window that moved halfway.
+		if _, problem := args.placement(); problem != "" {
+			return fmt.Sprintf("That is not something a window can be asked to do: %s. Tell the "+
+				"user in one short sentence, and do not retry with the same value.", problem), nil
+		}
 	}
 
 	// The resolution made when the user was asked to confirm wins, so the
@@ -432,7 +578,7 @@ func (t *windowTool) Execute(ctx context.Context, input json.RawMessage) (string
 			"in one short sentence that it has already gone, and do not retry.",
 			desktop.AppName(res.Class)), nil
 	}
-	return t.d.act(ctx, t.verb, current, args.Workspace), nil
+	return t.d.act(ctx, t.verb, current, args), nil
 }
 
 // unmarshalWindowArgs decodes the tool arguments. An absent object is the same
@@ -448,7 +594,7 @@ func unmarshalWindowArgs(input json.RawMessage, args *windowArgs) error {
 }
 
 // act performs one resolved action and returns what the assistant should say.
-func (d *Desktop) act(ctx context.Context, verb desktopVerb, w desktop.Window, workspace int) string {
+func (d *Desktop) act(ctx context.Context, verb desktopVerb, w desktop.Window, args windowArgs) string {
 	callCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 
@@ -459,13 +605,27 @@ func (d *Desktop) act(ctx context.Context, verb desktopVerb, w desktop.Window, w
 		verbName, err = "focus", d.comp.Focus(callCtx, w.Address)
 		done = fmt.Sprintf("Switched to %s.", w.Describe())
 	case verbMove:
-		verbName, err = "move", d.comp.MoveToWorkspace(callCtx, w.Address, workspace)
-		done = fmt.Sprintf("Moved %s to workspace %d. The user stayed where they were.", w.Describe(), workspace)
+		verbName, err = "move", d.place(callCtx, w, args)
+		done = fmt.Sprintf("Moved %s %s. The user stayed where they were.",
+			w.Describe(), describePlacement(args))
 	case verbClose:
 		verbName, err = "close", d.comp.Close(callCtx, w.Address)
 		done = fmt.Sprintf("Closed %s.", w.Describe())
 	}
 
+	if err != nil {
+		// A refusal the vocabulary already worded for a person — a screen
+		// that is not attached, a layout that has no master pane — is the
+		// answer, because the alternative ("it did not work") makes the user
+		// guess at something the daemon already knows.
+		if sentence := desktop.PlacementSentence(err); sentence != "" {
+			d.log.Warn("window placement refused", "component", "tools", "verb", verbName,
+				"class", w.Class, "address", w.Address, "error", err.Error())
+			d.publishRefusal(verbName, w.Describe(), sentence)
+			return fmt.Sprintf("That could not be done: %s. Tell the user in one short sentence, "+
+				"and do not retry.", sentence)
+		}
+	}
 	if err != nil {
 		// The compositor's own diagnostics stay daemon-side: they are the
 		// operator's material, and anything returned here may be read aloud.
@@ -480,9 +640,97 @@ func (d *Desktop) act(ctx context.Context, verb desktopVerb, w desktop.Window, w
 	// Class and address, never the title: a window title is content, and the
 	// journal outlives the conversation (the same rule desktop context keeps).
 	d.log.Info("window action", "component", "tools", "verb", verbName,
-		"class", w.Class, "address", w.Address, "workspace", workspace)
+		"class", w.Class, "address", w.Address, "workspace", args.Workspace,
+		"monitor", args.Monitor, "mode", args.Mode)
 	d.publish(verbName, w.Describe())
 	return done + " Confirm it to the user in one short sentence. Do not describe the window in detail."
+}
+
+// place applies the vocabulary to one resolved window.
+//
+// It goes through desktop.Placer, the same code the routine runner uses, so
+// "put this on the top monitor, two thirds" dispatches exactly what the
+// equivalent routine step would (ADR 0056). The monitor is resolved here
+// because that needs the live output inventory, which the seam has and the
+// vocabulary deliberately does not.
+func (d *Desktop) place(ctx context.Context, w desktop.Window, args windowArgs) error {
+	want, problem := args.placement()
+	if problem != "" {
+		// Unreachable: Execute validated the same values before resolving a
+		// window. Kept because this function is the one that dispatches, and
+		// a value nobody checked must never reach a compositor.
+		return fmt.Errorf("%s", problem)
+	}
+	monitors, err := d.comp.Monitors(ctx)
+	if err != nil {
+		if want.Monitor != "" || want.Sized() {
+			return fmt.Errorf("I cannot see which screens are attached: %w", err)
+		}
+		// Nothing here needs a monitor: place against the zero one, whose
+		// usable area is never consulted because no percentage was given.
+		monitors = nil
+	}
+	mon := placement.ForWorkspace(want.Workspace, monitors)
+	if want.Monitor != "" {
+		// Nicknames is nil, the seam #180 extends — see placement.Resolver.
+		resolved, err := (placement.Resolver{}).Resolve(want.Monitor, monitors)
+		if err != nil {
+			return err
+		}
+		mon = resolved
+		if want.Workspace != 0 && resolved.ActiveWorkspace != want.Workspace {
+			if err := d.comp.MoveWorkspaceToMonitor(ctx, want.Workspace, resolved.Name); err != nil {
+				return err
+			}
+		} else if want.Workspace == 0 {
+			// No workspace named: the window itself moves to the screen,
+			// which is what "put this on the other monitor" means when the
+			// user is talking about one window rather than a layout.
+			if err := d.comp.MoveToMonitor(ctx, w.Address, resolved.Name); err != nil {
+				return err
+			}
+		}
+	}
+	placer := desktop.Placer{Comp: d.comp, Timeout: d.timeout}
+	if err := placer.Apply(ctx, w, want, mon); err != nil {
+		return err
+	}
+	// A tiled proportion is applied straight away here, unlike in a routine:
+	// there is no sequence of launches to wait for, and the windows this one
+	// shares its split with are already on screen.
+	if want.Tiles() && want.Sized() {
+		return placer.Proportion(ctx, w, want, mon)
+	}
+	return nil
+}
+
+// describePlacement words what was done, for the sentence the assistant says.
+// Built from the arguments rather than from the compositor, because the
+// compositor has already been asked and answered; what the user needs to hear
+// is what they asked for, confirmed.
+func describePlacement(args windowArgs) string {
+	var parts []string
+	if args.Workspace != 0 {
+		parts = append(parts, fmt.Sprintf("to workspace %d", args.Workspace))
+	}
+	if m := strings.TrimSpace(args.Monitor); m != "" {
+		parts = append(parts, "onto "+m)
+	}
+	if mode := strings.TrimSpace(args.Mode); mode != "" {
+		parts = append(parts, "as "+mode)
+	}
+	switch {
+	case args.Width != "" && args.Height != "":
+		parts = append(parts, args.Width+" by "+args.Height)
+	case args.Width != "":
+		parts = append(parts, args.Width+" across")
+	case args.Height != "":
+		parts = append(parts, args.Height+" down")
+	}
+	if len(parts) == 0 {
+		return "where it was asked to go"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // list renders the inventory for the model.
@@ -928,8 +1176,13 @@ func (t *windowTool) Confirmation(input json.RawMessage) (command, summary strin
 		app := filepath.Base(binary)
 		return "launch " + app, fmt.Sprintf("I want to open %s. Should I go ahead?", app), true
 	}
-	if t.verb == verbMove && (args.Workspace < 1 || args.Workspace > maxWorkspace) {
-		return "", "", false
+	if t.verb == verbMove {
+		if !args.placed() {
+			return "", "", false
+		}
+		if _, problem := args.placement(); problem != "" {
+			return "", "", false // Execute will explain; there is nothing to confirm
+		}
 	}
 
 	// Resolution needs the compositor, and the gate has no context of its own
@@ -950,9 +1203,12 @@ func (t *windowTool) Confirmation(input json.RawMessage) (command, summary strin
 		return "close " + res.Window.Describe(),
 			fmt.Sprintf("I want to close %s%s. Should I go ahead?", app, title), true
 	default:
-		return fmt.Sprintf("move %s to workspace %d", res.Window.Describe(), args.Workspace),
-			fmt.Sprintf("I want to move %s%s to workspace %d. Should I go ahead?",
-				app, title, args.Workspace), true
+		// The whole placement, verbatim, in the question — the ADR 0014
+		// discipline: the user approves what will happen, not a summary of
+		// the part of it that fits.
+		where := describePlacement(args)
+		return fmt.Sprintf("move %s %s", res.Window.Describe(), where),
+			fmt.Sprintf("I want to move %s%s %s. Should I go ahead?", app, title, where), true
 	}
 }
 

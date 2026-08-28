@@ -32,9 +32,9 @@ func captureEntry() Routine {
 		Name:    "morning setup",
 		Phrases: []string{"morning setup"},
 		Steps: []RoutineStep{
-			{App: "alacritty", Workspace: 1, Tile: "split"},
-			{App: "signal-desktop", Match: "Signal", Workspace: 9, Float: true,
-				Size: []int{1200, 800}, Position: []int{100, 120}},
+			{App: "alacritty", Workspace: 1, Mode: "tiled"},
+			{App: "signal-desktop", Match: "Signal", Workspace: 9, Mode: "floating",
+				Width: "1200px", Height: "800px", Position: []int{100, 120}},
 		},
 	}
 }
@@ -63,7 +63,7 @@ func TestUpsertAppendsPreservingEveryOtherByte(t *testing.T) {
 	if len(cfg.Routines) != 2 || cfg.Routines[1].Name != "morning setup" {
 		t.Fatalf("routines = %+v", cfg.Routines)
 	}
-	if len(cfg.Routines[1].Steps) != 2 || cfg.Routines[1].Steps[1].Size[0] != 1200 {
+	if len(cfg.Routines[1].Steps) != 2 || cfg.Routines[1].Steps[1].Width != "1200px" {
 		t.Fatalf("steps did not round-trip: %+v", cfg.Routines[1].Steps)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -78,7 +78,7 @@ func TestUpsertReplacesOnlyTheNamedBlock(t *testing.T) {
 	// First capture it, so the block carries an old provenance comment.
 	first, err := UpsertRoutineTOML([]byte(capturedDoc), Routine{
 		Name: "evening", Phrases: []string{"evening mode"},
-		Steps: []RoutineStep{{App: "mpv", Workspace: 5, Tile: "split"}},
+		Steps: []RoutineStep{{App: "mpv", Workspace: 5, Mode: "tiled"}},
 	}, "captured 2026-08-20", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +86,8 @@ func TestUpsertReplacesOnlyTheNamedBlock(t *testing.T) {
 	replacement := Routine{
 		Name: "evening", Phrases: []string{"evening mode"},
 		Steps: []RoutineStep{
-			{App: "mpv", Workspace: 5, Tile: "split"},
-			{App: "spotify", Workspace: 6, Tile: "split"},
+			{App: "mpv", Workspace: 5, Mode: "tiled"},
+			{App: "spotify", Workspace: 6, Mode: "tiled"},
 		},
 	}
 	out, err := UpsertRoutineTOML(first, replacement, "captured 2026-08-21", nil)

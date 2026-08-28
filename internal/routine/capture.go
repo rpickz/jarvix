@@ -3,9 +3,11 @@ package routine
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/placement"
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
@@ -153,25 +155,33 @@ func captureExcluded(w desktop.Window) bool {
 // captureStep derives one step from one kept window. note is the TODO line
 // for a placeholder step, "" when the command derived.
 func captureStep(w desktop.Window, opts CaptureOptions) (Step, string) {
-	step := Step{Workspace: w.Workspace}
+	step := Step{Placement: placement.Placement{Workspace: w.Workspace}}
 	if w.Floating {
-		step.Float = true
-		// Geometry is recorded only when it would validate: a window some
-		// compositor reports at an impossible size gets a float directive
-		// without one, which converges on "floating where the layout puts
-		// it" rather than writing an entry the next load rejects.
-		if w.Width > 0 && w.Height > 0 && w.Width <= maxPixel && w.Height <= maxPixel {
-			step.Width, step.Height = w.Width, w.Height
+		step.Mode = placement.ModeFloating
+		// Geometry is recorded only when it would replay. A size that cannot
+		// be honoured must not be written as if it could (the #177 lesson:
+		// captured sizes were recorded for two years against a resize verb
+		// that had never worked), so each axis is validated through the
+		// vocabulary's own parser and dropped if it would not load.
+		width, wErr := placement.ParseExtent(strconv.Itoa(w.Width) + "px")
+		height, hErr := placement.ParseExtent(strconv.Itoa(w.Height) + "px")
+		if wErr == nil && hErr == nil {
+			step.Width, step.Height = width, height
 		}
-		if w.X >= -maxPixel && w.X <= maxPixel && w.Y >= -maxPixel && w.Y <= maxPixel {
+		if p := (placement.Placement{Mode: placement.ModeFloating,
+			X: w.X, Y: w.Y, HasPosition: true}); len(p.Problems(false)) == 0 {
 			step.X, step.Y, step.HasPosition = w.X, w.Y, true
 		}
 	} else {
-		// Tiled windows are captured as splits. The inventory does not say
-		// which window is the layout's master, and guessing would promote
-		// the wrong one on every run; `tile = "master"` is a one-word hand
-		// edit, and the file says whose.
-		step.Tile = TileSplit
+		// Tiled windows are captured as tiled, and without a proportion. The
+		// inventory reports a tiled window's geometry, but replaying it would
+		// move splits in an order that is not the order they were made in, so
+		// a captured share is a promise the replay cannot keep; the honest
+		// capture is the arrangement, and the proportion is a hand edit or a
+		// form edit. Master is not guessed either — the inventory does not
+		// say which window holds the pane, and promoting the wrong one on
+		// every run is worse than promoting none.
+		step.Mode = placement.ModeTiled
 	}
 
 	app, derived := deriveCommand(w.Class, opts.LookPath)

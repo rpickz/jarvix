@@ -31,6 +31,14 @@ func UpsertRoutineTOML(doc []byte, entry Routine, provenance string, notes []str
 	if err != nil {
 		return nil, fmt.Errorf("config.toml does not parse; fix it by hand first: %w", err)
 	}
+	// Normalise before rendering. The renderer writes only the current
+	// placement vocabulary (ADR 0056), so an entry handed to it with a
+	// superseded spelling — `float = true`, `size = [w, h]`, `tile` — would
+	// otherwise render as something the read-back check does not recognise
+	// and the save would be refused. Translating it here is what makes the
+	// promise real: an entry the window or the capture writer touches comes
+	// back in the current vocabulary, and nobody is asked to migrate a file.
+	entry = normaliseRoutine(entry)
 	replaceAt := -1
 	for i, r := range original.Routines {
 		if strings.EqualFold(strings.TrimSpace(r.Name), strings.TrimSpace(entry.Name)) {
@@ -115,6 +123,25 @@ func routineBlockSpan(lines []string, index int) (start, end int, err error) {
 	return start, end, nil
 }
 
+// normaliseRoutine rewrites an entry's placement keys into the current
+// vocabulary, by the same round trip through routine.Definition the loader
+// and the capture writer already use — so there is one translation and not a
+// second copy of it here.
+func normaliseRoutine(entry Routine) Routine {
+	converted := Config{Routines: []Routine{entry}}.RoutineDefinitions()
+	if len(converted) != 1 {
+		return entry
+	}
+	normalised := RoutineFromDefinition(converted[0])
+	// RoutineFromDefinition carries only what a Definition holds; the keys
+	// that are the entry's own — its identity and its triggers — are copied
+	// back so normalising cannot quietly drop a schedule.
+	normalised.Enabled = entry.Enabled
+	normalised.Schedule = entry.Schedule
+	normalised.Announce = entry.Announce
+	return normalised
+}
+
 // renderRoutineTOML renders one entry in the same shape the documentation's
 // worked examples use — steps indented two spaces under their routine — so a
 // captured entry reads like a hand-written one.
@@ -137,17 +164,35 @@ func renderRoutineTOML(entry Routine, provenance string, notes []string) []strin
 			lines = append(lines, "  match = "+encodeTOMLString(s.Match))
 		}
 		lines = append(lines, "  workspace = "+strconv.Itoa(s.Workspace))
-		if s.Float {
-			lines = append(lines, "  float = true")
+		// The placement keys, in the vocabulary's own presentation order and
+		// only where the step said something. The superseded spellings
+		// (float, size, tile) are deliberately never written: an entry the
+		// window or the capture writer touches comes back in the current
+		// vocabulary, which is how a file migrates without anyone being told
+		// to migrate it.
+		if s.Monitor != "" {
+			lines = append(lines, "  monitor = "+encodeTOMLString(s.Monitor))
 		}
-		if len(s.Size) == 2 {
-			lines = append(lines, fmt.Sprintf("  size = [%d, %d]", s.Size[0], s.Size[1]))
+		if s.Mode != "" {
+			lines = append(lines, "  mode = "+encodeTOMLString(s.Mode))
+		}
+		if s.Width != "" {
+			lines = append(lines, "  width = "+encodeTOMLString(s.Width))
+		}
+		if s.Height != "" {
+			lines = append(lines, "  height = "+encodeTOMLString(s.Height))
 		}
 		if len(s.Position) == 2 {
 			lines = append(lines, fmt.Sprintf("  position = [%d, %d]", s.Position[0], s.Position[1]))
 		}
-		if s.Tile != "" {
-			lines = append(lines, "  tile = "+encodeTOMLString(s.Tile))
+		if s.PlaceNext != "" {
+			lines = append(lines, "  place_next = "+encodeTOMLString(s.PlaceNext))
+		}
+		if s.Master {
+			lines = append(lines, "  master = true")
+		}
+		if s.Focus != "" {
+			lines = append(lines, "  focus = "+encodeTOMLString(s.Focus))
 		}
 	}
 	return lines
@@ -180,6 +225,9 @@ func routinesEqual(got, want []Routine) bool {
 			g, w := got[i].Steps[j], want[i].Steps[j]
 			if g.App != w.App || g.Match != w.Match || g.Workspace != w.Workspace ||
 				g.Float != w.Float || g.Tile != w.Tile ||
+				g.Monitor != w.Monitor || g.Mode != w.Mode ||
+				g.Width != w.Width || g.Height != w.Height ||
+				g.PlaceNext != w.PlaceNext || g.Master != w.Master || g.Focus != w.Focus ||
 				!intSlicesEqual(g.Size, w.Size) || !intSlicesEqual(g.Position, w.Position) {
 				return false
 			}

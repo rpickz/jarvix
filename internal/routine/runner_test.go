@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // The runner tests are hermetic and clock-injected: the compositor is the
@@ -112,8 +113,9 @@ func TestRoutineLaunchesWaitsAndPlaces(t *testing.T) {
 		Name:    "morning setup",
 		Phrases: []string{"morning setup"},
 		Steps: []Step{
-			{App: "alacritty", Workspace: 1},
-			{App: "firefox", Workspace: 2, Tile: TileMaster},
+			{App: "alacritty", Placement: placement.Placement{Workspace: 1}},
+			{App: "firefox", Placement: placement.Placement{
+				Workspace: 2, Mode: placement.ModeTiled, Master: true}},
 		},
 	}}
 	r, _ := newTestRunner(comp, defs, log, func(poll int) {
@@ -137,10 +139,14 @@ func TestRoutineLaunchesWaitsAndPlaces(t *testing.T) {
 
 	actions := comp.Actions()
 	got := verbs(actions)
-	// Launches first (parallel cold starts), then per-step placement, then
-	// the final switch to the first step's workspace. firefox's master
-	// arrangement tiles it and promotes it.
-	want := []string{"spawn", "spawn", "move", "move", "float", "master", "workspace"}
+	// Launches first (parallel cold starts — this routine arranges nothing,
+	// so the windows may cold-start together), then per-step placement, then
+	// the final switch to the first step's workspace. firefox's tiled mode is
+	// set as a whole state — out of fullscreen, then tiled — and its master
+	// flag promotes it. alacritty names no mode, so nothing is dispatched for
+	// one: a step that said nothing about how the window sits must not decide
+	// on the user's behalf.
+	want := []string{"spawn", "spawn", "move", "move", "fullscreen", "float", "master", "workspace"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("dispatches = %v, want %v", got, want)
 	}
@@ -153,11 +159,11 @@ func TestRoutineLaunchesWaitsAndPlaces(t *testing.T) {
 	if actions[3].Address != "0xf" || actions[3].Workspace != 2 {
 		t.Errorf("firefox placement = %+v", actions[3])
 	}
-	if actions[4].Floating {
-		t.Errorf("master arrangement floated the window: %+v", actions[4])
+	if actions[5].Floating {
+		t.Errorf("the tiled mode floated the window: %+v", actions[5])
 	}
-	if actions[6].Workspace != 1 {
-		t.Errorf("finished on workspace %d, want the first step's (1)", actions[6].Workspace)
+	if last := actions[len(actions)-1]; last.Verb != "workspace" || last.Workspace != 1 {
+		t.Errorf("finished on %+v, want a switch to the first step's workspace (1)", last)
 	}
 
 	events := log.names()
@@ -179,7 +185,7 @@ func TestRoutineDedupesAlreadyRunningApps(t *testing.T) {
 	)
 	defs := []Definition{{
 		Name: "morning setup", Phrases: []string{"morning setup"},
-		Steps: []Step{{App: "firefox", Workspace: 2}},
+		Steps: []Step{{App: "firefox", Placement: placement.Placement{Workspace: 2}}},
 	}}
 	r, _ := newTestRunner(comp, defs, nil, nil)
 
@@ -210,8 +216,8 @@ func TestTwoStepsOfTheSameAppClaimDistinctWindows(t *testing.T) {
 	defs := []Definition{{
 		Name: "terminals", Phrases: []string{"terminals"},
 		Steps: []Step{
-			{App: "alacritty", Workspace: 3},
-			{App: "alacritty", Workspace: 4},
+			{App: "alacritty", Placement: placement.Placement{Workspace: 3}},
+			{App: "alacritty", Placement: placement.Placement{Workspace: 4}},
 		},
 	}}
 	r, _ := newTestRunner(comp, defs, nil, nil)
@@ -235,8 +241,8 @@ func TestRoutineContinuesPastAFailedLaunch(t *testing.T) {
 	defs := []Definition{{
 		Name: "morning setup", Phrases: []string{"morning setup"},
 		Steps: []Step{
-			{App: "slack", Workspace: 9},
-			{App: "firefox", Workspace: 2},
+			{App: "slack", Placement: placement.Placement{Workspace: 9}},
+			{App: "firefox", Placement: placement.Placement{Workspace: 2}},
 		},
 	}}
 	r, _ := newTestRunner(comp, defs, log, nil)
@@ -273,8 +279,8 @@ func TestRoutineBoundsTheWaitForAWindow(t *testing.T) {
 	defs := []Definition{{
 		Name: "morning setup", Phrases: []string{"morning setup"},
 		Steps: []Step{
-			{App: "ghostwindow", Workspace: 1},
-			{App: "firefox", Workspace: 2},
+			{App: "ghostwindow", Placement: placement.Placement{Workspace: 1}},
+			{App: "firefox", Placement: placement.Placement{Workspace: 2}},
 		},
 	}}
 	r, _ := newTestRunner(comp, defs, nil, nil)
@@ -299,8 +305,11 @@ func TestRoutinePlacementDirectives(t *testing.T) {
 	defs := []Definition{{
 		Name: "layout", Phrases: []string{"layout"},
 		Steps: []Step{
-			{App: "signal", Workspace: 9, Float: true, Width: 1200, Height: 800, X: 100, Y: 50, HasPosition: true},
-			{App: "code", Workspace: 2, Tile: TileSplit},
+			{App: "signal", Placement: placement.Placement{
+				Workspace: 9, Mode: placement.ModeFloating,
+				Width: placement.Pixels(1200), Height: placement.Pixels(800),
+				X: 100, Y: 50, HasPosition: true}},
+			{App: "code", Placement: placement.Placement{Workspace: 2, Mode: placement.ModeTiled}},
 		},
 	}}
 	r, _ := newTestRunner(comp, defs, nil, nil)
@@ -309,18 +318,23 @@ func TestRoutinePlacementDirectives(t *testing.T) {
 	}
 	actions := comp.Actions()
 	got := verbs(actions)
-	want := []string{"move", "float", "resize", "position", "move", "float", "workspace"}
+	want := []string{"move", "fullscreen", "float", "resize", "position", "pin",
+		"move", "fullscreen", "float", "workspace"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("dispatches = %v, want %v", got, want)
 	}
-	if !actions[1].Floating {
+	if !actions[2].Floating {
 		t.Error("the float directive did not float")
 	}
-	if actions[2].Width != 1200 || actions[2].Height != 800 {
-		t.Errorf("resize = %+v", actions[2])
+	if actions[3].Width != 1200 || actions[3].Height != 800 {
+		t.Errorf("resize = %+v", actions[3])
 	}
-	if actions[3].X != 100 || actions[3].Y != 50 {
-		t.Errorf("position = %+v", actions[3])
+	if actions[4].X != 100 || actions[4].Y != 50 {
+		t.Errorf("position = %+v", actions[4])
+	}
+	if actions[5].Pinned {
+		t.Error("a plain floating step must unpin, not pin — otherwise a window pinned by hand " +
+			"yesterday stays pinned through a routine that says it floats")
 	}
 	if actions[5].Floating {
 		t.Error("the split arrangement floated instead of tiling")
@@ -335,7 +349,7 @@ func TestRoutineRefusesASecondRunWhileRunning(t *testing.T) {
 	comp := desktop.NewFakeCompositor()
 	defs := []Definition{{
 		Name: "morning setup", Phrases: []string{"morning setup"},
-		Steps: []Step{{App: "firefox", Workspace: 2}},
+		Steps: []Step{{App: "firefox", Placement: placement.Placement{Workspace: 2}}},
 	}}
 	parked := make(chan struct{})
 	release := make(chan struct{})
@@ -393,7 +407,7 @@ func TestRoutineCancelledMidWaitStopsCleanly(t *testing.T) {
 	comp := desktop.NewFakeCompositor()
 	defs := []Definition{{
 		Name: "morning setup", Phrases: []string{"morning setup"},
-		Steps: []Step{{App: "firefox", Workspace: 2}},
+		Steps: []Step{{App: "firefox", Placement: placement.Placement{Workspace: 2}}},
 	}}
 	log := &eventLog{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -431,7 +445,7 @@ func TestRoutineRunMiscellany(t *testing.T) {
 	)
 	defs := []Definition{{
 		Name: "Morning Setup", Phrases: []string{"morning setup"},
-		Steps: []Step{{App: "firefox", Workspace: 2}},
+		Steps: []Step{{App: "firefox", Placement: placement.Placement{Workspace: 2}}},
 	}}
 	r, _ := newTestRunner(comp, defs, nil, nil)
 

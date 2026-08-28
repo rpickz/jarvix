@@ -11,6 +11,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/placement"
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
@@ -154,10 +155,29 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("I cannot reach the window manager")
 	}
 
-	// Phase one: claim existing windows, launch what is missing. All the
-	// launches are dispatched before any window is waited for, so the
-	// applications cold-start in parallel while the placements proceed in
-	// order — the only parallelism the ordering allows.
+	// The monitor inventory, read once for the same reason the window
+	// inventory is: percentages resolve against it, and a screen that
+	// vanished mid-run would otherwise give two steps two different answers.
+	// A compositor that will not report its outputs is not a failed run — the
+	// steps that named no monitor and no percentage are unaffected — so the
+	// error is carried into the steps that need it rather than raised here.
+	monitors, monitorErr := r.monitors(ctx)
+
+	// Phase one: put each named workspace on the monitor its steps asked for,
+	// BEFORE anything launches. A workspace that arrives on the right screen
+	// after its windows have opened has already shown the user the wrong
+	// screen, and on a tiling layout it re-tiles them on the way.
+	targets := r.targetMonitors(ctx, def, monitors, monitorErr)
+
+	// Phase two: claim existing windows, and — unless the routine arranges
+	// its windows — launch everything missing up front so the applications
+	// cold-start in parallel. An arranging routine cannot do that: the layout
+	// decides where a window lands the moment it maps, from the preselection
+	// standing at that moment, so its launches are serialised into phase
+	// three, one window at a time. The cost is the routine's slowest path,
+	// and it is the price of being able to say what the desktop looks like.
+	arranged := def.arranges()
+	place := r.placer()
 	outcomes := make([]outcome, len(def.Steps))
 	claimed := make(map[string]bool)
 	for i, step := range def.Steps {
@@ -167,6 +187,9 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 			continue
 		}
 		outcomes[i].launched = true
+		if arranged {
+			continue
+		}
 		if err := r.spawn(ctx, step.App); err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
@@ -177,8 +200,31 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 		}
 	}
 
-	// Phase two: wait for each launched window, then place it.
+	// Phase three: launch (when arranging), wait for the window, place it,
+	// and set the preselection the next step's window will land against.
 	for i, step := range def.Steps {
+		if outcomes[i].failure == "" && arranged && outcomes[i].launched {
+			// The new window lands on whatever workspace is in view, so the
+			// view has to be the step's workspace before the launch. It is a
+			// visible side effect and an unavoidable one: no compositor this
+			// seam models lets a window be mapped onto a workspace nobody is
+			// looking at and tiled against a chosen sibling.
+			if err := r.call(ctx, func(c context.Context) error {
+				return r.comp.SwitchWorkspace(c, step.Workspace)
+			}); err != nil {
+				if ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				outcomes[i].failure = fmt.Sprintf("workspace %d could not be shown", step.Workspace)
+			} else if err := r.spawn(ctx, step.App); err != nil {
+				if ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				r.log.Warn("routine step could not launch", "component", "routine",
+					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
+				outcomes[i].failure = step.App + " did not start"
+			}
+		}
 		if outcomes[i].failure == "" && !outcomes[i].resolved {
 			w, err := r.awaitWindow(ctx, step, claimed)
 			if err != nil {
@@ -194,16 +240,47 @@ func (r *Runner) Run(ctx context.Context, name string) (string, error) {
 			}
 		}
 		if outcomes[i].failure == "" {
-			if err := r.place(ctx, step, outcomes[i].window); err != nil {
+			if err := targets[i].err; err != nil {
+				// The screen the step named is not there. Say which one and
+				// why, and carry on with the remaining steps — the #180
+				// contract, and the ordinary "failure continues" rule.
+				outcomes[i].failure = failureClause(step, "placed", err)
+			} else if err := place.Apply(ctx, outcomes[i].window, step.Placement, targets[i].monitor); err != nil {
 				if ctx.Err() != nil {
 					return "", ctx.Err()
 				}
 				r.log.Warn("routine step could not be placed", "component", "routine",
 					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
-				outcomes[i].failure = step.App + " could not be placed"
+				outcomes[i].failure = failureClause(step, "placed", err)
+			} else if err := place.Preselect(ctx, outcomes[i].window, step.PlaceNext); err != nil {
+				if ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				r.log.Warn("routine step could not arrange the next window", "component", "routine",
+					"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
+				outcomes[i].failure = failureClause(step, "arranged", err)
 			}
 		}
 		r.emitStep(def.Name, i, step, outcomes[i])
+	}
+
+	// Phase four: the tiled proportions, once every window that shares a
+	// split exists. Sizing earlier would move a split with nothing on the
+	// other side of it, which the compositor answers by doing nothing —
+	// silently, which is exactly the failure mode this ticket exists to end.
+	for i, step := range def.Steps {
+		if outcomes[i].failure != "" || !step.Tiles() || !step.Sized() {
+			continue
+		}
+		if err := place.Proportion(ctx, outcomes[i].window, step.Placement, targets[i].monitor); err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			r.log.Warn("routine step could not be sized", "component", "routine",
+				"routine", def.Name, "step", i+1, "app", step.App, "error", err.Error())
+			outcomes[i].failure = failureClause(step, "sized", err)
+			r.emitStep(def.Name, i, step, outcomes[i])
+		}
 	}
 
 	// End somewhere predictable: the first step's workspace, which for the
@@ -267,6 +344,104 @@ func (r *Runner) windows(ctx context.Context) ([]desktop.Window, error) {
 	return r.comp.Windows(callCtx)
 }
 
+// monitors reads the output inventory under the per-call bound.
+func (r *Runner) monitors(ctx context.Context) ([]placement.Monitor, error) {
+	callCtx, cancel := context.WithTimeout(ctx, r.callTimeout)
+	defer cancel()
+	return r.comp.Monitors(callCtx)
+}
+
+// arranges reports whether any step asks for an arrangement, which is what
+// forces the run to launch its windows one at a time (see Run's phase two).
+func (d Definition) arranges() bool {
+	for _, s := range d.Steps {
+		if s.PlaceNext != placement.PlaceNextNone {
+			return true
+		}
+	}
+	return false
+}
+
+// stepTarget is one step's resolved screen: the monitor its percentages
+// resolve against, or the reason there isn't one.
+type stepTarget struct {
+	monitor placement.Monitor
+	err     error
+}
+
+// targetMonitors resolves every step's monitor and moves the workspaces that
+// named one, returning per-step targets in step order.
+//
+// Two rules are worth stating. A workspace is moved once however many steps
+// name it, because moving it twice is two visible jumps for one intention;
+// and a step that named NO monitor still gets one — whichever holds its
+// workspace — because a percentage has to resolve against something real, and
+// "the monitor this workspace is on" is what a person means when they write
+// `width = "66%"` and nothing else.
+func (r *Runner) targetMonitors(ctx context.Context, def Definition, monitors []placement.Monitor,
+	invErr error) []stepTarget {
+	targets := make([]stepTarget, len(def.Steps))
+	// Nicknames is nil: connector names and "current" are the two forms this
+	// vocabulary resolves today, and #180 fills the third in here — one
+	// field, and every consumer of the vocabulary gains nicknames at once.
+	resolver := placement.Resolver{}
+	moved := make(map[int]bool, len(def.Steps))
+	for i, step := range def.Steps {
+		if invErr != nil {
+			if step.Monitor != "" || step.Sized() {
+				targets[i].err = fmt.Errorf("I cannot see which screens are attached: %w", invErr)
+			}
+			continue
+		}
+		if step.Monitor == "" {
+			targets[i].monitor = placement.ForWorkspace(step.Workspace, monitors)
+			continue
+		}
+		mon, err := resolver.Resolve(step.Monitor, monitors)
+		if err != nil {
+			targets[i].err = err
+			continue
+		}
+		targets[i].monitor = mon
+		if moved[step.Workspace] {
+			continue
+		}
+		moved[step.Workspace] = true
+		if mon.ActiveWorkspace == step.Workspace {
+			// Already there. Dispatching anyway would be harmless and is
+			// skipped for the reason every convergent operation skips a
+			// no-op: the fewer things a re-run moves, the less it looks like
+			// it is fighting the user.
+			continue
+		}
+		if err := r.call(ctx, func(c context.Context) error {
+			return r.comp.MoveWorkspaceToMonitor(c, step.Workspace, mon.Name)
+		}); err != nil {
+			targets[i].err = err
+		}
+	}
+	return targets
+}
+
+// call runs one compositor dispatch under the per-call bound, refusing to
+// start once the run's context is done so "stop" lands mid-placement.
+func (r *Runner) call(ctx context.Context, f func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, r.callTimeout)
+	defer cancel()
+	return f(callCtx)
+}
+
+// placer applies the vocabulary. It is desktop.Placer rather than logic of
+// this package's own precisely because the window tools place windows too:
+// "what does mode = pinned dispatch?" has one answer, and a routine and a
+// spoken request must not be able to disagree about it (ADR 0056).
+func (r *Runner) placer() desktop.Placer {
+	return desktop.Placer{Comp: r.comp, Timeout: r.callTimeout}
+}
+
 // spawn launches one step's application through the compositor, the same
 // validated path the terminal intent uses (ADR 0022's exec_cmd exception):
 // the name was bounded to one bare token at config load and the seam checks
@@ -275,9 +450,7 @@ func (r *Runner) windows(ctx context.Context) ([]desktop.Window, error) {
 // rather than from the daemon is also what makes the window land with the
 // graphical session's environment and survive a daemon restart.
 func (r *Runner) spawn(ctx context.Context, app string) error {
-	callCtx, cancel := context.WithTimeout(ctx, r.callTimeout)
-	defer cancel()
-	return r.comp.Spawn(callCtx, app)
+	return r.call(ctx, func(c context.Context) error { return r.comp.Spawn(c, app) })
 }
 
 // findUnclaimed matches a step against the windows no earlier step has
@@ -321,60 +494,25 @@ func (r *Runner) awaitWindow(ctx context.Context, step Step, claimed map[string]
 	}
 }
 
-// place applies one step's directives to a resolved window, every dispatch
-// bounded and every directive a set rather than a toggle, so re-running the
-// routine converges on the same layout.
-func (r *Runner) place(ctx context.Context, step Step, w desktop.Window) error {
-	call := func(f func(context.Context) error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		callCtx, cancel := context.WithTimeout(ctx, r.callTimeout)
-		defer cancel()
-		return f(callCtx)
+// failureClause words one step's placement failure for the spoken summary.
+//
+// The clause matters more than it looks: "could not be placed" was the whole
+// vocabulary of failure before this change, so a resize the compositor
+// refused and a workspace that does not exist sounded identical, and a step
+// whose resize was silently rejected was reported as placed (#177). A run now
+// says which part of the placement it could not do.
+//
+// The compositor's own diagnostics stay out of the sentence — they are the
+// operator's material and live in the log line beside it — except for the two
+// the seam has already rewritten into user-facing sentences (a layout that
+// has no master pane, a monitor that is not attached), which are recognised
+// by carrying no compositor jargon because the seam built them from the
+// vocabulary's own words.
+func failureClause(step Step, clause string, err error) string {
+	if msg := desktop.PlacementSentence(err); msg != "" {
+		return step.App + ": " + msg
 	}
-	if err := call(func(c context.Context) error {
-		return r.comp.MoveToWorkspace(c, w.Address, step.Workspace)
-	}); err != nil {
-		return err
-	}
-	if step.Float {
-		if err := call(func(c context.Context) error {
-			return r.comp.SetFloating(c, w.Address, true)
-		}); err != nil {
-			return err
-		}
-		if step.Width > 0 && step.Height > 0 {
-			if err := call(func(c context.Context) error {
-				return r.comp.ResizeWindow(c, w.Address, step.Width, step.Height)
-			}); err != nil {
-				return err
-			}
-		}
-		if step.HasPosition {
-			if err := call(func(c context.Context) error {
-				return r.comp.PositionWindow(c, w.Address, step.X, step.Y)
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	switch step.Tile {
-	case TileSplit, TileMaster:
-		if err := call(func(c context.Context) error {
-			return r.comp.SetFloating(c, w.Address, false)
-		}); err != nil {
-			return err
-		}
-		if step.Tile == TileMaster {
-			if err := call(func(c context.Context) error {
-				return r.comp.PromoteMaster(c, w.Address)
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return step.App + " could not be " + clause
 }
 
 // emit publishes one bus event, if anyone is listening.

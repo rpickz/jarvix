@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // parseValid parses a document and requires it to validate.
@@ -58,14 +60,21 @@ func TestRoutinesParseAndConvert(t *testing.T) {
 	if def.Name != "morning setup" || len(def.Phrases) != 2 {
 		t.Errorf("def = %+v", def)
 	}
-	if s := def.Steps[1]; s.App != "firefox" || s.Workspace != 2 || s.Tile != "master" {
+	// The superseded spellings translate into the vocabulary rather than
+	// being refused: `tile = "master"` is a tiled window promoted to the
+	// master pane, and `float = true` with a pixel `size` is a floating
+	// window sized in pixels (ADR 0056).
+	if s := def.Steps[1]; s.App != "firefox" || s.Workspace != 2 ||
+		s.Mode != placement.ModeTiled || !s.Master {
 		t.Errorf("step 2 = %+v", s)
 	}
 	floaty := def.Steps[3]
-	if floaty.App != "signal-desktop" || floaty.Match != "signal" || !floaty.Float {
+	if floaty.App != "signal-desktop" || floaty.Match != "signal" ||
+		floaty.Mode != placement.ModeFloating {
 		t.Errorf("step 4 = %+v", floaty)
 	}
-	if floaty.Width != 1200 || floaty.Height != 800 || !floaty.HasPosition || floaty.X != 100 || floaty.Y != 100 {
+	if floaty.Width != placement.Pixels(1200) || floaty.Height != placement.Pixels(800) ||
+		!floaty.HasPosition || floaty.X != 100 || floaty.Y != 100 {
 		t.Errorf("step 4 geometry = %+v", floaty)
 	}
 	// The router knows the phrases.
@@ -110,6 +119,44 @@ workspace = 1
 float = true
 size = [1, 2, 3]
 `, "write it as [width, height]"},
+		{"a share bigger than the screen", `
+[[routines]]
+name = "bad"
+phrases = ["bad routine"]
+[[routines.steps]]
+app = "firefox"
+workspace = 1
+mode = "tiled"
+width = "150%"
+`, "more than the whole screen"},
+		{"a mode nobody has", `
+[[routines]]
+name = "bad"
+phrases = ["bad routine"]
+[[routines.steps]]
+app = "firefox"
+workspace = 1
+mode = "stacked"
+`, "is not a placement mode"},
+		{"a mode the compositor cannot deliver as a set", `
+[[routines]]
+name = "bad"
+phrases = ["bad routine"]
+[[routines.steps]]
+app = "firefox"
+workspace = 1
+mode = "grouped"
+`, "which only toggles"},
+		{"one directive spelled two ways", `
+[[routines]]
+name = "bad"
+phrases = ["bad routine"]
+[[routines.steps]]
+app = "firefox"
+workspace = 1
+mode = "tiled"
+float = true
+`, "the superseded spelling, so delete it"},
 		{"intents disabled", `
 [intents]
 enabled = false

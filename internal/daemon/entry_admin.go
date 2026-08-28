@@ -251,12 +251,26 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 			"announce": entryKeyBool, "steps": entryKeyTables,
 		},
 		keyOrder: []string{"name", "phrases", "schedule", "announce", "enabled", "steps"},
+		// The step keys are the launching half plus the window-placement
+		// vocabulary (ADR 0056), which is why they read as one list rather
+		// than two: a step IS a launch and a placement. The three superseded
+		// spellings (float, size, tile) stay declared because the form must
+		// be able to save an entry a hand edit gave them — dropping them from
+		// the whitelist would make a working routine unsavable — and the
+		// renderer writes only the current vocabulary, so an entry the window
+		// touches comes back migrated.
 		subKeys: map[string]map[string]entryKeyKind{"steps": {
 			"app": entryKeyString, "match": entryKeyString, "workspace": entryKeyInt,
-			"float": entryKeyBool, "size": entryKeyIntPair, "position": entryKeyIntPair,
-			"tile": entryKeyString,
+			"monitor": entryKeyString, "mode": entryKeyString,
+			"width": entryKeyString, "height": entryKeyString,
+			"position": entryKeyIntPair, "place_next": entryKeyString,
+			"master": entryKeyBool, "focus": entryKeyString,
+			"float": entryKeyBool, "size": entryKeyIntPair, "tile": entryKeyString,
 		}},
-		subOrder: map[string][]string{"steps": {"app", "match", "workspace", "float", "size", "position", "tile"}},
+		subOrder: map[string][]string{"steps": {
+			"app", "match", "workspace", "monitor", "mode", "width", "height",
+			"position", "place_next", "master", "focus", "float", "size", "tile",
+		}},
 	},
 	"scripts": {
 		family: "scripts", kind: "script",

@@ -158,8 +158,11 @@ func TestCaptureWritesProvenanceAndAValidEntry(t *testing.T) {
 			signal = &cfg.Routines[0].Steps[i]
 		}
 	}
-	if signal == nil || !signal.Float || signal.Match != "Signal" ||
-		len(signal.Size) != 2 || signal.Size[0] != 1200 ||
+	// Written in the current placement vocabulary (ADR 0056), never in the
+	// superseded `float`/`size` spelling: a captured entry is what a user
+	// opens in the editor, so it must read like one they wrote today.
+	if signal == nil || signal.Mode != "floating" || signal.Match != "Signal" ||
+		signal.Width != "1200px" || signal.Height != "800px" ||
 		len(signal.Position) != 2 || signal.Position[1] != 120 {
 		t.Errorf("signal step = %+v", signal)
 	}

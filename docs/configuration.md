@@ -312,8 +312,19 @@ announce = false                 # speak a scheduled run's summary (default fals
 [[routines.steps]]               # repeat per step, run in order
 app = "firefox"                  # program to launch if not already running
 workspace = 2                    # where its window goes (1-99)
-tile = "master"                  # optional: "master" or "split"; or float =
-                                 # true with size = [w, h], position = [x, y]
+monitor = "HDMI-A-1"             # optional: a connector name, or "current"
+mode = "tiled"                   # tiled | floating | pinned | fullscreen |
+                                 # maximised
+width = "66%"                    # optional share: a percentage of the screen's
+height = "100%"                  # usable area, or pixels ("1200px")
+place_next = "right"             # optional: where the NEXT tiled window on
+                                 # this workspace goes (right/left/below/above)
+master = false                   # promote into the layout's big pane
+focus = "silent"                 # silent (default) or follow
+[[routines.steps]]               # the step place_next above makes room for
+app = "code"
+workspace = 2
+mode = "tiled"
 
 [[scripts]]                      # your executables behind phrases; see "Scripts"
 name = "backup notes"            # what the confirmation names; unique
@@ -915,24 +926,37 @@ phrases = ["morning setup", "start my usual apps"]
   app = "alacritty"
   workspace = 1
 
+  # Two thirds of the top screen, and the next window goes to its right —
+  # which is what leaves the remaining third for whatever follows.
   [[routines.steps]]
   app = "firefox"
   workspace = 2
-  tile = "master"                # the big pane of the master/stack layout
+  monitor = "HDMI-A-1"
+  mode = "tiled"
+  width = "66%"                  # of the screen's USABLE area (bars excluded)
+  height = "100%"
+  place_next = "right"
 
   [[routines.steps]]
   app = "code"
   workspace = 2
-  tile = "split"                 # tiled into the workspace's split
+  mode = "tiled"
+  place_next = "below"           # and the one after that stacks under it
+
+  [[routines.steps]]
+  app = "alacritty"
+  workspace = 2
+  mode = "tiled"                 # lands under code, sharing the right third
 
   [[routines.steps]]
   app = "signal-desktop"
   match = "signal"               # how the *window* is recognised, when its
                                  # class differs from the binary's name
   workspace = 9
-  float = true
-  size = [1200, 800]             # pixels; floating only
-  position = [100, 100]          # pixels; floating only
+  mode = "floating"
+  width = "1200px"               # pixels, or a percentage like the step above
+  height = "800px"
+  position = [100, 100]          # pixels; floating modes only
 ```
 
 How a run behaves:
@@ -956,10 +980,53 @@ How a run behaves:
   than interleaving two sequences.
 - The run ends with your view on the **first step's workspace**.
 
-Placement notes: `float`, `size`, and `position` go together (a tiled
-window's geometry belongs to the layout); `tile` and `float` are mutually
-exclusive; `tile = "master"` briefly focuses the window to promote it, which
-is why a routine's master steps pull your view along until the final switch.
+#### Where a window goes: the placement vocabulary
+
+The placement half of a step is one vocabulary, used everywhere Jarvix opens a
+window — routine steps, the window-control tools, and the form in the
+conversation window ([ADR 0056](adr/0056-window-placement-vocabulary.md)).
+
+| Key | Values | Meaning |
+| --- | --- | --- |
+| `mode` | `tiled`, `floating`, `pinned`, `fullscreen`, `maximised` | how the window sits. `pinned` is floating and above every workspace |
+| `width`, `height` | `"66%"`, `"1200px"` | a share of the target screen's **usable** area (what the bars left), or exact pixels. On a **tiled** window this moves the split it sits in; on a floating one it is the window's own size |
+| `position` | `[x, y]` pixels | floating modes only — a tiled window's position belongs to the layout |
+| `place_next` | `right`, `left`, `below`, `above` | where the **next** tiled window on this workspace goes, relative to this one. Step order is therefore part of the layout's meaning |
+| `master` | `true` | promote a tiled window into the layout's big pane (master-family layouts only) |
+| `monitor` | `"DP-2"`, `"current"` | which screen this step's **workspace** lives on |
+| `focus` | `silent` (default), `follow` | whether your view follows the placed window |
+
+Everything is validated when the routine is **saved or loaded**, not when it
+runs: a share over 100%, a pixel size bigger than the target screen, a size on
+a mode that always fills it, `place_next` on a floating window. The message
+names the key to fix.
+
+**Some things the compositor genuinely cannot do, and says so** rather than
+reporting a step placed:
+
+- `place_next` needs a dwindle-family layout, and `master` a master-family one.
+  On the wrong layout the run reports *"this workspace's layout has no master
+  pane"* and carries on with the other steps.
+- A `monitor` that is not plugged in reports *"no monitor is called DP-2 right
+  now"*, and names the screens that are.
+- Grouped/tabbed windows, pseudotiling and scratchpads are **not** modes, each
+  for a recorded reason — the compositor offers only a toggle for the first
+  two, pseudotiling has no size of its own, and a scratchpad is summoned rather
+  than placed. Asking for one by name gets the reason back, not "unknown".
+
+A routine that uses `place_next` **launches its windows one at a time and
+switches your view to each step's workspace**, because a tiling layout decides
+where a window lands the moment it maps. A routine without it keeps launching
+everything at once. `master` briefly focuses the window to promote it, for the
+same reason: the compositor's layout message carries no window selector.
+
+> **Superseded spellings.** `float = true`, `size = [w, h]` and
+> `tile = "split" | "master"` were the whole placement vocabulary before ADR
+> 0056. They still work and translate on load — `float` becomes
+> `mode = "floating"`, `tile = "master"` becomes `mode = "tiled"` with
+> `master = true` — so no existing routine breaks. Saying one thing both ways
+> (`mode` *and* `float`) is a validation error naming both. Anything the window
+> or the capture writer saves comes back in the current spelling.
 
 Routines run under their own permission identity, **`routine.run`, default
 "allow"** — every step is something you wrote in your own configuration, and
@@ -1034,9 +1101,12 @@ derived — a browser web-app profile, say — is still saved: its step gets the
 placeholder `app = "CHANGE-ME"` with a `# TODO:` comment naming the class,
 the spoken confirmation says which app needs a hand, and `jarvix routines`
 (and `routines.list`) mark the routine **incomplete** until you edit the
-real command in. Tiled windows are captured as `tile = "split"`; promoting
-one to `"master"` is a one-word hand edit, because the inventory cannot say
-which window owns the layout.
+real command in. Tiled windows are captured as `mode = "tiled"` with no share
+and no `place_next`: the inventory cannot say which window owns the layout's
+big pane, and a captured share would move splits in an order that is not the
+order they were made in — so the proportion and the arrangement are a form or
+hand edit. Floating windows keep their size and position, in the current
+vocabulary (`width = "1200px"`), never in the superseded `size = [w, h]`.
 
 If the name already exists, Jarvix asks before replacing ("A routine called
 morning setup already exists. Should I replace it with this layout?") —
