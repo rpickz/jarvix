@@ -236,8 +236,8 @@ func TestScheduledFireWithAnnounceSpeaksOverDaemonWiring(t *testing.T) {
 	if n := h.tts.Speaks(); n == 0 {
 		t.Fatal("announce = true spoke nothing")
 	}
-	if h.tts.LastRequest.Text != "Notes backed up." {
-		t.Errorf("spoken = %q, want the script's report line", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Notes backed up." {
+		t.Errorf("spoken = %q, want the script's report line", h.tts.Last().Text)
 	}
 }
 

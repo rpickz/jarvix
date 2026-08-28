@@ -84,8 +84,8 @@ func TestForgetFactAsksNamingTheExactFact(t *testing.T) {
 	if len(h.provider.Requests) != 0 {
 		t.Errorf("the provider was called %d times; forgetting is not a model turn", len(h.provider.Requests))
 	}
-	if h.tts.LastRequest.Text != "Forgotten." {
-		t.Errorf("spoken ack = %q, want Forgotten.", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Forgotten." {
+		t.Errorf("spoken ack = %q, want Forgotten.", h.tts.Last().Text)
 	}
 }
 
@@ -111,8 +111,8 @@ func TestForgetFactDeclineKeepsTheFact(t *testing.T) {
 	if facts := book.List(""); len(facts) != 1 {
 		t.Fatalf("facts after decline = %v, want the one kept", facts)
 	}
-	if h.tts.LastRequest.Text != "Cancelled." {
-		t.Errorf("spoken ack = %q, want Cancelled.", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Cancelled." {
+		t.Errorf("spoken ack = %q, want Cancelled.", h.tts.Last().Text)
 	}
 }
 
@@ -157,7 +157,7 @@ func TestForgetFactUnknownIdSpeaksAnHonestFailure(t *testing.T) {
 	}
 	h.collectUntil(t, "session.finished")
 	h.waitIdle(t)
-	if !strings.Contains(h.tts.LastRequest.Text, "could not be forgotten") {
-		t.Errorf("spoken ack = %q, want the honest failure", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "could not be forgotten") {
+		t.Errorf("spoken ack = %q, want the honest failure", h.tts.Last().Text)
 	}
 }

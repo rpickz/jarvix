@@ -88,8 +88,8 @@ func TestFocusPhraseReachesTheRunnerAndSpeaksItsRecap(t *testing.T) {
 		t.Errorf("event data = %v", ev.Data)
 	}
 	// The recap is the acknowledgement, spoken verbatim.
-	if h.tts.LastRequest.Text != "Back on deploy — last here ten minutes ago." {
-		t.Errorf("spoken recap = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Back on deploy — last here ten minutes ago." {
+		t.Errorf("spoken recap = %q", h.tts.Last().Text)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestFocusRefusalIsOneSpokenSentence(t *testing.T) {
 	if ev.Data["status"] != "failed" {
 		t.Errorf("event data = %v", ev.Data)
 	}
-	if h.tts.LastRequest.Text != "Sorry, no thread is called \"deploy\"." {
-		t.Errorf("spoken refusal = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Sorry, no thread is called \"deploy\"." {
+		t.Errorf("spoken refusal = %q", h.tts.Last().Text)
 	}
 }
 
@@ -119,7 +119,7 @@ func TestFocusWithoutARunnerRefusesInWords(t *testing.T) {
 	if ev.Data["status"] != "failed" {
 		t.Errorf("event data = %v", ev.Data)
 	}
-	if h.tts.LastRequest.Text != "Sorry, focus threads are not available on this daemon." {
-		t.Errorf("spoken refusal = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Sorry, focus threads are not available on this daemon." {
+		t.Errorf("spoken refusal = %q", h.tts.Last().Text)
 	}
 }

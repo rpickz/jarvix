@@ -473,10 +473,10 @@ func TestLexiconAppliesOnReload(t *testing.T) {
 
 	// Before: the shipped defaults expand the number but know no "Jarvix".
 	h.ask(t)
-	if got := h.tts.LastRequest.Text; !strings.Contains(got, "nine point two million") {
+	if got := h.tts.Last().Text; !strings.Contains(got, "nine point two million") {
 		t.Errorf("spoken text = %q, want the decimal expanded", got)
 	}
-	if got := h.tts.LastRequest.Text; strings.Contains(got, "jarviks") {
+	if got := h.tts.Last().Text; strings.Contains(got, "jarviks") {
 		t.Fatalf("spoken text = %q before the lexicon entry existed", got)
 	}
 
@@ -494,7 +494,7 @@ func TestLexiconAppliesOnReload(t *testing.T) {
 	}
 
 	h.ask(t)
-	if got := h.tts.LastRequest.Text; !strings.Contains(got, "jarviks") {
+	if got := h.tts.Last().Text; !strings.Contains(got, "jarviks") {
 		t.Errorf("spoken text = %q, want the new pronunciation", got)
 	}
 
@@ -520,7 +520,7 @@ func TestLexiconHandEditAppliesOnReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.ask(t)
-	if got := h.tts.LastRequest.Text; !strings.Contains(got, "kates") {
+	if got := h.tts.Last().Text; !strings.Contains(got, "kates") {
 		t.Errorf("spoken text = %q, want the hand-edited pronunciation", got)
 	}
 }

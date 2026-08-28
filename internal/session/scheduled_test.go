@@ -68,8 +68,8 @@ func TestScheduledFireWithAnnounceSpeaks(t *testing.T) {
 	if n := h.tts.Speaks(); n == 0 {
 		t.Fatal("announce = true spoke nothing")
 	}
-	if h.tts.LastRequest.Text != "Morning setup: all five apps placed." {
-		t.Errorf("spoken = %q, want the run's summary", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Morning setup: all five apps placed." {
+		t.Errorf("spoken = %q, want the run's summary", h.tts.Last().Text)
 	}
 }
 
