@@ -285,7 +285,7 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 		return one(supersededRow(data))
 	case "error":
 		return one(ActivityRow{Kind: ActivityKindError, Failed: true,
-			Label:  "Failed at " + activityString(data, "stage"),
+			Label:  activityErrorLabel(activityString(data, "stage")),
 			Detail: activityString(data, "message")})
 	case "session.cancelled":
 		return one(ActivityRow{Kind: ActivityKindCancelled,
@@ -351,6 +351,13 @@ func toolFinishedRow(data map[string]any) ActivityRow {
 		detail = joinActivity(outcome, dur)
 	}
 	return ActivityRow{Kind: ActivityKindTool, Label: "Finished: " + tool, Detail: detail}
+}
+
+// activityErrorLabel names the stage a session failed at. Shared with the
+// conversation window's pending turn (PendingTurnFailed, issue #158): the
+// transcript and the feed report one failure, so they must not word it twice.
+func activityErrorLabel(stage string) string {
+	return "Failed at " + stage
 }
 
 // declineReason words a tool.declined source for the feed. The daemon's

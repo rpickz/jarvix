@@ -8,6 +8,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/conversations"
+	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
 )
@@ -213,14 +214,28 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	// session ends is a different matter, and handled the way the drain
 	// discipline always has (#29/#54): it runs under s.ctx, which those paths
 	// cancel, and unwinds at its next check.
+	//
+	// The same critical section records the call as the one in flight, so a
+	// window opening mid-round can be told what is running (issue #158). It is
+	// set here rather than after the publish because the record and the
+	// decision to run must not be separable: a conversation.get between them
+	// would see a live session with nothing running and word the pending turn
+	// as a bare "Thinking".
+	label, waiting, slow := e.tools.Activity(call)
 	e.mu.Lock()
 	live := e.current == s && s.ctx.Err() == nil
+	if live {
+		e.runningTool = call.Name
+		e.runningToolDetail = ""
+		if slow {
+			e.runningToolDetail = label
+		}
+	}
 	e.mu.Unlock()
 	if !live {
 		return "", false
 	}
 	started := map[string]any{"session_id": s.id, "tool": call.Name, "arguments": call.Arguments}
-	label, waiting, slow := e.tools.Activity(call)
 	if slow {
 		started["detail"] = label
 	}
@@ -247,6 +262,15 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	// A tool that ran and *refused* reports that in its result text to the
 	// model, and on the bus through its own audit events (typing.audit,
 	// desktop.refusal), where the reason travels with it.
+	// Nothing is in flight any more. Guarded on identity so a call that
+	// unwound late cannot clear a *later* call's record — the session-end
+	// paths clear it too (setStateLocked), and either may get here first.
+	e.mu.Lock()
+	if e.runningTool == call.Name {
+		e.runningTool, e.runningToolDetail = "", ""
+	}
+	e.mu.Unlock()
+
 	outcome := "ok"
 	if strings.HasPrefix(result, "error: ") {
 		outcome = "error"
@@ -509,36 +533,17 @@ func (e *Engine) spokenConfirmationPrompt(req confirmRequest) string {
 // shortConfirmationPrompt words the default spoken ask for a tool identity:
 // the action class in plain words, then "the details are on screen" — which
 // is where the verbatim command actually is. Keyed on the gate's tool
-// identities (internal/tools), not on anything the model said; an identity
-// not listed here names itself, so a future tool is never announced as
-// something friendlier than its own name.
+// identities, not on anything the model said; an identity the table does not
+// know names itself, so a future tool is never announced as something
+// friendlier than its own name.
+//
+// The class comes from desktop.ToolActionAsk rather than from a switch here
+// (issue #158) because the conversation window's pending turn needs the same
+// fact in the present tense — "Running a shell command" while it runs. One
+// table, two grammatical forms: the gate and the transcript cannot end up
+// describing one capability two ways.
 func shortConfirmationPrompt(tool string) string {
-	class := fmt.Sprintf("use the %s tool", tool)
-	switch tool {
-	case "shell.run":
-		class = "run a shell command"
-	case tools.IntentToolName:
-		class = "run your custom command"
-	case tools.ScriptToolName:
-		class = "run one of your scripts"
-	case tools.RoutineToolName:
-		class = "run one of your routines"
-	case tools.AdvisorToolName:
-		class = "consult another assistant"
-	case tools.KnowledgeRefreshToolName:
-		class = "refresh one of your feeds"
-	case tools.TypeTextToolName, tools.PressKeyToolName:
-		class = "type on your keyboard"
-	case tools.MemoryForgetToolName:
-		class = "forget one of your saved facts"
-	case tools.ConfigWriteSettingToolName:
-		class = "change one of your settings"
-	case tools.ConfigWriteEntryToolName:
-		class = "save a configuration entry"
-	case tools.ConfigDeleteEntryToolName:
-		class = "delete a configuration entry"
-	}
-	return fmt.Sprintf("May I %s? The details are on screen.", class)
+	return fmt.Sprintf("May I %s? The details are on screen.", desktop.ToolActionAsk(tool))
 }
 
 // speakPrompt asks the confirmation question out loud.

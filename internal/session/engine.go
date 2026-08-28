@@ -214,6 +214,24 @@ type Engine struct {
 	state   State
 	current *sess
 	counter int
+	// stateSince is when the current state began, on the engine's own clock.
+	// It exists so a surface can say how long a wait has been going without
+	// guessing (issue #158): the bar's counter starts when the widget *saw*
+	// the transition, which is right for a widget that was already running and
+	// wrong for a window opened five seconds into a long think — it would
+	// start from zero and tell the user a comfortable lie. Published as
+	// state.changed's since_ms and conversation.get's state_since_ms; guarded
+	// by mu.
+	stateSince time.Time
+	// runningTool is the tool call executing right now, with the progress
+	// label it published on tool.started when it has one. A window that opens
+	// mid-tool-round reconstructs the pending turn's wording from these
+	// (conversation.get), so it says "Consulting claude · 12s" exactly like a
+	// window that watched the round start. Cleared when the call returns and
+	// again when the session ends, so a hung tool cannot outlive its turn on
+	// screen. Guarded by mu.
+	runningTool       string
+	runningToolDetail string
 	// pending is the tool confirmation the session is waiting on, if any
 	// (ADR 0014). Guarded by mu.
 	pending *pendingConfirmation
@@ -437,6 +455,10 @@ func NewEngine(provider ai.Provider, transcriber stt.Transcriber, synthesizer tt
 	if opts.ConfirmTimer != nil {
 		e.timer = opts.ConfirmTimer
 	}
+	// Idle began when the engine did. Without this a conversation.get before
+	// the first session would report a zero time, and a client subtracting it
+	// from now would compute fifty-odd years of idleness.
+	e.stateSince = e.now()
 	e.loadHistory()
 	return e
 }
@@ -498,6 +520,41 @@ func (e *Engine) State() (State, string) {
 		id = e.current.id
 	}
 	return e.state, id
+}
+
+// Phase is everything a surface needs to say what Jarvix is doing right now
+// and for how long: the state, whose session it belongs to, when the state
+// began, and the tool call in flight if there is one.
+type Phase struct {
+	State     State
+	SessionID string
+	// Since is when the current state began, on the engine's clock.
+	Since time.Time
+	// Tool is the executing tool call's name, "" when none is running, and
+	// ToolDetail its progress label ("Consulting claude…") for the tools that
+	// publish one.
+	Tool       string
+	ToolDetail string
+}
+
+// Phase reports the current phase as one consistent read. It is one method
+// rather than four accessors because a client rendering a "Thinking · 12s"
+// line from separate calls could pick up a state from one moment and a start
+// time from the next, and then quote a duration that never happened.
+func (e *Engine) Phase() Phase {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	id := ""
+	if e.current != nil {
+		id = e.current.id
+	}
+	return Phase{
+		State:      e.state,
+		SessionID:  id,
+		Since:      e.stateSince,
+		Tool:       e.runningTool,
+		ToolDetail: e.runningToolDetail,
+	}
 }
 
 // StartSession begins a new session. If a session is already active — for
@@ -778,12 +835,27 @@ func (e *Engine) setStateLocked(to State) error {
 		return invalidTransition(e.state, to)
 	}
 	e.state = to
+	e.stateSince = e.now()
+	if to == StateIdle {
+		// No session, no tool in flight. executeTool clears this when the call
+		// returns, but a tool blocked inside a cancelled context returns late
+		// or never — and every session-ending path (finish, cancel, failure)
+		// passes through here, so this is the one place that catches all of
+		// them. A surface left saying "Consulting claude" after the turn ended
+		// would be reporting work that belongs to nothing (issue #158).
+		e.runningTool, e.runningToolDetail = "", ""
+	}
 	id := ""
 	if e.current != nil {
 		id = e.current.id
 	}
 	e.log.Debug("state changed", "component", "session", "state", string(to), "session_id", id)
-	e.publish(Event{Type: "state.changed", Data: map[string]any{"state": string(to), "session_id": id}})
+	// since_ms is the phase's start on the daemon's clock, so every surface
+	// counts the same wait from the same instant (issue #158). Additive: a
+	// client that ignores it sees exactly the payload it always saw.
+	e.publish(Event{Type: "state.changed", Data: map[string]any{
+		"state": string(to), "session_id": id,
+		"since_ms": e.stateSince.UnixMilli()}})
 	return nil
 }
 

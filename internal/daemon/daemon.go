@@ -1159,17 +1159,34 @@ func (d *Daemon) registerMethods() {
 	// state so one call is enough to render. Clients live-append from
 	// assistant.delta / transcript.final / state.changed / error events.
 	d.server.Handle("conversation.get", func(json.RawMessage) (any, error) {
-		state, id := d.engine.State()
+		phase := d.engine.Phase()
 		stage, message := d.lastError()
 		snapshot := map[string]any{
 			"turns":      d.engine.Conversation(),
-			"state":      string(state),
-			"session_id": id,
+			"state":      string(phase.State),
+			"session_id": phase.SessionID,
+			// When the current state began, so a window opened mid-thought counts
+			// the wait from the daemon's phase start rather than from the moment
+			// it happened to connect (issue #158). A client starting its own clock
+			// at zero would tell the user a comfortable lie about how long they
+			// have been waiting.
+			"state_since_ms": phase.Since.UnixMilli(),
 			// The last failure, if the session that just ended failed: the
 			// window is normally opened by clicking the notification about
 			// it, so the snapshot must carry what the `error` event said.
 			"error_stage":   stage,
 			"error_message": message,
+		}
+		// The tool call in flight, if one is running: the pending turn then says
+		// "Consulting claude" rather than a bare "Thinking", and says it the same
+		// way whether the window watched the round start or arrived in the middle
+		// of it. Absent when nothing is running, like confirmation below — the
+		// key's presence is the fact.
+		if phase.Tool != "" {
+			snapshot["tool"] = phase.Tool
+			if phase.ToolDetail != "" {
+				snapshot["tool_detail"] = phase.ToolDetail
+			}
 		}
 		// A pending tool confirmation rides the snapshot too (issue #76): a
 		// window opened during the wait missed tool.confirmation_required,

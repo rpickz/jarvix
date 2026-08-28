@@ -14,22 +14,23 @@
 // One record per state. Keys match the `state` field of a state.changed
 // event (docs/ipc.md), plus the three the widget synthesises — not-running,
 // error, and working — and the two background-listening rows the wake state
-// selects.
+// selects. `short` is the bar chip's word, empty where a state carries no
+// chip at all.
 var states = {
-  "acting": { key: "acting", glyph: "󰉁", label: "Running a command", detail: "A matched intent is executing", urgent: false, pulse: false, dim: false },
-  "awaiting_confirmation": { key: "awaiting_confirmation", glyph: "󰋗", label: "Waiting for your answer", detail: "A tool call needs confirming", urgent: true, pulse: true, dim: false },
-  "cancelling": { key: "cancelling", glyph: "󰜺", label: "Cancelling", detail: "Stopping the current turn", urgent: false, pulse: false, dim: false },
-  "error": { key: "error", glyph: "󰀦", label: "Jarvix hit a problem", detail: "The last turn failed", urgent: true, pulse: false, dim: false },
-  "idle": { key: "idle", glyph: "󰀘", label: "Jarvix is ready", detail: "Click to open the conversation", urgent: false, pulse: false, dim: false },
-  "listening": { key: "listening", glyph: "󰍬", label: "Listening", detail: "The microphone is open", urgent: false, pulse: true, dim: false },
-  "not-running": { key: "not-running", glyph: "󰒲", label: "Jarvix is not running", detail: "Start it: systemctl --user start jarvixd", urgent: false, pulse: false, dim: true },
-  "responding": { key: "responding", glyph: "󰍩", label: "Responding", detail: "Writing the answer", urgent: false, pulse: false, dim: false },
-  "speaking": { key: "speaking", glyph: "󰕾", label: "Speaking", detail: "Reading the answer aloud", urgent: false, pulse: false, dim: false },
-  "thinking": { key: "thinking", glyph: "󰧑", label: "Thinking", detail: "Working out an answer", urgent: false, pulse: true, dim: false },
-  "transcribing": { key: "transcribing", glyph: "󱑽", label: "Transcribing", detail: "Turning what you said into text", urgent: false, pulse: false, dim: false },
-  "wake-armed": { key: "wake-armed", glyph: "󰍮", label: "Listening for the wake word", detail: "The microphone is open; audio stays on this machine until you say the wake word", urgent: false, pulse: false, dim: false },
-  "wake-muted": { key: "wake-muted", glyph: "󰍭", label: "Microphone muted", detail: "Background listening is off; run jarvix unmute to resume", urgent: false, pulse: false, dim: false },
-  "working": { key: "working", glyph: "󰇘", label: "Working", detail: "Jarvix is busy", urgent: false, pulse: false, dim: false }
+  "acting": { key: "acting", glyph: "󰉁", label: "Running a command", short: "Running", detail: "A matched intent is executing", urgent: false, pulse: false, dim: false },
+  "awaiting_confirmation": { key: "awaiting_confirmation", glyph: "󰋗", label: "Waiting for your answer", short: "Confirm?", detail: "A tool call needs confirming", urgent: true, pulse: true, dim: false },
+  "cancelling": { key: "cancelling", glyph: "󰜺", label: "Cancelling", short: "Cancelling", detail: "Stopping the current turn", urgent: false, pulse: false, dim: false },
+  "error": { key: "error", glyph: "󰀦", label: "Jarvix hit a problem", short: "Problem", detail: "The last turn failed", urgent: true, pulse: false, dim: false },
+  "idle": { key: "idle", glyph: "󰀘", label: "Jarvix is ready", short: "", detail: "Click to open the conversation", urgent: false, pulse: false, dim: false },
+  "listening": { key: "listening", glyph: "󰍬", label: "Listening", short: "Listening", detail: "The microphone is open", urgent: false, pulse: true, dim: false },
+  "not-running": { key: "not-running", glyph: "󰒲", label: "Jarvix is not running", short: "", detail: "Start it: systemctl --user start jarvixd", urgent: false, pulse: false, dim: true },
+  "responding": { key: "responding", glyph: "󰍩", label: "Responding", short: "Responding", detail: "Writing the answer", urgent: false, pulse: false, dim: false },
+  "speaking": { key: "speaking", glyph: "󰕾", label: "Speaking", short: "Speaking", detail: "Reading the answer aloud", urgent: false, pulse: false, dim: false },
+  "thinking": { key: "thinking", glyph: "󰧑", label: "Thinking", short: "Thinking", detail: "Working out an answer", urgent: false, pulse: true, dim: false },
+  "transcribing": { key: "transcribing", glyph: "󱑽", label: "Transcribing", short: "Transcribing", detail: "Turning what you said into text", urgent: false, pulse: false, dim: false },
+  "wake-armed": { key: "wake-armed", glyph: "󰍮", label: "Listening for the wake word", short: "", detail: "The microphone is open; audio stays on this machine until you say the wake word", urgent: false, pulse: false, dim: false },
+  "wake-muted": { key: "wake-muted", glyph: "󰍭", label: "Microphone muted", short: "", detail: "Background listening is off; run jarvix unmute to resume", urgent: false, pulse: false, dim: false },
+  "working": { key: "working", glyph: "󰇘", label: "Working", short: "Working", detail: "Jarvix is busy", urgent: false, pulse: false, dim: false }
 }
 
 // statusFor mirrors desktop.BarStatusFor. Precedence: a dead socket beats any
@@ -46,7 +47,8 @@ function statusFor(connected, state, errorMessage, wake) {
     var failed = states["error"]
     return {
       key: failed.key, glyph: failed.glyph, label: failed.label,
-      detail: message, urgent: failed.urgent, pulse: failed.pulse, dim: failed.dim
+      short: failed.short, detail: message, urgent: failed.urgent,
+      pulse: failed.pulse, dim: failed.dim
     }
   }
   var name = String(state || "")
@@ -108,6 +110,94 @@ function liveTooltip(status, elapsedSec, tool, toolDetail, question) {
   if (Math.floor(elapsedSec || 0) > 0) detail = formatElapsed(elapsedSec) + " · " + detail
   if (detail === "") return status.label
   return status.label + " — " + detail
+}
+
+// chipLabel mirrors desktop.BarChipLabel: the short words the bar draws beside
+// its glyph, with the elapsed count on the states that earn one, and "" where
+// the widget should draw the bare icon alone (issue #158).
+function chipLabel(status, elapsedSec) {
+  if (!status || !status.short) return ""
+  if (busyStates[status.key] && Math.floor(elapsedSec || 0) > 0) {
+    return status.short + " " + formatElapsed(elapsedSec)
+  }
+  return status.short
+}
+
+// The conversation window's pending assistant turn (issue #158). Everything
+// below mirrors internal/desktop/pending.go, which is where it is tested; the
+// window renders the string and decides nothing (ADR 0013).
+
+// The present-tense action class per tool, mirroring desktop.toolPhrases —
+// the same table the permission gate asks its short question from, so the two
+// surfaces cannot name one capability two ways.
+var toolDoing = {
+  "advisor.ask": "Consulting another assistant",
+  "config.delete_entry": "Deleting a configuration entry",
+  "config.write_entry": "Saving a configuration entry",
+  "config.write_setting": "Changing one of your settings",
+  "intent.run": "Running your custom command",
+  "knowledge.refresh": "Refreshing one of your feeds",
+  "memory.forget": "Forgetting one of your saved facts",
+  "routine.run": "Running one of your routines",
+  "script.run": "Running one of your scripts",
+  "shell.run": "Running a shell command",
+  "typing.press_key": "Typing on your keyboard",
+  "typing.type_text": "Typing on your keyboard"
+}
+
+// toolActionDoing mirrors desktop.ToolActionDoing. An unlisted tool names
+// itself rather than borrowing a friendlier word.
+function toolActionDoing(tool) {
+  var name = String(tool || "")
+  if (name === "") return ""
+  return toolDoing[name] || ("Running " + name)
+}
+
+// pendingTurnLabel mirrors desktop.PendingTurnLabel: what Jarvix is doing, from
+// the session state and the tool in flight. "" means there is no pending turn —
+// which is how the window knows to stop showing one rather than leave it
+// counting up after the turn ended.
+function pendingTurnLabel(state, tool, toolDetail) {
+  var s = states[String(state || "")]
+  if (!s || !busyStates[s.key]) return ""
+  if (s.key === "awaiting_confirmation") return s.label
+  var name = String(tool || "").trim()
+  var td = String(toolDetail || "").trim()
+  if (s.key === "speaking" && name === "" && td === "") return ""
+  var detail = td.replace(/…$/, "").trim()
+  if (detail !== "") return detail
+  var phrase = toolActionDoing(name)
+  if (phrase !== "") return phrase
+  return s.label
+}
+
+// How long a wait must run before it starts saying how long. Mirrors
+// desktop.PendingElapsedThresholdSec.
+var pendingElapsedThresholdSec = 2
+
+// pendingTurnLine mirrors desktop.PendingTurnLine. elapsedSec is measured from
+// the daemon's own phase start (state.changed's since_ms, conversation.get's
+// state_since_ms), never from when this window happened to start watching.
+function pendingTurnLine(state, tool, toolDetail, elapsedSec) {
+  var label = pendingTurnLabel(state, tool, toolDetail)
+  if (label === "") return ""
+  var sec = Math.floor(elapsedSec || 0)
+  if (sec >= pendingElapsedThresholdSec) return label + " · " + formatElapsed(sec)
+  return label
+}
+
+// How a pending turn resolves when the user cancelled. Mirrors
+// desktop.PendingTurnCancelled.
+var pendingTurnCancelled = "Cancelled"
+
+// pendingTurnFailed mirrors desktop.PendingTurnFailed: the activity feed's own
+// sentence for the same failure, so one error is never worded twice.
+function pendingTurnFailed(stage, message) {
+  var text = String(message || "").trim()
+  if (text === "") text = "The last turn failed"
+  var at = String(stage || "").trim()
+  if (at === "") return text
+  return "Failed at " + at + " — " + text
 }
 
 // The panel's menu, in draw order. Every command already exists: the plugin's
