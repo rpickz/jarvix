@@ -67,7 +67,7 @@ func (d *Daemon) newAutomationService(cfg config.Config) *automation.Service {
 // the refusal notification; this is the earlier, cheaper lesson.
 func (d *Daemon) warnUnattendableSchedules(cfg config.Config, entries []automation.Entry) {
 	for _, e := range entries {
-		verdict, ok := automationVerdict(cfg, d.toolsPolicy, e)
+		verdict, ok := automationVerdict(cfg, d.registry.Policy(), e)
 		if !ok || verdict.Decision == tools.PolicyAllow {
 			continue
 		}
@@ -111,7 +111,7 @@ func automationVerdict(cfg config.Config, policy *tools.Policy, e automation.Ent
 // shutdown drains it like everything else.
 func (d *Daemon) fireAutomation(ctx context.Context, e automation.Entry) {
 	cfg := d.runningConfig()
-	verdict, known := automationVerdict(cfg, d.toolsPolicy, e)
+	verdict, known := automationVerdict(cfg, d.registry.Policy(), e)
 	if !known {
 		// The tables changed under a firing already dispatched; the reload
 		// has rebuilt the schedules, so this generation's entry just ends.
@@ -248,7 +248,7 @@ func (d *Daemon) registerAutomationMethods() {
 			if !st.LastFired.IsZero() {
 				entry["last_fired"] = st.LastFired.Format(time.RFC3339)
 			}
-			verdict, ok := automationVerdict(cfg, d.toolsPolicy,
+			verdict, ok := automationVerdict(cfg, d.registry.Policy(),
 				automation.Entry{Kind: st.Kind, Name: st.Name})
 			refuse := ok && verdict.Decision != tools.PolicyAllow
 			entry["would_refuse"] = refuse

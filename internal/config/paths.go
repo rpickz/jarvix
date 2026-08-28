@@ -83,6 +83,17 @@ func (p Paths) FocusFile() string { return filepath.Join(p.State, "focus.toml") 
 // one by voice needs no config-write ceremony.
 func (p Paths) RemindersFile() string { return filepath.Join(p.State, "reminders.toml") }
 
+// ApprovalsFile is the approval ledger (#162, ADR 0052): when each
+// `[tools.policy] shell_allow` pattern was agreed to on a confirmation card,
+// and how often it has since let a command run unprompted.
+//
+// State rather than config, and the line is sharper here than anywhere else:
+// the patterns themselves stay in config.toml, which alone decides what runs
+// without asking. This file is the history beside them, machine-written
+// several times a minute, and deleting it costs the user their record of when
+// they agreed to something — never a permission, in either direction.
+func (p Paths) ApprovalsFile() string { return filepath.Join(p.State, "approvals.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

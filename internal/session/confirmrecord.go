@@ -76,6 +76,12 @@ func (e *Engine) recordConfirmationLocked(p *pendingConfirmation, outcome, sourc
 			Outcome:    outcome,
 			Source:     source,
 			TimeoutSec: int(p.timeout.Seconds()),
+			// The honest half of a "don't ask again" (#162): the record says
+			// approved AND says which rule that answer added, so re-reading
+			// the conversation shows where a standing grant came from rather
+			// than a bare yes that quietly widened the gate.
+			Remembered:    p.rememberedPattern(),
+			RememberScope: string(p.granted),
 		},
 		summary:   p.summary,
 		at:        e.now(),

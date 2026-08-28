@@ -310,6 +310,27 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	merged := next
 	merged.Activation = running.Activation
 	merged.Tools = running.Tools
+	// …except the gate's two pattern lists (#162, ADR 0052). Everything else
+	// under [tools] is restart-class because it is wired at construction —
+	// which tools exist, what they may reach — but `shell_allow` and
+	// `shell_deny` are read on every classification, and the permission gate
+	// is the one part of this file that must be able to TIGHTEN without a
+	// restart. A user who has just watched Jarvix run something they regret
+	// and edits the file (or says "forget docker ps") has to see that take
+	// effect now, not after `systemctl --user restart jarvixd`; a revocation
+	// that waits is a revocation that has not happened. Loosening travels the
+	// same path because a gate with two different reload rules depending on
+	// direction is a gate nobody can predict — and the loosening direction
+	// still requires a deliberate human edit of a file the assistant cannot
+	// reach (#109).
+	merged.Tools.Policy.ShellAllow = next.Tools.Policy.ShellAllow
+	merged.Tools.Policy.ShellDeny = next.Tools.Policy.ShellDeny
+	if err := d.recompileGate(merged); err != nil {
+		// A file whose patterns will not compile has already failed
+		// Config.Validate above, so this is belt and braces — and the belt is
+		// the running gate, which is left exactly as it was.
+		return false, err.Error()
+	}
 	merged.Artifacts = running.Artifacts
 	// Memory is restart-class with the rest of the tool registry: the store
 	// and the memory tools are wired at construction (ADR 0025).
@@ -354,6 +375,11 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.vocabulary, d.knowledge,
 		d.conversations, d.windows, d.log)
 	opts.Capture = capture
+	// The approval store survives every reload like the memory book and the
+	// reminder service (#162): one instance for the daemon's life, so the
+	// spoken listing keeps reading the same list the writer writes and the
+	// ledger keeps its firing counts across a config change.
+	opts.Approvals = &approvalsVoice{store: d.approvals}
 	// The runner chain is rebuilt around the same construction-wired
 	// services (ADR 0041, ADR 0046): the store instances survive every
 	// reload, exactly like the memory book they are modelled on.
@@ -424,6 +450,24 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	d.log.Info("configuration applied", "component", "daemon",
 		"provider", merged.AI.Provider, "model", merged.AI.Model, "tts", merged.TTS.Provider)
 	return true, ""
+}
+
+// recompileGate rebuilds the permission gate from cfg and installs it,
+// keeping the approval store's view of the allow list in step.
+//
+// The two moves are one operation on purpose: the classifier's patterns and
+// the list the Approvals view, the CLI and the spoken answer read must be the
+// same list at every instant a client could look. Installing the policy and
+// forgetting the store would produce a daemon that runs a command unprompted
+// and then tells the user it has no such rule.
+func (d *Daemon) recompileGate(cfg config.Config) error {
+	policy, err := d.compilePolicy(cfg)
+	if err != nil {
+		return err
+	}
+	d.registry.SetPolicy(policy)
+	d.approvals.setPatterns(cfg.Tools.Policy.ShellAllow)
+	return nil
 }
 
 // restartPending lists the restart-class settings whose file value differs

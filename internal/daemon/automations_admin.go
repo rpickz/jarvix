@@ -223,7 +223,7 @@ func (d *Daemon) automationsListing() (any, error) {
 			if !st.LastFired.IsZero() {
 				entry["last_fired"] = st.LastFired.Format(time.RFC3339)
 			}
-			verdict, known := automationVerdict(cfg, d.toolsPolicy,
+			verdict, known := automationVerdict(cfg, d.registry.Policy(),
 				automation.Entry{Kind: kind, Name: name})
 			refuse := known && verdict.Decision != tools.PolicyAllow
 			entry["would_refuse"] = refuse

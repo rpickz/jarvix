@@ -249,7 +249,9 @@ default = "ask"                  # decision for tools with no [tools.policy.tool
 confirm_timeout_sec = 30         # unanswered confirmations decline after this
 remember_for_conversation = false # re-run an approved command without asking again
                                  # for the rest of this conversation only
-shell_allow = []                 # extra command prefixes that run silently,
+shell_allow = []                 # extra command prefixes that run silently;
+                                 # answering a confirmation card with
+                                 # "don't ask again" appends one here (#162),
                                  # e.g. ["docker compose ps", "kubectl get"]
 shell_deny = []                  # extra command prefixes that never run,
                                  # e.g. ["git push"] — deny beats everything
@@ -1792,6 +1794,58 @@ Every tool call is classified **allow / ask / deny** before it executes
 Classification happens in the daemon on the parsed command; the model's own
 description of what it is doing is never trusted, so a model cannot describe
 `rm -rf ~` as "tidying up". Unknown tools default to `ask`.
+
+### Approve and don't ask again (`shell_allow`, issue #162)
+
+The confirmation card offers a third answer beside Approve once and Reject:
+**Approve and don't ask again**, with the exact rule it would add printed on
+the button — `docker ps`, `xdg-open`, `kubectl get pods`. Choosing it appends
+that word prefix to `shell_allow` through the same surgical editor the
+settings screen uses (comments and hand edits survive), recompiles the running
+gate, and the next matching command runs without a question.
+`…just this conversation` grants the same rule in memory only; it never
+reaches disk and goes when the conversation does.
+
+The rule offered is always the narrowest useful one: the command's leading
+words up to the first argument that varies, at most three words. `docker ps`
+therefore covers `docker ps --format '{{.Image}}'` too, which is the point —
+the nuisance is variants of one intent, not one command repeating.
+
+**Some commands are never offered the third button**, and the card says why in
+one sentence. A word-prefix rule cannot say "but not those flags", so anything
+whose danger lives in its flags or its subcommands is refused rather than
+pretended at: destructive or privilege-escalating leading words (`rm`, `dd`,
+`sudo`, `chmod`, `kill`, `mv`, `crontab`, `sh -c`, `xargs`, `eval`, …, all of
+which always ask anyway); binaries whose flags reach further than their name
+(`find`, `git`, `systemctl`, `curl`, `ssh`, `make`, `npm`, `go`, package
+managers); wrappers that run whatever command follows them (`timeout`,
+`nohup`, `watch`, `strace`); synthetic-input tools (`xdotool`); `jarvix`
+itself; a command invoked by path (`./deploy.sh` — the file's contents can
+change afterwards); and dangerous subcommands of multiplexers (`docker run`,
+`kubectl delete`, `terraform apply`). A bare multiplexer is never offered
+either, because `docker` would cover `docker run`. A compound command offers
+only the segment that needed approval, and nothing at all if two segments did.
+
+**Nothing behind a rule is silent.** A pre-approved run appears in the
+activity feed as "Ran without asking", naming the rule that let it through.
+Deny rules, the always-risky command words, and output redirection still beat
+every allow, so a remembered `ls` can never authorise `ls; rm -rf ~`.
+
+See them and take them back:
+
+```bash
+jarvix approvals list                  # pattern, when added, how often used
+jarvix approvals forget docker ps      # applies immediately, no restart
+```
+
+…or the window's **Approvals** tab, or by editing `shell_allow` by hand and
+running `jarvix config reload`. Asking "what have I pre-approved?" answers by
+voice. The assistant cannot add, change, or remove a rule: `[tools.policy]` is
+structurally unreachable from its configuration tools
+([ADR 0036](adr/0036-assistant-self-configuration.md)), and only a human click
+or spoken yes on a card writes one. Full reasoning, including the refusal
+matrix and the prompt-injection argument, is in
+[ADR 0052](adr/0052-remembered-approvals.md).
 
 ### What the ask sounds like (`[confirmations]`)
 
