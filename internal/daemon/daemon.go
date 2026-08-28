@@ -29,6 +29,7 @@ import (
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/reminders"
 	"github.com/rpickz/jarvix/internal/session"
+	"github.com/rpickz/jarvix/internal/statehold"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/transcript"
@@ -174,6 +175,17 @@ type Daemon struct {
 	// session that produced them by design, so shutdown has to wait for them
 	// rather than assume a finished session means a finished daemon.
 	post quiesce.Group
+	// stateGate is the backup write barrier (ADR 0045): every store the
+	// daemon writes under the state root enters it around each mutation, and
+	// the state.hold verb (state.go) holds it so `jarvix backup` copies a
+	// coherent point in time.
+	stateGate *statehold.Gate
+	// holdRelease ends the hold the state.hold verb opened; nil when none is
+	// active. Guarded by holdMu. Kept here rather than returned to the
+	// client because release must also work from a *different* connection —
+	// the CLI may crash and a human may want to release by hand.
+	holdMu      sync.Mutex
+	holdRelease func()
 	// shutdownGrace bounds the drain in shutdown; DefaultShutdownGrace unless
 	// a test shortens it to exercise the give-up path.
 	shutdownGrace time.Duration
@@ -303,6 +315,12 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		logger = slog.Default()
 	}
 
+	// The backup write barrier (ADR 0045): one gate threaded through every
+	// store the daemon writes under the state root, so the state.hold verb
+	// can hand `jarvix backup` a coherent point in time. Built first because
+	// every store construction below carries it.
+	gate := &statehold.Gate{}
+
 	// The taught vocabulary (issue #129), built before the transcriber so
 	// the STT bias prompt can read the hard-to-hear phrases live. Disabled
 	// means absent — no store consulted, no tools registered — but never
@@ -313,6 +331,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		vocab = vocabulary.NewStore(paths.VocabularyFile(), vocabulary.StoreOptions{
 			MaxEntries:        cfg.Vocabulary.MaxEntries,
 			MaxInjectedTokens: cfg.Vocabulary.MaxInjectedTokens,
+			Gate:              gate,
 		}, logger)
 		logger.Info("vocabulary enabled", "component", "vocabulary",
 			"path", paths.VocabularyFile(), "max_entries", cfg.Vocabulary.MaxEntries,
@@ -549,6 +568,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		book = memory.NewBook(paths.MemoryFile(), memory.BookOptions{
 			MaxFacts:          cfg.Memory.MaxFacts,
 			MaxInjectedTokens: cfg.Memory.MaxInjectedTokens,
+			Gate:              gate,
 		}, logger)
 		logger.Info("memory enabled", "component", "memory", "path", paths.MemoryFile(),
 			"max_facts", cfg.Memory.MaxFacts, "max_injected_tokens", cfg.Memory.MaxInjectedTokens)
@@ -562,18 +582,18 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// background-refresh decision is the knowledge.refresh identity's tier,
 	// consulted once here: the tools section is restart-class, so the answer
 	// holds for the daemon's life.
-	feeds := newKnowledgeService(cfg, paths, policy, bus, logger)
+	feeds := newKnowledgeService(cfg, paths, policy, bus, gate, logger)
 
 	// Conversation memory persists under the XDG state dir so a follow-up
 	// still has its context after a daemon restart (ADR 0011).
-	var store history.Store = &history.File{Path: paths.HistoryFile()}
+	var store history.Store = &history.File{Path: paths.HistoryFile(), Gate: gate}
 	if deps.HistoryStore != nil {
 		store = deps.HistoryStore
 	}
 	// The durable archive (ADR 0027). Whether the engine *writes* to it is
 	// the retention switch, decided in engineOptions; the store itself always
 	// exists so listing and deleting past conversations work regardless.
-	var convs conversations.Store = &conversations.FileStore{Dir: paths.ConversationsDir()}
+	var convs conversations.Store = &conversations.FileStore{Dir: paths.ConversationsDir(), Gate: gate}
 	if deps.ConversationStore != nil {
 		convs = deps.ConversationStore
 	}
@@ -603,7 +623,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// same late bind the capture service uses. One instance for the daemon's
 	// life, like the memory book: the runner, the verbs, and the check-in
 	// clockwork must always agree on what the threads are.
-	focusSvc := newFocusService(paths, compositor, bus, logger)
+	focusSvc := newFocusService(paths, compositor, bus, gate, logger)
 	// The reminder service (#141, ADR 0046) is built beside it for the same
 	// reason — the engine's intent runner carries it — and bound to the
 	// daemon after (bindReminders). One instance for the daemon's life: the
@@ -715,6 +735,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		compositor: compositor, windows: windows, router: router,
 		paths: paths, injected: injected, cfg: cfg, warm: workers,
 		provider:      deps.Provider,
+		stateGate:     gate,
 		shutdownGrace: DefaultShutdownGrace,
 	}
 	d.sessions = deps.Sessions
@@ -1210,6 +1231,7 @@ func (d *Daemon) registerMethods() {
 	d.registerOverlayMethods()
 	d.registerReminderMethods()
 	d.registerEntryAdminMethods()
+	d.registerStateMethods()
 }
 
 // pendingConfirmationReport renders the tool confirmation the session is

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // Store persists the rolling conversation history. Implementations must
@@ -45,6 +46,9 @@ const MaxFileBytes = 1 << 20 // 1 MiB
 type File struct {
 	// Path is the history file, conventionally under $XDG_STATE_HOME/jarvix.
 	Path string
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through.
+	Gate *statehold.Gate
 }
 
 // document is the on-disk shape. Only the user question and the assistant's
@@ -112,6 +116,9 @@ func knownRole(r ai.Role) bool {
 
 // Save implements Store.
 func (f *File) Save(messages []ai.Message, lastTurn time.Time) error {
+	// Entered before the first byte moves, released once the file is
+	// settled: `jarvix backup` holds this gate for its coherent cut.
+	defer f.Gate.Enter()()
 	doc := document{Version: documentVersion, LastTurn: lastTurn}
 	doc.Messages = make([]message, 0, len(messages))
 	for _, m := range messages {
@@ -203,6 +210,7 @@ func syncDir(dir string) error {
 
 // Clear implements Store.
 func (f *File) Clear() error {
+	defer f.Gate.Enter()()
 	err := os.Remove(f.Path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove history: %w", err)

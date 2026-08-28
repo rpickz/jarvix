@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // Store caps and defaults.
@@ -77,6 +79,9 @@ type StoreOptions struct {
 	MaxInjectedTokens int
 	// Now is the clock, injectable so tests control every timestamp.
 	Now func() time.Time
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through.
+	Gate *statehold.Gate
 }
 
 // Store is the in-memory view of the vocabulary, backed by one TOML file.
@@ -89,7 +94,9 @@ type Store struct {
 	maxEntries        int
 	maxInjectedTokens int
 	now               func() time.Time
-	log               *slog.Logger
+	// gate is the backup write barrier (ADR 0045); nil never blocks.
+	gate *statehold.Gate
+	log  *slog.Logger
 	// write persists an entry list; always writeStore outside tests. A field
 	// for the memory book's reason: the write-failure contracts (a failed
 	// write must never leave the Store claiming an entry it does not hold)
@@ -126,6 +133,7 @@ func NewStore(path string, opts StoreOptions, log *slog.Logger) *Store {
 		maxEntries:        opts.MaxEntries,
 		maxInjectedTokens: opts.MaxInjectedTokens,
 		now:               opts.Now,
+		gate:              opts.Gate,
 		log:               log,
 	}
 	if s.maxEntries <= 0 {
@@ -289,6 +297,9 @@ func nextID(entries []Entry) int {
 // success, so a failed write can never leave the Store claiming an entry is
 // taught when it is not. Callers hold s.mu.
 func (s *Store) saveLocked(entries []Entry) error {
+	// Entered before the first byte moves, released once the store is
+	// settled: `jarvix backup` holds this gate for its coherent cut.
+	defer s.gate.Enter()()
 	if s.corrupt {
 		// The file on disk is one the user may be mid-way through fixing.
 		// Move it aside rather than overwrite it: the write proceeds, and

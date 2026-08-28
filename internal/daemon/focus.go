@@ -33,6 +33,7 @@ import (
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
+	"github.com/rpickz/jarvix/internal/statehold"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/transcript"
 )
@@ -52,8 +53,9 @@ const focusClassifyTimeout = time.Second
 // it; the firing path and the midpoint switch bind after (bindFocus), the
 // capture service's pattern.
 func newFocusService(paths config.Paths, compositor desktop.Compositor, bus *session.Bus,
-	logger *slog.Logger) *focus.Service {
+	gate *statehold.Gate, logger *slog.Logger) *focus.Service {
 	return focus.NewService(paths.FocusFile(), focus.Options{
+		Gate: gate,
 		Windows: func(ctx context.Context) ([]desktop.Window, error) {
 			ctx, cancel := context.WithTimeout(ctx, focusWindowsTimeout)
 			defer cancel()

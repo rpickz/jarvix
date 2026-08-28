@@ -178,6 +178,14 @@ type persisted struct {
 	nextParked int
 }
 
+// ValidateFile reports whether the store at path would load: parseable TOML,
+// no unknown keys, a supported schema version. `jarvix restore` (ADR 0045)
+// proves a staged archive with it before swapping anything into place.
+func ValidateFile(path string) error {
+	_, err := readStore(path)
+	return err
+}
+
 // writeStore persists the store atomically: temp file in the same directory,
 // fsync, rename, fsync the directory — a crash mid-write leaves the old store
 // or the new one, never a torn file, and the rename is durable rather than

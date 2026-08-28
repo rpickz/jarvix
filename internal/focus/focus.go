@@ -41,6 +41,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/quiesce"
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // Model types. Everything is plain data; the Service owns all mutation.
@@ -210,6 +211,9 @@ type Options struct {
 	// Now is the clock; Timer creates one shot of it.
 	Now   func() time.Time
 	Timer func(d time.Duration) (<-chan time.Time, func())
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through.
+	Gate *statehold.Gate
 }
 
 // Service owns the thread store and the check-in clockwork. All methods are
@@ -217,7 +221,9 @@ type Options struct {
 // the file changed on disk — a hand-edit is picked up on the very next
 // operation, no restart, no watcher.
 type Service struct {
-	path     string
+	path string
+	// gate is the backup write barrier (ADR 0045); nil never blocks.
+	gate     *statehold.Gate
 	windows  func(ctx context.Context) ([]desktop.Window, error)
 	fire     func(ctx context.Context, f Firing)
 	publish  func(string, map[string]any)
@@ -289,6 +295,7 @@ func NewService(path string, opts Options, log *slog.Logger) *Service {
 		recapBudget: opts.RecapBudget,
 		now:         opts.Now,
 		timer:       opts.Timer,
+		gate:        opts.Gate,
 		log:         log,
 		write:       writeStore,
 		rearm:       make(chan struct{}, 1),
@@ -461,6 +468,9 @@ func (s *Service) normalize(p persisted) persisted {
 // success, so a failed write can never leave the Service claiming a state the
 // file does not hold. Callers hold s.mu.
 func (s *Service) saveLocked(p persisted) error {
+	// Entered before the first byte moves, released once the store is
+	// settled: `jarvix backup` holds this gate for its coherent cut.
+	defer s.gate.Enter()()
 	if s.corrupt {
 		// The file on disk is one the user may be mid-way through fixing.
 		// Move it aside rather than overwrite it: the write proceeds, and

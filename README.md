@@ -374,6 +374,61 @@ never clashes with another binding. See
 [ADR 0008](docs/adr/0008-daemon-side-push-to-talk.md) (including the privacy
 model: non-chord key events are discarded immediately and never logged).
 
+### Backing up the assistant's memory of you
+
+Jarvix's whole knowledge of you — remembered facts, taught vocabulary, focus
+threads, conversations, routines, settings — lives under `~/.config/jarvix`
+and `~/.local/state/jarvix`. One command archives both roots as a single
+dated tar.gz with a manifest (Jarvix version, file list, SHA-256 hashes,
+per-store schema versions):
+
+```bash
+jarvix backup                        # jarvix-backup-YYYYMMDD-HHMMSS.tar.gz here
+jarvix backup ~/backups/jarvix/      # dated archive inside that directory
+jarvix backup --no-secrets           # api keys in config.toml replaced with
+                                     # placeholders; restore lists what to re-enter
+```
+
+Secrets are **included by default** — an api key written into
+`config.toml` (the per-endpoint fallback to the environment variables) is
+part of a working machine, and a backup that silently dropped it would not
+restore one. Treat the archive like the private files it contains (it is
+written `0600`).
+
+With the daemon running, backup asks it to briefly hold store writes
+(`state.hold`) so the copy is a coherent point in time; with the daemon
+stopped it copies directly. Either way every file's hash is pinned in the
+manifest, and the archive contains nothing outside Jarvix's own two
+directories — no shell configs, no ssh keys, ever.
+
+Restore validates before it touches anything, and refuses — specifically and
+loudly — on a corrupt or truncated archive, a hash mismatch, an archive or
+store format newer than the installed Jarvix, or a running daemon:
+
+```bash
+systemctl --user stop jarvixd
+jarvix restore jarvix-backup-20260828-030000.tar.gz
+jarvix doctor
+systemctl --user start jarvixd
+```
+
+The archive is staged and swapped into place with renames (never
+delete-then-copy), and any existing state first moves aside whole to a
+timestamped safety copy (`~/.local/state/jarvix.pre-restore-<timestamp>`,
+same for config) which the report names — your old state is never
+destroyed. An archive made with `--no-secrets` restores fine; the report
+lists each api key that needs re-entering.
+
+For unattended backups, `--quiet` prints nothing on success and the exit
+codes are stable: `0` success, `1` any failure, `2` unknown command. A
+sensible cron line:
+
+```cron
+0 3 * * * jarvix backup --quiet ~/backups/jarvix/
+```
+
+See [ADR 0045](docs/adr/0045-backup-restore.md) for the consistency model.
+
 ## Troubleshooting
 
 Start with `jarvix doctor` — it checks PipeWire, microphone, speakers,

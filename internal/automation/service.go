@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/quiesce"
+	"github.com/rpickz/jarvix/internal/statehold"
 )
 
 // Kind is what a schedule fires: a routine or a script.
@@ -50,12 +51,17 @@ type Options struct {
 	// Now is the clock; Timer creates one shot of it.
 	Now   func() time.Time
 	Timer func(d time.Duration) (<-chan time.Time, func())
+	// Gate is the backup write barrier (ADR 0045); nil — the CLI, tests —
+	// means writes are never held. Only the daemon threads one through.
+	Gate *statehold.Gate
 }
 
 // Service owns the schedules: the loops, the last-run trail, and the
 // missed-while-down boot report. All methods are safe for concurrent use.
 type Service struct {
-	path    string
+	path string
+	// gate is the backup write barrier (ADR 0045); nil never blocks.
+	gate    *statehold.Gate
 	fire    func(ctx context.Context, e Entry)
 	publish func(string, map[string]any)
 	now     func() time.Time
@@ -102,6 +108,7 @@ func NewService(path string, opts Options, log *slog.Logger) *Service {
 	}
 	s := &Service{
 		path:    path,
+		gate:    opts.Gate,
 		fire:    opts.Fire,
 		publish: opts.Publish,
 		now:     opts.Now,
@@ -369,6 +376,9 @@ func (s *Service) loadLocked() {
 // a warning, not an error: the trail only feeds the boot report. Callers
 // hold s.mu.
 func (s *Service) saveLocked() {
+	// Entered before the first byte moves, released once the trail is
+	// settled: `jarvix backup` holds this gate for its coherent cut.
+	defer s.gate.Enter()()
 	if err := writeTrail(s.path, s.entries, s.states); err != nil {
 		s.log.Warn("schedule trail could not be persisted",
 			"component", "automation", "error", err.Error())
