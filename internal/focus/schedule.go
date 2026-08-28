@@ -9,7 +9,9 @@ import (
 // timebox's midpoint and close. One loop, armed to the single next moment
 // anything is due, recomputed whenever a mutation changes the schedule — the
 // automation scheduler's discipline (ADR 0032) over interval events instead
-// of wall-clock ones.
+// of wall-clock ones. The loop is always armed, never parked: an empty
+// schedule is a long wait, not the absence of one (ADR 0049, and run's own
+// comment for why).
 //
 // The do-not-nag rule lives in two places by design. Here: while a focus
 // session holds the floor, reminder ticks are skipped outright — a monotask
@@ -91,6 +93,13 @@ func (s *Service) InFlight() int { return s.group.InFlight() }
 
 // Rearm wakes the loop to recompute its next event. Safe from any goroutine;
 // a wake already pending is enough, so this never blocks.
+//
+// A wake carries no claim about *what* changed, and callers signal after
+// dropping s.mu, so the loop routinely consumes a token for a change its last
+// nextWait already read — a redundant pass, never a missed one. That
+// asymmetry is deliberate and must stay this way round: the loop re-reads the
+// whole schedule after every wake, so a spurious wake costs one recompute,
+// while a suppressed wake would cost a missed firing.
 func (s *Service) Rearm() {
 	select {
 	case s.rearm <- struct{}{}:
@@ -98,10 +107,42 @@ func (s *Service) Rearm() {
 	}
 }
 
+// idleSweep is the longest the loop will go without looking at the store when
+// nothing at all is scheduled. It is not a poll for due moments — everything
+// due has an arm of its own — it is the store's hand-edit promise applied to
+// the one reader that has no other way of hearing about a change (#152; see
+// run, which owns the reasoning).
+const idleSweep = time.Minute
+
 // run is the loop: find the next due moment, wait for it (or for a rearm),
 // dispatch what came due, repeat. Every wait goes through the timer seam and
 // every firing through the generation context, so tests drive it
 // deterministically and shutdown ends it promptly.
+//
+// The loop is **always armed** — there is no "nothing scheduled, sleep until
+// somebody pokes me" branch, and that absence is the point (#152). Two things
+// go wrong when the loop parks on `s.rearm` alone:
+//
+//   - It stops reading the store. Every other entry point refreshes from disk
+//     on its way in, which is what makes `focus.toml` hand-editable without a
+//     restart — the file's own header promises exactly that. A parked loop is
+//     the one reader that never comes back, so adding `remind_every_min = 30`
+//     by hand while nothing else is scheduled arms nothing at all until some
+//     unrelated verb happens to call Rearm. Silence, with a correct-looking
+//     file on disk, is the worst failure this feature can have.
+//   - It makes "armed" unobservable. A park drops `<-fire` from the select
+//     entirely, so a tick delivered to a parked loop is not late — it is
+//     never received. The scheduler is entitled to reach an empty schedule at
+//     a moment its caller did not predict (the loop dispatches on entry and
+//     on every wake, always against the current clock, so a pass nobody
+//     asked for can legitimately consume the last due moment), and a park
+//     turns that ordinary outcome into an indefinite hang for anyone holding
+//     a timer channel.
+//
+// So an empty schedule is not a special case: it is a wait of idleSweep,
+// still interruptible by a mutation, still cancelled by the generation
+// context. That also matches the automation sibling (ADR 0032), whose loop
+// arms unconditionally because a cron schedule always has a next occurrence.
 func (s *Service) run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -110,13 +151,7 @@ func (s *Service) run(ctx context.Context) {
 		s.dispatchDue(ctx)
 		wait, any := s.nextWait()
 		if !any {
-			// Nothing scheduled: sleep until a mutation says otherwise.
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.rearm:
-			}
-			continue
+			wait = idleSweep
 		}
 		fire, stop := s.timer(wait)
 		select {
@@ -131,7 +166,10 @@ func (s *Service) run(ctx context.Context) {
 }
 
 // nextWait reports how long until the earliest scheduled moment, and whether
-// one exists at all.
+// one exists at all. It stays honest about the empty schedule rather than
+// inventing a moment for it — run decides what an empty schedule is worth
+// waiting (idleSweep), because that is a policy about the store, not a fact
+// about the clockwork.
 func (s *Service) nextWait() (time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
