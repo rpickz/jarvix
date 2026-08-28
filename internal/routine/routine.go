@@ -1,11 +1,15 @@
 // Package routine turns one spoken sentence into a placed desktop (ADR 0026).
 //
 // A routine is a named, user-authored sequence of steps — launch this
-// application, put its window on that workspace, optionally floated with a
-// size and position or arranged into the workspace's master/split layout —
-// triggered by a phrase the deterministic intent router recognises
-// (internal/intent) and executed through the compositor seam
-// (internal/desktop, ADR 0022).
+// application and put its window *there* — triggered by a phrase the
+// deterministic intent router recognises (internal/intent) and executed
+// through the compositor seam (internal/desktop, ADR 0022).
+//
+// "There" is the window-placement vocabulary (internal/placement, ADR 0056),
+// embedded in each Step rather than restated: a mode, a proportion in percent
+// or pixels, an arrangement for what comes next, and a target workspace and
+// monitor. The same value the window tools accept and the form edits, so a
+// routine can express anything Jarvix can do to a window anywhere.
 //
 // Three properties are the design, and each answers a way this feature could
 // annoy its owner:
@@ -30,24 +34,15 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
-// Tile arrangements a step may ask for. "split" is the ordinary tiled layout
-// — two split steps on one workspace share it side by side — and "master"
-// additionally promotes the window to the layout's master slot.
+// Workspace bounds, matching the compositor seam's own and the vocabulary's.
 const (
-	TileMaster = "master"
-	TileSplit  = "split"
+	minWorkspace = placement.MinWorkspace
+	maxWorkspace = placement.MaxWorkspace
 )
-
-// Workspace bounds, matching the compositor seam's own.
-const (
-	minWorkspace = 1
-	maxWorkspace = 99
-)
-
-// maxPixel bounds sizes and positions, matching the seam's defensive bound.
-const maxPixel = 32768
 
 // Definition is one configured routine, converted from its [[routines]]
 // table. The schema is deliberately boring — scalars and two-element integer
@@ -67,6 +62,12 @@ type Definition struct {
 }
 
 // Step is one application placed on one workspace.
+//
+// The placement half is not spelled here: it is placement.Placement, embedded,
+// which is the whole of ADR 0056's "defined once and used everywhere". A step
+// is *what to launch* plus *where it goes*, and the second half is the same
+// value the window tools take and the form edits, so an option added to the
+// vocabulary is available in a routine the moment it exists.
 type Step struct {
 	// App is the program to launch when no matching window exists: a single
 	// bare executable name or absolute path, the same rule the terminal
@@ -76,22 +77,9 @@ type Step struct {
 	// whose window class is not their binary name ("google-chrome-stable"
 	// launching a window classed "Google-chrome"). Empty matches on App.
 	Match string
-	// Workspace is where the window goes, 1–99.
-	Workspace int
-	// Float lifts the window out of the tiling layout; Size and position are
-	// only meaningful then, because tiled geometry belongs to the layout.
-	Float bool
-	// Width and Height are the floating size in pixels; zero means no size
-	// directive.
-	Width, Height int
-	// X and Y are the floating position in pixels; HasPosition distinguishes
-	// "place at 0,0" from "no position directive".
-	X, Y        int
-	HasPosition bool
-	// Tile arranges a tiled window: TileSplit tiles it into the workspace's
-	// split, TileMaster additionally makes it the master. Empty leaves the
-	// layout to the compositor. Mutually exclusive with Float.
-	Tile string
+	// Placement is where the window goes: mode, proportion, arrangement and
+	// target. Embedded so a step reads as one thing rather than two.
+	placement.Placement
 }
 
 // matchQuery is what the dedupe matcher looks for.
@@ -140,10 +128,50 @@ func Problems(defs []Definition) []string {
 		for j, step := range def.Steps {
 			problems = append(problems, stepProblems(fmt.Sprintf("%s steps[%d]", label, j), step)...)
 		}
+		problems = append(problems, danglingArrangements(label, def)...)
 	}
 	return problems
 }
 
+// danglingArrangements catches a `place_next` with nothing after it on the
+// same workspace.
+//
+// It is a whole-routine rule rather than a step rule because it can only be
+// seen from the whole routine, and it is worth catching: a preselection is
+// ONE-SHOT — the compositor holds it until a window maps and then spends it —
+// so a routine that sets one and never opens another window on that workspace
+// leaves it lying there for whatever the user opens by hand next. They would
+// experience it as their terminal opening in a strange place ten minutes
+// later, with nothing on screen connecting it to the routine.
+func danglingArrangements(label string, def Definition) []string {
+	var problems []string
+	for i, step := range def.Steps {
+		if step.PlaceNext == placement.PlaceNextNone {
+			continue
+		}
+		followed := false
+		for _, later := range def.Steps[i+1:] {
+			if later.Workspace == step.Workspace {
+				followed = true
+				break
+			}
+		}
+		if !followed {
+			problems = append(problems, fmt.Sprintf(
+				"%s steps[%d]: place_next = %q has no step after it on workspace %d, so the "+
+					"arrangement would be spent on whatever you open next by hand; remove it, "+
+					"or add the step it is making room for",
+				label, i, step.PlaceNext, step.Workspace))
+		}
+	}
+	return problems
+}
+
+// stepProblems validates one step: the launching half here, the placement
+// half through the vocabulary. There is deliberately no second copy of the
+// placement rules — the form, the tools and this loader all run
+// placement.Problems, so a value refused when a routine is saved is refused
+// identically when a tool sends it.
 func stepProblems(label string, s Step) []string {
 	var problems []string
 	switch {
@@ -153,39 +181,14 @@ func stepProblems(label string, s Step) []string {
 		problems = append(problems, fmt.Sprintf("%s: app %q must be a single executable name or absolute "+
 			"path (letters, digits, . _ / + -); it is launched directly, never through a shell", label, s.App))
 	}
-	if s.Workspace < minWorkspace || s.Workspace > maxWorkspace {
-		problems = append(problems, fmt.Sprintf("%s: workspace %d does not exist; workspaces are numbered %d to %d",
-			label, s.Workspace, minWorkspace, maxWorkspace))
-	}
 	if s.Match != "" && strings.TrimSpace(s.Match) == "" {
 		problems = append(problems, label+": match is blank; omit it to match on the app name")
 	}
-	hasSize := s.Width != 0 || s.Height != 0
-	if hasSize {
-		if s.Width <= 0 || s.Height <= 0 || s.Width > maxPixel || s.Height > maxPixel {
-			problems = append(problems, fmt.Sprintf("%s: size %d by %d is not a window size in pixels",
-				label, s.Width, s.Height))
-		}
-		if !s.Float {
-			problems = append(problems, label+": size needs float = true; a tiled window's size belongs to the layout")
-		}
-	}
-	if s.HasPosition {
-		if s.X < -maxPixel || s.X > maxPixel || s.Y < -maxPixel || s.Y > maxPixel {
-			problems = append(problems, fmt.Sprintf("%s: position %d,%d is not on any plausible monitor", label, s.X, s.Y))
-		}
-		if !s.Float {
-			problems = append(problems, label+": position needs float = true; a tiled window's position belongs to the layout")
-		}
-	}
-	switch s.Tile {
-	case "", TileMaster, TileSplit:
-	default:
-		problems = append(problems, fmt.Sprintf("%s: tile %q is not an arrangement; use %q or %q",
-			label, s.Tile, TileMaster, TileSplit))
-	}
-	if s.Tile != "" && s.Float {
-		problems = append(problems, label+": float and tile are mutually exclusive; a window is floated or tiled, not both")
+	// A routine step must name a workspace: it is describing a desktop, and
+	// "wherever the compositor felt like" is not a description. The tools,
+	// which place the window already in front of the user, pass false.
+	for _, p := range s.Problems(true) {
+		problems = append(problems, label+": "+p.String())
 	}
 	return problems
 }

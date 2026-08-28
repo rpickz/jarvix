@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // lookPathFor fakes binary resolution: only the listed names are installed.
@@ -73,9 +74,11 @@ func TestSnapshotDerivesCommandsAndMatches(t *testing.T) {
 		t.Fatalf("steps = %+v, placeholders = %v", steps, snap.Placeholders)
 	}
 	want := []Step{
-		{App: "firefox", Workspace: 1, Tile: TileSplit},
-		{App: "obsidian", Match: "md.obsidian.Obsidian", Workspace: 2, Tile: TileSplit},
-		{App: "signal-desktop", Match: "Signal", Workspace: 3, Tile: TileSplit},
+		{App: "firefox", Placement: placement.Placement{Workspace: 1, Mode: placement.ModeTiled}},
+		{App: "obsidian", Match: "md.obsidian.Obsidian",
+			Placement: placement.Placement{Workspace: 2, Mode: placement.ModeTiled}},
+		{App: "signal-desktop", Match: "Signal",
+			Placement: placement.Placement{Workspace: 3, Mode: placement.ModeTiled}},
 	}
 	for i := range want {
 		if !reflect.DeepEqual(steps[i], want[i]) {
@@ -121,10 +124,11 @@ func TestSnapshotWritesAPlaceholderNeverDrops(t *testing.T) {
 }
 
 // TestSnapshotRecordsFloatingGeometryAndTiledSplits: floats carry their size
-// and position, tiled windows become splits (master is a hand edit — the
-// inventory cannot say which window owns the layout), and impossible
-// geometry is left to the layout rather than written as an entry the next
-// load rejects.
+// and position in the placement vocabulary, tiled windows are captured tiled
+// and without a proportion (master and share are hand edits — the inventory
+// cannot say which window owns the layout, and a replayed share would move
+// splits in the wrong order), and impossible geometry is left to the layout
+// rather than written as an entry the next load rejects.
 func TestSnapshotRecordsFloatingGeometryAndTiledSplits(t *testing.T) {
 	windows := []desktop.Window{
 		{Address: "0x1", Class: "firefox", Workspace: 1, AcceptsInput: true},
@@ -136,16 +140,17 @@ func TestSnapshotRecordsFloatingGeometryAndTiledSplits(t *testing.T) {
 	snap := Snapshot("layout", windows, CaptureOptions{LookPath: lookPathFor("firefox", "signal", "mpv")})
 	steps := snap.Definition.Steps
 
-	if steps[0].Tile != TileSplit || steps[0].Float {
-		t.Errorf("tiled step = %+v, want tile %q", steps[0], TileSplit)
+	if steps[0].Mode != placement.ModeTiled || steps[0].Sized() {
+		t.Errorf("tiled step = %+v, want mode %q with no share", steps[0], placement.ModeTiled)
 	}
 	float := steps[1]
-	if !float.Float || float.Width != 1200 || float.Height != 800 ||
-		!float.HasPosition || float.X != 100 || float.Y != 120 || float.Tile != "" {
+	if float.Mode != placement.ModeFloating ||
+		float.Width != placement.Pixels(1200) || float.Height != placement.Pixels(800) ||
+		!float.HasPosition || float.X != 100 || float.Y != 120 {
 		t.Errorf("floating step = %+v, want the captured geometry", float)
 	}
 	offscreen := steps[2]
-	if !offscreen.Float || offscreen.Width != 0 || offscreen.HasPosition {
+	if offscreen.Mode != placement.ModeFloating || offscreen.Sized() || offscreen.HasPosition {
 		t.Errorf("impossible geometry step = %+v, want float with no directives", offscreen)
 	}
 	if problems := Problems([]Definition{snap.Definition}); len(problems) != 0 {

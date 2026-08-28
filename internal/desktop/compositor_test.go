@@ -305,6 +305,7 @@ printf '%s\n' "$*" >> "` + dir + `/calls"
 case "$1" in
   clients) cat "` + dir + `/clients.json" ;;
   version) printf '{"version":"0.56.2","tag":"v0.56.2"}\n' ;;
+  getoption) printf '{"option": "general:layout", "str": "dwindle", "set": true }\n' ;;
   dispatch)
     case "$2" in
       hl.dsp.*)
@@ -442,10 +443,29 @@ func TestInventoryIsNotTruncatedByTheDiagnosticCap(t *testing.T) {
 	}
 }
 
-// TestPlacementArgvPerDialect pins the placement dispatches routines make
-// (ADR 0026) in both dialects. Every one is a *set* rather than a toggle —
-// `setfloating`, never `togglefloating`; `exact`, never a delta — because a
-// routine re-run must converge on the same layout, not oscillate around it.
+// TestPlacementArgvPerDialect pins the placement dispatches the vocabulary
+// makes (ADR 0056) in both dialects. Every one is a *set* rather than a
+// toggle — `setfloating`, never `togglefloating`; an exact size, never a
+// delta — because a routine re-run must converge on the same layout, not
+// oscillate around it.
+//
+// The Lua spellings are not invented here: each was probed against Hyprland
+// 0.56.2 with a deliberately bogus window address, which is rejected on
+// argument shape BEFORE the window is looked up, so the reply distinguishes a
+// wrong shape from a missing window and nothing real is touched. ADR 0056
+// carries the full table; the three this test used to assert were all wrong,
+// which is issue #177:
+//
+//	hl.dsp.window.set_floating(…)  → attempt to call a nil value (field 'set_floating')
+//	hl.dsp.window.resize({width, height}) → unrecognized arguments. Expected positions (x & y)
+//	hl.dsp.window.position(…)     → attempt to call a nil value (field 'position')
+//	hl.dsp.layout.swap_with_master(…) → attempt to index a function value (field 'layout')
+//
+// A fixture of the same spelling as the code is a self-consistent pair with
+// no external truth in it — that is exactly how the old ones passed for two
+// years — so scripts/verify-window-placement.sh re-probes every one of these
+// against a live compositor, and this test's job is only to stop them
+// changing by accident.
 func TestPlacementArgvPerDialect(t *testing.T) {
 	const addr = "0x55d8e53e7c60"
 	tests := []struct {
@@ -454,25 +474,49 @@ func TestPlacementArgvPerDialect(t *testing.T) {
 		want []string
 	}{
 		{"float on lua", floatArgs(dialectLua, addr, true),
-			[]string{"dispatch", `hl.dsp.window.set_floating({ window = "address:0x55d8e53e7c60", floating = true })`}},
+			[]string{"dispatch", `hl.dsp.window.float({ window = "address:0x55d8e53e7c60", action = "enable" })`}},
 		{"float on legacy", floatArgs(dialectLegacy, addr, true),
 			[]string{"dispatch", "setfloating", "address:0x55d8e53e7c60"}},
 		{"float off lua", floatArgs(dialectLua, addr, false),
-			[]string{"dispatch", `hl.dsp.window.set_floating({ window = "address:0x55d8e53e7c60", floating = false })`}},
+			[]string{"dispatch", `hl.dsp.window.float({ window = "address:0x55d8e53e7c60", action = "disable" })`}},
 		{"float off legacy", floatArgs(dialectLegacy, addr, false),
 			[]string{"dispatch", "settiled", "address:0x55d8e53e7c60"}},
 		{"resize lua", resizeArgs(dialectLua, addr, 1200, 800),
-			[]string{"dispatch", `hl.dsp.window.resize({ window = "address:0x55d8e53e7c60", width = 1200, height = 800, exact = true })`}},
+			[]string{"dispatch", `hl.dsp.window.resize({ window = "address:0x55d8e53e7c60", x = 1200, y = 800, relative = false })`}},
 		{"resize legacy", resizeArgs(dialectLegacy, addr, 1200, 800),
 			[]string{"dispatch", "resizewindowpixel", "exact 1200 800,address:0x55d8e53e7c60"}},
 		{"position lua", positionArgs(dialectLua, addr, 100, -50),
-			[]string{"dispatch", `hl.dsp.window.position({ window = "address:0x55d8e53e7c60", x = 100, y = -50, exact = true })`}},
+			[]string{"dispatch", `hl.dsp.window.move({ window = "address:0x55d8e53e7c60", x = 100, y = -50, relative = false })`}},
 		{"position legacy", positionArgs(dialectLegacy, addr, 100, -50),
 			[]string{"dispatch", "movewindowpixel", "exact 100 -50,address:0x55d8e53e7c60"}},
+		{"pin on lua", pinArgs(dialectLua, addr, true),
+			[]string{"dispatch", `hl.dsp.window.pin({ window = "address:0x55d8e53e7c60", action = "enable" })`}},
+		{"pin off lua", pinArgs(dialectLua, addr, false),
+			[]string{"dispatch", `hl.dsp.window.pin({ window = "address:0x55d8e53e7c60", action = "disable" })`}},
+		{"fullscreen lua", fullscreenArgs(dialectLua, addr, FullscreenWhole, true),
+			[]string{"dispatch", `hl.dsp.window.fullscreen({ window = "address:0x55d8e53e7c60", mode = "fullscreen", action = "set" })`}},
+		{"maximised lua", fullscreenArgs(dialectLua, addr, FullscreenMaximised, true),
+			[]string{"dispatch", `hl.dsp.window.fullscreen({ window = "address:0x55d8e53e7c60", mode = "maximized", action = "set" })`}},
+		{"unfullscreen lua", fullscreenArgs(dialectLua, addr, FullscreenWhole, false),
+			[]string{"dispatch", `hl.dsp.window.fullscreen({ window = "address:0x55d8e53e7c60", mode = "fullscreen", action = "unset" })`}},
+		{"fullscreen legacy", fullscreenArgs(dialectLegacy, addr, FullscreenMaximised, true),
+			[]string{"dispatch", "fullscreen", "1"}},
+		{"preselect lua", preselectArgs(dialectLua, PreselectRight),
+			[]string{"dispatch", `hl.dsp.layout("preselect r")`}},
+		{"preselect legacy", preselectArgs(dialectLegacy, PreselectDown),
+			[]string{"dispatch", "layoutmsg", "preselect d"}},
 		{"master lua", masterArgs(dialectLua, addr),
-			[]string{"dispatch", `hl.dsp.layout.swap_with_master({ window = "address:0x55d8e53e7c60" })`}},
+			[]string{"dispatch", `hl.dsp.layout("swapwithmaster")`}},
 		{"master legacy", masterArgs(dialectLegacy, addr),
 			[]string{"dispatch", "layoutmsg", "swapwithmaster"}},
+		{"window to monitor lua", windowMonitorArgs(dialectLua, addr, "DP-2"),
+			[]string{"dispatch", `hl.dsp.window.move({ monitor = "DP-2", window = "address:0x55d8e53e7c60", follow = false })`}},
+		{"window to monitor legacy", windowMonitorArgs(dialectLegacy, addr, "DP-2"),
+			[]string{"dispatch", "movewindow", "mon:DP-2,silent,address:0x55d8e53e7c60"}},
+		{"workspace to monitor lua", workspaceMonitorArgs(dialectLua, 3, "HDMI-A-1"),
+			[]string{"dispatch", `hl.dsp.workspace.move({ workspace = 3, monitor = "HDMI-A-1" })`}},
+		{"workspace to monitor legacy", workspaceMonitorArgs(dialectLegacy, 3, "HDMI-A-1"),
+			[]string{"dispatch", "moveworkspacetomonitor", "3 HDMI-A-1"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

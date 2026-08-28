@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // FakeCompositor is a scripted compositor: canned inventories in, recorded
@@ -31,6 +33,20 @@ type FakeCompositor struct {
 	// is still recorded, because "it was asked for and refused" and "it was
 	// never asked for" are different assertions.
 	FailSpawn map[string]error
+	// FailVerb fails exactly the named placement verbs ("resize",
+	// "preselect", "master", …), so a test can reproduce the one thing the
+	// vocabulary must never do: report a step placed when part of it was
+	// refused (#177). The attempt is recorded either way.
+	FailVerb map[string]error
+	// Outputs is the monitor inventory Monitors returns. Empty reports "the
+	// window manager reports no monitors", which is what a headless session
+	// looks like and a legitimate thing for a run to have to say. Named for
+	// the thing rather than the method, because a field cannot share a name
+	// with the method that serves it.
+	Outputs []placement.Monitor
+	// Layout is what LayoutName reports; empty means "dwindle", the layout
+	// every arrangement directive in this vocabulary is written against.
+	Layout string
 
 	// BeforeAction runs at the start of every action, before the recorded
 	// call, with the address that was asked for. A test uses it to swap the
@@ -47,18 +63,32 @@ type FakeCompositor struct {
 	reads int
 }
 
-// FakeAction is one recorded dispatch.
+// FakeAction is one recorded dispatch. The whole point of recording the
+// payload rather than only the verb is that the vocabulary's contract is a
+// *sequence*: "two thirds on the left, two stacked in the remaining third" is
+// a specific series of moves, floats, preselections and resizes, and a test
+// that only counted them would pass on the wrong desktop.
 type FakeAction struct {
 	// Verb is one of "focus", "close", "move", "workspace", "spawn",
-	// "float", "resize", "position", "master".
+	// "float", "resize", "position", "pin", "fullscreen", "preselect",
+	// "master", "workspace_monitor".
 	Verb      string
 	Address   string
 	Workspace int
 	// Program is the executable a "spawn" was asked to start, empty for the
 	// window verbs.
 	Program string
-	// Floating is what a "float" set the state to.
+	// Floating is what a "float" set the state to; Pinned what a "pin" set;
+	// On what a "fullscreen" set.
 	Floating bool
+	Pinned   bool
+	On       bool
+	// Mode is a "fullscreen"'s covering state.
+	Mode FullscreenMode
+	// Direction is a "preselect"'s direction.
+	Direction PreselectDirection
+	// Monitor is a "workspace_monitor"'s target output.
+	Monitor string
 	// Width and Height are a "resize"'s pixels; X and Y a "position"'s.
 	Width, Height int
 	X, Y          int
@@ -155,9 +185,90 @@ func (f *FakeCompositor) PositionWindow(ctx context.Context, address string, x, 
 	return f.actOn(ctx, FakeAction{Verb: "position", Address: address, X: x, Y: y})
 }
 
+// SetPinned implements Compositor.
+func (f *FakeCompositor) SetPinned(ctx context.Context, address string, pinned bool) error {
+	return f.actOn(ctx, FakeAction{Verb: "pin", Address: address, Pinned: pinned})
+}
+
+// SetFullscreen implements Compositor.
+func (f *FakeCompositor) SetFullscreen(ctx context.Context, address string, mode FullscreenMode, on bool) error {
+	return f.actOn(ctx, FakeAction{Verb: "fullscreen", Address: address, Mode: mode, On: on})
+}
+
+// Preselect implements Compositor. It names no window — the real one acts on
+// whatever holds focus — so it records through the same path SwitchWorkspace
+// does, with no address to check against the inventory.
+func (f *FakeCompositor) Preselect(ctx context.Context, direction PreselectDirection) error {
+	switch direction {
+	case PreselectRight, PreselectLeft, PreselectDown, PreselectUp:
+	default:
+		return fmt.Errorf("refusing to preselect in unknown direction %q", direction)
+	}
+	return f.record(ctx, FakeAction{Verb: "preselect", Direction: direction})
+}
+
 // PromoteMaster implements Compositor.
 func (f *FakeCompositor) PromoteMaster(ctx context.Context, address string) error {
 	return f.actOn(ctx, FakeAction{Verb: "master", Address: address})
+}
+
+// MoveToMonitor implements Compositor.
+func (f *FakeCompositor) MoveToMonitor(ctx context.Context, address string, monitor string) error {
+	if err := f.actOn(ctx, FakeAction{Verb: "window_monitor", Address: address, Monitor: monitor}); err != nil {
+		return err
+	}
+	for _, m := range f.Outputs {
+		if m.Name == monitor {
+			return nil
+		}
+	}
+	return fmt.Errorf("no monitor is called %s", monitor)
+}
+
+// MoveWorkspaceToMonitor implements Compositor. The monitor is checked
+// against the fake's own inventory for the same reason actOn checks an
+// address: a fake that accepted an output it has never reported would let a
+// test pass while the real compositor answered "Monitor not found".
+func (f *FakeCompositor) MoveWorkspaceToMonitor(ctx context.Context, workspace int, monitor string) error {
+	if workspace < minWorkspace || workspace > maxWorkspace {
+		return fmt.Errorf("workspace %d does not exist", workspace)
+	}
+	if err := f.record(ctx, FakeAction{Verb: "workspace_monitor", Workspace: workspace, Monitor: monitor}); err != nil {
+		return err
+	}
+	for _, m := range f.Outputs {
+		if m.Name == monitor {
+			return nil
+		}
+	}
+	return fmt.Errorf("no monitor is called %s", monitor)
+}
+
+// Monitors implements Compositor.
+func (f *FakeCompositor) Monitors(ctx context.Context) ([]placement.Monitor, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	return append([]placement.Monitor(nil), f.Outputs...), nil
+}
+
+// LayoutName implements Compositor.
+func (f *FakeCompositor) LayoutName(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if f.Err != nil {
+		return "", f.Err
+	}
+	if f.Layout == "" {
+		return "dwindle", nil
+	}
+	return f.Layout, nil
 }
 
 // record notes a dispatch that names no window. The window verbs cannot use
@@ -174,6 +285,9 @@ func (f *FakeCompositor) record(ctx context.Context, action FakeAction) error {
 		return f.Err
 	}
 	f.actions = append(f.actions, action)
+	if err := f.FailVerb[action.Verb]; err != nil {
+		return err
+	}
 	return f.FailAction
 }
 
@@ -198,6 +312,9 @@ func (f *FakeCompositor) actOn(ctx context.Context, action FakeAction) error {
 		return f.Err
 	}
 	f.actions = append(f.actions, action)
+	if err := f.FailVerb[action.Verb]; err != nil {
+		return err
+	}
 	if f.FailAction != nil {
 		return f.FailAction
 	}

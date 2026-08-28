@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/placement"
 )
 
 // This file is the compositor seam (ADR 0022): the interface through which
@@ -173,20 +175,91 @@ type Compositor interface {
 	// routines re-run (ADR 0026), and a toggle applied twice undoes itself
 	// while a set applied twice converges.
 	SetFloating(ctx context.Context, address string, floating bool) error
-	// ResizeWindow sets a floating window's size in pixels. On a tiled window
-	// the compositor's answer is its own — the layout owns tiled geometry,
-	// which is why callers float first.
+	// ResizeWindow sets a window's size in pixels, exactly.
+	//
+	// On a floating window that is the window's own size. On a TILED window
+	// it is how a proportion is asked for: the compositor moves the split the
+	// window sits in, so "this one takes two thirds" is an exact resize of a
+	// tiled window and not a float (ADR 0056). Callers therefore no longer
+	// float first — floating first would produce a window hovering over the
+	// layout, which is a different arrangement entirely.
 	ResizeWindow(ctx context.Context, address string, width, height int) error
 	// PositionWindow moves a floating window's top-left corner to x,y in
 	// pixels. Coordinates may be negative: on a multi-monitor layout the
 	// global origin is wherever the user arranged it to be.
 	PositionWindow(ctx context.Context, address string, x, y int) error
+	// SetPinned pins (true) or unpins (false) the window at address, so it
+	// stays above everything on every workspace. Hyprland honours pinning
+	// only for floating windows, so callers float first; the pair is one mode
+	// in the vocabulary (placement.ModePinned) rather than two knobs.
+	SetPinned(ctx context.Context, address string, pinned bool) error
+	// SetFullscreen puts the window at address into (true) or out of (false)
+	// a fullscreen mode: covering the whole output, or maximised over the
+	// workspace's usable area. A set with an explicit mode, never a toggle,
+	// for the reason SetFloating is.
+	SetFullscreen(ctx context.Context, address string, mode FullscreenMode, on bool) error
+	// Preselect tells the tiling layout where the NEXT window mapped on the
+	// focused workspace should go, relative to the focused window. It is how
+	// tiled arrangement is expressed on a dwindle-family layout, which
+	// decides a new window's place when the window maps and never afterwards
+	// — so it is dispatched between launches, not after them.
+	//
+	// It acts on whatever holds focus, because that is the only thing the
+	// compositor's layout message takes; the caller focuses the window it
+	// means first. Layouts with no such message report so (see
+	// Hyprland.Preselect), which is how "your layout cannot do this" reaches
+	// the user instead of a step counted as placed.
+	Preselect(ctx context.Context, direction PreselectDirection) error
 	// PromoteMaster makes the window at address its workspace's master
 	// window — the big pane of a master/stack layout. Implementations may
 	// need to focus the window to do it (see Hyprland.PromoteMaster), so
-	// callers should expect the user's view to follow.
+	// callers should expect the user's view to follow. On a layout with no
+	// master pane it reports that rather than pretending.
 	PromoteMaster(ctx context.Context, address string) error
+	// MoveToMonitor sends one window to a named output without following it
+	// there. It is what "put this on the other screen" means for a single
+	// window the user is looking at; a routine placing a layout moves the
+	// whole workspace instead (MoveWorkspaceToMonitor), because the windows
+	// of one workspace belong together.
+	MoveToMonitor(ctx context.Context, address string, monitor string) error
+	// MoveWorkspaceToMonitor puts a whole workspace on a named output. This
+	// is what "put this on my top monitor" means for a routine step: the
+	// windows of one workspace belong together, and moving them individually
+	// would scatter a layout across two screens. Naming an output that is not
+	// plugged in is an error, not a silent no-op.
+	MoveWorkspaceToMonitor(ctx context.Context, workspace int, monitor string) error
+	// Monitors returns the outputs the compositor is driving, with the
+	// geometry a percentage resolves against.
+	Monitors(ctx context.Context) ([]placement.Monitor, error)
+	// LayoutName is the tiling layout in force ("dwindle", "master"), for the
+	// two directives whose availability depends on it: preselection is a
+	// dwindle-family message and master promotion a master-family one. Empty
+	// with no error means the compositor would not say.
+	LayoutName(ctx context.Context) (string, error)
 }
+
+// FullscreenMode is which of the compositor's two covering states is meant.
+type FullscreenMode int
+
+const (
+	// FullscreenWhole covers the entire output, bars included.
+	FullscreenWhole FullscreenMode = iota
+	// FullscreenMaximised covers the workspace's usable area, leaving the
+	// bars on screen. Hyprland spells it "maximized".
+	FullscreenMaximised
+)
+
+// PreselectDirection is where the next tiled window goes relative to the
+// focused one. The values are the vocabulary's (placement.PlaceNext),
+// translated once here into the compositor's single-letter spelling.
+type PreselectDirection string
+
+const (
+	PreselectRight PreselectDirection = "r"
+	PreselectLeft  PreselectDirection = "l"
+	PreselectDown  PreselectDirection = "d"
+	PreselectUp    PreselectDirection = "u"
+)
 
 // Compositor call bounds. A window action is a local IPC round trip: if it has
 // not answered in a second, something is wrong and the user is owed a sentence
@@ -267,7 +340,17 @@ func (h *Hyprland) Describe(ctx context.Context) (string, error) {
 	if name == "" {
 		name = strings.TrimSpace(v.Tag)
 	}
-	return strings.TrimSpace("Hyprland " + name + " (" + h.probeDialect(ctx).String() + " dispatch)"), nil
+	described := strings.TrimSpace("Hyprland " + name + " (" + h.probeDialect(ctx).String() + " dispatch")
+	// The tiling layout belongs in the diagnostic because two of the
+	// placement vocabulary's directives depend on it (ADR 0056):
+	// `place_next` is a dwindle-family message and `master` a master-family
+	// one, so "my routine says the layout cannot arrange windows that way" is
+	// answered by this line rather than by reading someone's hyprland.conf.
+	// Best-effort — a compositor that will not answer still gets described.
+	if layout, err := h.LayoutName(ctx); err == nil && layout != "" {
+		described += ", " + layout + " layout"
+	}
+	return described + ")", nil
 }
 
 // String names a dialect for logs and doctor output.
@@ -370,22 +453,129 @@ func (h *Hyprland) PositionWindow(ctx context.Context, address string, x, y int)
 	})
 }
 
+// SetPinned implements Compositor.
+func (h *Hyprland) SetPinned(ctx context.Context, address string, pinned bool) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return pinArgs(d, address, pinned)
+	})
+}
+
+// SetFullscreen implements Compositor.
+func (h *Hyprland) SetFullscreen(ctx context.Context, address string, mode FullscreenMode, on bool) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return fullscreenArgs(d, address, mode, on)
+	})
+}
+
+// Preselect implements Compositor.
+//
+// The refusal this turns into a sentence is the whole reason the method
+// exists: `preselect` is a dwindle layout message, and on a master-family
+// layout the compositor answers "Unknown master layoutmsg: preselect" with
+// exit status zero. Left alone that is a step reported as placed whose
+// arrangement never happened — the #177 shape — so the seam rewrites it into
+// something a run can report.
+func (h *Hyprland) Preselect(ctx context.Context, direction PreselectDirection) error {
+	switch direction {
+	case PreselectRight, PreselectLeft, PreselectDown, PreselectUp:
+	default:
+		return fmt.Errorf("refusing to preselect in unknown direction %q", direction)
+	}
+	err := h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return preselectArgs(d, direction)
+	})
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "layoutmsg") {
+		return fmt.Errorf("this workspace's layout cannot arrange windows that way "+
+			"(preselection is a dwindle-family feature): %w", err)
+	}
+	return err
+}
+
 // PromoteMaster implements Compositor.
 //
 // The window is focused first, and that is a workaround stated openly rather
-// than hidden: the legacy dialect's layout message (`layoutmsg
-// swapwithmaster`) takes no window selector — it acts on whatever has focus —
-// so naming the window means becoming it for a moment. The Lua form does take
-// a selector, but focusing on both dialects keeps the two behaviourally
-// identical, which matters more than saving the Lua users one dispatch: a
-// routine must place windows the same way on every machine it is written for.
+// than hidden: the layout message carries no window selector on either
+// dialect — it acts on whatever has focus — so naming the window means
+// becoming it for a moment. `hl.dsp.layout` is a *function* taking a plain
+// string (probed; ADR 0056), not a table of named messages, which is why the
+// Lua form has no selector to offer either.
+//
+// A layout with no master pane answers "Unknown dwindle layoutmsg", and that
+// is rewritten into the sentence the vocabulary promises rather than being
+// reported as a placement that happened.
 func (h *Hyprland) PromoteMaster(ctx context.Context, address string) error {
 	if err := h.dispatch(ctx, focusArgs, address, 0); err != nil {
 		return err
 	}
-	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+	err := h.dispatchProbed(ctx, func(d dispatchDialect) []string {
 		return masterArgs(d, address)
 	})
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "layoutmsg") {
+		return fmt.Errorf("%s: %w", placement.MasterUnsupported, err)
+	}
+	return err
+}
+
+// MoveToMonitor implements Compositor.
+func (h *Hyprland) MoveToMonitor(ctx context.Context, address string, monitor string) error {
+	if !addressPattern.MatchString(address) {
+		return fmt.Errorf("refusing to dispatch to malformed window address %q", address)
+	}
+	if !monitorPattern.MatchString(monitor) {
+		return fmt.Errorf("refusing to dispatch to malformed monitor name %q", monitor)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return windowMonitorArgs(d, address, monitor)
+	})
+}
+
+// MoveWorkspaceToMonitor implements Compositor.
+func (h *Hyprland) MoveWorkspaceToMonitor(ctx context.Context, workspace int, monitor string) error {
+	if workspace < minWorkspace || workspace > maxWorkspace {
+		return fmt.Errorf("workspace %d does not exist; workspaces are numbered %d to %d",
+			workspace, minWorkspace, maxWorkspace)
+	}
+	if !monitorPattern.MatchString(monitor) {
+		return fmt.Errorf("refusing to dispatch to malformed monitor name %q", monitor)
+	}
+	return h.dispatchProbed(ctx, func(d dispatchDialect) []string {
+		return workspaceMonitorArgs(d, workspace, monitor)
+	})
+}
+
+// Monitors implements Compositor.
+func (h *Hyprland) Monitors(ctx context.Context) ([]placement.Monitor, error) {
+	out, err := h.runCapped(ctx, maxInventoryOutput, monitorsArgs()...)
+	if err != nil {
+		return nil, err
+	}
+	return parseMonitors(out)
+}
+
+// LayoutName implements Compositor.
+//
+// `hyprctl getoption` is a read, not a dispatch, so it is the same shape as
+// the inventory: no dialect question, no state changed, and a compositor that
+// will not answer degrades to "" rather than to an error the caller has to
+// decide what to do with.
+func (h *Hyprland) LayoutName(ctx context.Context) (string, error) {
+	out, err := h.run(ctx, layoutOptionArgs()...)
+	if err != nil {
+		return "", err
+	}
+	var v struct {
+		Str string `json:"str"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &v); err != nil {
+		return "", fmt.Errorf("hyprctl getoption: %w", err)
+	}
+	return strings.TrimSpace(v.Str), nil
 }
 
 // clientsArgs builds the inventory invocation. JSON rather than the human
@@ -419,6 +609,14 @@ var addressPattern = regexp.MustCompile(`^0x[0-9a-fA-F]{1,32}$`)
 // nothing: every caller's value is a configured setting, never a spoken or
 // model-chosen string.
 var spawnPattern = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+
+// monitorPattern is what a monitor name must look like before it may be
+// interpolated into a dispatch. Load-bearing for the same reason spawnPattern
+// is: the Lua dialect wraps it in a string literal, so a quote or a backslash
+// would be syntax rather than a name that does not resolve. Connector names
+// are letters, digits, dashes and underscores on every driver there is, and a
+// monitor nickname (#180) is bounded to the same set by the vocabulary.
+var monitorPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // dispatchArgs builds one dispatch invocation in the given dialect. Split out
 // per verb, and pure, so the argv guarantees are asserted in table tests
@@ -494,9 +692,19 @@ func spawnArgs(d dispatchDialect, program string) []string {
 
 // floatArgs sets a window's floating state. Legacy spells the two directions
 // as separate dispatchers (`setfloating` / `settiled`) — deliberately not
-// `togglefloating`, whose second application undoes the first; Lua takes the
-// state as a value. Both are sets, which is what makes a re-run routine
-// converge instead of oscillate (ADR 0026).
+// `togglefloating`, whose second application undoes the first. Lua takes the
+// direction as an `action`, and the two spellings that mean "set" are
+// `enable` and `disable`.
+//
+// The spelling was probed, and the probe is the reason this comment is long.
+// `hl.dsp.window.set_floating`, which this code sent until issue #177, does
+// not exist at all: Lua answers "attempt to call a nil value (field
+// 'set_floating')" and hyprctl reports the failure, so every routine that
+// asked to float a window has been failing. Worse, the replacement validates
+// nothing — `action = "nonsense"` is accepted and silently falls back to
+// TOGGLE (Hyprland's Internal::parseToggleStr), so a typo here would not
+// error, it would oscillate on every re-run. That is why the two action words
+// are constants in the argv and not something a caller can influence.
 func floatArgs(d dispatchDialect, address string, floating bool) []string {
 	if d == dialectLegacy {
 		verb := "settiled"
@@ -505,43 +713,171 @@ func floatArgs(d dispatchDialect, address string, floating bool) []string {
 		}
 		return []string{"dispatch", verb, "address:" + address}
 	}
+	action := "disable"
+	if floating {
+		action = "enable"
+	}
 	return []string{"dispatch",
-		`hl.dsp.window.set_floating({ window = "address:` + address + `", floating = ` + strconv.FormatBool(floating) + ` })`}
+		`hl.dsp.window.float({ window = "address:` + address + `", action = "` + action + `" })`}
 }
 
-// resizeArgs sets a floating window's size. `exact` in both dialects: a
-// relative resize applied twice keeps growing, and routines re-run.
+// resizeArgs sets a window's size exactly.
+//
+// The Lua verb takes **`x` and `y` as the target size**, not `width` and
+// `height` — the whole of issue #177. Probed with a deliberately bogus
+// address, which is rejected on argument shape before the window is looked
+// up, so the reply distinguishes a wrong shape from a missing window:
+//
+//	$ hyprctl dispatch 'hl.dsp.window.resize({ window = "address:0xdeadbeef", width = 100, height = 100 })'
+//	error: hl.window.resize: unrecognized arguments. Expected positions (x & y) or keep_aspect_ratio
+//	$ hyprctl dispatch 'hl.dsp.window.resize({ window = "address:0xdeadbeef", x = 100, y = 100 })'
+//	ok
+//
+// `exact = true`, which this code used to send, is not a key the verb reads
+// at all; exactness is the *absence* of `relative`, which defaults to false
+// (Hyprland's hlWindowResize). It is written explicitly because a default
+// that silently changed would turn every routine into a window that grows by
+// its own size on each run, and routines re-run.
 func resizeArgs(d dispatchDialect, address string, width, height int) []string {
 	w, h := strconv.Itoa(width), strconv.Itoa(height)
 	if d == dialectLegacy {
 		return []string{"dispatch", "resizewindowpixel", "exact " + w + " " + h + ",address:" + address}
 	}
 	return []string{"dispatch",
-		`hl.dsp.window.resize({ window = "address:` + address + `", width = ` + w + `, height = ` + h + `, exact = true })`}
+		`hl.dsp.window.resize({ window = "address:` + address + `", x = ` + w + `, y = ` + h + `, relative = false })`}
 }
 
-// positionArgs moves a floating window's top-left corner. Exact for the same
-// reason resizeArgs is.
+// positionArgs moves a window's top-left corner, exactly.
+//
+// There is no `hl.dsp.window.position` — probing it answers "attempt to call
+// a nil value (field 'position')", so this was the second verb #177's defect
+// class had wrong. Positioning is the same `move` verb the workspace and
+// monitor directives use, distinguished by carrying `x` and `y`; Hyprland
+// reads the keys in the order direction, position, workspace, monitor, so a
+// table must carry exactly one of those groups.
 func positionArgs(d dispatchDialect, address string, x, y int) []string {
 	xs, ys := strconv.Itoa(x), strconv.Itoa(y)
 	if d == dialectLegacy {
 		return []string{"dispatch", "movewindowpixel", "exact " + xs + " " + ys + ",address:" + address}
 	}
 	return []string{"dispatch",
-		`hl.dsp.window.position({ window = "address:` + address + `", x = ` + xs + `, y = ` + ys + `, exact = true })`}
+		`hl.dsp.window.move({ window = "address:` + address + `", x = ` + xs + `, y = ` + ys + `, relative = false })`}
 }
 
-// masterArgs promotes a window to its workspace's master slot. The legacy
-// layout message carries no window selector — PromoteMaster focuses the
-// window first, which is why the address goes unused there; the Lua form
-// names it directly, and PromoteMaster still focuses first so the two
-// dialects behave identically.
-func masterArgs(d dispatchDialect, address string) []string {
+// pinArgs pins or unpins a window. The same enable/disable action floatArgs
+// uses, and the same reason for spelling it out: an unrecognised action word
+// falls back to toggling.
+func pinArgs(d dispatchDialect, address string, pinned bool) []string {
+	if d == dialectLegacy {
+		// Legacy has only `pin`, which toggles. Sending it for "unpin" would
+		// pin an unpinned window, so the seam declines to guess: the Lua
+		// dialect is where pinning is a set, and on legacy the vocabulary's
+		// pinned mode reports what it could not do (see routine's placer).
+		return []string{"dispatch", "pin", "address:" + address}
+	}
+	action := "disable"
+	if pinned {
+		action = "enable"
+	}
+	return []string{"dispatch",
+		`hl.dsp.window.pin({ window = "address:` + address + `", action = "` + action + `" })`}
+}
+
+// fullscreenArgs covers or uncovers a window.
+//
+// This verb is the well-behaved one: it validates both of its enumerations
+// and says which value it did not like, and it reports a missing window
+// ("hl.window.fullscreen: no target") instead of answering "ok". Hyprland's
+// spelling of the maximised mode is American; the vocabulary's is not, and
+// this is the one place the two meet.
+func fullscreenArgs(d dispatchDialect, address string, mode FullscreenMode, on bool) []string {
+	if d == dialectLegacy {
+		// `fullscreen 0` is whole-output, `fullscreen 1` maximised; there is
+		// no "unset" spelling, so leaving the state is the same dispatcher
+		// with the mode the window is already in, which toggles it off.
+		arg := "0"
+		if mode == FullscreenMaximised {
+			arg = "1"
+		}
+		return []string{"dispatch", "fullscreen", arg}
+	}
+	name := "fullscreen"
+	if mode == FullscreenMaximised {
+		name = "maximized"
+	}
+	action := "unset"
+	if on {
+		action = "set"
+	}
+	return []string{"dispatch",
+		`hl.dsp.window.fullscreen({ window = "address:` + address + `", mode = "` + name +
+			`", action = "` + action + `" })`}
+}
+
+// preselectArgs tells the dwindle layout where the next window goes.
+//
+// `hl.dsp.layout` is a FUNCTION taking a plain string, not a table of named
+// messages: `hl.dsp.layout({ message = "preselect r" })` answers "layout: bad
+// argument 1: expected string, got table". The string is the same layout
+// message the legacy dialect passes to `layoutmsg`, so the two dialects carry
+// identical text and differ only in how it is wrapped.
+func preselectArgs(d dispatchDialect, direction PreselectDirection) []string {
+	msg := "preselect " + string(direction)
+	if d == dialectLegacy {
+		return []string{"dispatch", "layoutmsg", msg}
+	}
+	return []string{"dispatch", `hl.dsp.layout("` + msg + `")`}
+}
+
+// masterArgs promotes a window to its workspace's master slot. The layout
+// message carries no window selector on either dialect — PromoteMaster
+// focuses the window first, which is why the address goes unused. The Lua
+// form this code used to send, `hl.dsp.layout.swap_with_master({ window = …
+// })`, indexes a function and fails outright ("attempt to index a function
+// value"); there is no such table.
+func masterArgs(d dispatchDialect, _ string) []string {
 	if d == dialectLegacy {
 		return []string{"dispatch", "layoutmsg", "swapwithmaster"}
 	}
-	return []string{"dispatch", `hl.dsp.layout.swap_with_master({ window = "address:` + address + `" })`}
+	return []string{"dispatch", `hl.dsp.layout("swapwithmaster")`}
 }
+
+// windowMonitorArgs sends one window to a named output, without following it.
+// The same `move` verb positioning and the workspace directive use,
+// distinguished by carrying `monitor`; an output that is not plugged in
+// answers "Invalid monitor / monitor doesn't exist", which the seam reports.
+func windowMonitorArgs(d dispatchDialect, address, monitor string) []string {
+	if d == dialectLegacy {
+		return []string{"dispatch", "movewindow", "mon:" + monitor + ",silent,address:" + address}
+	}
+	return []string{"dispatch",
+		`hl.dsp.window.move({ monitor = "` + monitor + `", window = "address:` + address +
+			`", follow = false })`}
+}
+
+// workspaceMonitorArgs moves a whole workspace onto a named output.
+//
+// `hl.dsp.workspace.move` requires `monitor` (it answers "'monitor' is
+// required" without it) and accepts the workspace as a number or a string; a
+// monitor that is not plugged in answers "Monitor not found", which is a
+// refusal the seam reports rather than an "ok" nobody can check.
+func workspaceMonitorArgs(d dispatchDialect, workspace int, monitor string) []string {
+	ws := strconv.Itoa(workspace)
+	if d == dialectLegacy {
+		return []string{"dispatch", "moveworkspacetomonitor", ws + " " + monitor}
+	}
+	return []string{"dispatch",
+		`hl.dsp.workspace.move({ workspace = ` + ws + `, monitor = "` + monitor + `" })`}
+}
+
+// monitorsArgs asks for the outputs and their geometry. A read, like the
+// inventory: JSON, no dialect, nothing changed.
+func monitorsArgs() []string { return []string{"monitors", "-j"} }
+
+// layoutOptionArgs asks which tiling layout is in force, so the two
+// layout-dependent directives can say "your layout cannot do this" before
+// trying rather than after.
+func layoutOptionArgs() []string { return []string{"getoption", "general:layout", "-j"} }
 
 // dispatch performs one window action.
 func (h *Hyprland) dispatch(ctx context.Context, args dispatchArgs, address string, workspace int) error {
@@ -763,6 +1099,58 @@ func (f *flexBool) UnmarshalJSON(b []byte) error {
 		*f = n != 0
 	}
 	return nil
+}
+
+// hyprMonitor is the subset of `hyprctl monitors -j` the placement vocabulary
+// reads: where the output is, how big it is, what the bars took, and which
+// workspace it is showing. The other forty-odd fields — modes, colour
+// management, the tearing diagnostics — are deliberately not decoded.
+type hyprMonitor struct {
+	Name   string  `json:"name"`
+	X      int     `json:"x"`
+	Y      int     `json:"y"`
+	Width  int     `json:"width"`
+	Height int     `json:"height"`
+	Scale  float64 `json:"scale"`
+	// Reserved is the layer-shell reservation in Hyprland's own order —
+	// left, top, right, bottom — and is what makes a percentage resolve
+	// against the part of the screen a window can actually occupy.
+	Reserved        []int `json:"reserved"`
+	Focused         bool  `json:"focused"`
+	Disabled        bool  `json:"disabled"`
+	ActiveWorkspace struct {
+		ID int `json:"id"`
+	} `json:"activeWorkspace"`
+}
+
+// parseMonitors turns hyprctl's output list into the vocabulary's monitors.
+// Disabled outputs are dropped: they have geometry in the JSON but nothing
+// can be placed on them, and resolving "DP-3" to a screen that is switched
+// off would put the user's morning windows somewhere they cannot see.
+func parseMonitors(out string) ([]placement.Monitor, error) {
+	var raw []hyprMonitor
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &raw); err != nil {
+		return nil, fmt.Errorf("hyprctl monitors: %w", err)
+	}
+	monitors := make([]placement.Monitor, 0, len(raw))
+	for _, m := range raw {
+		if m.Disabled || strings.TrimSpace(m.Name) == "" {
+			continue
+		}
+		mon := placement.Monitor{
+			Name: strings.TrimSpace(m.Name), X: m.X, Y: m.Y,
+			Width: m.Width, Height: m.Height, Scale: m.Scale,
+			Focused: m.Focused, ActiveWorkspace: m.ActiveWorkspace.ID,
+		}
+		// A compositor that reports a reservation of some other length is
+		// reporting something this code does not understand, and guessing
+		// which edges it meant would shrink windows by the wrong amount.
+		if len(m.Reserved) == 4 {
+			mon.Reserved = [4]int{m.Reserved[0], m.Reserved[1], m.Reserved[2], m.Reserved[3]}
+		}
+		monitors = append(monitors, mon)
+	}
+	return monitors, nil
 }
 
 // parseClients turns hyprctl's inventory into Windows, most-recently-focused

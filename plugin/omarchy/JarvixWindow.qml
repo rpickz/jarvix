@@ -768,6 +768,15 @@ FloatingWindow {
         if (tile !== "") step.tile = tile
         if (s.size !== undefined) step.size = s.size
         if (s.position !== undefined) step.position = s.position
+        // The window-placement vocabulary (ADR 0056). The routine editor
+        // (#181) gives these their own controls; until then they are carried
+        // through byte-for-byte, because a form that silently dropped the
+        // keys it does not render would delete a user's placement the first
+        // time they edited the step's name.
+        for (var k = 0; k < automationPlacementKeys.length; k++) {
+          var key = automationPlacementKeys[k]
+          if (s[key] !== undefined && String(s[key]) !== "") step[key] = s[key]
+        }
         steps.push(step)
       }
       entry.steps = steps
@@ -882,9 +891,16 @@ FloatingWindow {
     return out.join("\n")
   }
 
+  // automationPlacementKeys are the window-placement vocabulary's step keys
+  // (ADR 0056). The daemon owns their meaning and their validation; this list
+  // exists only so the form carries them through an edit untouched.
+  readonly property var automationPlacementKeys: [
+    "monitor", "mode", "width", "height", "place_next", "master", "focus"
+  ]
+
   // automationStepExtraProblems catches a step's problems on the keys the
-  // form carries through without an input (size, position, tile) so they
-  // still land inside the step that owns them.
+  // form carries through without an input (size, position, tile, and the
+  // placement vocabulary) so they still land inside the step that owns them.
   function automationStepExtraProblems(index) {
     var shown = { app: true, workspace: true, match: true, float: true }
     var prefix = "steps[" + index + "]"

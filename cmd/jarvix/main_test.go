@@ -497,7 +497,7 @@ size = [1200, 800]
 	}
 	for _, want := range []string{
 		"morning setup", `"morning setup" or "start my usual apps"`,
-		"alacritty → workspace 1", "signal-desktop → workspace 9 (floating 1200x800)",
+		"alacritty → workspace 1", "signal-desktop → workspace 9 (floating, 1200px by 800px)",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("output %q missing %q", stdout, want)
