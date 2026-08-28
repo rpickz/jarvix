@@ -380,6 +380,9 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	// spoken listing keeps reading the same list the writer writes and the
 	// ledger keeps its firing counts across a config change.
 	opts.Approvals = &approvalsVoice{store: d.approvals}
+	// The spoken source listing (#168) reads through the daemon, which
+	// outlives every reload, so it is simply rebuilt around the same one.
+	opts.Provenance = &provenanceVoice{d: d}
 	// The runner chain is rebuilt around the same construction-wired
 	// services (ADR 0041, ADR 0046): the store instances survive every
 	// reload, exactly like the memory book they are modelled on.

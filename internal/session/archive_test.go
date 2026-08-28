@@ -15,17 +15,38 @@ import (
 	"github.com/rpickz/jarvix/internal/intent"
 )
 
-// awaitAppend waits for the archive Fake to report a completed append. The
-// flush runs after session.finished, off the engine's lock path (like
+// awaitAppend waits for the archive Fake to report a completed append, and
+// then takes the engine's own read barrier before returning.
+//
+// The flush runs after session.finished, off the engine's lock path (like
 // persistence, ADR 0011), so a test that reads the archive must wait for the
-// write rather than assume it happened by event time.
-func awaitAppend(t *testing.T, fake *conversations.Fake) {
+// write rather than assume it happened by event time. That is the first half,
+// and on its own it is not enough.
+//
+// The second half is the one that was missing, and it is the derived-state
+// trap in its archive costume. The Fake notifies from *inside* Append, so the
+// op proves the turns are stored — it does not prove the engine has adopted
+// the id that append minted, because persistArchive does that *after* Append
+// returns. A test that read ActiveConversationID here was asserting on
+// derived state having observed only its cause, and got "" whenever the tail
+// lost the race to the woken test goroutine. TestResetDetachesAndTheNextThread
+// IsANewConversation is exactly that shape, and it flaked for exactly that
+// reason (roughly 2 in 100 whole-package runs under -race).
+//
+// SyncArchive is the barrier built for this window (#115/#116): archiveMu is
+// held across the adoption, so on return the flush — and its adoption — has
+// completed, whoever did the writing. interrupted_test.go already reaches for
+// it directly before every ActiveConversationID read, with a comment saying
+// so; folding it in here gives every caller of this helper the same
+// guarantee instead of leaving it to be remembered one test at a time.
+func (h *harness) awaitAppend(t *testing.T, fake *conversations.Fake) {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case op := <-fake.Ops:
 			if op == "append" {
+				h.engine.SyncArchive()
 				return
 			}
 		case <-deadline:
@@ -50,7 +71,7 @@ func TestArchiveKeepsEveryTurnBeyondTheCap(t *testing.T) {
 
 	for _, q := range []string{"question one", "question two", "question three"} {
 		h.ask(t, q)
-		awaitAppend(t, fake)
+		h.awaitAppend(t, fake)
 	}
 
 	// The model saw only the capped head...
@@ -83,7 +104,7 @@ func TestArchiveRunsWithHistoryDisabled(t *testing.T) {
 	fake := conversations.NewFake()
 	h := newHarness(t, archiveOptions(fake, 0))
 	h.ask(t, "a standalone question")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	id := h.engine.ActiveConversationID()
 	if turns := fake.Turns(id); len(turns) != 2 {
@@ -103,7 +124,7 @@ func TestResetDetachesAndTheNextThreadIsANewConversation(t *testing.T) {
 	h := newHarness(t, archiveOptions(fake, 8))
 
 	h.ask(t, "the first thread")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 	first := h.engine.ActiveConversationID()
 
 	h.engine.ResetConversation()
@@ -112,7 +133,7 @@ func TestResetDetachesAndTheNextThreadIsANewConversation(t *testing.T) {
 	}
 
 	h.ask(t, "the second thread")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 	second := h.engine.ActiveConversationID()
 	if second == "" || second == first {
 		t.Fatalf("second thread landed in %q, want a fresh conversation (first was %q)", second, first)
@@ -260,10 +281,10 @@ func TestReopenContinuesContextWithinBudget(t *testing.T) {
 	for _, turn := range archived {
 		msgs = append(msgs, ai.Message{Role: ai.Role(turn.Role), Content: turn.Text})
 	}
-	h.engine.AdoptConversation("old-conv", msgs, nil)
+	h.engine.AdoptConversation("old-conv", msgs, nil, nil)
 
 	h.ask(t, "a follow-up")
-	awaitAppend(t, fake)
+	h.awaitAppend(t, fake)
 
 	got := requestContents(h.provider.LastRequest)
 	if !strings.Contains(got, "newest question") || !strings.Contains(got, "middle question") {
@@ -473,7 +494,7 @@ func TestArchiveFailureDegradesQuietly(t *testing.T) {
 	h := newHarness(t, archiveOptions(fake, 8))
 
 	h.ask(t, "first question")
-	awaitAppend(t, fake) // attempted, failed
+	h.awaitAppend(t, fake) // attempted, failed
 	h.ask(t, "second question")
 
 	// The conversation still works, context intact...
@@ -484,5 +505,76 @@ func TestArchiveFailureDegradesQuietly(t *testing.T) {
 	// ...and the engine stopped hammering the broken archive after one try.
 	if n := fake.Appends(); n != 1 {
 		t.Errorf("archive saw %d append attempts after a failure, want 1", n)
+	}
+}
+
+// heldAppend wraps a store and holds each append open *after* the store has
+// recorded the turns and notified Ops — which is precisely the window this
+// helper has to close: the turns are durable and the append has been
+// announced, but persistArchive has not yet adopted the id the append minted,
+// because that happens after Append returns.
+type heldAppend struct {
+	conversations.Store
+	held chan struct{}
+}
+
+func (a *heldAppend) Append(id string, turns []conversations.Turn) (string, error) {
+	landed, err := a.Store.Append(id, turns)
+	<-a.held // ...and the flush stays inside the call
+	return landed, err
+}
+
+// TestAwaitAppendClosesTheAdoptionWindow pins the guarantee awaitAppend now
+// carries, deterministically rather than by soaking: on return, the id the
+// append minted has been adopted, so a test may read ActiveConversationID.
+//
+// The window is held open by construction, so this fails every time on a
+// helper that only watches the Ops channel — it answers "" the moment the
+// store notifies — and blocks on the barrier with the helper as it stands.
+// The same probe fails identically against the pre-#168 tree, which is where
+// the window has always been: it is production behaviour that has never
+// promised otherwise, and the daemon's own readers all take the barrier
+// before asking (conversation.list, .search and .delete each call
+// SyncArchive first). Only the test helper was reading without it.
+func TestAwaitAppendClosesTheAdoptionWindow(t *testing.T) {
+	fake := conversations.NewFake()
+	held := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(held) }) }
+	t.Cleanup(release)
+	h := newHarness(t, archiveOptions(&heldAppend{Store: fake, held: held}, 8))
+
+	h.ask(t, "the first thread")
+
+	got := make(chan string, 1)
+	go func() {
+		h.awaitAppend(t, fake)
+		got <- h.engine.ActiveConversationID()
+	}()
+
+	// While the flush is provably still inside Append, the helper must not
+	// have returned: there is no adopted id to read yet, and answering "" is
+	// the bug. The wait only has to be long enough to catch an answer that
+	// would arrive immediately — with the barrier in place no answer is
+	// possible at all, because archiveMu is held by a goroutine parked on an
+	// unbuffered channel this test controls.
+	select {
+	case id := <-got:
+		release()
+		t.Fatalf("awaitAppend returned with the id unadopted: ActiveConversationID = %q", id)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case id := <-got:
+		if id == "" {
+			t.Fatal("the id was still unadopted after the append completed")
+		}
+		if turns := fake.Turns(id); len(turns) != 2 {
+			t.Errorf("adopted conversation %q holds %+v", id, turns)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitAppend never returned after the append completed")
 	}
 }

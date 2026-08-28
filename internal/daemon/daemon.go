@@ -669,6 +669,12 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, logger)
 	engOpts.Returning = briefingSvc
 	engOpts.Approvals = &approvalsVoice{store: approvalSvc}
+	// "Where did that come from?" (#168) is answered by the same resolver the
+	// window's panel uses, which lives on the daemon — so the composer is
+	// created empty here and given the daemon below, exactly as the capture
+	// seam's committed hook is.
+	provVoice := &provenanceVoice{}
+	engOpts.Provenance = provVoice
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
 	// the engine's real timer (see session.Options.ConfirmTimer).
@@ -792,6 +798,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		}
 	}
 	capture.committed = d.captureCommitted
+	provVoice.d = d
 	d.bindFocus()
 	d.bindReminders()
 	d.bindBriefing()
@@ -1265,6 +1272,7 @@ func (d *Daemon) registerMethods() {
 	d.registerConfigMethods()
 	d.registerContextMethods()
 	d.registerConversationMethods()
+	d.registerProvenanceMethods()
 	d.registerMemoryMethods()
 	d.registerMemoryAdminMethods()
 	d.registerVocabularyMethods()

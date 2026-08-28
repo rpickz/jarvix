@@ -55,6 +55,11 @@ func (e *Engine) gatherMemory(s *sess) memory.Injection {
 	e.lastMemoryTaken = true
 	e.mu.Unlock()
 
+	// What went into the answer, collected where it is known (issue #168):
+	// these facts were put in front of the model, which is exactly — and only
+	// — what the turn's provenance will claim about them.
+	s.noteSources(memorySources(inj)...)
+
 	// Counts and estimates, never content: events fan out to every connected
 	// client and anything in them may be displayed or logged by one.
 	e.publish(Event{Type: "memory.injected", Data: map[string]any{

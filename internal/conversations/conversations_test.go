@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // update regenerates the golden files: go test ./internal/conversations -update
@@ -637,5 +639,110 @@ func TestEmptyDirectoryListsEmpty(t *testing.T) {
 	}
 	if got := s.Active(); got != "" {
 		t.Errorf("fresh install has active conversation %q", got)
+	}
+}
+
+// TestProvenanceRoundTripsAndStaysOffEveryOtherTurn is #168's additive
+// criterion: what went into an answer survives the archive whole, and the key
+// never appears on a turn that has none — which is what keeps every line
+// already on disk byte-identical and the golden files untouched.
+func TestProvenanceRoundTripsAndStaysOffEveryOtherTurn(t *testing.T) {
+	s := fixedStore(t)
+	ts := time.Date(2026, 8, 21, 10, 30, 0, 0, time.UTC)
+	record := &provenance.Record{
+		Sources: []provenance.Reference{
+			{Kind: provenance.KindFact, Strength: provenance.Available, Ref: "m3"},
+			{Kind: provenance.KindTool, Strength: provenance.Returned,
+				Tool: "shell.run", Subject: "git status"},
+		},
+		Truncated: 2,
+	}
+	turns := []Turn{
+		{Role: "user", Text: "what is the deploy host?", Time: ts},
+		{Role: "assistant", Text: "It is atlas.", Time: ts, Provenance: record},
+		{Role: "user", Text: "thanks", Time: ts},
+		{Role: "assistant", Text: "Any time.", Time: ts},
+	}
+	id, err := s.Append("", turns)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := s.Read(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := conv.Turns[1].Provenance
+	if got == nil || len(got.Sources) != 2 || got.Truncated != 2 {
+		t.Fatalf("provenance did not round-trip: %+v", got)
+	}
+	if got.Sources[0].Ref != "m3" || got.Sources[0].Strength != provenance.Available {
+		t.Errorf("first source = %+v", got.Sources[0])
+	}
+	if got.Sources[1].Tool != "shell.run" || got.Sources[1].Subject != "git status" {
+		t.Errorf("second source = %+v", got.Sources[1])
+	}
+	if conv.Turns[3].Provenance != nil {
+		t.Errorf("a turn that consumed nothing carried provenance: %+v", conv.Turns[3].Provenance)
+	}
+
+	// omitempty is the compatibility mechanism, exactly as it is for
+	// interrupted and confirmation: a turn without provenance must not so
+	// much as mention the key.
+	raw, err := os.ReadFile(s.turnsPath(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for i, line := range lines {
+		if i == 2 { // header + user turn precede the answer that has provenance
+			continue
+		}
+		if strings.Contains(line, "provenance") {
+			t.Errorf("line %d carries the key without the fact: %s", i, line)
+		}
+	}
+	// References, never content: nothing a fact said is in the file.
+	if strings.Contains(string(raw), "atlas.example") {
+		t.Error("provenance carried content into the archive")
+	}
+}
+
+// TestOldArchiveWithoutProvenanceLoadsClean: an archive written before #168
+// reads with no provenance, nothing unreadable, and the same schema version —
+// the promise that lets the field ship without a bump.
+func TestOldArchiveWithoutProvenanceLoadsClean(t *testing.T) {
+	s := fixedStore(t)
+	id := "20260820-091500-old"
+	// Byte-for-byte the pre-#168 format, straight from the golden files.
+	transcript := `{"schema":1,"id":"` + id + `"}
+{"role":"user","text":"an old question","ts":"2026-08-20T09:15:00Z"}
+{"role":"assistant","text":"An old answer.","ts":"2026-08-20T09:15:00Z"}
+`
+	meta := `{"schema":1,"id":"` + id + `","started":"2026-08-20T09:15:00Z","last_active":"2026-08-20T09:15:00Z","turns":2,"preview":"an old question"}`
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.turnsPath(id), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.metaPath(id), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := s.Read(id)
+	if err != nil {
+		t.Fatalf("old archive did not load: %v", err)
+	}
+	if len(conv.Turns) != 2 {
+		t.Fatalf("read %d turns, want 2", len(conv.Turns))
+	}
+	for i, turn := range conv.Turns {
+		if turn.Provenance != nil {
+			t.Errorf("turn %d read provenance from a file without the key", i)
+		}
+	}
+	if _, unreadable, err := s.List(); err != nil || len(unreadable) != 0 {
+		t.Errorf("old archive listed as unreadable: %v %v", unreadable, err)
 	}
 }

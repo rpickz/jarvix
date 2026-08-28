@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/provenance"
 )
 
 // Renderer turns artifact source of one format into a viewable file. The
@@ -275,6 +277,16 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 		a.OnCreated(renderer.Format(), outPath)
 	}
 
+	// What went into the answer (issue #168). The path is reported to the
+	// turn, not to the model: this is the one thing about the call the
+	// arguments cannot say — the title the model asked for is not the file
+	// that was written, because claimPaths de-duplicates it — and it is what
+	// "open the artifact" needs. It travels on the context sink, so a call
+	// made outside a turn (the CLI, a test) reports to nobody.
+	provenance.Note(ctx, provenance.Reference{
+		Kind: provenance.KindArtifact, Ref: outPath, Subject: renderer.Format(),
+	})
+
 	// The result deliberately contains no path and no source: whatever is in
 	// it may end up spoken aloud, and paths read verbatim are the failure
 	// mode this tool exists to avoid. The artifact.created event carries the
@@ -369,14 +381,23 @@ func (a *Artifact) claimPaths(slug string, r Renderer) (srcPath, outPath string,
 // or the single word "none" means the format has no viewer at all — the
 // caller announces the saved file instead of launching anything.
 func (a *Artifact) openCommandFor(format string) (argv []string, hasViewer bool) {
-	if override, ok := a.OpenCommands[format]; ok {
+	return ViewerFor(a.OpenCommand, a.OpenCommands, format)
+}
+
+// ViewerFor is openCommandFor's body as a package-level function, so anything
+// that has to reopen an artifact later resolves the *same* viewer this tool
+// used when it created one — the provenance panel's "open the file" among
+// them (issue #168). Shared rather than reimplemented, because two answers to
+// "which viewer opens a mermaid diagram" is one answer too many.
+func ViewerFor(shared []string, perFormat map[string][]string, format string) (argv []string, hasViewer bool) {
+	if override, ok := perFormat[format]; ok {
 		if noViewer(override) {
 			return nil, false
 		}
 		return override, true
 	}
-	if len(a.OpenCommand) > 0 && !noViewer(a.OpenCommand) {
-		return a.OpenCommand, true
+	if len(shared) > 0 && !noViewer(shared) {
+		return shared, true
 	}
 	return []string{DefaultOpenCommand}, true
 }
@@ -400,9 +421,21 @@ func (a *Artifact) open(argv []string, path string) error {
 	if a.openFn != nil {
 		return a.openFn(argv, path)
 	}
+	return Launch(argv, path)
+}
+
+// Launch runs argv with one trailing argument and does not wait for it —
+// open's body, shared for the same reason ViewerFor is. argv is used
+// verbatim, never re-split, so a viewer living under a path with spaces
+// launches correctly, and the target is always a separate argument, so
+// nothing in it can become a flag or a second word.
+func Launch(argv []string, target string) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("no command to run")
+	}
 	args := make([]string, 0, len(argv))
 	args = append(args, argv[1:]...)
-	cmd := exec.Command(argv[0], append(args, path)...) //nolint:gosec // argv comes from validated config, path from claimPaths
+	cmd := exec.Command(argv[0], append(args, target)...) //nolint:gosec // argv comes from validated config or a fixed literal
 	if err := cmd.Start(); err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/conversations"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/provenance"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
 )
@@ -453,11 +454,19 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	// excluded span, reported as tool_ms and kept out of jarvix_ms (#72).
 	// start clocks the same span for this one call: tool_ms totals the
 	// session's tool time, tool.finished's duration_ms belongs to this call.
+	// A sink for what this one call has to say about itself (issue #168).
+	// Most tools report nothing and are named from their own call; the two
+	// that know something the arguments cannot — which file artifact.create
+	// actually wrote, which conversations a search matched — note it here.
+	var sink provenance.Sink
 	s.timings.beginExcluded(StageToolRuns)
 	start := time.Now()
-	result = e.tools.Execute(s.ctx, call)
+	result = e.tools.Execute(provenance.WithSink(s.ctx, &sink), call)
 	s.timings.endExcluded()
 	stopProgress()
+	// Derived from the call and its outcome, never from the model's words:
+	// this ran, and this is what it returned.
+	s.noteSources(toolSource(call, result, sink.Drain())...)
 
 	// The finish event carries how long the call took and whether the
 	// registry could run it at all, for the activity feed (issue #70).

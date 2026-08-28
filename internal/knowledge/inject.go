@@ -28,6 +28,13 @@ type Injection struct {
 	Message string
 	// Feeds is how many values the block carries.
 	Feeds int
+	// Names are the feeds the block carries, in block order — names only,
+	// never values. The counts above were enough while the only consumers
+	// were disclosure events, but "what went into this answer" (issue #168)
+	// has to name the specific feed, and a count cannot. A name is the feed's
+	// identity and already travels on every knowledge surface; the value
+	// stays where it always was, in the block and the tab.
+	Names []string
 	// Trimmed is how many qualifying values were dropped to fit the budget.
 	Trimmed int
 	// EstTokens is the estimated token cost of Message.
@@ -44,6 +51,7 @@ func (s *Service) Inject() Injection {
 	s.loadLocked()
 	now := s.now()
 	lines := make([]string, 0, len(s.feeds))
+	names := make([]string, 0, len(s.feeds))
 	for _, f := range s.feeds {
 		// A disabled feed keeps its value but leaves the model's context: the
 		// user parked it, and injecting an ageing value would un-park it in
@@ -62,14 +70,16 @@ func (s *Service) Inject() Injection {
 		}
 		line += ")"
 		lines = append(lines, line)
+		names = append(names, f.Name)
 	}
-	return buildInjection(lines, s.maxInjected)
+	return buildInjection(lines, names, s.maxInjected)
 }
 
 // buildInjection assembles the block, keeping lines while the whole message —
 // preamble, entries, and the trim disclosure it may need — fits capTokens,
-// then dropping from the end of the list.
-func buildInjection(lines []string, capTokens int) Injection {
+// then dropping from the end of the list. names runs parallel to lines, so
+// the kept feeds are named by exactly the same cut.
+func buildInjection(lines, names []string, capTokens int) Injection {
 	if len(lines) == 0 {
 		return Injection{}
 	}
@@ -80,6 +90,7 @@ func buildInjection(lines []string, capTokens int) Injection {
 			return Injection{
 				Message:   msg,
 				Feeds:     kept,
+				Names:     append([]string(nil), names[:kept]...),
 				Trimmed:   len(lines) - kept,
 				EstTokens: memory.EstimateTokens(msg),
 			}

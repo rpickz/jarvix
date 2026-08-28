@@ -352,7 +352,7 @@ func TestReplayWorksOnAdoptedConversation(t *testing.T) {
 		{Role: ai.RoleUser, Content: "what did we archive?"},
 		{Role: ai.RoleAssistant, Content: "An archived answer, restored whole."},
 	}
-	h.engine.AdoptConversation("c-reopened", msgs, nil)
+	h.engine.AdoptConversation("c-reopened", msgs, nil, nil)
 
 	turn, role, err := h.engine.ReplaySpeech(2, "assistant")
 	if err != nil {

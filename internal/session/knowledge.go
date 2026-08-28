@@ -40,6 +40,9 @@ func (e *Engine) gatherKnowledge(s *sess) knowledge.Injection {
 	if inj.Message == "" {
 		return inj
 	}
+	// The feeds whose values this turn was given (issue #168), by name —
+	// names only, exactly like the event below carries counts only.
+	s.noteSources(knowledgeSources(inj)...)
 	e.publish(Event{Type: "knowledge.injected", Data: map[string]any{
 		"session_id": s.id,
 		"feeds":      inj.Feeds,
