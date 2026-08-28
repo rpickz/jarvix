@@ -46,6 +46,12 @@ Item {
   property int confirmTimeoutSec: 0    // the configured window, from the daemon
   property double confirmDeadlineMs: 0 // absolute auto-decline time; 0 = clock not started
   property double confirmNowMs: 0      // ticked by confirmTick so the binding updates
+  // The remember offer (#162): the exact rule the daemon would add, or "".
+  // The refusal sentence is deliberately NOT rendered here — this surface
+  // elides the command itself for the same reason, and a two-line
+  // explanation of a control that is absent would crowd out the question.
+  // The window card carries the refusal in full.
+  property string confirmRememberPattern: ""
 
   // Seconds left before auto-decline, or -1 while the daemon has not started
   // the clock (the question is still being asked aloud). Clamped at 0 like
@@ -54,12 +60,13 @@ Item {
   readonly property int confirmRemainingSec: confirmDeadlineMs > 0
     ? Math.max(0, Math.ceil((confirmDeadlineMs - confirmNowMs) / 1000)) : -1
 
-  function showConfirmation(tool, summary, timeoutSec, deadlineMs) {
+  function showConfirmation(tool, summary, timeoutSec, deadlineMs, rememberPattern) {
     confirmTool = tool
     confirmSummary = summary
     confirmTimeoutSec = timeoutSec
     confirmDeadlineMs = deadlineMs
     confirmNowMs = Date.now()
+    confirmRememberPattern = rememberPattern || ""
     confirmPending = true
   }
 
@@ -68,6 +75,7 @@ Item {
     confirmTool = ""
     confirmSummary = ""
     confirmDeadlineMs = 0
+    confirmRememberPattern = ""
   }
 
   // JSON-RPC ids for the overlay's session.confirm calls. Its own private
@@ -81,13 +89,17 @@ Item {
   // card's buttons send. Nothing resolves here: the surface clears on the
   // daemon's tool.confirmed / tool.declined event, the same signal that
   // resolves the card, so both surfaces always agree (single source of truth).
-  function answerConfirmation(approved) {
+  function answerConfirmation(approved, remember) {
     if (!daemon.connected || !confirmPending) return
     confirmRequestId = nextConfirmRequestId
     nextConfirmRequestId = nextConfirmRequestId >= 649 ? 600 : nextConfirmRequestId + 1
+    var params = { approved: approved }
+    // A scope word, never a pattern (#162): the rule the daemon writes is the
+    // one it derived and published, so this surface names nothing.
+    if (remember) params.remember = remember
     daemon.write(JSON.stringify({
       jsonrpc: "2.0", id: confirmRequestId, method: "session.confirm",
-      params: { approved: approved }
+      params: params
     }) + "\n")
   }
 
@@ -122,7 +134,7 @@ Item {
       // clock has started — the question may still be being spoken — so the
       // countdown opens at "up to timeout_sec", exactly like the card.
       showConfirmation(String(params.tool || ""), String(params.summary || ""),
-        Number(params.timeout_sec || 0), 0)
+        Number(params.timeout_sec || 0), 0, String(params.remember_pattern || ""))
       break
     case "tool.confirmation_deadline":
       confirmDeadlineMs = Number(params.deadline_ms || 0)
@@ -183,7 +195,8 @@ Item {
               String(frame.result.confirmation.tool || ""),
               String(frame.result.confirmation.summary || ""),
               Number(frame.result.confirmation.timeout_sec || 0),
-              Number(frame.result.confirmation.deadline_ms || 0))
+              Number(frame.result.confirmation.deadline_ms || 0),
+              String(frame.result.confirmation.remember_pattern || ""))
           } else {
             root.clearConfirmation()
           }
@@ -529,6 +542,41 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 onClicked: root.answerConfirmation(false)
+              }
+            }
+
+            // The remember control (#162), in the same Row because the
+            // overlay's click mask IS this Row's rectangle — a second row
+            // would sit outside the mask and be click-through, which is a
+            // button that looks pressable and is not. Quieter than Approve
+            // and last in reading order: Approve-once stays primary here
+            // too. The permanent scope only; "just this conversation" lives
+            // on the window card, where there is room to explain the
+            // difference and where the exact command is visible beside it.
+            Rectangle {
+              id: confirmRemember
+              visible: root.confirmRememberPattern !== ""
+              width: visible ? confirmRememberLabel.width + Style.space(24) : 0
+              height: confirmRememberLabel.height + Style.space(10)
+              radius: Style.cornerRadius
+              color: Util.alpha(Color.popups.text, 0.04)
+              border.color: Util.alpha(Color.popups.text, 0.4)
+              border.width: 1
+              Accessible.role: Accessible.Button
+              Accessible.name: "Approve and do not ask again — adds the rule "
+                + root.confirmRememberPattern + " permanently"
+              Text {
+                id: confirmRememberLabel
+                anchors.centerIn: parent
+                text: "Always allow " + root.confirmRememberPattern
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+              MouseArea {
+                anchors.fill: parent
+                enabled: confirmRemember.visible
+                onClicked: root.answerConfirmation(true, "always")
               }
             }
           }

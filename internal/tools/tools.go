@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/rpickz/jarvix/internal/ai"
 )
@@ -108,7 +109,17 @@ type Registry struct {
 	// policy is the permission gate consulted before every Execute (ADR
 	// 0014). Nil means no gate — a construction-time choice for tests, never
 	// the daemon's: the daemon always installs a policy.
-	policy *Policy
+	//
+	// Atomic since issue #162, because the gate is no longer written once at
+	// construction: remembering a pattern recompiles the policy and swaps it
+	// in while sessions may be reading it, and so does a config.reload that
+	// revokes one. A plain field would make every pre-approved command a data
+	// race against the rule that allowed it — and a race whose losing side is
+	// a permission decision is not a race anyone gets to run in production.
+	// The pointer is swapped whole; a Policy is immutable once compiled, so a
+	// reader either sees the old gate entirely or the new gate entirely and
+	// never a half-applied one.
+	policy atomic.Pointer[Policy]
 }
 
 // NewRegistry builds a registry. logger may be nil.
@@ -127,17 +138,31 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
 }
 
-// SetPolicy installs the permission gate. Call before the registry serves
-// traffic; the registry does not lock around it.
-func (r *Registry) SetPolicy(p *Policy) { r.policy = p }
+// SetPolicy installs the permission gate, replacing any previous one. Safe to
+// call while the registry is serving traffic (see Registry.policy): a call in
+// flight either finishes under the gate it started with or, if it has not
+// reached the check yet, is judged by the new one — both honest readings, and
+// neither a torn one.
+func (r *Registry) SetPolicy(p *Policy) { r.policy.Store(p) }
 
 // Policy returns the installed permission gate (nil when none).
-func (r *Registry) Policy() *Policy { return r.policy }
+func (r *Registry) Policy() *Policy { return r.policy.Load() }
 
 // Check classifies one tool call against the permission gate, without
 // executing anything. With no policy installed everything is allowed —
 // the pre-gate behaviour tests rely on.
 func (r *Registry) Check(call ai.ToolCall) Verdict {
+	return r.CheckWithGrants(call, nil)
+}
+
+// CheckWithGrants is Check plus the conversation-scoped allow patterns of
+// issue #162, applied by the policy exactly where the configured allow list
+// is applied. The structural wall and the escalation hooks below are
+// unchanged by a grant: a tool that refuses a call still refuses it, and a
+// tool that tightens its own tier still tightens it — a grant can only ever
+// answer the question "is this shell command on a list the user wrote".
+func (r *Registry) CheckWithGrants(call ai.ToolCall, grants [][]string) Verdict {
+	policy := r.policy.Load()
 	// The structural wall first, before any policy is consulted — including
 	// the no-policy case below, because "no gate installed" must not mean
 	// "the excluded configuration became writable" (Refusing).
@@ -150,10 +175,10 @@ func (r *Registry) Check(call ai.ToolCall) Verdict {
 			}
 		}
 	}
-	if r.policy == nil {
+	if policy == nil {
 		return Verdict{Decision: PolicyAllow, Tool: call.Name, Rule: "no policy installed"}
 	}
-	verdict := r.policy.Decide(call)
+	verdict := policy.DecideWithGrants(call, grants)
 	tool, registered := r.tools[call.Name]
 	// A tool that can see something the configuration could not may tighten
 	// the tier — allow becomes ask, and only in that direction (Escalating).
@@ -205,20 +230,27 @@ func (r *Registry) Activity(call ai.ToolCall) (label, waiting string, ok bool) {
 // — the user-defined intent path (ADR 0017). Like Check, no policy means
 // everything is allowed.
 func (r *Registry) CheckCommand(tool, command string) Verdict {
-	if r.policy == nil {
+	return r.CheckCommandWithGrants(tool, command, nil)
+}
+
+// CheckCommandWithGrants is CheckCommand plus conversation-scoped grants.
+func (r *Registry) CheckCommandWithGrants(tool, command string, grants [][]string) Verdict {
+	policy := r.policy.Load()
+	if policy == nil {
 		return Verdict{Decision: PolicyAllow, Tool: tool, Command: command, Rule: "no policy installed"}
 	}
-	return r.policy.DecideCommand(tool, command)
+	return policy.DecideCommandWithGrants(tool, command, grants)
 }
 
 // CheckRoutine classifies running one named routine under the routine.run
 // identity (ADR 0026). Like Check, no policy means everything is allowed —
 // which for routines is also what the shipped default policy says.
 func (r *Registry) CheckRoutine(name string) Verdict {
-	if r.policy == nil {
+	policy := r.policy.Load()
+	if policy == nil {
 		return Verdict{Decision: PolicyAllow, Tool: RoutineToolName, Command: name, Rule: "no policy installed"}
 	}
-	return r.policy.DecideRoutine(name)
+	return policy.DecideRoutine(name)
 }
 
 // CheckScript classifies running one named script under the script.run
@@ -227,11 +259,12 @@ func (r *Registry) CheckRoutine(name string) Verdict {
 // registry at all it asks, because an ungated arbitrary executable must not
 // run silently.
 func (r *Registry) CheckScript(name, path string) Verdict {
-	if r.policy == nil {
+	policy := r.policy.Load()
+	if policy == nil {
 		return Verdict{Decision: PolicyAllow, Tool: ScriptToolName,
 			Command: name + " (" + path + ")", Rule: "no policy installed"}
 	}
-	return r.policy.DecideScript(name, path)
+	return policy.DecideScript(name, path)
 }
 
 // Names returns registered tool names in registration order.

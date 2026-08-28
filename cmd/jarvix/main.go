@@ -32,6 +32,8 @@ Usage:
   jarvix conversations delete <id> Delete one from disk (--all deletes every one)
   jarvix memory list [query]    List remembered facts (the knowledge base)
   jarvix memory forget <what>   Delete a remembered fact, by id or by words
+  jarvix approvals list         List commands that run without asking
+  jarvix approvals forget <p>   Revoke one pre-approved command pattern
   jarvix ptt toggle             Tap-to-talk: start listening / submit (keybinding)
   jarvix ptt start|stop         Hold-to-talk halves for a bare-key binding
   jarvix mute                   Close the microphone: kill background capture
@@ -148,6 +150,19 @@ func run(args []string) int {
 			err = cmdMemoryForget(paths, strings.Join(rest[1:], " "))
 		default:
 			return fail(fmt.Errorf("usage: jarvix memory list [query] | jarvix memory forget <id-or-words>"))
+		}
+	case "approvals":
+		switch {
+		case len(rest) == 0, len(rest) == 1 && rest[0] == "list":
+			err = cmdApprovalsList(paths)
+		case len(rest) >= 2 && rest[0] == "forget":
+			// Joined so `jarvix approvals forget docker ps` needs no quotes —
+			// a pattern is words, and words arrive as arguments.
+			err = cmdApprovalsForget(paths, strings.Join(rest[1:], " "))
+		default:
+			// No "add" verb, deliberately (see cmd/jarvix/approvals.go): a
+			// standing grant is made on the card that shows the exact rule.
+			return fail(fmt.Errorf("usage: jarvix approvals list | jarvix approvals forget <pattern>"))
 		}
 	case "ptt":
 		if len(rest) < 1 || (rest[0] != "start" && rest[0] != "stop" && rest[0] != "toggle") {

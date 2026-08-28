@@ -58,6 +58,10 @@ func (d *Daemon) watchActivity(ctx context.Context, events <-chan session.Event,
 			// memory (#93): a routine or script ending is recorded before its
 			// rendered row, so a list read racing the row push still agrees.
 			d.recordAutomationRun(ev)
+			// And the approval ledger's firing count (#162): a pre-approved
+			// run is recorded before its rendered row, so the Approvals tab's
+			// "used 4 times" and the feed's fourth row always agree.
+			d.recordApprovalUse(ev)
 			// The replay row (issue #122) is worded beside its verb
 			// (replay.go) rather than in the desktop vocabulary — same
 			// daemon-side discipline, one special case here.

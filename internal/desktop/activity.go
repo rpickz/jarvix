@@ -167,9 +167,45 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Label:  "Waiting for your yes or no",
 			Detail: activityString(data, "command")})
 	case "tool.confirmed":
+		// A resolution that also added a standing rule says both halves
+		// (#162): "approved" alone would under-report the most consequential
+		// answer the card can take, because the user did not approve one
+		// command — they changed what runs without asking.
+		if remembered := activityString(data, "remembered"); remembered != "" {
+			return one(ActivityRow{Kind: ActivityKindGate,
+				Label: "Approved and remembered: " + activityString(data, "tool"),
+				Detail: joinActivity(activityString(data, "command"),
+					rememberedRuleNote(remembered, activityString(data, "remember_scope")))})
+		}
 		return one(ActivityRow{Kind: ActivityKindGate,
 			Label:  "Approved: " + activityString(data, "tool"),
 			Detail: activityString(data, "command")})
+	case "approvals.changed":
+		// A standing grant added or revoked outside the card — the CLI, the
+		// window's Approvals tab. Pattern and action only: the pattern IS the
+		// permission, so there is nothing here to withhold, and naming it is
+		// the point.
+		return one(ActivityRow{Kind: ActivityKindGate,
+			Label:  approvalChangeLabel(activityString(data, "action")),
+			Detail: joinActivity(activityString(data, "pattern"), preApprovedScope(activityString(data, "scope")))})
+	case "tool.pre_approved":
+		// A command that ran WITHOUT being asked about, because a rule the
+		// user once agreed to allowed it (#162, ADR 0053). This row is the
+		// price of that feature and the reason it is acceptable: a standing
+		// grant removes the question, so it must not also remove the
+		// evidence. The rule is named, the command is verbatim (the gate has
+		// always published shell commands verbatim — SummariseToolArgs says
+		// why), and the scope says whether this lasts until the conversation
+		// ends or until the user revokes it.
+		//
+		// ActivityKindGate rather than a new kind, on config.setting_changed's
+		// argument: an older plugin renders an unknown kind with the fallback
+		// glyph, and this IS the gate — the same machinery as the approve and
+		// decline rows, reporting the case where it did not have to stop.
+		return one(ActivityRow{Kind: ActivityKindGate,
+			Label: "Ran without asking: " + activityString(data, "tool"),
+			Detail: joinActivity(preApprovedScope(activityString(data, "scope")),
+				activityString(data, "rule"), activityString(data, "command"))})
 	case "tool.declined":
 		return one(ActivityRow{Kind: ActivityKindRefusal, Failed: true,
 			Label:  "Declined: " + activityString(data, "tool"),
@@ -363,6 +399,44 @@ func activityErrorLabel(stage string) string {
 // declineReason words a tool.declined source for the feed. The daemon's
 // vocabulary (docs/ipc.md) is closed; an unknown source is shown as itself
 // rather than hidden, because a refusal must never lose its reason.
+// rememberedRuleNote words the rule a "don't ask again" answer added.
+func rememberedRuleNote(pattern, scope string) string {
+	if scope == "conversation" {
+		return "won't ask again this conversation: " + pattern
+	}
+	return "won't ask again: " + pattern
+}
+
+// approvalChangeLabel words an approvals.changed action. An unrecognised
+// action names itself rather than vanishing — a permission change must never
+// render as a blank row.
+func approvalChangeLabel(action string) string {
+	switch action {
+	case "added":
+		return "Pre-approval added"
+	case "forgotten":
+		return "Pre-approval revoked"
+	}
+	return "Pre-approval " + action
+}
+
+// preApprovedScope words how long the rule that allowed a command stands.
+// The two are genuinely different promises — one dies with the conversation,
+// one waits to be revoked — and a row that blurred them would leave the user
+// unsure whether they still had something to take back. An unrecognised scope
+// shows as itself, so a future one never loses its reason.
+func preApprovedScope(scope string) string {
+	switch scope {
+	case "conversation":
+		return "pre-approved for this conversation"
+	case "always":
+		return "pre-approved"
+	case "":
+		return "pre-approved"
+	}
+	return "pre-approved (" + scope + ")"
+}
+
 func declineReason(source string) string {
 	switch source {
 	case "cli", "text", "voice":

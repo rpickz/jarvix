@@ -343,6 +343,32 @@ question never loses the question. Answers are spoken **as they stream** —
 Jarvix starts talking on the first complete sentence rather than waiting for
 the whole reply.
 
+**Approve and don't ask again.** The confirmation card offers a third answer
+beside Approve once and Reject, with the exact rule it would add printed on
+the button — `docker ps`, `xdg-open`, `kubectl get pods`. Choosing it appends
+that word prefix to `[tools.policy] shell_allow`, so the next matching command
+runs without a question; `…just this conversation` grants the same rule in
+memory only and never writes it down. The rule offered is always the narrowest
+useful one — the command's leading words up to the first argument that varies
+— so one rule covers `docker ps` and `docker ps --format '{{.Image}}'`, which
+is the nuisance this removes: not one command repeating, but the same intent
+in different spellings.
+
+Some commands are never offered the button, and the card says why in a
+sentence: a word-prefix rule cannot say "but not those flags", so `rm`, `sudo`
+and their family, `find` (`-delete`), `git` (`push --force`), wrappers like
+`timeout` that run whatever follows them, `xdotool`, `jarvix` itself, anything
+invoked by path, and `docker run`-shaped subcommands get Approve-once and
+Reject only. Deny rules and the always-risky words still beat every rule, so a
+remembered `ls` can never authorise `ls; rm -rf ~`. A pre-approved run appears
+in the activity feed as "Ran without asking", naming the rule — nothing behind
+a standing grant is silent. See them with `jarvix approvals list` or the
+window's **Approvals** tab, take one back with `jarvix approvals forget docker
+ps` (immediate, no restart), or ask "what have I pre-approved?" out loud. The
+assistant cannot add, change or remove one: only a human click or spoken yes
+on a card writes a rule
+([ADR 0053](docs/adr/0053-remembered-approvals.md)).
+
 Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
 `jarvix new` archives the thread instead of destroying it, whole — the
 `history_turns` cap only limits what the model is sent, never what is kept.

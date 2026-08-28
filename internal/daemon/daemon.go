@@ -132,10 +132,13 @@ type Daemon struct {
 	// began before the restart — a shortfall the ring's own doc comment names
 	// and this is the one caller that has to say out loud.
 	started time.Time
-	// toolsPolicy is the compiled permission gate, held so the scheduler's
-	// fire path consults the very same tier resolution the session gate does
-	// — the clock and the voice can never disagree about what is permitted.
-	toolsPolicy *tools.Policy
+	// The compiled permission gate is not held here. It lives on the registry
+	// alone, which holds it atomically since #162: a remembered rule and a
+	// config.reload both swap it while sessions are reading it, and a second
+	// copy on the Daemon would be a copy to go stale — the scheduler's fire
+	// path would then consult a different tier resolution from the session
+	// gate, and the clock and the voice would disagree about what is
+	// permitted. Callers say d.registry.Policy().
 
 	// conversations is the durable archive (ADR 0027). Never nil, and held
 	// even with retention off: the off switch stops writing, but listing,
@@ -260,6 +263,13 @@ type Daemon struct {
 	// the daemon and an entry that has not run since boot simply has none
 	// (the tab shows nothing rather than fabricating). Guarded by actMu.
 	lastRuns map[string]automationRun
+
+	// approvals is the ledger behind pre-approved command patterns (#162,
+	// ADR 0053): when each `[tools.policy] shell_allow` rule was agreed to
+	// and how often it has fired. One instance for the daemon's life, on the
+	// memory book's terms — the config file remains the source of truth for
+	// which rules exist, and this only holds the history beside them.
+	approvals *approvalStore
 
 	// captureReload is set when a mid-session write has changed config.toml
 	// in a way the engine's collaborators do not know yet: a layout capture
@@ -649,8 +659,16 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// only exists once the daemon does, including the live config the three
 	// briefing.* settings are read from.
 	briefingSvc := newBriefingService(convs, bus, logger)
+	// The approval store (#162, ADR 0053) is built before the engine for the
+	// briefing service's exact reason: the engine carries it
+	// (Options.Approvals, the read-only half that answers "what have I
+	// pre-approved?") and cannot be built without it. It is the same object
+	// the write path uses, so the voice can never describe a list the gate
+	// does not hold.
+	approvalSvc := newApprovalStore(cfg.Tools.Policy.ShellAllow, paths.ApprovalsFile(), logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, logger)
 	engOpts.Returning = briefingSvc
+	engOpts.Approvals = &approvalsVoice{store: approvalSvc}
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
 	// the engine's real timer (see session.Options.ConfirmTimer).
@@ -747,7 +765,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	server := ipc.NewServer(paths.Socket, bus, logger)
 	d := &Daemon{
 		engine: engine, server: server, bus: bus, log: logger,
-		registry: registry, policy: cfg.Tools.Policy, toolsPolicy: policy,
+		registry: registry, policy: cfg.Tools.Policy, approvals: approvalSvc,
 		memory: book, vocabulary: vocab, knowledge: feeds, focus: focusSvc,
 		reminders:     remindersSvc,
 		briefing:      briefingSvc,
@@ -1199,23 +1217,7 @@ func (d *Daemon) registerMethods() {
 		}
 		return snapshot, nil
 	})
-	d.server.Handle("session.confirm", func(params json.RawMessage) (any, error) {
-		// Approved defaults to true: `jarvix confirm` is the affirmative;
-		// declining is the explicit case.
-		p := struct {
-			Approved *bool `json:"approved"`
-		}{}
-		if len(params) > 0 {
-			if err := json.Unmarshal(params, &p); err != nil {
-				return nil, ipc.Errorf(ipc.CodeInvalidParams, "session.confirm params: %v", err)
-			}
-		}
-		approved := p.Approved == nil || *p.Approved
-		if err := d.engine.Confirm(approved); err != nil {
-			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
-		}
-		return map[string]bool{"approved": approved}, nil
-	})
+	d.server.Handle("session.confirm", d.handleSessionConfirm)
 	d.server.Handle("status.get", func(json.RawMessage) (any, error) {
 		state, id := d.engine.State()
 		ptt := "external" // activation comes from keybindings (toggle/hold CLI)
@@ -1259,6 +1261,7 @@ func (d *Daemon) registerMethods() {
 		}, nil
 	})
 	d.registerActivityMethods()
+	d.registerApprovalMethods()
 	d.registerConfigMethods()
 	d.registerContextMethods()
 	d.registerConversationMethods()
@@ -1304,6 +1307,17 @@ func (d *Daemon) pendingConfirmationReport() map[string]any {
 	}
 	if !pending.Deadline.IsZero() {
 		confirmation["deadline_ms"] = pending.Deadline.UnixMilli()
+	}
+	// The remember offer (#162), so a window opened mid-wait renders the same
+	// third button — with the same exact pattern on it — as one that watched
+	// the question arrive. Keys mirror tool.confirmation_required's exactly:
+	// remember_pattern when the control appears, remember_reason when it does
+	// not, and the presence of the key is the fact.
+	if pending.Remember.Offered {
+		confirmation["remember_pattern"] = pending.Remember.Pattern
+		confirmation["remember_segment"] = pending.Remember.Segment
+	} else if pending.Remember.Reason != "" {
+		confirmation["remember_reason"] = pending.Remember.Reason
 	}
 	return confirmation
 }

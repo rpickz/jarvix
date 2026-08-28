@@ -120,6 +120,12 @@ type Options struct {
 	// (issue #129). Nil — vocabulary disabled — makes a matched teach phrase
 	// an honest spoken refusal rather than a silent drop.
 	VocabularyTeacher VocabularyTeacher
+	// Approvals answers "what have i pre-approved" (issue #162). Nil makes
+	// the matched phrase an honest spoken refusal rather than a confident
+	// "nothing" — a listing that says the grants are empty when it simply
+	// cannot see them is the worst possible answer to a question about
+	// permissions.
+	Approvals ApprovalsLister
 	// Knowledge supplies the live feed values block — cached readings from
 	// the user's configured feeds (ADR 0031) — for turns that reach the
 	// model. Nil disables it entirely: no consultation, no message, no cost.
@@ -239,6 +245,23 @@ type Engine struct {
 	// (remember_for_conversation). Cleared with the conversation; guarded
 	// by mu.
 	approvals map[string]bool
+	// grants are conversation-scoped allow patterns (issue #162, ADR 0053):
+	// word prefixes the user granted on a confirmation card by choosing
+	// "just this conversation". They are the same vocabulary as
+	// `[tools.policy] shell_allow` and are applied by the same classifier,
+	// but they exist HERE and nowhere else — never written, never read back,
+	// gone when the process ends or the conversation does.
+	//
+	// That is the whole promise of the scope, and it is kept structurally by
+	// where the field lives rather than by remembering not to persist it:
+	// there is no writer on this path to forget to disable. Cleared beside
+	// approvals everywhere approvals are cleared, because a grant is an
+	// approval with a broader shape and must not outlive one.
+	//
+	// Ordered rather than a set: the classifier walks patterns in order and
+	// names the first that matched in the audit row, so the row a user sees
+	// is stable across runs. Guarded by mu.
+	grants []string
 	// reconfiguring blocks new sessions for the brief window in which
 	// Reconfigure drains e.active before swapping collaborators.
 	reconfiguring bool
@@ -1492,8 +1515,11 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 		e.history = nil
 		e.lastTurn = time.Time{}
 		// Remembered tool approvals are conversation-scoped: a new thread
-		// must ask again.
+		// must ask again. Conversation-scoped allow patterns (#162) go with
+		// them for the same reason and by the same sentence: "just this
+		// conversation" has to mean this one.
 		e.approvals = make(map[string]bool)
+		e.grants = nil
 		// The archived record ends with the thread; the new one must not
 		// append to it (ADR 0027). Nothing is pending to flush here — every
 		// commitTurn's staging is flushed on its own session tail — so only
@@ -1770,6 +1796,7 @@ func (e *Engine) reset(cancelActive bool) {
 	e.history = nil
 	e.lastTurn = time.Time{}
 	e.approvals = make(map[string]bool)
+	e.grants = nil
 	// A record still unstaged here belongs to the thread that is ending —
 	// stage it standalone before the detach hands the batch over, then clear
 	// the display list: the confirmation records die with the head exactly

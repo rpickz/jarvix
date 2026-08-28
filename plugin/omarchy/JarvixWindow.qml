@@ -88,6 +88,12 @@ FloatingWindow {
     // generic entry-admin verbs with family "ai" and "advisors".
     { id: "providers", label: "Providers" },
     { id: "memory", label: "Memory" },
+    // approvals — the standing grants (#162, ADR 0053): every command
+    // pattern that runs without asking, when it was agreed to, how often it
+    // has fired, and a Forget button on each. Its own tab rather than a
+    // corner of Settings because a permission you cannot find is a
+    // permission you cannot revoke.
+    { id: "approvals", label: "Approvals" },
     { id: "settings", label: "Settings" }
   ]
   property string currentTab: "chat"
@@ -118,6 +124,7 @@ FloatingWindow {
       requestMemory()
       requestVocabulary()
     }
+    else if (id === "approvals") requestApprovals()
     else if (id === "chat" && pendingCardIndex >= 0) {
       // A permission question must never be hidden by tab state: coming back
       // to Chat lands on the card, wherever the list had been scrolled.
@@ -1926,6 +1933,12 @@ FloatingWindow {
   property double confirmDeadlineMs: 0 // absolute auto-decline time; 0 = clock not started
   property double confirmNowMs: 0      // ticked by confirmCountdown so the binding updates
   property int confirmRequestId: 0
+  // The remember offer for the open card (#162): the exact rule the daemon
+  // would add, or the one short sentence saying why it will not offer one.
+  // Both come from the daemon — this file derives nothing about permissions
+  // (ADR 0013) — and exactly one of them is ever non-empty.
+  property string confirmRememberPattern: ""
+  property string confirmRememberReason: ""
 
   // Seconds left before auto-decline, or -1 while the daemon has not started
   // the clock (the question is still being spoken aloud). Clamped at 0: only
@@ -1934,7 +1947,8 @@ FloatingWindow {
   readonly property int confirmRemainingSec: confirmDeadlineMs > 0
     ? Math.max(0, Math.ceil((confirmDeadlineMs - confirmNowMs) / 1000)) : -1
 
-  function appendConfirmationCard(summary, command, timeoutSec, deadlineMs) {
+  function appendConfirmationCard(summary, command, timeoutSec, deadlineMs,
+                                 rememberPattern, rememberReason) {
     // The pending turn steps aside and comes back underneath (issue #158): a
     // card that landed *below* the row still saying "Thinking" would read as
     // the question having arrived after the wait it interrupted.
@@ -1945,6 +1959,8 @@ FloatingWindow {
     confirmTimeoutSec = timeoutSec
     confirmDeadlineMs = deadlineMs
     confirmNowMs = Date.now()
+    confirmRememberPattern = rememberPattern || ""
+    confirmRememberReason = rememberReason || ""
     syncPendingTurn()
   }
 
@@ -1957,6 +1973,8 @@ FloatingWindow {
     turns.setProperty(pendingCardIndex, "outcome", outcome)
     pendingCardIndex = -1
     confirmDeadlineMs = 0
+    confirmRememberPattern = ""
+    confirmRememberReason = ""
   }
 
   // declineOutcome words a tool.declined source for the card. The source
@@ -1997,14 +2015,88 @@ FloatingWindow {
   // interpreted here — the yes/no vocabulary lives in the daemon, once. The
   // card resolves on the daemon's tool.confirmed / tool.declined event, not
   // on the click.
-  function answerConfirmation(approved) {
+  //
+  // remember is the scope word for "approve and don't ask again" (#162):
+  // "always", "conversation", or "" for the ordinary approve-once. It is a
+  // SCOPE and never a pattern — the rule to write is the one the daemon
+  // derived and published on this very card, so this surface has no way to
+  // name one and nothing that reaches this surface does either.
+  function answerConfirmation(approved, remember) {
     if (!daemon.connected || pendingCardIndex < 0) return
     confirmRequestId = nextRequestId
     nextRequestId++
+    var params = { approved: approved }
+    if (remember) params.remember = remember
     daemon.write(JSON.stringify({
       jsonrpc: "2.0", id: confirmRequestId, method: "session.confirm",
-      params: { approved: approved }
+      params: params
     }) + "\n")
+  }
+
+  // --- approvals -----------------------------------------------------------
+  // The Approvals tab (#162, ADR 0053): what runs without asking. Display
+  // only, like every other surface here — the daemon composes each row's
+  // facts, this file places them, and Forget is one verb call.
+  property var approvals: []
+  property string approvalsPath: ""
+  // JSON-RPC ids from this feature's own private range (900–949, the
+  // reminders and overlay-confirm discipline) so its replies are
+  // recognisable by construction.
+  property int approvalsRequestId: 0
+  property int approvalsForgetRequestId: 0
+  property int nextApprovalsRequestId: 900
+
+  function takeApprovalsRequestId() {
+    var id = nextApprovalsRequestId
+    nextApprovalsRequestId = nextApprovalsRequestId >= 949 ? 900 : nextApprovalsRequestId + 1
+    return id
+  }
+
+  function requestApprovals() {
+    if (!daemon.connected) return
+    approvalsRequestId = takeApprovalsRequestId()
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: approvalsRequestId, method: "approvals.list"
+    }) + "\n")
+  }
+
+  function loadApprovals(result) {
+    approvals = result.approved || []
+    approvalsPath = String(result.path || "")
+  }
+
+  function forgetApproval(pattern) {
+    if (!daemon.connected) return
+    approvalsForgetRequestId = takeApprovalsRequestId()
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: approvalsForgetRequestId, method: "approvals.forget",
+      params: { pattern: pattern }
+    }) + "\n")
+  }
+
+  // approvalSubtitle says what the grant IS — how long it lasts — because
+  // that is the fact a person revoking needs first.
+  function approvalSubtitle(a) {
+    if (String(a.scope || "") === "conversation")
+      return "Just this conversation — never written to disk"
+    return "Permanent until you forget it"
+  }
+
+  // approvalMeta says where it came from and what it has done. A rule that
+  // has never fired is called out: an unused standing permission is the one
+  // most worth taking back.
+  function approvalMeta(a) {
+    var parts = []
+    if (a.added) parts.push("added " + String(a.added).slice(0, 10))
+    else if (String(a.source || "") === "hand") parts.push("added by hand")
+    var uses = Number(a.uses || 0)
+    if (uses > 0) {
+      parts.push("used " + uses + (uses === 1 ? " time" : " times")
+        + (a.last_used ? ", last " + String(a.last_used).slice(0, 10) : ""))
+    } else if (String(a.scope || "") !== "conversation") {
+      parts.push("never used")
+    }
+    return parts.join(" · ")
   }
 
   // --- speak again ---------------------------------------------------------
@@ -2298,7 +2390,9 @@ FloatingWindow {
         String(result.confirmation.summary || ""),
         String(result.confirmation.command || ""),
         Number(result.confirmation.timeout_sec || 0),
-        Number(result.confirmation.deadline_ms || 0))
+        Number(result.confirmation.deadline_ms || 0),
+        String(result.confirmation.remember_pattern || ""),
+        String(result.confirmation.remember_reason || ""))
     }
     sessionState = String(result.state || "idle")
     assistantStreaming = false
@@ -2431,7 +2525,8 @@ FloatingWindow {
       // until the daemon says the clock has started (the question may still
       // be being spoken), so the countdown starts at "up to timeout_sec".
       appendConfirmationCard(String(params.summary || ""), String(params.command || ""),
-        Number(params.timeout_sec || 0), 0)
+        Number(params.timeout_sec || 0), 0,
+        String(params.remember_pattern || ""), String(params.remember_reason || ""))
       break
     case "tool.confirmation_deadline":
       // The countdown starts: the daemon computed the deadline from its
@@ -2465,6 +2560,12 @@ FloatingWindow {
       // A fetch completed — scheduled or Refresh now. The event carries the
       // feed's name only; the fresh value rides the status reply.
       requestKnowledge()
+      break
+    case "approvals.changed":
+      // A standing grant was added or revoked — here, on a card, or from the
+      // CLI. The event carries the pattern only; the listing reply is where
+      // the history travels.
+      requestApprovals()
       break
     case "memory.entry_changed":
       // A fact was added or edited — from this window's form or another
@@ -2659,6 +2760,16 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
           if (frame.result) win.loadMemory(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.approvalsRequestId) {
+          if (frame.result) win.loadApprovals(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.approvalsForgetRequestId) {
+          // A refusal must be seen in words; a success is followed by the
+          // approvals.changed event, which re-reads the list for every open
+          // window rather than only this one.
+          if (frame.error) {
+            win.errorStage = "approvals"
+            win.errorMessage = String(frame.error.message || "the pre-approval could not be forgotten")
+          }
         } else if (frame.id !== undefined && frame.id === win.vocabSaveRequestId) {
           win.handleVocabFormReply(frame)
         } else if (frame.id !== undefined && frame.id === win.vocabForgetRequestId) {
@@ -4841,6 +4952,74 @@ FloatingWindow {
     // Add and Edit (#100) open a form pane whose saves go to memory.add /
     // memory.update — the book's own write path, never the config editor —
     // ungated because nothing they do destroys (Forget keeps its card).
+    // The Approvals tab (#162, ADR 0053): every command pattern that runs
+    // without being asked about, with when it was agreed to, how often it
+    // has fired, and Forget on each row. Read-only apart from Forget — there
+    // is no Add here, deliberately: a standing grant is made on the
+    // confirmation card, where the exact command that provoked it is on
+    // screen beside the rule, and a "new rule" form with neither would be
+    // the same permission with none of the context.
+    Item {
+      id: approvalsScreen
+      visible: win.socketReady && win.currentTab === "approvals"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      JarvixEmptyState {
+        visible: win.approvals.length === 0
+        anchors.fill: parent
+        text: "Nothing is pre-approved — every command still asks first.\n"
+          + "Answer a permission question with \u201cApprove and don\u2019t ask again\u201d "
+          + "to add a rule here."
+      }
+
+      ListView {
+        id: approvalsList
+        visible: win.approvals.length > 0
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: approvalsFooter.top
+        anchors.bottomMargin: Style.space(8)
+        clip: true
+        spacing: Style.space(10)
+        model: win.approvals
+
+        delegate: JarvixCollectionRow {
+          required property var modelData
+          width: approvalsList.width
+          // The pattern in the monospace detail line, verbatim: it is a
+          // command prefix, and the card that added it showed it this way.
+          title: modelData.pattern
+          subtitle: win.approvalSubtitle(modelData)
+          meta: win.approvalMeta(modelData)
+          actionLabel: "Forget"
+          actionName: "Forget the pre-approval " + modelData.pattern
+            + " — that command will ask again"
+          onActionTriggered: win.forgetApproval(modelData.pattern)
+        }
+      }
+
+      Text {
+        id: approvalsFooter
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        wrapMode: Text.Wrap
+        text: win.approvalsPath === "" ? ""
+          : "Permanent rules live in " + win.approvalsPath
+            + " under [tools.policy] shell_allow — yours to edit. "
+            + "Deny rules and always-risky commands still ask, whatever is listed here."
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+    }
+
     Item {
       id: memoryScreen
       visible: win.socketReady && win.currentTab === "memory"
@@ -5468,7 +5647,12 @@ FloatingWindow {
             + " Command: " + model.command
             + (model.outcome !== "" ? " " + model.outcome : "")
           Accessible.description: model.outcome === ""
-            ? "Press Y to approve or N to decline" : "Already answered"
+            ? (win.confirmRememberPattern !== ""
+                ? "Press Y to approve once, A to approve and add the rule "
+                  + win.confirmRememberPattern
+                  + ", C to allow it for this conversation, or N to decline"
+                : "Press Y to approve or N to decline")
+            : "Already answered"
 
           // Y and N answer the focused card — the click's keyboard twin. The
           // keys carry a literal boolean to the same session.confirm call;
@@ -5482,6 +5666,17 @@ FloatingWindow {
             } else if (event.key === Qt.Key_N) {
               event.accepted = true
               win.answerConfirmation(false)
+            } else if (event.key === Qt.Key_A && win.confirmRememberPattern !== "") {
+              // A for always, C for this conversation (#162). Separate keys
+              // rather than a modifier on Y: a standing grant must never be
+              // one slipped finger away from an approve-once, and it must be
+              // reachable without a mouse — the remember control is keyboard
+              // equipment like every other button on this card.
+              event.accepted = true
+              win.answerConfirmation(true, "always")
+            } else if (event.key === Qt.Key_C && win.confirmRememberPattern !== "") {
+              event.accepted = true
+              win.answerConfirmation(true, "conversation")
             }
           }
 
@@ -5587,6 +5782,111 @@ FloatingWindow {
                   onClicked: win.answerConfirmation(false)
                 }
               }
+            }
+
+            // The remember row (#162). Deliberately BELOW the approve/decline
+            // row and deliberately quiet: Approve-once stays the primary
+            // action, and a standing grant has to read as the deliberate
+            // choice it is. Text, never colour alone — the button carries the
+            // exact rule it would add, verbatim, so nothing is generalised
+            // behind the user's back.
+            Row {
+              visible: model.outcome === "" && win.confirmRememberPattern !== ""
+              spacing: Style.space(8)
+
+              Rectangle {
+                id: rememberAlwaysButton
+                enabled: model.outcome === "" && win.socketReady
+                opacity: enabled ? 1.0 : 0.45
+                width: rememberAlwaysLabel.width + Style.space(24)
+                height: rememberAlwaysLabel.height + Style.space(10)
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.popups.text,
+                  rememberAlwaysButton.activeFocus ? 0.18 : 0.06)
+                border.color: Util.alpha(Color.popups.text, 0.4)
+                border.width: rememberAlwaysButton.activeFocus ? 2 : 1
+                activeFocusOnTab: enabled
+                Accessible.role: Accessible.Button
+                Accessible.name: "Approve and do not ask again — adds the rule "
+                  + win.confirmRememberPattern + " permanently"
+                Keys.onReturnPressed: win.answerConfirmation(true, "always")
+                Keys.onSpacePressed: win.answerConfirmation(true, "always")
+                Text {
+                  id: rememberAlwaysLabel
+                  anchors.centerIn: parent
+                  text: "Approve and don\u2019t ask again: " + win.confirmRememberPattern
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.subtitle
+                  color: Color.popups.text
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: rememberAlwaysButton.enabled
+                  onClicked: win.answerConfirmation(true, "always")
+                }
+              }
+
+              Rectangle {
+                id: rememberConversationButton
+                enabled: model.outcome === "" && win.socketReady
+                opacity: enabled ? 1.0 : 0.45
+                width: rememberConversationLabel.width + Style.space(24)
+                height: rememberConversationLabel.height + Style.space(10)
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.popups.text,
+                  rememberConversationButton.activeFocus ? 0.18 : 0.06)
+                border.color: Util.alpha(Color.popups.text, 0.4)
+                border.width: rememberConversationButton.activeFocus ? 2 : 1
+                activeFocusOnTab: enabled
+                Accessible.role: Accessible.Button
+                Accessible.name: "Approve for this conversation only — allows "
+                  + win.confirmRememberPattern
+                  + " until this conversation ends, and never saves it"
+                Keys.onReturnPressed: win.answerConfirmation(true, "conversation")
+                Keys.onSpacePressed: win.answerConfirmation(true, "conversation")
+                Text {
+                  id: rememberConversationLabel
+                  anchors.centerIn: parent
+                  text: "\u2026just this conversation"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.subtitle
+                  color: Color.popups.text
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: rememberConversationButton.enabled
+                  onClicked: win.answerConfirmation(true, "conversation")
+                }
+              }
+            }
+
+            // The scope sentence, always shown beside an offered rule: a
+            // permanent grant and a conversation-scoped one look alike on a
+            // button and are not alike at all.
+            Text {
+              visible: model.outcome === "" && win.confirmRememberPattern !== ""
+              text: "Permanent unless you revoke it (jarvix approvals forget). "
+                + "The conversation-only version is never written to disk."
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+
+            // …and the refusal in its place when there is no rule to offer
+            // (#162's refusal matrix). One short honest sentence from the
+            // daemon, shown rather than swallowed: a missing button with no
+            // explanation is the thing a user works around.
+            Text {
+              visible: model.outcome === "" && win.confirmRememberPattern === ""
+                && win.confirmRememberReason !== ""
+              text: "Can\u2019t be remembered: " + win.confirmRememberReason
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
             }
 
             // The countdown while pending, the outcome once resolved — both

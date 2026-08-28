@@ -72,6 +72,21 @@ type Confirmation struct {
 	// TimeoutSec is the confirmation window that applied, so a timed-out
 	// record can say how long the user was given.
 	TimeoutSec int `json:"timeout_sec,omitempty"`
+	// Remembered is the word-prefix rule the user added by answering with
+	// "don't ask again" (issue #162), and RememberScope how long it stands
+	// ("always" or "conversation"). Both empty for an ordinary approve-once,
+	// which is nearly every record.
+	//
+	// They are here because a record that said only "approved" would be
+	// dishonest about the most consequential answer the card can take: the
+	// user did not approve one command, they changed what runs without
+	// asking, and the transcript of the moment they did that is the only
+	// place the two facts sit together. Additive with omitempty exactly like
+	// Interrupted and Confirmation itself — every existing line stays
+	// byte-identical, an old archive loads with both empty, and
+	// SchemaVersion stays 1.
+	Remembered    string `json:"remembered,omitempty"`
+	RememberScope string `json:"remember_scope,omitempty"`
 }
 
 // Turn is one archived utterance: who said it, what they said, and when.

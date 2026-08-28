@@ -102,6 +102,44 @@ func RewriteTOML(doc []byte, changes map[string]any) ([]byte, error) {
 	return []byte(out), nil
 }
 
+// RewriteOffRegistryKey sets one dotted key that is deliberately NOT in the
+// settings registry, with the same surgical edit and the same read-back guard
+// RewriteTOML applies to registry keys. read tells it how to find the value
+// again in a parsed Config, which is what SettingFor supplies for the
+// registry keys and what the caller must supply here.
+//
+// It exists for `[tools.policy] shell_allow` (issue #162, ADR 0053). That key
+// is structurally absent from the registry — the whole [tools.policy] table
+// is, so the assistant's settings tool cannot address it (#109, ADR 0036) —
+// and it must stay absent, because the registry is the surface the assistant
+// resolves keys against. Remembered approvals therefore need a writer that
+// reaches past the registry without widening it, and this is that writer:
+// available in Go to the daemon code a human's answer runs through, reachable
+// from no tool and no IPC method that takes a key name.
+//
+// The guard is the point of routing through this file at all. A rewrite that
+// does not parse, or that does not read back as the value intended, returns
+// an error and nothing is written — so a scanner bug can cost a save, never
+// the user's configuration.
+func RewriteOffRegistryKey(doc []byte, key string, value any, read func(Config) any) ([]byte, error) {
+	encoded, err := encodeTOMLValue(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", key, err)
+	}
+	out, err := rewriteOne(string(doc), key, encoded)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", key, err)
+	}
+	parsed, err := parse([]byte(out), Default())
+	if err != nil {
+		return nil, fmt.Errorf("rewrite produced an unparsable document (nothing was written): %w", err)
+	}
+	if !settingValuesEqual(read(parsed), value) {
+		return nil, fmt.Errorf("%s: rewrite did not take effect (nothing was written)", key)
+	}
+	return []byte(out), nil
+}
+
 // WriteFileAtomic writes data to path via a same-directory temp file and
 // rename, mode 0600, so a crash mid-write can never leave a truncated config.
 func WriteFileAtomic(path string, data []byte) error {

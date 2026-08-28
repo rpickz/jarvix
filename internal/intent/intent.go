@@ -182,6 +182,11 @@ type Match struct {
 	// VocabList marks "what words have i taught you" (#129): the engine
 	// answers with the vocabulary seam's one spoken listing.
 	VocabList bool
+	// ApprovalsList marks "what have i pre-approved" (#162): the engine
+	// answers with the approvals seam's one spoken listing. A read-only
+	// intent by construction — no phrase in this router adds or removes a
+	// standing grant.
+	ApprovalsList bool
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -333,6 +338,8 @@ type rule struct {
 	vocabListen bool
 	// vocabList marks the "what words have i taught you" rules (#129).
 	vocabList bool
+	// approvalsList marks the "what have i pre-approved" rules (#162).
+	approvalsList bool
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -576,6 +583,22 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: VocabListIntentName, pattern: p, vocabList: true})
 	}
 	r.names = append(r.names, VocabListIntentName)
+
+	// The approvals listing phrases (#162) are owned literals on the same
+	// terms. Read-only: this is the only approvals grammar there is, because
+	// a standing grant is made on a card that shows the exact rule and never
+	// by a sentence (see approvals.go).
+	for _, raw := range approvalsListPatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the vocabulary
+			// listing's.
+			return nil, fmt.Errorf("approvals list pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = ApprovalsListIntentName
+		r.add(&rule{name: ApprovalsListIntentName, pattern: p, approvalsList: true})
+	}
+	r.names = append(r.names, ApprovalsListIntentName)
 
 	// taken maps a compiled phrase to a human description of what owns it, so
 	// a routine phrase collision is reported against whichever of the three
@@ -1074,8 +1097,9 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		WindowNames: ru.windowNames,
 		Briefing:    ru.briefing,
 		Focus:       ru.focus, FocusWindows: ru.focusWindows,
-		Reminder:  ru.reminder,
-		VocabList: ru.vocabList,
+		Reminder:      ru.reminder,
+		VocabList:     ru.vocabList,
+		ApprovalsList: ru.approvalsList,
 	}
 	// The one free-text value lands with the family that owns the rule, so a
 	// consumer can never read another feature's words by mistake.

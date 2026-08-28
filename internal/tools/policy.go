@@ -44,7 +44,10 @@ type PolicyConfig struct {
 	// win); "deny" disables the tool entirely.
 	Tools map[string]PolicyDecision
 	// ShellAllow adds word-prefix patterns (e.g. "docker compose ps") that
-	// run without confirmation.
+	// run without confirmation. Since issue #162 this is also where a
+	// "don't ask again" answer to a confirmation card lands — appended by the
+	// surgical config editor, never by the assistant (#109's wall stands) —
+	// which is why the list's vocabulary stays exactly what it always was.
 	ShellAllow []string
 	// ShellDeny adds word-prefix patterns that never run, regardless of any
 	// confirmation. Deny beats everything.
@@ -73,6 +76,19 @@ type Verdict struct {
 	// from Command so a model cannot describe `rm -rf ~` as "tidying up".
 	// Set only when Decision is PolicyAsk.
 	Summary string
+	// PreApproved marks an allow that a *user-granted* pattern produced —
+	// a `[tools.policy] shell_allow` entry or a conversation-scoped grant
+	// (issue #162) — as opposed to a shipped read-only allow pattern or a
+	// tool tier. It is what makes a pre-approved run auditable: the caller
+	// puts a row in the activity feed naming Rule, so a standing grant can
+	// never make Jarvix act silently. A separate field rather than a string
+	// match on Rule because the audit promise must not rest on prose.
+	PreApproved bool
+	// Pattern is the granted word-prefix that produced a PreApproved allow,
+	// verbatim ("docker ps"). Carried as a field rather than recovered from
+	// Rule's prose so the ledger that counts how often a rule has fired keys
+	// on the same string the user is shown and revokes by.
+	Pattern string
 }
 
 // Policy is the compiled permission gate. All patterns are compiled once at
@@ -442,6 +458,16 @@ func (p *Policy) DecideRoutine(name string) Verdict {
 // policy default), so the decision is configurable per identity while the
 // risk analysis stays identical.
 func (p *Policy) DecideCommand(tool, command string) Verdict {
+	return p.DecideCommandWithGrants(tool, command, nil)
+}
+
+// DecideCommandWithGrants is DecideCommand plus the conversation-scoped
+// grants DecideWithGrants documents. A user-defined intent faces the same
+// classifier as a model's shell.run call, so it must face the same grants:
+// remembering "the docker ps question" on an intent's card and then being
+// asked it again by the same intent would be the feature failing at its one
+// job.
+func (p *Policy) DecideCommandWithGrants(tool, command string, grants [][]string) Verdict {
 	args, err := json.Marshal(struct {
 		Command string `json:"command"`
 	}{Command: command})
@@ -450,7 +476,7 @@ func (p *Policy) DecideCommand(tool, command string) Verdict {
 			Rule:    "arguments could not be encoded",
 			Summary: "I could not check that command. Should I go ahead?"}
 	}
-	v := p.decideShell(ai.ToolCall{Name: tool, Arguments: string(args)}, p.ToolDecision(tool))
+	v := p.decideShell(ai.ToolCall{Name: tool, Arguments: string(args)}, p.ToolDecision(tool), grants)
 	v.Tool = tool
 	// The tool-level deny tier short-circuits before the command is recorded;
 	// the overlay and the audit trail still need to know what was refused.
@@ -476,6 +502,21 @@ func (p *Policy) DecideCommand(tool, command string) Verdict {
 // allow. The model's arguments are the only input — its stated intent is
 // never consulted.
 func (p *Policy) Decide(call ai.ToolCall) Verdict {
+	return p.DecideWithGrants(call, nil)
+}
+
+// DecideWithGrants is Decide plus conversation-scoped allow patterns (issue
+// #162): word prefixes the user granted on a confirmation card for this
+// conversation only, which the caller holds in memory and which never reach
+// disk.
+//
+// They are applied at exactly the point the configured allow list is applied
+// — after the deny check, after the risk regexes, after the risk words — so a
+// grant is weaker than every existing control and cannot be anything else. A
+// conversation-scoped grant of "ls" therefore still asks about `ls; rm -rf ~`,
+// for the same reason a configured one does: the segments are judged
+// separately and the rm is a risk word.
+func (p *Policy) DecideWithGrants(call ai.ToolCall, grants [][]string) Verdict {
 	mode := p.ToolDecision(call.Name)
 	if call.Name == advisorToolName {
 		return p.decideAdvisor(call, mode)
@@ -484,6 +525,10 @@ func (p *Policy) Decide(call ai.ToolCall) Verdict {
 		return p.decideKnowledge(call, mode)
 	}
 	if call.Name != shellToolName {
+		// Grants are shell-command word prefixes and say nothing about any
+		// other identity, so they are simply not consulted here — the
+		// always-ask floor a tool carries is untouched by anything the card
+		// can grant.
 		v := Verdict{Decision: mode, Tool: call.Name}
 		switch mode {
 		case PolicyDeny:
@@ -512,7 +557,7 @@ func (p *Policy) Decide(call ai.ToolCall) Verdict {
 		}
 		return v
 	}
-	return p.decideShell(call, mode)
+	return p.decideShell(call, mode, grants)
 }
 
 // decideAdvisor classifies one advisor.ask call (ADR 0016). Delegation sends
@@ -614,7 +659,7 @@ func (p *Policy) decideKnowledge(call ai.ToolCall, mode PolicyDecision) Verdict 
 	return v
 }
 
-func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision) Verdict {
+func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision, grants [][]string) Verdict {
 	v := Verdict{Tool: call.Name}
 	if mode == PolicyDeny {
 		v.Decision = PolicyDeny
@@ -656,6 +701,12 @@ func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision) Verdict {
 	worst := PolicyAllow
 	worstRule := ""
 	worstReason := ""
+	// preApproved is set by any segment a user-granted pattern allowed, and
+	// survives to the verdict only if nothing asks. One remembered segment in
+	// a line that runs unprompted is enough to owe the user an audit row: the
+	// row names the rule, and the rule is the one the user granted.
+	preApproved := false
+	preApprovedPattern := ""
 	for _, seg := range segments {
 		if rule, ok := matchDeny(seg, p.extraDeny); ok {
 			v.Decision = PolicyDeny
@@ -665,12 +716,21 @@ func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision) Verdict {
 		if mode == PolicyAllow {
 			continue // trust everything short of a deny pattern
 		}
-		decision, rule, reason := classifySegment(seg, p.extraAllow)
+		decision, rule, reason, remembered, pattern := classifySegment(seg, p.extraAllow, grants)
 		if decision == PolicyAsk && worst != PolicyAsk {
 			worst, worstRule, worstReason = PolicyAsk, rule, reason
 		}
 		if worst == PolicyAllow && worstRule == "" {
 			worstRule = rule
+		}
+		if remembered && !preApproved {
+			preApproved, preApprovedPattern = true, pattern
+			if worst == PolicyAllow {
+				// Name the granted rule rather than whichever segment came
+				// first: "it ran because of a rule you added" is the fact the
+				// row exists to carry.
+				worstRule = rule
+			}
 		}
 	}
 	if mode == PolicyAllow {
@@ -680,6 +740,9 @@ func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision) Verdict {
 	}
 	v.Decision = worst
 	v.Rule = worstRule
+	if v.PreApproved = preApproved && worst == PolicyAllow; v.PreApproved {
+		v.Pattern = preApprovedPattern
+	}
 	if worst == PolicyAsk {
 		v.Summary = fmt.Sprintf("I want to run %q, which %s. Should I go ahead?", spokenCommand(command), worstReason)
 	}
@@ -819,29 +882,44 @@ var riskRegexes = []struct {
 // classifySegment judges one simple command. Order matters and is the
 // security argument: risk checks beat allow patterns (deny was already
 // checked by the caller), and anything unmatched asks.
-func classifySegment(seg string, extraAllow [][]string) (decision PolicyDecision, rule, reason string) {
+//
+// grants are the conversation-scoped patterns of issue #162. They sit beside
+// extraAllow — after every risk check, never before one — because a grant is
+// the weakest thing in this function by design: the user said "for now", and
+// "for now" must not outrank a rule that says "never".
+func classifySegment(seg string, extraAllow, grants [][]string) (decision PolicyDecision, rule, reason string, remembered bool, pattern string) {
 	for _, r := range riskRegexes {
 		if r.re.MatchString(seg) {
-			return PolicyAsk, r.rule, r.reason
+			return PolicyAsk, r.rule, r.reason, false, ""
 		}
 	}
 	if w := commandWord(seg); w != "" {
 		// mkfs.ext4, mkfs.vfat, … share mkfs's tier via the prefix check.
 		if riskWords[w] || strings.HasPrefix(w, "mkfs") {
-			return PolicyAsk, fmt.Sprintf("risky command %q", w), fmt.Sprintf("uses the risky command %q", w)
+			return PolicyAsk, fmt.Sprintf("risky command %q", w), fmt.Sprintf("uses the risky command %q", w), false, ""
 		}
 	}
 	for _, words := range extraAllow {
 		if matchWordPrefix(seg, words) {
-			return PolicyAllow, fmt.Sprintf("configured allow pattern %q", strings.Join(words, " ")), ""
+			joined := strings.Join(words, " ")
+			return PolicyAllow, fmt.Sprintf("configured allow pattern %q", joined), "", true, joined
+		}
+	}
+	for _, words := range grants {
+		if matchWordPrefix(seg, words) {
+			// Named distinctly from a configured pattern so the audit row and
+			// the log say which kind of permission ran this: one the user can
+			// find in config.toml, or one that dies with the conversation.
+			joined := strings.Join(words, " ")
+			return PolicyAllow, fmt.Sprintf("conversation allow pattern %q", joined), "", true, joined
 		}
 	}
 	for _, words := range allowPatterns {
 		if matchWordPrefix(seg, words) {
-			return PolicyAllow, fmt.Sprintf("allow pattern %q", strings.Join(words, " ")), ""
+			return PolicyAllow, fmt.Sprintf("allow pattern %q", strings.Join(words, " ")), "", false, ""
 		}
 	}
-	return PolicyAsk, "no matching pattern", "is not on my read-only allow list"
+	return PolicyAsk, "no matching pattern", "is not on my read-only allow list", false, ""
 }
 
 var envAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)

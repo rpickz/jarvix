@@ -172,6 +172,8 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runVocabListen(s, m)
 	case m.VocabList:
 		ack, runErr = e.runVocabList(s)
+	case m.ApprovalsList:
+		ack, runErr = e.runApprovalsList()
 	case m.Desktop != intent.DesktopNone:
 		runErr = e.runDesktopIntent(s, m)
 	case len(m.Argv) > 0:
@@ -290,7 +292,11 @@ func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive boo
 			// A user-defined intent is a command the user wrote themselves, so
 			// remembering its approval is exactly what the setting is for.
 			rememberable: tools.RememberableApproval(tools.IntentToolName),
-			resume:       StateActing,
+			// And so is a standing rule (#162): the intent faces the same
+			// classifier as a model's shell.run call, so it gets the same
+			// third button, derived by the same policy from the same command.
+			remember: e.rememberOffer(verdict),
+			resume:   StateActing,
 		})
 		if !ok {
 			return nil, false
@@ -305,6 +311,9 @@ func (e *Engine) runUserIntent(s *sess, m intent.Match) (runErr error, alive boo
 			return errIntentDeclined, true
 		}
 	default:
+		// A remembered rule can silence an intent's question exactly as it
+		// silences the model's, so it owes the same audit row (#162).
+		e.auditPreApproved(s, verdict)
 		e.log.Debug("intent allowed", "component", "tools", "tool", tools.IntentToolName,
 			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
 	}
@@ -455,7 +464,7 @@ func (e *Engine) intentVerdict(command string) tools.Verdict {
 			Summary: fmt.Sprintf("I want to run %q. Should I go ahead?", command),
 		}
 	}
-	return e.tools.CheckCommand(tools.IntentToolName, command)
+	return e.tools.CheckCommandWithGrants(tools.IntentToolName, command, e.grantWords())
 }
 
 // intentRunner returns the configured runner. NewEngine installs a real one

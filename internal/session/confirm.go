@@ -35,6 +35,16 @@ type pendingConfirmation struct {
 	// what is being asked without waiting for an event that already happened.
 	summary string
 	rule    string
+	// granted is the scope the user answered with, set at resolution so the
+	// record can say a rule was added and which kind. Zero for the ordinary
+	// approve-once, which is what almost every resolution is.
+	granted tools.RememberScope
+	// remember is the "don't ask again" offer for this question (#162): the
+	// exact word-prefix that would be added, or the one-sentence refusal. It
+	// is derived daemon-side from the parsed command at the moment the
+	// question is asked, kept here so that the card, the snapshot, and the
+	// resolution all use one string — the one the user was shown.
+	remember tools.RememberOffer
 	// timeout is the configured confirmation window, and deadline is when it
 	// actually expires. deadline stays zero until the countdown starts — the
 	// clock begins when the question has been asked aloud, not when it was
@@ -66,6 +76,15 @@ type pendingConfirmation struct {
 	stopPrompt context.CancelFunc
 }
 
+// rememberedPattern is the rule this resolution added, or "" when the answer
+// was an ordinary approve-once.
+func (p *pendingConfirmation) rememberedPattern() string {
+	if p.granted == tools.RememberNone {
+		return ""
+	}
+	return p.remember.Pattern
+}
+
 // resumeState is where a resolved confirmation returns the session, defaulting
 // to Thinking so a pending confirmation built without one behaves as before.
 func (p *pendingConfirmation) resumeState() State {
@@ -79,6 +98,25 @@ func (p *pendingConfirmation) resumeState() State {
 // !approved declines it. This is the `jarvix confirm` / `session.confirm`
 // path; spoken and typed replies resolve through Submit instead.
 func (e *Engine) Confirm(approved bool) error {
+	return e.ConfirmRemembering(approved, tools.RememberNone)
+}
+
+// ConfirmRemembering is Confirm with a standing-grant scope (#162): the third
+// answer the confirmation card offers.
+//
+// It does NOT take a pattern. The pattern is the one this engine derived when
+// it asked the question and published it on the card — recomputing it from a
+// caller's string would be exactly the channel the feature must not have,
+// because a caller's string is one plausible forgery away from being the
+// model's. A caller that wants to know what it is agreeing to reads
+// PendingConfirmation first, which is where the card got it too.
+//
+// The permanent scope is not written here. Writing to config.toml is the
+// daemon's business — it owns the path, the fingerprint and the reload — and
+// it does that BEFORE calling this, so a write that fails leaves the question
+// standing rather than approving a command on the strength of a rule that did
+// not land. What this does with RememberAlways is record it honestly.
+func (e *Engine) ConfirmRemembering(approved bool, scope tools.RememberScope) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.pending == nil {
@@ -87,8 +125,96 @@ func (e *Engine) Confirm(approved bool) error {
 	if e.state != StateAwaitingConfirmation {
 		return fmt.Errorf("a voice reply is already being captured; finish it or cancel the session")
 	}
+	if scope != tools.RememberNone {
+		if !approved {
+			// "Remember that I said no" is not a thing this feature does:
+			// shell_allow has no negative form, and a decline that quietly
+			// wrote a deny rule would be a permission change the user never
+			// asked for.
+			return fmt.Errorf("a rule is only added when you approve; decline simply declines")
+		}
+		if !e.pending.remember.Offered {
+			// The refusal matrix, enforced at the resolution rather than only
+			// at the offer. A client that never rendered the card — or one
+			// built against an older daemon — must not be able to add a rule
+			// this daemon refused to offer.
+			return fmt.Errorf("that command cannot be remembered: %s", e.pending.remember.Reason)
+		}
+	}
+	if scope == tools.RememberConversation {
+		e.grantLocked(e.pending.remember.Pattern)
+	}
+	e.pending.granted = scope
 	e.resolveConfirmationLocked(approved, "cli")
 	return nil
+}
+
+// grantLocked adds a conversation-scoped allow pattern, ignoring a duplicate
+// so a user answering the same question twice does not grow the list.
+// Callers hold e.mu.
+func (e *Engine) grantLocked(pattern string) {
+	if pattern == "" {
+		return
+	}
+	for _, g := range e.grants {
+		if g == pattern {
+			return
+		}
+	}
+	e.grants = append(e.grants, pattern)
+	e.log.Info("conversation approval granted", "component", "tools",
+		"pattern", pattern, "scope", string(tools.RememberConversation))
+}
+
+// grantWords compiles the conversation-scoped grants for the classifier.
+// Compiled per check rather than cached because the list is at most a handful
+// of patterns and a cache would be one more thing that can disagree with the
+// list it caches — the gate is not a hot path, and correctness here is worth
+// more than the allocation.
+func (e *Engine) grantWords() [][]string {
+	e.mu.Lock()
+	patterns := append([]string(nil), e.grants...)
+	e.mu.Unlock()
+	if len(patterns) == 0 {
+		return nil
+	}
+	words, err := tools.CompileGrants(patterns)
+	if err != nil {
+		// Unreachable: every grant came from a proposal that was already
+		// non-empty. A grant that will not compile is dropped rather than
+		// allowed to fail the call it was meant to permit.
+		e.log.Warn("conversation approvals could not be compiled",
+			"component", "tools", "error", err.Error())
+		return nil
+	}
+	return words
+}
+
+// RevokeConversationGrant removes a conversation-scoped grant, reporting
+// whether it was there. Revocation is the one operation on a grant that is
+// not the card's: a user who changes their mind mid-conversation must be able
+// to take it back without ending the conversation to do it.
+func (e *Engine) RevokeConversationGrant(pattern string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i, g := range e.grants {
+		if g != pattern {
+			continue
+		}
+		e.grants = append(e.grants[:i:i], e.grants[i+1:]...)
+		e.log.Info("conversation approval revoked", "component", "tools", "pattern", pattern)
+		return true
+	}
+	return false
+}
+
+// ConversationGrants lists the conversation-scoped allow patterns in grant
+// order — what "what have I pre-approved?" reads for the temporary half, and
+// what the Approvals view shows above the permanent list.
+func (e *Engine) ConversationGrants() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.grants...)
 }
 
 // resolveConfirmationLocked delivers the user's answer to the waiting asker
@@ -153,7 +279,15 @@ func (e *Engine) confirmationData(p *pendingConfirmation, source string) map[str
 	if e.current != nil {
 		id = e.current.id
 	}
-	return map[string]any{"session_id": id, "tool": p.tool, "command": p.command, "source": source}
+	d := map[string]any{"session_id": id, "tool": p.tool, "command": p.command, "source": source}
+	// A resolution that added a rule says so on the wire (#162), so the
+	// activity feed's approval row and the window card both report the whole
+	// answer rather than the half of it that ran a command.
+	if pattern := p.rememberedPattern(); pattern != "" {
+		d["remembered"] = pattern
+		d["remember_scope"] = string(p.granted)
+	}
+	return d
 }
 
 // gateAndExecute applies the permission gate to one tool call and executes it
@@ -165,7 +299,7 @@ func (e *Engine) confirmationData(p *pendingConfirmation, source string) map[str
 // does not run can be reported to the model together with the promise it has
 // to take back — see refused.
 func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall, turn spokenTurn) (result string, ok bool) {
-	verdict := e.tools.Check(call)
+	verdict := e.tools.CheckWithGrants(call, e.grantWords())
 	switch verdict.Decision {
 	case tools.PolicyDeny:
 		e.log.Info("tool call denied", "component", "tools", "tool", call.Name,
@@ -179,10 +313,80 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall, turn spokenTurn) (res
 	case tools.PolicyAsk:
 		return e.confirmAndExecute(s, call, verdict, turn)
 	default:
+		e.auditPreApproved(s, verdict)
 		e.log.Debug("tool call allowed", "component", "tools", "tool", call.Name,
 			"command", verdict.Command, "rule", verdict.Rule, "source", "policy")
 		return e.executeTool(s, call, turn.speaker)
 	}
+}
+
+// auditPreApproved puts a pre-approved run on the bus (#162, ADR 0053).
+//
+// This is the price of the feature and the reason it is acceptable: a command
+// that runs because of a rule the user once agreed to is not asked about, so
+// it must be *said* — in the activity feed, naming the rule that let it
+// through, at the moment it happens. Nothing Jarvix does behind a standing
+// grant is ever silent.
+//
+// It fires for user-granted patterns only. A shipped read-only allow pattern
+// (`ls`, `git status`) is not a grant anybody made and has never produced a
+// row; adding one now would bury the rows that matter under the ones that
+// never did.
+func (e *Engine) auditPreApproved(s *sess, verdict tools.Verdict) {
+	if !verdict.PreApproved {
+		return
+	}
+	e.log.Info("tool call pre-approved", "component", "tools", "tool", verdict.Tool,
+		"command", verdict.Command, "rule", verdict.Rule, "pattern", verdict.Pattern,
+		"source", "remembered rule")
+	e.publish(Event{Type: "tool.pre_approved", Data: map[string]any{
+		"session_id": s.id, "tool": verdict.Tool, "command": verdict.Command,
+		"rule": verdict.Rule, "pattern": verdict.Pattern,
+		"scope": string(e.grantScope(verdict.Pattern)),
+	}})
+}
+
+// grantScope reports whether pattern is a conversation-scoped grant or a
+// configured one, so the audit row can say which — "for this conversation"
+// and "until you revoke it" are different promises and the row must not blur
+// them.
+func (e *Engine) grantScope(pattern string) tools.RememberScope {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, g := range e.grants {
+		if g == pattern {
+			return tools.RememberConversation
+		}
+	}
+	return tools.RememberAlways
+}
+
+// rememberOffer derives the standing-grant offer for a verdict, or a refusal
+// when there is no gate to derive it from (tests wire an engine without a
+// registry). A missing gate means no offer: the one thing this must never do
+// is invent a rule for a policy it cannot see.
+func (e *Engine) rememberOffer(verdict tools.Verdict) tools.RememberOffer {
+	if e.tools == nil {
+		return tools.RememberOffer{Reason: "there is no permission policy to add a rule to."}
+	}
+	policy := e.tools.Policy()
+	if policy == nil {
+		return tools.RememberOffer{Reason: "there is no permission policy to add a rule to."}
+	}
+	return policy.RememberOfferFor(verdict)
+}
+
+// rememberEventData renders an offer for the wire. Present keys are the fact:
+// remember_pattern is set exactly when the control should appear, and
+// remember_reason exactly when it should not.
+func rememberEventData(offer tools.RememberOffer) map[string]any {
+	if offer.Offered {
+		return map[string]any{"remember_pattern": offer.Pattern, "remember_segment": offer.Segment}
+	}
+	if offer.Reason == "" {
+		return nil
+	}
+	return map[string]any{"remember_reason": offer.Reason}
 }
 
 // executeTool runs an approved call through the registry, bracketed by the
@@ -293,6 +497,7 @@ func (e *Engine) confirmAndExecute(s *sess, call ai.ToolCall, verdict tools.Verd
 		rule:         verdict.Rule,
 		key:          approvalKey(call, verdict),
 		rememberable: tools.RememberableApproval(call.Name),
+		remember:     e.rememberOffer(verdict),
 		resume:       StateThinking,
 		speaker:      turn.speaker,
 	})
@@ -336,6 +541,11 @@ type confirmRequest struct {
 	// rememberable is false for a tool whose approval must never be reused,
 	// however remember_for_conversation is configured (tools.RememberableApproval).
 	rememberable bool
+	// remember is the standing-grant offer for this question (#162), derived
+	// from the verdict by whichever caller has one. The zero value is a
+	// refusal with no reason, which renders as "no remember control" — the
+	// safe default for any future caller that forgets to fill it in.
+	remember tools.RememberOffer
 	// resume is the state to return to once answered.
 	resume State
 	// speaker is the turn's streaming speaker when it has one. The question is
@@ -383,6 +593,16 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		e.mu.Unlock()
 		e.log.Info("tool call allowed", "component", "tools", "tool", req.tool,
 			"command", req.command, "rule", req.rule, "source", "remembered approval")
+		// remember_for_conversation's fast path was the one place Jarvix
+		// re-ran an approved command with nothing on the bus to say so
+		// (#162's audit criterion applies to it too — it is the same promise,
+		// and it was already being broken before a single rule existed).
+		// Published outside the lock, like every other event on this path.
+		e.publish(Event{Type: "tool.pre_approved", Data: map[string]any{
+			"session_id": s.id, "tool": req.tool, "command": req.command,
+			"rule":  fmt.Sprintf("you approved %q earlier in this conversation", req.command),
+			"scope": string(tools.RememberConversation),
+		}})
 		return confirmApproved, true
 	}
 	if err := e.setStateLocked(StateAwaitingConfirmation); err != nil {
@@ -418,6 +638,7 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		key:        req.key,
 		summary:    req.summary,
 		rule:       req.rule,
+		remember:   req.remember,
 		timeout:    timeout,
 		resume:     req.resume,
 		outcome:    make(chan bool, 1),
@@ -426,11 +647,21 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 	e.pending = p
 	// The exact command goes on the bus before anything is spoken: the
 	// overlay must show what the user is confirming, verbatim.
-	e.publish(Event{Type: "tool.confirmation_required", Data: map[string]any{
+	confirmData := map[string]any{
 		"session_id": s.id, "tool": req.tool, "command": req.command,
 		"summary": req.summary, "rule": req.rule,
 		"timeout_sec": int(timeout.Seconds()),
-	}})
+	}
+	// The remember offer rides the same event as the question (#162), so the
+	// card can show the exact rule on the button before the user commits and
+	// never has to ask a second round trip what it is about to write. The
+	// refusal rides it too: a card that simply omitted the control would
+	// leave the user wondering, and "one short sentence saying why" is an
+	// acceptance criterion, not a nicety.
+	for k, v := range rememberEventData(req.remember) {
+		confirmData[k] = v
+	}
+	e.publish(Event{Type: "tool.confirmation_required", Data: confirmData})
 	e.mu.Unlock()
 	e.log.Info("tool confirmation required", "component", "tools", "tool", req.tool,
 		"command", req.command, "rule", req.rule)
@@ -663,6 +894,11 @@ type PendingConfirmationInfo struct {
 	// not started yet).
 	Timeout  time.Duration
 	Deadline time.Time
+	// Remember is the standing-grant offer (#162) — the same one the
+	// confirmation_required event carried, so a window that opened mid-wait
+	// renders the identical third button rather than a differently-worded
+	// one derived from what it can see.
+	Remember tools.RememberOffer
 }
 
 // PendingConfirmation reports the confirmation the session is waiting on, if
@@ -683,6 +919,7 @@ func (e *Engine) PendingConfirmation() (PendingConfirmationInfo, bool) {
 		Rule:     p.rule,
 		Timeout:  p.timeout,
 		Deadline: p.deadline,
+		Remember: p.remember,
 	}, true
 }
 
