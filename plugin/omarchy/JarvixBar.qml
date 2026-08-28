@@ -48,6 +48,17 @@ Panel {
   // states describe a turn, this describes the microphone between turns.
   property string wakeState: "off"
 
+  // The active focus thread (#123, the chip deferred from PR #132): its name,
+  // and whether a timeboxed focus session is live. Kept current by
+  // focus.changed alone — the event carries active id, name, and the session
+  // flag on every change precisely so no round trip is needed — and seeded by
+  // one focus.list on connect, because a bar that loads mid-thread must not
+  // stay blank until the next switch. Display is a static text chip beside
+  // the icon: no timer, no countdown, no animation (the #127 anti-goals hold
+  // here too; the Focus tab carries the detail).
+  property string activeThreadName: ""
+  property bool focusSessionLive: false
+
   // Live detail for the tooltip (issue #70): which tool is running (and its
   // long-form label for a slow one, e.g. "Consulting claude…"), the question
   // a pending confirmation is asking, and when the current phase began. All
@@ -147,6 +158,17 @@ Panel {
         try { frame = JSON.parse(line) } catch (e) { return }
         if (frame.method) {
           root.handleEvent(frame.method, frame.params || {})
+        } else if (frame.id === 800 && frame.result) {
+          // Answer to the focus.list sent on connect (id 800, this file's
+          // slot in the 800-849 range): the seed for the active-thread chip.
+          // The daemon lists the active thread first and flags it, so the
+          // first flagged row is the whole answer.
+          root.activeThreadName = ""
+          root.focusSessionLive = !!frame.result.session
+          var threads = frame.result.threads || []
+          for (var i = 0; i < threads.length; i++) {
+            if (threads[i].active) { root.activeThreadName = String(threads[i].name || ""); break }
+          }
         } else if (frame.result && frame.result.state !== undefined) {
           // Answer to the status.get sent on connect: the daemon may already
           // be mid-session — and already listening in the background — when
@@ -163,6 +185,7 @@ Panel {
       root.socketReady = connected
       if (connected) {
         write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "status.get" }) + "\n")
+        write(JSON.stringify({ jsonrpc: "2.0", id: 800, method: "focus.list" }) + "\n")
       } else {
         // Not "unknown" — "not running", which is what the icon says. The
         // held error goes with the connection that reported it, and so does
@@ -178,6 +201,10 @@ Panel {
         root.toolDetail = ""
         root.confirmQuestion = ""
         root.elapsedSec = 0
+        // The thread chip too: with no daemon the active thread is
+        // unknowable, and a stale name is worse than none.
+        root.activeThreadName = ""
+        root.focusSessionLive = false
         reconnect.start()
       }
     }
@@ -228,6 +255,12 @@ Panel {
       break
     case "wake.changed":
       wakeState = String(params.state || "off")
+      break
+    case "focus.changed":
+      // Carried on every focus event (docs/ipc.md): active id, its name,
+      // and the session flag — the chip updates from the event alone.
+      activeThreadName = String(params.active_name || "")
+      focusSessionLive = !!params.session
       break
     }
   }
@@ -299,7 +332,11 @@ Panel {
   }
 
   // --- bar icon -----------------------------------------------------------
+  // The widget is the icon plus, while a focus thread is active, the static
+  // thread chip beside it; the widget's width follows so the bar lays its
+  // neighbours out correctly either way.
   implicitWidth: button.implicitWidth
+    + (threadChip.visible ? threadChip.implicitWidth + Style.space(4) : 0)
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
@@ -310,21 +347,28 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  // The pulse is the only animation, and it runs on exactly the states the
-  // overlay pulses on, so the two surfaces never disagree about when Jarvix
-  // looks busy. alwaysRunToEnd lets the loop finish on full opacity rather
-  // than freezing the icon half-faded when the state changes mid-fade.
-  SequentialAnimation on opacity {
-    running: root.status.pulse
-    loops: Animation.Infinite
-    alwaysRunToEnd: true
-    NumberAnimation { from: 1.0; to: 0.45; duration: 620; easing.type: Easing.InOutSine }
-    NumberAnimation { from: 0.45; to: 1.0; duration: 620; easing.type: Easing.InOutSine }
-  }
-
   BarIconButton {
     id: button
-    anchors.fill: parent
+    anchors.left: parent.left
+    anchors.top: parent.top
+    anchors.bottom: parent.bottom
+    width: button.implicitWidth
+
+    // The pulse is the only animation, and it runs on exactly the states the
+    // overlay pulses on, so the two surfaces never disagree about when Jarvix
+    // looks busy. alwaysRunToEnd lets the loop finish on full opacity rather
+    // than freezing the icon half-faded when the state changes mid-fade.
+    // Scoped to the icon — it used to fade the whole widget, which was the
+    // same thing when the widget WAS the icon; the thread chip beside it is
+    // a static surface (#123/#127's no-animation rule) and must not breathe.
+    SequentialAnimation on opacity {
+      running: root.status.pulse
+      loops: Animation.Infinite
+      alwaysRunToEnd: true
+      NumberAnimation { from: 1.0; to: 0.45; duration: 620; easing.type: Easing.InOutSine }
+      NumberAnimation { from: 0.45; to: 1.0; duration: 620; easing.type: Easing.InOutSine }
+    }
+
     bar: root.bar
     text: root.status.glyph
     // The theme's urgent colour, for the two states the user must act on.
@@ -344,6 +388,57 @@ Panel {
       if (buttonCode === Qt.RightButton) root.toggle()
       else if (buttonCode === Qt.MiddleButton) root.runCommand("jarvix new")
       else root.runCommand("omarchy-shell jarvix toggleWindow")
+    }
+  }
+
+  // The active-thread chip (#123's deferred bar surface): the current
+  // thread's name, in text, always in peripheral vision — "which front am I
+  // on?" answered without opening anything. Static by rule: no timer, no
+  // countdown, no animation; the one extra mark is a small filled dot while
+  // a timeboxed focus session is live (with its accessible text carrying
+  // the same fact, never colour alone). Absent entirely when no thread is
+  // active or no daemon is running.
+  Rectangle {
+    id: threadChip
+    visible: root.socketReady && root.activeThreadName !== ""
+    anchors.left: button.right
+    anchors.leftMargin: Style.space(4)
+    anchors.verticalCenter: parent.verticalCenter
+    implicitWidth: chipRow.implicitWidth + Style.space(12)
+    implicitHeight: chipLabel.implicitHeight + Style.space(6)
+    radius: Style.cornerRadius
+    color: Util.alpha(root.foreground, 0.08)
+    border.color: Util.alpha(root.foreground, 0.25)
+    border.width: 1
+
+    Accessible.role: Accessible.StaticText
+    Accessible.name: "Focus thread: " + root.activeThreadName
+      + (root.focusSessionLive ? " (focus session running)" : "")
+
+    Row {
+      id: chipRow
+      anchors.centerIn: parent
+      spacing: Style.space(5)
+
+      Rectangle {
+        visible: root.focusSessionLive
+        width: Style.space(6)
+        height: width
+        radius: width / 2
+        anchors.verticalCenter: parent.verticalCenter
+        color: root.foreground
+      }
+
+      Text {
+        id: chipLabel
+        text: root.activeThreadName
+        anchors.verticalCenter: parent.verticalCenter
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+        width: Math.min(implicitWidth, Style.space(120))
+      }
     }
   }
 
