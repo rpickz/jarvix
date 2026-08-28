@@ -44,7 +44,7 @@ func TestShortPromptIsSpokenByDefault(t *testing.T) {
 	// The deadline event is published only after the question has been asked
 	// aloud, so once it arrives the prompt's synthesis request is on record.
 	h.waitFor(t, "tool.confirmation_deadline")
-	if got, want := h.tts.LastRequest.Text, "May I run a shell command? The details are on screen."; got != want {
+	if got, want := h.tts.Last().Text, "May I run a shell command? The details are on screen."; got != want {
 		t.Errorf("spoken prompt = %q, want the short default %q", got, want)
 	}
 
@@ -67,12 +67,12 @@ func TestVerbatimPromptWhenSpeakDetailsIsOn(t *testing.T) {
 	required := h.waitFor(t, "tool.confirmation_required")
 	summary, _ := required.Data["summary"].(string)
 	h.waitFor(t, "tool.confirmation_deadline")
-	if got := h.tts.LastRequest.Text; got != summary {
+	if got := h.tts.Last().Text; got != summary {
 		t.Errorf("spoken prompt = %q, want the full summary %q", got, summary)
 	}
-	if !strings.Contains(h.tts.LastRequest.Text, "rm -rf ./build") {
+	if !strings.Contains(h.tts.Last().Text, "rm -rf ./build") {
 		t.Errorf("spoken prompt %q does not quote the command; speak_details must restore the verbatim read-out",
-			h.tts.LastRequest.Text)
+			h.tts.Last().Text)
 	}
 
 	_ = h.engine.Confirm(false)

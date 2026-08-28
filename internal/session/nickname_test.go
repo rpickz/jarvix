@@ -102,8 +102,8 @@ func TestNicknamePhraseAssignsWithoutAProviderCall(t *testing.T) {
 	if ev.Data["acknowledgement"] != namer.spoken {
 		t.Errorf("acknowledgement = %v", ev.Data["acknowledgement"])
 	}
-	if h.tts.LastRequest.Text != namer.spoken {
-		t.Errorf("spoken confirmation = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != namer.spoken {
+		t.Errorf("spoken confirmation = %q", h.tts.Last().Text)
 	}
 }
 
@@ -119,8 +119,8 @@ func TestNicknameRefusalIsSpokenAsSorry(t *testing.T) {
 		t.Errorf("status = %v", seen["intent.executed"].Data["status"])
 	}
 	want := `Sorry, "mute" is already the built-in intent "volume.mute"; choose a different name.`
-	if h.tts.LastRequest.Text != want {
-		t.Errorf("spoken = %q, want %q", h.tts.LastRequest.Text, want)
+	if h.tts.Last().Text != want {
+		t.Errorf("spoken = %q, want %q", h.tts.Last().Text, want)
 	}
 }
 
@@ -141,8 +141,8 @@ func TestWindowNamesPhraseListsWithoutAProviderCall(t *testing.T) {
 	if ev := seen["intent.executed"]; ev.Data["intent"] != intent.WindowNamesIntentName {
 		t.Errorf("event = %v", ev.Data)
 	}
-	if h.tts.LastRequest.Text != namer.listSpoken {
-		t.Errorf("spoken = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != namer.listSpoken {
+		t.Errorf("spoken = %q", h.tts.Last().Text)
 	}
 }
 
@@ -151,8 +151,8 @@ func TestWindowNamesPhraseListsWithoutAProviderCall(t *testing.T) {
 func TestNicknamesWithoutTheSeamRefuseHonestly(t *testing.T) {
 	h := newNicknameHarness(t, nil)
 	sayRoutine(t, h, "call this window builds")
-	if h.tts.LastRequest.Text != "Sorry, naming windows is not available on this daemon." {
-		t.Errorf("spoken = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Sorry, naming windows is not available on this daemon." {
+		t.Errorf("spoken = %q", h.tts.Last().Text)
 	}
 	if len(h.provider.Requests) != 0 {
 		t.Fatalf("the provider was consulted for a claimed phrase")

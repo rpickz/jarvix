@@ -176,8 +176,8 @@ func TestScriptPhraseAsksBeforeRunningByDefault(t *testing.T) {
 	if ev.Data["source"] != "script" || ev.Data["status"] != "ok" {
 		t.Errorf("event = %v", ev.Data)
 	}
-	if h.tts.LastRequest.Text != "Backup notes finished." {
-		t.Errorf("spoken line = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Backup notes finished." {
+		t.Errorf("spoken line = %q", h.tts.Last().Text)
 	}
 }
 
@@ -299,8 +299,8 @@ func TestScriptSilentSuccessSpeaksNothingButIsRecorded(t *testing.T) {
 
 	seen := sayScript(t, h, "backup my notes")
 
-	if h.tts.LastRequest.Text != "" {
-		t.Errorf("a silent success spoke %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "" {
+		t.Errorf("a silent success spoke %q", h.tts.Last().Text)
 	}
 	ev := seen["intent.executed"]
 	if ev.Data["status"] != "ok" || ev.Data["acknowledgement"] != "" {
@@ -335,7 +335,7 @@ func TestScriptFailureIsSpoken(t *testing.T) {
 	if ev.Data["acknowledgement"] != "Sorry, backup notes failed — exit 2: disk full." {
 		t.Errorf("acknowledgement = %v", ev.Data["acknowledgement"])
 	}
-	if h.tts.LastRequest.Text == "" {
+	if h.tts.Last().Text == "" {
 		t.Error("a failed script was not spoken")
 	}
 }

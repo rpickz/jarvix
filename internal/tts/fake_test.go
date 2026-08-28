@@ -28,8 +28,8 @@ func TestFakeStreamsScriptedChunks(t *testing.T) {
 	if len(chunks) != 2 || string(chunks[0].PCM) != "ab" || string(chunks[1].PCM) != "cd" {
 		t.Errorf("chunks = %+v", chunks)
 	}
-	if f.LastRequest.Text != "hello" {
-		t.Errorf("LastRequest = %+v", f.LastRequest)
+	if f.Last().Text != "hello" {
+		t.Errorf("LastRequest = %+v", f.Last())
 	}
 	if f.Speaks() != 1 {
 		t.Errorf("speaks = %d", f.Speaks())

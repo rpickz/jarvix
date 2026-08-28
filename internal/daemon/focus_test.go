@@ -211,8 +211,8 @@ func TestFocusFiringSpeaksThroughTheSessionPath(t *testing.T) {
 	}
 	// fireFocus blocks until the session ended, and the engine speaks before
 	// it finishes — so the read is ordered, not polled.
-	if !strings.HasPrefix(h.tts.LastRequest.Text, "Deploy:") {
-		t.Errorf("spoken check-in = %q", h.tts.LastRequest.Text)
+	if !strings.HasPrefix(h.tts.Last().Text, "Deploy:") {
+		t.Errorf("spoken check-in = %q", h.tts.Last().Text)
 	}
 }
 

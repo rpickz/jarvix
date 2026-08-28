@@ -131,8 +131,8 @@ func TestRoutinePhraseRunsWithoutAProviderCall(t *testing.T) {
 	if ev.Data["acknowledgement"] != "Morning setup: all five apps placed." {
 		t.Errorf("acknowledgement = %v", ev.Data["acknowledgement"])
 	}
-	if h.tts.LastRequest.Text != "Morning setup: all five apps placed." {
-		t.Errorf("spoken summary = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Morning setup: all five apps placed." {
+		t.Errorf("spoken summary = %q", h.tts.Last().Text)
 	}
 }
 

@@ -88,8 +88,8 @@ func TestIntentHitMakesNoProviderCall(t *testing.T) {
 		t.Errorf("a built-in intent must never reach a shell: %v", h.runner.Shell())
 	}
 	// And it was spoken, so the user knows it landed.
-	if h.tts.LastRequest.Text != "Volume thirty." {
-		t.Errorf("spoken acknowledgement = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Volume thirty." {
+		t.Errorf("spoken acknowledgement = %q", h.tts.Last().Text)
 	}
 }
 
@@ -337,8 +337,8 @@ func TestIntentCommandFailureSpeaksAndRecovers(t *testing.T) {
 	if _, isError := seen["error"]; isError {
 		t.Error("a failing intent must not fail the session")
 	}
-	if !strings.Contains(h.tts.LastRequest.Text, "wpctl is not installed") {
-		t.Errorf("the failure was not spoken: %q", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "wpctl is not installed") {
+		t.Errorf("the failure was not spoken: %q", h.tts.Last().Text)
 	}
 	if state, _ := h.engine.State(); state != StateIdle {
 		t.Errorf("state = %s, want idle", state)
@@ -404,8 +404,8 @@ func TestRefusedDesktopDispatchIsSpokenNotSilent(t *testing.T) {
 	if ev.Data["acknowledgement"] == "Workspace four" {
 		t.Error("a refused dispatch was acknowledged as though it had worked")
 	}
-	if !strings.Contains(h.tts.LastRequest.Text, "workspace not found") {
-		t.Errorf("the refusal was not spoken: %q", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "workspace not found") {
+		t.Errorf("the refusal was not spoken: %q", h.tts.Last().Text)
 	}
 	if _, isError := seen["error"]; isError {
 		t.Error("a refused dispatch must not fail the session")
@@ -433,8 +433,8 @@ func TestDesktopIntentWithoutACompositorSaysSo(t *testing.T) {
 	if ev := seen["intent.executed"]; ev.Data["status"] != "failed" {
 		t.Fatalf("status = %v, want failed with no compositor", ev.Data["status"])
 	}
-	if !strings.Contains(h.tts.LastRequest.Text, "window manager") {
-		t.Errorf("spoken failure = %q, want it to name what is missing", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "window manager") {
+		t.Errorf("spoken failure = %q, want it to name what is missing", h.tts.Last().Text)
 	}
 }
 

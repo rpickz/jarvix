@@ -117,8 +117,8 @@ func TestCapturePhraseSavesWithoutAProviderCall(t *testing.T) {
 	if ev.Data["acknowledgement"] != capturer.commitSpoken {
 		t.Errorf("acknowledgement = %v", ev.Data["acknowledgement"])
 	}
-	if h.tts.LastRequest.Text != capturer.commitSpoken {
-		t.Errorf("spoken confirmation = %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != capturer.commitSpoken {
+		t.Errorf("spoken confirmation = %q", h.tts.Last().Text)
 	}
 }
 

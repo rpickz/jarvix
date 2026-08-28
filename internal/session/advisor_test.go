@@ -66,8 +66,8 @@ func TestAdvisorAnswerBecomesTheSpokenTurn(t *testing.T) {
 	if !strings.Contains(result, "build once, publish per target") {
 		t.Errorf("advisor output did not reach the model: %q", result)
 	}
-	if h.tts.LastRequest.Text == "" || !strings.Contains(h.tts.LastRequest.Text, "publish per target") {
-		t.Errorf("the answer was not spoken: %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text == "" || !strings.Contains(h.tts.Last().Text, "publish per target") {
+		t.Errorf("the answer was not spoken: %q", h.tts.Last().Text)
 	}
 }
 
@@ -124,8 +124,8 @@ func TestMissingAdvisorEndsTheSessionCleanly(t *testing.T) {
 	if !strings.Contains(result, "not installed") || !strings.Contains(result, "one short sentence") {
 		t.Errorf("model should be asked for a one-sentence failure: %q", result)
 	}
-	if !strings.Contains(h.tts.LastRequest.Text, "isn't installed") {
-		t.Errorf("the failure was not spoken: %q", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "isn't installed") {
+		t.Errorf("the failure was not spoken: %q", h.tts.Last().Text)
 	}
 }
 

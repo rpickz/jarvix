@@ -225,8 +225,8 @@ func TestTeachIntentGoesToTheSeamNotTheModel(t *testing.T) {
 	if ev.Data["intent"] != "vocabulary.teach" || ev.Data["acknowledgement"] != teacher.spoken {
 		t.Errorf("intent.executed = %v", ev.Data)
 	}
-	if !strings.Contains(h.tts.LastRequest.Text, "quid means pounds") {
-		t.Errorf("the confirmation was not spoken: %+v", h.tts.LastRequest)
+	if !strings.Contains(h.tts.Last().Text, "quid means pounds") {
+		t.Errorf("the confirmation was not spoken: %+v", h.tts.Last())
 	}
 }
 

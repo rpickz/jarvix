@@ -177,8 +177,8 @@ func TestVoiceSessionFullLifecycle(t *testing.T) {
 	}
 	h.waitIdle(t)
 
-	if h.tts.LastRequest.Text != "Recursion is a function calling itself." {
-		t.Errorf("tts got %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Recursion is a function calling itself." {
+		t.Errorf("tts got %q", h.tts.Last().Text)
 	}
 	if _, plays := h.player.Played(); plays != 1 {
 		t.Errorf("player plays = %d", plays)

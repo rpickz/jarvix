@@ -52,8 +52,8 @@ func TestReplaySpeaksRecordedTurnThroughStandardPipeline(t *testing.T) {
 	if h.tts.Speaks() <= speaksBefore {
 		t.Error("replay never reached the synthesizer")
 	}
-	if h.tts.LastRequest.Text != "Recursion is a function calling itself." {
-		t.Errorf("tts got %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "Recursion is a function calling itself." {
+		t.Errorf("tts got %q", h.tts.Last().Text)
 	}
 	// The conversation record is untouched: a replay is not a new turn.
 	after := h.engine.Conversation()
@@ -81,8 +81,8 @@ func TestReplayDefaultsToNewestAssistantTurn(t *testing.T) {
 	}
 	h.collectUntil(t, "session.finished")
 	h.waitIdle(t)
-	if h.tts.LastRequest.Text != "A second answer entirely." {
-		t.Errorf("tts got %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "A second answer entirely." {
+		t.Errorf("tts got %q", h.tts.Last().Text)
 	}
 }
 
@@ -190,8 +190,8 @@ func TestSecondReplaySupersedesFirst(t *testing.T) {
 	}
 	// The spoken form of a bare line gains its terminal period from the same
 	// normalizer live speech uses — the standard-pipeline promise.
-	if h.tts.LastRequest.Text != "explain recursion." {
-		t.Errorf("tts got %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "explain recursion." {
+		t.Errorf("tts got %q", h.tts.Last().Text)
 	}
 	if len(h.engine.Conversation()) != 2 {
 		t.Error("replays changed the record")
@@ -266,8 +266,8 @@ func TestReplaySpeaksInterruptedTurnAsRecorded(t *testing.T) {
 	}
 	h.collectUntil(t, "session.finished")
 	h.waitIdle(t)
-	if !strings.Contains(h.tts.LastRequest.Text, "interrupted") {
-		t.Errorf("the annotation was not spoken; last tts text %q", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "interrupted") {
+		t.Errorf("the annotation was not spoken; last tts text %q", h.tts.Last().Text)
 	}
 }
 
@@ -293,11 +293,11 @@ func TestReplayConfirmationTurnSpeaksSummaryOnly(t *testing.T) {
 	}
 	h.collectUntil(t, "session.finished")
 	h.waitIdle(t)
-	if !strings.Contains(h.tts.LastRequest.Text, "scratch directory") {
-		t.Errorf("summary was not spoken: %q", h.tts.LastRequest.Text)
+	if !strings.Contains(h.tts.Last().Text, "scratch directory") {
+		t.Errorf("summary was not spoken: %q", h.tts.Last().Text)
 	}
-	if strings.Contains(h.tts.LastRequest.Text, "rm -rf") {
-		t.Errorf("the verbatim command must not be spoken: %q", h.tts.LastRequest.Text)
+	if strings.Contains(h.tts.Last().Text, "rm -rf") {
+		t.Errorf("the verbatim command must not be spoken: %q", h.tts.Last().Text)
 	}
 }
 
@@ -350,7 +350,7 @@ func TestReplayWorksOnAdoptedConversation(t *testing.T) {
 	}
 	h.collectUntil(t, "session.finished")
 	h.waitIdle(t)
-	if h.tts.LastRequest.Text != "An archived answer, restored whole." {
-		t.Errorf("tts got %q", h.tts.LastRequest.Text)
+	if h.tts.Last().Text != "An archived answer, restored whole." {
+		t.Errorf("tts got %q", h.tts.Last().Text)
 	}
 }
