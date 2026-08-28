@@ -66,11 +66,18 @@ type Window struct {
 	PID int
 	// X and Y are the window's top-left corner in global pixels, and Width
 	// and Height its size. They exist for layout capture (#62), which must
-	// record a floating window's geometry to reproduce it; tiled geometry
-	// belongs to the layout and is carried only for completeness. All four
-	// are zero on a compositor that does not report geometry.
+	// record a floating window's geometry to reproduce it, and for the window
+	// overlays (#127), which pin a chip to the top-right corner; tiled
+	// geometry belongs to the layout and is carried for those readers. All
+	// four are zero on a compositor that does not report geometry.
 	X, Y          int
 	Width, Height int
+	// Fullscreen marks a window covering its whole output — or maximised
+	// over the tiling area, which covers its siblings just as completely.
+	// Read for the window overlays (#127): an overlay must never float over
+	// a window that is itself covering the window it annotates, so a
+	// workspace with a fullscreen window gets no overlays at all.
+	Fullscreen bool
 }
 
 // Describe renders a window for humans: "Firefox — GitHub". The em dash is
@@ -700,6 +707,12 @@ type hyprClient struct {
 	// compositor that omits them still parses.
 	At   []int `json:"at"`
 	Size []int `json:"size"`
+	// Fullscreen has been both a JSON bool and a JSON number across Hyprland
+	// versions (a plain flag originally, a mode bitfield — 1 maximised, 2
+	// fullscreen — since the fullscreen-state rework), so it gets the same
+	// tolerant decoding as stableId: either encoding, any non-zero meaning
+	// "this window is covering the others".
+	Fullscreen flexBool `json:"fullscreen"`
 }
 
 // flexString decodes a field Hyprland has emitted as both a JSON string and a
@@ -722,6 +735,32 @@ func (f *flexString) UnmarshalJSON(b []byte) error {
 		*f = flexString(v)
 	default:
 		*f = flexString(s)
+	}
+	return nil
+}
+
+// flexBool decodes a field Hyprland has emitted as both a JSON bool and a
+// JSON number across versions (fullscreen). The number form is a mode — 0
+// none, 1 maximised, 2 fullscreen — and every non-zero mode means the window
+// is drawn over its siblings, which is the only fact this package models.
+// Refusing to decode it would fail the whole inventory, the flexString trade
+// again.
+type flexBool bool
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (f *flexBool) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	switch s {
+	case "", "null", "false":
+		*f = false
+	case "true":
+		*f = true
+	default:
+		var n float64
+		if err := json.Unmarshal(b, &n); err != nil {
+			return err
+		}
+		*f = n != 0
 	}
 	return nil
 }
@@ -754,6 +793,7 @@ func parseClients(out string) ([]Window, error) {
 			Focused:       c.FocusHistoryID == 0,
 			StableID:      string(c.StableID),
 			PID:           c.PID,
+			Fullscreen:    bool(c.Fullscreen),
 		}
 		if len(c.At) == 2 {
 			w.X, w.Y = c.At[0], c.At[1]
