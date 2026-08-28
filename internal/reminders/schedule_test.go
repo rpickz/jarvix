@@ -480,3 +480,30 @@ func TestBoundaryStormNeverDoublesADelivery(t *testing.T) {
 		t.Errorf("history = %d entries, want %d", len(v.History), total)
 	}
 }
+
+// TestTheLoopStaysArmedWithNothingScheduled pins the invariant this scheduler
+// shipped without: an empty store is a wait, never a park (ADR 0049, ported
+// from the focus sibling in #152 — the two schedulers were written in
+// parallel and this one missed the cure).
+//
+// The assertion is deliberately about *arming*, not about firing. A parked
+// loop drops `<-fire` from its select, so a tick handed to it is never taken
+// — the harness's fire() is a rendezvous and simply hangs. Nothing is due
+// here and nothing should be delivered; the whole point is that the loop is
+// still listening, which is what lets a hand-edited reminders.toml be
+// noticed by the one reader that has no other way to hear about it.
+func TestTheLoopStaysArmedWithNothingScheduled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reminders.toml")
+	h := startSchedule(t, path)
+
+	// No reminders at all: the schedule is empty on entry and stays empty.
+	// Both ticks must be received — the first proves the entry pass armed,
+	// the second that an empty pass arms again rather than parking.
+	h.timers.fire(t)
+	h.timers.fire(t)
+
+	h.settle(t)
+	if n := h.attempts.Load(); n != 0 {
+		t.Errorf("delivery attempts = %d, want 0 — an empty store must arm, never deliver", n)
+	}
+}
