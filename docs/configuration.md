@@ -882,7 +882,18 @@ running. To make your own intents instant, either allow that identity —
 — or allow-list just the commands you use (`shell_allow = ["hyprlock"]`).
 
 A malformed entry fails validation at startup, naming the entry:
-`intents.custom[1]: match "…" has no run command`.
+`intents.custom[1]: match "…" has no run command`. So does a phrase that is
+already taken — by a built-in, by a routine or script trigger, or by another
+custom intent — and the message names whichever got there first.
+
+**Editing these in the window.** Since #164 the Automations tab has a *Spoken
+commands* section: New, and clicking a row opens it. The phrase is checked by
+the real intent router on every keystroke that commits, so a taken phrase names
+its owner under the phrase field before you save, and the grammar recompiles on
+the standard reload — the phrase works immediately, with no restart. The
+assistant cannot reach this family: a custom intent runs a shell command you
+never see again once the phrase is spoken
+([ADR 0054](adr/0054-the-last-config-file-holdouts.md)).
 
 ## Routines (`[[routines]]`)
 
@@ -1382,6 +1393,14 @@ against your routines, scripts, and custom intents at load. The recaps are
 templated daemon-side from the thread's own record, never generated: fast,
 predictable, and only ever wrong if the record is.
 
+Since #164 the Focus tab also has a **form**: New thread, and Edit on any row.
+It carries a thread's name, its anchors, its check-in interval and its recap
+mode — the last of which no spoken phrase can set — and saves the whole draft
+in one write, so a thread is never left half-configured
+([ADR 0054](adr/0054-the-last-config-file-holdouts.md)). An edit leaves the
+anchors alone unless you ask it not to: renaming a thread must not silently
+re-point it at whatever is in front of the window now.
+
 What the design guarantees:
 
 - **You own the store.** Threads, anchors, parked thoughts, and the live
@@ -1414,8 +1433,9 @@ I on X" with a model-composed summary of what is visible there instead: at
 most three short sentences, present state first, then the next step. It
 rides two consents (the `[context] window` opt-in gates it entirely, and a
 browser or any other non-terminal anchor is never silently read to the
-model), a per-thread override in `focus.toml` (`recap = "always"` or
-`"never"`), and a hard 3-second deadline — capture gone, model late, or the
+model), a per-thread override (`recap = "always"` or
+`"never"` — set in the Focus tab's thread form since #164, and a hand edit of
+`focus.toml` before that), and a hard 3-second deadline — capture gone, model late, or the
 answer off contract all fall back to the thread's own record behind an
 honest admission, and a late summary is dropped rather than spoken over
 whatever you moved on to. The captured text and the summary are transient:
@@ -1562,7 +1582,13 @@ What the design guarantees:
 
 The Automations tab lists the pending reminders with a Cancel button on each,
 under the routines and scripts; "what fired today?" answers from the retained
-history. There are no `[reminders]` settings — there is no policy to carry.
+history. Since #164 it has a **New reminder** form as well, for when typing is
+easier than talking: the words and the time, through the *same* parser speech
+uses, with the moment it resolves to shown before you save — "Fires at nine
+tomorrow morning" — so an ambiguous "at three" is settled on screen rather than
+in the morning ([ADR 0054](adr/0054-the-last-config-file-holdouts.md)). A typed
+reminder is a spoken one in every other respect. There are no `[reminders]`
+settings — there is no policy to carry.
 
 ## Vocabulary (`[vocabulary]`)
 
@@ -1842,10 +1868,34 @@ jarvix approvals forget docker ps      # applies immediately, no restart
 running `jarvix config reload`. Asking "what have I pre-approved?" answers by
 voice. The assistant cannot add, change, or remove a rule: `[tools.policy]` is
 structurally unreachable from its configuration tools
-([ADR 0036](adr/0036-assistant-self-configuration.md)), and only a human click
-or spoken yes on a card writes one. Full reasoning, including the refusal
-matrix and the prompt-injection argument, is in
+([ADR 0036](adr/0036-assistant-self-configuration.md)). Full reasoning,
+including the refusal matrix and the prompt-injection argument, is in
 [ADR 0053](adr/0053-remembered-approvals.md).
+
+**Editing both lists in the window.** Since #164 the Approvals view shows the
+deny list beside the allow list — a deny rule is the reason something you
+granted still asks — and can edit either
+([ADR 0054](adr/0054-the-last-config-file-holdouts.md)):
+
+- **Adding an allow rule by hand** faces the *same refusal matrix* the
+  confirmation card uses, imported rather than restated, so the two routes
+  cannot disagree about `docker`, `timeout`, or `./deploy.sh`. The refusal is
+  the card's own sentence. Two rules differ because you typed this one: every
+  word must be a command word (a flag is refused, not silently dropped — a rule
+  that stopped before it would be *wider* than the one you wrote), and there is
+  no three-word cap, because a longer prefix is narrower and therefore safer.
+- **Adding a deny rule** faces no matrix at all: a gate that argued with someone
+  making it stricter is a gate people route around. The receipt names any allow
+  rules the new deny now beats.
+- **Removing an allow rule** is immediate and unquestioned.
+- **Removing a deny rule asks first**, with a sentence naming what the rule
+  protected — the commands it refused, that the refusal beat every allow rule
+  including a remembered one, and what those commands will do instead. The deny
+  list is a protection, not a preference.
+
+`jarvix approvals` still has no `add`: the window shows the refusal in words and
+the deny removal as a paragraph to read, and a shell flag would make a standing
+grant scriptable.
 
 ### What the ask sounds like (`[confirmations]`)
 
@@ -1901,7 +1951,14 @@ story is the gate, not a switch:
 - The `[ai]` tables, `[tools.policy]`, `[advisors]`, and `[[intents.custom]]`
   are **not writable by the assistant at all** — not deny-by-default but
   structurally unreachable, so the gate cannot be talked into loosening
-  itself. Those remain hand edits (or, for `[ai]`, the settings screen).
+  itself. Those are edited in the window (the Providers section for `[ai]` and
+  `[advisors]`, the Automations tab for `[[intents.custom]]`, the Approvals
+  view for `[tools.policy]`), or by hand.
+- `[tts.lexicon]` is a third case, and the reason is different: the assistant
+  can already respell a word through the `tts.lexicon` *setting*, which writes
+  the whole table. What it does not get is a second, per-entry route to the
+  same table — two write paths to one table is the duplication the entry
+  registry exists to prevent, so the per-word form is the window's.
 - Every attempt — approved, declined, or refused — lands in the window's
   Activity pane, and entry/setting rows say whether the window, you, or the
   assistant made the change.
@@ -2255,6 +2312,19 @@ fix applies on the next answer after `jarvix config reload` — no restart.
 jarvix config get tts.lexicon
 jarvix config set 'tts.lexicon=Kubernetes=koo ber net eez,k9s=kay nine ess'
 ```
+
+**Editing these in the window.** Since #164 the Settings screen has a
+*Pronunciations* section: New, and clicking a row opens it. Each entry is edited
+on its own, through the generic entry form, so a save rewrites one line and
+leaves every other byte — the comment beside a neighbour, and the comment beside
+the line itself — exactly where it was
+([ADR 0054](adr/0054-the-last-config-file-holdouts.md)).
+
+The form **warns when the written form is an ordinary English word**. The
+lexicon respells every whole word it matches, in every sentence, so respelling
+"read" for a product name changes every "I read your note" too. It is a warning
+and not a refusal — you may well mean it — and it does not fire for the
+technical vocabulary this feature exists for.
 
 ## XDG paths
 

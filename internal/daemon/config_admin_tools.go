@@ -152,7 +152,7 @@ func (a *assistantConfigAdmin) GetEntry(family, name string) (tools.ConfigEntry,
 	if err != nil && !os.IsNotExist(err) {
 		return tools.ConfigEntry{}, err
 	}
-	entry, found, err := config.EntryValue(raw, spec.family, name)
+	entry, found, err := config.EntryValue(raw, spec.family, spec.identity(), name)
 	if err != nil {
 		return tools.ConfigEntry{}, err
 	}

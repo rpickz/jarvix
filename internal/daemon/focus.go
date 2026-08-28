@@ -404,6 +404,41 @@ func (d *Daemon) registerFocusMethods() {
 		return map[string]any{"thread": focusThreadID(th), "spoken": spoken}, nil
 	})
 
+	// focus.save is the Focus tab's create/edit FORM (#164): the whole draft in
+	// one request, applied in one write. focus.create stays as it is — it is the
+	// voice path's verb and the CLI's — and this is not a second write path but
+	// the same store's own Save, which is the only place a thread's four
+	// settings can land together without a moment where two of them have landed
+	// and two have not.
+	d.server.Handle("focus.save", func(params json.RawMessage) (any, error) {
+		p := struct {
+			Thread  string `json:"thread"`
+			Name    string `json:"name"`
+			Anchors *int   `json:"anchors"`
+			Remind  int    `json:"remind_every_min"`
+			Recap   string `json:"recap"`
+		}{}
+		if err := unmarshalFocusParams("focus.save", params, &p); err != nil {
+			return nil, err
+		}
+		th, spoken, err := d.focus.Save(context.Background(), p.Thread,
+			focus.ThreadForm{
+				Name: p.Name, AnchorWindows: p.Anchors,
+				RemindEveryMin: p.Remind, Recap: p.Recap,
+			})
+		if err != nil {
+			return nil, &ipc.Error{
+				Code:    ipc.CodeConfigInvalid,
+				Message: err.Error(),
+				Data:    map[string]any{"problems": focusSaveProblems(err)},
+			}
+		}
+		return map[string]any{
+			"thread": focusThreadID(th), "spoken": spoken,
+			"created": strings.TrimSpace(p.Thread) == "",
+		}, nil
+	})
+
 	d.server.Handle("focus.switch", func(params json.RawMessage) (any, error) {
 		p := struct {
 			Thread string `json:"thread"`
@@ -494,6 +529,23 @@ func (d *Daemon) registerFocusMethods() {
 		}
 		return map[string]any{"spoken": spoken}, nil
 	})
+}
+
+// focusSaveProblems keys one form refusal to the field that caused it, the
+// entry pipeline's {field, message} contract reused so the Focus tab pins a
+// problem exactly as every other form does. The matching is on the sentence the
+// service already wrote, never on a second copy of the rule.
+func focusSaveProblems(err error) []entryProblem {
+	msg := err.Error()
+	switch {
+	case errors.Is(err, focus.ErrNoName), strings.Contains(msg, "already exists"):
+		return []entryProblem{{Field: "name", Message: msg}}
+	case strings.Contains(msg, "check-in interval"):
+		return []entryProblem{{Field: "remind_every_min", Message: msg}}
+	case strings.Contains(msg, "is not a mode"):
+		return []entryProblem{{Field: "recap", Message: msg}}
+	}
+	return []entryProblem{{Message: msg}}
 }
 
 // unmarshalFocusParams reads one verb's params with the standard refusal.

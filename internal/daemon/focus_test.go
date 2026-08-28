@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/focus"
+	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/transcript"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -549,5 +551,137 @@ func TestFocusListClassificationRespectsTheWindowConsent(t *testing.T) {
 	}
 	if len(h.provider.Requests) != 0 {
 		t.Error("classification reached the model — it must never involve one")
+	}
+}
+
+// TestFocusSaveMatchesWhatTheVoicePathProduces is #164's focus acceptance
+// criterion: a thread created or edited by form is the same thread the voice
+// path makes, with the settings voice could never reach.
+//
+// "The same" is compared directly — one thread through focus.create plus the
+// spoken remind verb, one through focus.save — rather than against a
+// hand-written expectation, so a divergence in either path fails here.
+func TestFocusSaveMatchesWhatTheVoicePathProduces(t *testing.T) {
+	h := startFocusDaemon(t)
+	client := dialDaemon(t, h.socket)
+
+	// The voice path's thread: created with one anchor, then given a check-in.
+	spoken, _, err := h.d.focus.Create(context.Background(), "the voice one", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.d.focus.RemindThread(spoken.ID, 20); err != nil {
+		t.Fatal(err)
+	}
+
+	// The form's thread: everything in one request, one write.
+	var saved struct {
+		Thread struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"thread"`
+		Spoken  string `json:"spoken"`
+		Created bool   `json:"created"`
+	}
+	if err := client.Call("focus.save", map[string]any{
+		"name": "the typed one", "anchors": 1, "remind_every_min": 20, "recap": "never",
+	}, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !saved.Created || saved.Thread.ID == "" {
+		t.Fatalf("save = %+v", saved)
+	}
+	// The acknowledgement is the voice path's own sentences, not a second set.
+	if !strings.HasPrefix(saved.Spoken, "New thread: the typed one.") ||
+		!strings.Contains(saved.Spoken, "I'll check in on the typed one every twenty minutes.") {
+		t.Errorf("spoken = %q", saved.Spoken)
+	}
+
+	view := h.d.focus.Snapshot(context.Background())
+	var typed, voiced *focus.ThreadView
+	for i := range view.Threads {
+		switch view.Threads[i].Name {
+		case "the typed one":
+			typed = &view.Threads[i]
+		case "the voice one":
+			voiced = &view.Threads[i]
+		}
+	}
+	if typed == nil || voiced == nil {
+		t.Fatalf("threads = %+v", view.Threads)
+	}
+	if len(typed.Anchors) != len(voiced.Anchors) || typed.Anchors[0].App != voiced.Anchors[0].App {
+		t.Errorf("anchors: typed %+v, voiced %+v", typed.Anchors, voiced.Anchors)
+	}
+	if typed.RemindEveryMin != voiced.RemindEveryMin {
+		t.Errorf("check-in: typed %d, voiced %d", typed.RemindEveryMin, voiced.RemindEveryMin)
+	}
+	// And the one thing the voice path cannot set at all — the reason the recap
+	// mode was a hand edit of focus.json until now.
+	if typed.Recap != focus.RecapNever {
+		t.Errorf("recap = %q, want the form's choice", typed.Recap)
+	}
+
+	// An edit changes what it names and leaves the rest — including, by
+	// default, the anchors: a rename must not silently re-point the thread at
+	// whatever is in front of the window now.
+	saved.Spoken = ""
+	if err := client.Call("focus.save", map[string]any{
+		"thread": typed.ID, "name": "renamed", "remind_every_min": 0, "recap": "",
+	}, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Created {
+		t.Errorf("an edit reported created")
+	}
+	view = h.d.focus.Snapshot(context.Background())
+	for i := range view.Threads {
+		th := view.Threads[i]
+		if th.ID != typed.ID {
+			continue
+		}
+		if th.Name != "renamed" || th.Recap != focus.RecapAuto || th.RemindEveryMin != 0 {
+			t.Errorf("after edit = %+v", th)
+		}
+		if len(th.Anchors) != 1 {
+			t.Errorf("the rename dropped the anchors: %+v", th.Anchors)
+		}
+	}
+}
+
+// TestFocusSaveRefusesFieldByField: every refusal the form can provoke comes
+// back keyed to the input that caused it, and nothing is half-written — the
+// reason Save is one store write rather than four verbs in sequence.
+func TestFocusSaveRefusesFieldByField(t *testing.T) {
+	h := startFocusDaemon(t)
+	client := dialDaemon(t, h.socket)
+	if _, _, err := h.d.focus.Create(context.Background(), "taken", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]any
+		field  string
+	}{
+		{"no name", map[string]any{"name": "  "}, "name"},
+		{"duplicate name", map[string]any{"name": "Taken"}, "name"},
+		{"negative interval", map[string]any{"name": "x", "remind_every_min": -1}, "remind_every_min"},
+		{"unknown recap", map[string]any{"name": "x", "recap": "sometimes"}, "recap"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := client.Call("focus.save", tc.params, nil)
+			var rpcErr *ipc.Error
+			if !errors.As(err, &rpcErr) || rpcErr.Code != ipc.CodeConfigInvalid {
+				t.Fatalf("accepted: %v", err)
+			}
+			if _, ok := problemOn(entryProblemList(t, rpcErr.Data.(map[string]any)), tc.field); !ok {
+				t.Errorf("problems = %v, want one on %q", rpcErr.Data, tc.field)
+			}
+		})
+	}
+	// One thread, still: nothing was half-written by any of that.
+	if view := h.d.focus.Snapshot(context.Background()); len(view.Threads) != 1 {
+		t.Errorf("threads = %+v after four refusals", view.Threads)
 	}
 }

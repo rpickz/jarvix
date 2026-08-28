@@ -365,9 +365,16 @@ in the activity feed as "Ran without asking", naming the rule — nothing behind
 a standing grant is silent. See them with `jarvix approvals list` or the
 window's **Approvals** tab, take one back with `jarvix approvals forget docker
 ps` (immediate, no restart), or ask "what have I pre-approved?" out loud. The
-assistant cannot add, change or remove one: only a human click or spoken yes
-on a card writes a rule
+assistant cannot add, change or remove one — `[tools.policy]` is structurally
+unreachable from its configuration tools
 ([ADR 0053](docs/adr/0053-remembered-approvals.md)).
+
+The Approvals view shows the **deny** list beside the allow list and edits
+both: an allow rule typed by hand faces the identical refusal matrix the card
+uses, so the two routes cannot disagree; a deny rule faces none, because a gate
+that argued with someone making it stricter is a gate people route around; and
+**removing** a deny rule asks first, with a sentence naming what that rule
+protected ([ADR 0054](docs/adr/0054-the-last-config-file-holdouts.md)).
 
 Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
 `jarvix new` archives the thread instead of destroying it, whole — the

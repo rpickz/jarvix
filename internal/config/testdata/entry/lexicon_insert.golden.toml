@@ -1,0 +1,12 @@
+# my config, hand-written
+[tts]
+provider = "kokoro"
+
+# how it should say the words it gets wrong
+[tts.lexicon]
+Kubernetes = "koo ber net eez"   # kokoro says koo-ber-NEET-es
+k9s = "kay nine ess"
+Hyprland = "hyper land"
+
+[stt.whisper]
+model = "base.en"

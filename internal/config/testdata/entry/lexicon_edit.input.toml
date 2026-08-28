@@ -1,0 +1,10 @@
+# my config, hand-written
+[tts]
+provider = "kokoro"
+
+[tts.lexicon]
+Kubernetes = "koo ber net eez"   # kokoro says koo-ber-NEET-es
+k9s = "kay nine ess"
+
+[stt.whisper]
+model = "base.en"

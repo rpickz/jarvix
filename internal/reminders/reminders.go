@@ -408,10 +408,9 @@ func (s *Service) Create(when, text string) (string, error) {
 	if text == "" {
 		return "", ErrNoText
 	}
-	w, ok := intent.ParseWhen(when)
-	if !ok {
-		return "", fmt.Errorf("%w %q — try a clock time like \"at three\" or \"at 15:00\", "+
-			"or a delay like \"in twenty minutes\"", ErrBadTime, strings.TrimSpace(when))
+	w, err := parseWhen(when)
+	if err != nil {
+		return "", err
 	}
 	s.mu.Lock()
 	s.refreshLocked()
@@ -437,6 +436,38 @@ func (s *Service) Create(when, text string) (string, error) {
 	s.emit("created", map[string]any{"id": r.ID})
 	s.Rearm()
 	return "Reminding you " + say + ": " + text + ".", nil
+}
+
+// parseWhen reads one time expression with the grammar the SPEECH path uses —
+// intent.ParseWhen, the {when} slot's own table — and words a miss the way the
+// spoken path words it. One function so a typed reminder and a spoken one can
+// never accept different sentences (#164).
+func parseWhen(when string) (intent.When, error) {
+	w, ok := intent.ParseWhen(when)
+	if !ok {
+		return intent.When{}, fmt.Errorf("%w %q — try a clock time like \"at three\" or \"at 15:00\", "+
+			"or a delay like \"in twenty minutes\"", ErrBadTime, strings.TrimSpace(when))
+	}
+	return w, nil
+}
+
+// Preview resolves one time expression against this service's clock and says
+// which moment it means, storing nothing.
+//
+// It is the form's "before saving" half (#164). A spoken reminder gets the
+// resolution in the confirmation it hears back — "Reminding you at three this
+// afternoon" — which is how an ambiguous hour is settled out loud. A typed one
+// would otherwise be saved before its author found out whether "at three" meant
+// this afternoon or tomorrow morning, so the form asks the daemon the same
+// question first and shows the same words. Same parser, same clock, same
+// next-occurrence rule; the only difference is that nothing is written.
+func (s *Service) Preview(when string) (time.Time, string, error) {
+	w, err := parseWhen(when)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	due, say := w.Resolve(s.now())
+	return due, say, nil
 }
 
 // ListSpoken reads the pending reminders, soonest first.

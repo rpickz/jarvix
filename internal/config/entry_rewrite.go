@@ -23,11 +23,18 @@ import (
 // entry, and a third copy of the block-location machinery would drift. The
 // API is deliberately family-agnostic: `family` is the table-array name as it
 // appears between the double brackets ("knowledge.feeds", "routines",
-// "scripts"), `name` matches the entry's `name` key case-insensitively (the
-// rule every family already uses for uniqueness), and `field` takes any
-// scalar encodeTOMLValue can render. Which block is which is decided by the
-// parser, never by a second grammar: entries are resolved against the decoded
-// document and addressed by position, exactly as UpsertRoutineTOML does.
+// "scripts"), `idKey` names the key that carries an entry's identity, `name`
+// matches that key case-insensitively (the rule every family already uses for
+// uniqueness), and `field` takes any scalar encodeTOMLValue can render. Which
+// block is which is decided by the parser, never by a second grammar: entries
+// are resolved against the decoded document and addressed by position, exactly
+// as UpsertRoutineTOML does.
+//
+// idKey is a parameter rather than the constant "name" because #164 added
+// `[[intents.custom]]`, whose identity is the phrase it matches — there is no
+// `name` key in that table and inventing one would change a file format three
+// years of hand-written configs already use. Every other family passes "name"
+// and reads exactly as it did.
 //
 // Three granularities, one discipline. SetEntryField writes one scalar (#92,
 // #93's enabled switch). UpsertEntryTOML and DeleteEntryTOML (#99, the window
@@ -43,7 +50,7 @@ import (
 // the body's indentation. The document must already parse, and the named
 // entry must exist — creation stays a hand edit (or #62's upserter).
 func SetEntryField(doc []byte, family, name, field string, value any) ([]byte, error) {
-	entries, err := entryNames(doc, family)
+	entries, err := entryNames(doc, family, "name")
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +88,7 @@ func SetEntryField(doc []byte, family, name, field string, value any) ([]byte, e
 	if _, err := ParseBytes([]byte(out)); err != nil {
 		return nil, fmt.Errorf("rewrite produced an unparsable document (nothing was written): %w", err)
 	}
-	after, err := entryNames([]byte(out), family)
+	after, err := entryNames([]byte(out), family, "name")
 	if err != nil {
 		return nil, fmt.Errorf("rewrite produced an unreadable document (nothing was written): %w", err)
 	}
@@ -197,28 +204,28 @@ func entryBlockSpan(lines []string, family string, index int) (start, end int, e
 	return start, end, nil
 }
 
-// entryNames lists the `name` key of every [[family]] entry, in document
-// order — the parser's view, which is what block addressing trusts. The
-// generic decode keeps this editor independent of any one family's struct.
-func entryNames(doc []byte, family string) ([]string, error) {
+// entryNames lists the idKey of every [[family]] entry, in document order —
+// the parser's view, which is what block addressing trusts. The generic decode
+// keeps this editor independent of any one family's struct.
+func entryNames(doc []byte, family, idKey string) ([]string, error) {
 	entries, err := decodeEntries(doc, family)
 	if err != nil {
 		return nil, err
 	}
 	names := make([]string, len(entries))
 	for i, e := range entries {
-		if n, ok := e["name"].(string); ok {
+		if n, ok := e[idKey].(string); ok {
 			names[i] = n
 		}
 	}
 	return names, nil
 }
 
-// EntryNames lists the `name` key of every [[family]] entry, in document
-// order — the listing order an array family can promise, exported for the
-// generic listing verb (#163) that serves both document shapes.
-func EntryNames(doc []byte, family string) ([]string, error) {
-	return entryNames(doc, family)
+// EntryNames lists the idKey of every [[family]] entry, in document order —
+// the listing order an array family can promise, exported for the generic
+// listing verb (#163) that serves both document shapes.
+func EntryNames(doc []byte, family, idKey string) ([]string, error) {
+	return entryNames(doc, family, idKey)
 }
 
 // entryFieldValue reads one field of the index-th [[family]] entry back from
@@ -295,9 +302,9 @@ func decodeNode(doc []byte, family string) (any, error) {
 // block fresh, so comments *inside* the replaced entry go with it — the
 // UpsertRoutineTOML precedent — while every byte outside the block, glued
 // header comments included, survives.
-func UpsertEntryTOML(doc []byte, family, name string, entry map[string]any,
+func UpsertEntryTOML(doc []byte, family, idKey, name string, entry map[string]any,
 	keyOrder []string, subOrder map[string][]string) ([]byte, error) {
-	before, err := entryNames(doc, family)
+	before, err := entryNames(doc, family, idKey)
 	if err != nil {
 		return nil, err
 	}
@@ -345,12 +352,12 @@ func UpsertEntryTOML(doc []byte, family, name string, entry map[string]any,
 	if _, err := ParseBytes([]byte(out)); err != nil {
 		return nil, fmt.Errorf("rewrite produced an unparsable document (nothing was written): %w", err)
 	}
-	after, err := entryNames([]byte(out), family)
+	after, err := entryNames([]byte(out), family, idKey)
 	if err != nil {
 		return nil, fmt.Errorf("rewrite produced an unreadable document (nothing was written): %w", err)
 	}
 	wantNames := append([]string{}, before...)
-	newName, _ := entry["name"].(string)
+	newName, _ := entry[idKey].(string)
 	index := replaceAt
 	if replaceAt < 0 {
 		wantNames = append(wantNames, newName)
@@ -380,8 +387,8 @@ func UpsertEntryTOML(doc []byte, family, name string, entry map[string]any,
 // line stays: it may head a whole section. The blank line that separated the
 // removed block from its neighbour is collapsed so the document never
 // accumulates double blanks; everything else is byte-preserved.
-func DeleteEntryTOML(doc []byte, family, name string) ([]byte, error) {
-	before, err := entryNames(doc, family)
+func DeleteEntryTOML(doc []byte, family, idKey, name string) ([]byte, error) {
+	before, err := entryNames(doc, family, idKey)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +441,7 @@ func DeleteEntryTOML(doc []byte, family, name string) ([]byte, error) {
 	if _, err := ParseBytes([]byte(out)); err != nil {
 		return nil, fmt.Errorf("rewrite produced an unparsable document (nothing was written): %w", err)
 	}
-	after, err := entryNames([]byte(out), family)
+	after, err := entryNames([]byte(out), family, idKey)
 	if err != nil {
 		return nil, fmt.Errorf("rewrite produced an unreadable document (nothing was written): %w", err)
 	}
@@ -454,13 +461,13 @@ func DeleteEntryTOML(doc []byte, family, name string) ([]byte, error) {
 // generic map a form round-trips (#99): the daemon serves it, the form edits
 // the fields it shows, and every key it does not show survives the save
 // untouched because the whole map comes back.
-func EntryValue(doc []byte, family, name string) (map[string]any, bool, error) {
+func EntryValue(doc []byte, family, idKey, name string) (map[string]any, bool, error) {
 	entries, err := decodeEntries(doc, family)
 	if err != nil {
 		return nil, false, err
 	}
 	for _, e := range entries {
-		if n, ok := e["name"].(string); ok &&
+		if n, ok := e[idKey].(string); ok &&
 			strings.EqualFold(strings.TrimSpace(n), strings.TrimSpace(name)) {
 			return e, true, nil
 		}
@@ -472,8 +479,8 @@ func EntryValue(doc []byte, family, name string) (map[string]any, bool, error) {
 // document order — the index the loader's validators use in their labels
 // ("routines[2]"), which is what lets a caller match whole-document problems
 // back to one entry (#99).
-func EntryIndex(doc []byte, family, name string) (int, bool, error) {
-	names, err := entryNames(doc, family)
+func EntryIndex(doc []byte, family, idKey, name string) (int, bool, error) {
+	names, err := entryNames(doc, family, idKey)
 	if err != nil {
 		return 0, false, err
 	}

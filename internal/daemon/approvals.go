@@ -96,22 +96,41 @@ func (s *approvalStore) setPatterns(patterns []string) {
 // List folds the ledger onto the running list.
 func (s *approvalStore) List() []approvals.Entry { return s.ledger.List(s.Patterns()) }
 
-// shellAllowKey is the one configuration key this file writes. Named once so
-// the writer, the reload and the tests cannot disagree about it.
-const shellAllowKey = "tools.policy.shell_allow"
+// The two configuration keys this file writes. Named once so the writer, the
+// reload and the tests cannot disagree about them.
+//
+// shell_deny joined shell_allow in #164, when the Approvals view learned to add
+// a deny rule and remove an allow one. Both are reload-class (ADR 0053) and
+// both are structurally absent from the settings registry, which is what keeps
+// #109's exclusion wall standing while a human edits either.
+const (
+	shellAllowKey = "tools.policy.shell_allow"
+	shellDenyKey  = "tools.policy.shell_deny"
+)
+
+// The two lists, named as the wire names them. A verb that writes the gate
+// takes one of these and nothing else: "which list" is never inferred from the
+// shape of a request, because inferring it wrong in the widening direction is
+// the one mistake this surface must not be able to make.
+const (
+	approvalListAllow = "allow"
+	approvalListDeny  = "deny"
+)
 
 // Approval-change sources, mirroring the setting-change sources in
 // settings.go: a card answered in the window or the overlay, and the CLI.
 // Both are people; the label says which surface, so the activity feed can
 // report where a rule came from.
 const (
-	approvalSourceCard = "card"
-	approvalSourceCLI  = "cli"
+	approvalSourceCard   = "card"
+	approvalSourceCLI    = "cli"
+	approvalSourceWindow = "window"
 )
 
 func (d *Daemon) registerApprovalMethods() {
 	d.server.Handle("approvals.list", d.handleApprovalsList)
 	d.server.Handle("approvals.forget", d.handleApprovalsForget)
+	d.server.Handle("approvals.add", d.handleApprovalsAdd)
 }
 
 // handleApprovalsList reports every standing grant: the permanent patterns
@@ -150,10 +169,157 @@ func (d *Daemon) handleApprovalsList(json.RawMessage) (any, error) {
 			"uses":    0,
 		})
 	}
+	// The deny list travels with the allow list because the view edits both and
+	// because a person reading "what runs without asking" is owed the other
+	// half: a deny rule is the reason something they granted still asks. It
+	// carries no ledger — the ledger counts standing GRANTS being used, and a
+	// deny rule's whole job is that nothing happens.
+	denied := make([]map[string]any, 0, len(d.shellDenyPatterns()))
+	for _, pattern := range d.shellDenyPatterns() {
+		denied = append(denied, map[string]any{"pattern": pattern})
+	}
 	return map[string]any{
 		"path":     d.paths.ConfigFile(),
 		"approved": rows,
+		"denied":   denied,
 	}, nil
+}
+
+// handleApprovalsAdd is the Approvals view's authoring verb (#164, ADR 0054):
+// one pattern a PERSON typed, onto one named list.
+//
+// It is the first IPC method in this project that accepts a pattern on the
+// granting path, and ADR 0053 rejected exactly that for the confirmation card.
+// The distinction it rests on is not politeness, it is provenance: the card's
+// pattern must be derived because the card exists in response to something the
+// MODEL asked for, and a model that could name a rule would only need to
+// persuade some client to forward it. Nothing here happens in response to the
+// model. There is no tool that reaches this method, `jarvix`/`jarvixd` are in
+// the refusal matrix so no remembered shell rule can reach the CLI either, and
+// the reply says in words what was written.
+//
+// The allow list carries the confirmation card's own refusal matrix, imported
+// rather than restated (tools.Policy.VetAllowPattern) — the two routes to
+// shell_allow judge patterns with one function, so they cannot come to
+// different answers about `docker` or `timeout`. The deny list carries none:
+// every deny is a tightening, and a gate that argued with someone making it
+// stricter would be a gate people work around.
+func (d *Daemon) handleApprovalsAdd(params json.RawMessage) (any, error) {
+	var p struct {
+		Pattern     string `json:"pattern"`
+		List        string `json:"list"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "approvals.add params: %v", err)
+		}
+	}
+	// `list` is required, not defaulted. A default would mean a request that
+	// forgot the field widened the gate, and "the caller omitted a field" must
+	// never be a way to reach the loosening direction.
+	if p.List != approvalListAllow && p.List != approvalListDeny {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams,
+			"approvals.add list %q is invalid; use %q or %q",
+			p.List, approvalListAllow, approvalListDeny)
+	}
+	pattern := normalisePattern(p.Pattern)
+	if pattern == "" {
+		// Field-keyed rather than a protocol error: the form is asking about
+		// text somebody typed, and an empty rule is the most likely first thing
+		// they will send. It belongs under the input, not in a banner.
+		return nil, approvalPatternRefused("type the leading words of a command, like \"docker ps\".")
+	}
+	if p.List == approvalListAllow {
+		if offer := d.registry.Policy().VetAllowPattern(pattern); !offer.Offered {
+			// The matrix's own sentence, verbatim: it was written to be shown
+			// on a card and read aloud unchanged, and the form shows the same
+			// words for the same refusal.
+			return nil, approvalPatternRefused(offer.Reason)
+		}
+		return d.addApprovalPattern(approvalListAllow, pattern, p.Fingerprint)
+	}
+	return d.addApprovalPattern(approvalListDeny, pattern, p.Fingerprint)
+}
+
+// approvalPatternRefused wraps one refusal in the entry pipeline's field-keyed
+// shape, so the add form pins it under the input that typed it exactly as every
+// other form in the window does.
+func approvalPatternRefused(reason string) *ipc.Error {
+	return &ipc.Error{
+		Code:    ipc.CodeConfigInvalid,
+		Message: "that rule cannot be added: " + reason,
+		Data:    map[string]any{"problems": []entryProblem{{Field: "pattern", Message: reason}}},
+	}
+}
+
+// addApprovalPattern appends one pattern to one list and reports what it did.
+func (d *Daemon) addApprovalPattern(list, pattern, fingerprint string) (any, error) {
+	current := d.approvalPatterns(list)
+	for _, existing := range current {
+		if normalisePattern(existing) == pattern {
+			// Idempotent rather than an error, like rememberPattern: the user
+			// asked for a state the file is already in.
+			return map[string]any{"added": false, "pattern": pattern, "list": list,
+				"reason": "that rule is already on the list"}, nil
+		}
+	}
+	next := append(append([]string(nil), current...), pattern)
+	if err := d.writeApprovalList(list, next, fingerprint); err != nil {
+		return nil, err
+	}
+	result := map[string]any{"added": true, "pattern": pattern, "list": list}
+	if list == approvalListAllow {
+		d.approvals.ledger.Added(pattern, time.Now())
+	} else {
+		// What this deny now overrides. Deny wins over allow in both directions
+		// of prefix (ADR 0014), so a new deny can silence a standing grant the
+		// user made months ago — and being told which is the difference between
+		// tightening the gate and discovering later that something stopped
+		// working.
+		if shadowed := shadowedAllows(pattern, d.shellAllowPatterns()); len(shadowed) > 0 {
+			result["shadows"] = shadowed
+		}
+	}
+	d.log.Info("approval rule added", "component", "tools",
+		"pattern", pattern, "list", list, "source", approvalSourceWindow)
+	d.bus.Publish(session.Event{Type: "approvals.changed", Data: map[string]any{
+		"action": "added", "pattern": pattern, "list": list,
+		"scope": string(tools.RememberAlways), "source": approvalSourceWindow,
+	}})
+	return result, nil
+}
+
+// shadowedAllows lists the allow patterns a new deny rule now beats, in either
+// prefix direction — the same comparison the classifier makes.
+func shadowedAllows(deny string, allows []string) []string {
+	denyWords := strings.Fields(deny)
+	var out []string
+	for _, allow := range allows {
+		allowWords := strings.Fields(allow)
+		if wordPrefix(denyWords, allowWords) || wordPrefix(allowWords, denyWords) {
+			out = append(out, allow)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// wordPrefix reports whether a is a word-for-word prefix of b (equal counts).
+// The daemon's own copy of the comparison, because the tools package's is
+// unexported and this is a report about the file rather than a decision about
+// a command — a decision would have to be the classifier's or it would be a
+// second gate.
+func wordPrefix(a, b []string) bool {
+	if len(a) > len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // handleApprovalsForget revokes one permanent pattern.
@@ -166,16 +332,36 @@ func (d *Daemon) handleApprovalsList(json.RawMessage) (any, error) {
 func (d *Daemon) handleApprovalsForget(params json.RawMessage) (any, error) {
 	var p struct {
 		Pattern string `json:"pattern"`
+		List    string `json:"list"`
+		// Confirmed answers the question a deny removal asks first. Absent is
+		// "not yet", which is why it is a plain bool: there is no third state,
+		// and a client that has never heard of it cannot remove a deny rule.
+		Confirmed bool `json:"confirmed"`
 	}
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "approvals.forget params: %v", err)
 		}
 	}
+	// The allow list is the default because it is what forgetting meant before
+	// there was a second list, and `jarvix approvals forget` still says nothing
+	// about lists. Defaulting is safe HERE and unsafe in approvals.add for the
+	// same one reason: this direction only ever tightens the gate.
+	if p.List == "" {
+		p.List = approvalListAllow
+	}
+	if p.List != approvalListAllow && p.List != approvalListDeny {
+		return nil, ipc.Errorf(ipc.CodeInvalidParams,
+			"approvals.forget list %q is invalid; use %q or %q",
+			p.List, approvalListAllow, approvalListDeny)
+	}
 	pattern := normalisePattern(p.Pattern)
 	if pattern == "" {
 		return nil, ipc.Errorf(ipc.CodeInvalidParams,
 			"approvals.forget needs a pattern, e.g. {\"pattern\": \"docker ps\"}")
+	}
+	if p.List == approvalListDeny {
+		return d.forgetDenyPattern(pattern, p.Confirmed)
 	}
 	// The conversation-scoped grants first: they are not in the file, so a
 	// config write would never find them, and "forget docker ps" must forget
@@ -189,29 +375,90 @@ func (d *Daemon) handleApprovalsForget(params json.RawMessage) (any, error) {
 			"scope": string(tools.RememberConversation)}, nil
 	}
 	current := d.shellAllowPatterns()
-	kept := make([]string, 0, len(current))
+	kept, found := withoutPattern(current, pattern)
+	if !found {
+		return map[string]any{"forgotten": false, "pattern": pattern,
+			"list": approvalListAllow, "approved": current}, nil
+	}
+	if err := d.writeApprovalList(approvalListAllow, kept, ""); err != nil {
+		return nil, err
+	}
+	d.approvals.ledger.Forget(pattern)
+	d.bus.Publish(session.Event{Type: "approvals.changed", Data: map[string]any{
+		"action": "forgotten", "pattern": pattern, "list": approvalListAllow,
+		"scope": string(tools.RememberAlways), "source": approvalSourceCLI,
+	}})
+	return map[string]any{"forgotten": true, "pattern": pattern,
+		"list": approvalListAllow, "scope": string(tools.RememberAlways)}, nil
+}
+
+// forgetDenyPattern removes one deny rule, and asks first.
+//
+// This is the one revocation in the project that is deliberately harder than
+// the thing it revokes, and the asymmetry is the point. Forgetting an ALLOW
+// rule narrows what runs unasked, so it is answered immediately and never
+// questioned. Removing a DENY rule is the opposite act wearing the same verb:
+// it widens what may run, and it does so by deleting a protection whose whole
+// job is that nothing has been happening — there is no ledger row, no activity
+// feed entry, nothing to remind anyone what it has been stopping. So the daemon
+// says what the rule protected, in its own words, and does nothing until that
+// sentence is answered.
+func (d *Daemon) forgetDenyPattern(pattern string, confirmed bool) (any, error) {
+	current := d.shellDenyPatterns()
+	kept, found := withoutPattern(current, pattern)
+	if !found {
+		return map[string]any{"forgotten": false, "pattern": pattern,
+			"list": approvalListDeny, "denied": current}, nil
+	}
+	if !confirmed {
+		return map[string]any{
+			"forgotten":        false,
+			"pattern":          pattern,
+			"list":             approvalListDeny,
+			"confirm_required": true,
+			"confirmation":     denyRemovalConfirmation(pattern),
+		}, nil
+	}
+	if err := d.writeApprovalList(approvalListDeny, kept, ""); err != nil {
+		return nil, err
+	}
+	d.log.Info("deny rule removed", "component", "tools",
+		"pattern", pattern, "list", approvalListDeny, "source", approvalSourceWindow)
+	d.bus.Publish(session.Event{Type: "approvals.changed", Data: map[string]any{
+		"action": "forgotten", "pattern": pattern, "list": approvalListDeny,
+		"source": approvalSourceWindow,
+	}})
+	return map[string]any{"forgotten": true, "pattern": pattern,
+		"list": approvalListDeny}, nil
+}
+
+// denyRemovalConfirmation is the sentence a deny removal has to be answered
+// with, naming what the rule protected rather than asking "are you sure?" —
+// which is a question nobody reads. It states the shape of command the rule has
+// been refusing, that the refusal beat every allow rule including a remembered
+// one, and what those commands will do instead.
+func denyRemovalConfirmation(pattern string) string {
+	return fmt.Sprintf(
+		"The deny rule %q refuses every command beginning with those words, whoever asks — "+
+			"the assistant, one of your own spoken intents, or an allow rule that would "+
+			"otherwise cover it, because deny always wins. Removing it means those commands "+
+			"are classified like any other again: they will ask instead of being refused, and "+
+			"an answer of \"approve and don't ask again\" could then make them silent. Nothing "+
+			"else in [tools.policy] changes. Confirm to remove it.", pattern)
+}
+
+// withoutPattern returns list minus pattern, and whether it was there.
+func withoutPattern(list []string, pattern string) ([]string, bool) {
+	kept := make([]string, 0, len(list))
 	found := false
-	for _, existing := range current {
+	for _, existing := range list {
 		if normalisePattern(existing) == pattern {
 			found = true
 			continue
 		}
 		kept = append(kept, existing)
 	}
-	if !found {
-		return map[string]any{"forgotten": false, "pattern": pattern,
-			"approved": current}, nil
-	}
-	if err := d.writeShellAllow(kept, ""); err != nil {
-		return nil, err
-	}
-	d.approvals.ledger.Forget(pattern)
-	d.bus.Publish(session.Event{Type: "approvals.changed", Data: map[string]any{
-		"action": "forgotten", "pattern": pattern,
-		"scope": string(tools.RememberAlways), "source": approvalSourceCLI,
-	}})
-	return map[string]any{"forgotten": true, "pattern": pattern,
-		"scope": string(tools.RememberAlways)}, nil
+	return kept, found
 }
 
 // rememberPattern appends one pattern to `[tools.policy] shell_allow` and
@@ -238,7 +485,8 @@ func (d *Daemon) rememberPattern(pattern, source string) error {
 			return nil
 		}
 	}
-	if err := d.writeShellAllow(append(append([]string(nil), current...), pattern), ""); err != nil {
+	if err := d.writeApprovalList(approvalListAllow,
+		append(append([]string(nil), current...), pattern), ""); err != nil {
 		return err
 	}
 	d.approvals.ledger.Added(pattern, time.Now())
@@ -251,15 +499,22 @@ func (d *Daemon) rememberPattern(pattern, source string) error {
 	return nil
 }
 
-// writeShellAllow replaces the whole `shell_allow` list in config.toml and
-// recompiles the running policy from the result.
+// writeApprovalList replaces one whole `[tools.policy]` pattern list in
+// config.toml and recompiles the running policy from the result.
+//
+// One writer for both lists, because everything that makes the write safe is
+// the same for both: the fingerprint guard, the rebase onto the file rather
+// than the running config, whole-document validation, a compile BEFORE the
+// write so a rule the classifier will not accept never lands, the atomic write,
+// and only then the swap of the running gate. Two writers would be two places
+// for one of those to go missing.
 //
 // fingerprint, when non-empty, is the caller's view of the file and a
 // mismatch fails the write — the settings surface's external-edit guard,
 // applied here for the same reason: a rule appended on top of a file someone
 // has since hand-edited would silently discard their edit, and the one file
 // where that must never happen is the one that says what may run.
-func (d *Daemon) writeShellAllow(patterns []string, fingerprint string) error {
+func (d *Daemon) writeApprovalList(list string, patterns []string, fingerprint string) error {
 	path := d.paths.ConfigFile()
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -286,7 +541,14 @@ func (d *Daemon) writeShellAllow(patterns []string, fingerprint string) error {
 			Message: fmt.Sprintf("config.toml does not parse; fix it by hand first: %v", err),
 		}
 	}
-	fileCfg.Tools.Policy.ShellAllow = patterns
+	key := shellAllowKey
+	read := func(c config.Config) any { return c.Tools.Policy.ShellAllow }
+	if list == approvalListDeny {
+		key, read = shellDenyKey, func(c config.Config) any { return c.Tools.Policy.ShellDeny }
+		fileCfg.Tools.Policy.ShellDeny = patterns
+	} else {
+		fileCfg.Tools.Policy.ShellAllow = patterns
+	}
 	fileCfg.Voices = fileCfg.InstalledVoices(d.paths)
 	if err := fileCfg.Validate(); err != nil {
 		return &ipc.Error{
@@ -310,8 +572,7 @@ func (d *Daemon) writeShellAllow(patterns []string, fingerprint string) error {
 	// surface the assistant's config tools resolve names against (#109). Same
 	// surgical edit, same parse-and-read-back guard, no widening of the
 	// registry to get it.
-	newRaw, err := config.RewriteOffRegistryKey(raw, shellAllowKey, patterns,
-		func(c config.Config) any { return c.Tools.Policy.ShellAllow })
+	newRaw, err := config.RewriteOffRegistryKey(raw, key, patterns, read)
 	if err != nil {
 		return ipc.Errorf(ipc.CodeInternalError, "rewrite config: %v", err)
 	}
@@ -322,10 +583,18 @@ func (d *Daemon) writeShellAllow(patterns []string, fingerprint string) error {
 	// installed before a failed write would be a permission the file does not
 	// grant, which is the one direction of drift nobody could audit.
 	d.registry.SetPolicy(policy)
-	d.approvals.setPatterns(patterns)
 	d.cfgMu.Lock()
-	d.cfg.Tools.Policy.ShellAllow = patterns
+	if list == approvalListDeny {
+		d.cfg.Tools.Policy.ShellDeny = patterns
+	} else {
+		d.cfg.Tools.Policy.ShellAllow = patterns
+	}
 	d.cfgMu.Unlock()
+	if list == approvalListAllow {
+		// The approval store holds the ALLOW list only: it exists to answer
+		// "what runs without asking", which a deny rule never does.
+		d.approvals.setPatterns(patterns)
+	}
 	d.publishConfigChanged(config.Fingerprint(newRaw))
 	return nil
 }
@@ -349,6 +618,23 @@ func (d *Daemon) compilePolicy(cfg config.Config) (*tools.Policy, error) {
 
 // shellAllowPatterns is the running gate's configured allow list.
 func (d *Daemon) shellAllowPatterns() []string { return d.approvals.Patterns() }
+
+// shellDenyPatterns is the running gate's configured deny list. It comes from
+// the running configuration rather than a holder of its own, for the reason the
+// approval store exists and this does not: the store is there because the
+// SESSION ENGINE needs a read-only view of the allow list to answer a spoken
+// question, and nothing speaks the deny list.
+func (d *Daemon) shellDenyPatterns() []string {
+	return append([]string(nil), d.runningConfig().Tools.Policy.ShellDeny...)
+}
+
+// approvalPatterns is one named list, as the running gate holds it.
+func (d *Daemon) approvalPatterns(list string) []string {
+	if list == approvalListDeny {
+		return d.shellDenyPatterns()
+	}
+	return d.shellAllowPatterns()
+}
 
 // normalisePattern collapses whitespace so `docker  ps` and `docker ps` are
 // one rule — the same collapsing the classifier performs when it compiles a

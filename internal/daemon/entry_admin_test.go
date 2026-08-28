@@ -87,11 +87,13 @@ func tomlKeys(t *testing.T, v any) []string {
 // without a registry row entry would silently block form-saving any entry a
 // hand edit gave that key — this test makes the drift loud instead.
 //
-// Two shape-driven adjustments, each of them a rule rather than an excuse
-// (#163): a KEYED family carries `name` on the wire although the struct has
-// no such field, because the table key is the identity; and a declared SECRET
+// Three shape-driven adjustments, each of them a rule rather than an excuse
+// (#163, #164): a KEYED family carries `name` on the wire although the struct
+// has no such field, because the table key is the identity; a declared SECRET
 // key is a struct field the form deliberately cannot write, because it is
-// written through the credential channel instead.
+// written through the credential channel instead; and a SCALAR-MAP family has
+// no struct at all — [tts.lexicon] is a map[string]string — so its example is
+// nil and its wire keys are `name` plus the one value key it declares.
 func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
 	structs := map[string]any{
 		"routines":        config.Routine{},
@@ -99,6 +101,8 @@ func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
 		"knowledge.feeds": config.KnowledgeFeed{},
 		"ai":              config.Endpoint{},
 		"advisors":        config.Advisor{},
+		"intents.custom":  config.CustomIntent{},
+		"tts.lexicon":     nil,
 	}
 	if len(structs) != len(entryAdminFamilies) {
 		t.Fatalf("registry has %d families, this test knows %d — extend both together",
@@ -110,10 +114,20 @@ func TestEntryAdminFamiliesMirrorConfigStructs(t *testing.T) {
 			t.Errorf("family %q is not in the registry", family)
 			continue
 		}
-		want := make([]string, 0, len(spec.keys))
-		for _, key := range tomlKeys(t, example) {
-			if spec.secretFor(key) == nil {
-				want = append(want, key)
+		var want []string
+		if example == nil {
+			if spec.shape != entryShapeScalarMap || spec.valueKey == "" {
+				t.Errorf("%s has no config struct, so it must be a scalar-map family "+
+					"declaring its value key", family)
+				continue
+			}
+			want = []string{"name", spec.valueKey}
+		} else {
+			want = make([]string, 0, len(spec.keys))
+			for _, key := range tomlKeys(t, example) {
+				if spec.secretFor(key) == nil {
+					want = append(want, key)
+				}
 			}
 		}
 		if spec.shape == entryShapeKeyed {
@@ -164,11 +178,14 @@ func TestConfigGetEntryOverSocket(t *testing.T) {
 		t.Errorf("entry = %v, want the whole [[scripts]] table, report included", entry)
 	}
 
+	// [tools.policy] is the family that must never become editable through this
+	// surface: the permission gate is administered on its own screen, with its
+	// own refusal matrix (#164, ADR 0053), not as an entry family.
 	err := client.Call("config.get_entry",
-		map[string]any{"family": "intents.custom", "name": "x"}, nil)
+		map[string]any{"family": "tools.policy", "name": "x"}, nil)
 	var rpcErr *ipc.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != ipc.CodeInvalidParams ||
-		!strings.Contains(rpcErr.Message, `"intents.custom"`) {
+		!strings.Contains(rpcErr.Message, `"tools.policy"`) {
 		t.Errorf("unknown family err = %v, want CodeInvalidParams naming it", err)
 	}
 	err = client.Call("config.get_entry",

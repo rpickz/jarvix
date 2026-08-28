@@ -424,6 +424,40 @@ type TTS struct {
 	Lexicon map[string]string `toml:"lexicon"`
 }
 
+// lexiconProblems validates the [tts.lexicon] table (#164). It exists because
+// the window edits the lexicon one entry at a time now, and the entry pipeline
+// keys whole-document problems to the form field they name — so the two states
+// a hand edit can reach that the compiler silently discards (an empty written
+// form, which would match nowhere, and an empty spoken form, which would delete
+// the word from every sentence it appears in) become field errors on the form
+// that typed them rather than a mystery about why speech changed.
+//
+// The labels are the keyed shape's dotted path, `tts.lexicon.<term>`, which is
+// what a user would type to describe the entry and what classifyEntryProblem
+// strips to find the field.
+func (c Config) lexiconProblems() []string {
+	terms := make([]string, 0, len(c.TTS.Lexicon))
+	for term := range c.TTS.Lexicon {
+		terms = append(terms, term)
+	}
+	sort.Strings(terms)
+	var problems []string
+	for _, term := range terms {
+		if strings.TrimSpace(term) == "" {
+			problems = append(problems, "tts.lexicon has an entry with an empty written form; "+
+				"the written form is the word to respell, so give it one or remove the entry")
+			continue
+		}
+		if strings.TrimSpace(c.TTS.Lexicon[term]) == "" {
+			problems = append(problems, fmt.Sprintf(
+				"tts.lexicon.%s: spoken form is empty; write how the word should sound, "+
+					"like \"koo ber net eez\" — an empty one would drop %q out of every sentence",
+				term, term))
+		}
+	}
+	return problems
+}
+
 // Piper configures the Piper adapter.
 type Piper struct {
 	Voice  string `toml:"voice"`  // voice name ("en_US-amy-medium") or absolute path to .onnx
@@ -1036,6 +1070,7 @@ func (c Config) Validate() error {
 	problems = append(problems, c.vocabularyProblems()...)
 	problems = append(problems, c.knowledgeProblems()...)
 	problems = append(problems, c.voiceProblems()...)
+	problems = append(problems, c.lexiconProblems()...)
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:

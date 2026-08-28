@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tts"
@@ -280,5 +282,98 @@ func TestBootFiresAMissedReminderLate(t *testing.T) {
 	v := h.d.reminders.Snapshot()
 	if len(v.History) != 1 || v.History[0].Outcome != "fired" || !v.History[0].Late {
 		t.Fatalf("history = %+v; want one late-marked boot delivery", v.History)
+	}
+}
+
+// TestTypedReminderIsTheSpokenOneWithATypedSentence is #164's reminder
+// acceptance criterion: a reminder made in a form behaves identically to a
+// spoken one, including the next-occurrence resolution shown before saving.
+//
+// "Identically" is tested by comparing them directly rather than by asserting
+// against a hand-written expectation: the same words go in through the form
+// verb and through the store's own Create, and what comes out — the spoken
+// confirmation and the resolved moment — has to match.
+func TestTypedReminderIsTheSpokenOneWithATypedSentence(t *testing.T) {
+	h := startFocusDaemon(t)
+	client := dialDaemon(t, h.socket)
+
+	// The preview first, which is the only thing the form adds: the moment,
+	// worded by the daemon, before anything is written.
+	var preview struct {
+		Valid     bool   `json:"valid"`
+		Due       string `json:"due"`
+		DueSpoken string `json:"due_spoken"`
+	}
+	if err := client.Call("reminders.preview",
+		map[string]any{"when": "tomorrow at nine"}, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Valid || preview.DueSpoken != "at nine tomorrow morning" {
+		t.Fatalf("preview = %+v, want the daemon's own wording", preview)
+	}
+	if preview.Due == "" {
+		t.Error("no resolved moment: the form would have to do the arithmetic")
+	}
+	// The preview wrote nothing.
+	if listing := h.d.reminders.Snapshot(); len(listing.Pending) != 0 {
+		t.Errorf("the preview created %d reminders", len(listing.Pending))
+	}
+
+	// A half-typed time is a FIELD PROBLEM, not an RPC error: every keystroke
+	// of "at thre" would otherwise be a transport failure.
+	var bad struct {
+		Valid    bool `json:"valid"`
+		Problems []struct {
+			Field   string `json:"field"`
+			Message string `json:"message"`
+		} `json:"problems"`
+	}
+	if err := client.Call("reminders.preview", map[string]any{"when": "at thre"}, &bad); err != nil {
+		t.Fatalf("a half-typed time was an error rather than a problem: %v", err)
+	}
+	if bad.Valid || len(bad.Problems) != 1 || bad.Problems[0].Field != "when" {
+		t.Errorf("preview of a bad time = %+v", bad)
+	}
+
+	// And the create. Its confirmation must be word-for-word the sentence the
+	// spoken path earns for the same request.
+	var created struct {
+		Spoken string `json:"spoken"`
+	}
+	if err := client.Call("reminders.create",
+		map[string]any{"when": "tomorrow at nine", "text": "call the pharmacy"}, &created); err != nil {
+		t.Fatal(err)
+	}
+	spokenPath, err := h.d.reminders.Create("tomorrow at nine", "call the pharmacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Spoken != spokenPath {
+		t.Errorf("typed confirmation %q != spoken confirmation %q", created.Spoken, spokenPath)
+	}
+	if created.Spoken != "Reminding you at nine tomorrow morning: call the pharmacy." {
+		t.Errorf("confirmation = %q", created.Spoken)
+	}
+	// Both are in the one store, pending, on the one clock.
+	if listing := h.d.reminders.Snapshot(); len(listing.Pending) != 2 {
+		t.Errorf("pending = %d, want the typed one beside the spoken one", len(listing.Pending))
+	}
+
+	// A refused create is field-keyed too, so the form pins it under the input
+	// that caused it rather than in a banner.
+	for _, tc := range []struct{ when, text, field string }{
+		{"at thre", "x", "when"},
+		{"at three", "   ", "text"},
+	} {
+		err := client.Call("reminders.create",
+			map[string]any{"when": tc.when, "text": tc.text}, nil)
+		var rpcErr *ipc.Error
+		if !errors.As(err, &rpcErr) {
+			t.Errorf("%+v was accepted: %v", tc, err)
+			continue
+		}
+		if _, ok := problemOn(entryProblemList(t, rpcErr.Data.(map[string]any)), tc.field); !ok {
+			t.Errorf("%+v: problems = %v, want one on %q", tc, rpcErr.Data, tc.field)
+		}
 	}
 }
