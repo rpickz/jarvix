@@ -83,13 +83,16 @@ func (d *Daemon) overlayThreads(ctx context.Context) []overlay.Thread {
 	return threads
 }
 
-// overlayAIState is the one line #137 changes: return the thread view's
-// classification once the focus payloads carry one. The vocabulary contract
-// is overlay.StateWorking / StateNeedsYou / StateDone — anything else is
-// dropped feed-side before the wire (overlay.Compose), so a mismatched
-// vocabulary degrades to "no dot", never to a wrong colour.
-func overlayAIState(focus.ThreadView) string {
-	return ""
+// overlayAIState returns the thread view's session classification (#137):
+// the deterministic working / needs_you / done read from the anchored AI
+// session's own transcript, or "" when the session could not be classified.
+// The vocabulary contract is overlay.StateWorking / StateNeedsYou /
+// StateDone — anything else is dropped feed-side before the wire
+// (overlay.Compose), so a mismatched vocabulary degrades to "no dot", never
+// to a wrong colour. The two halves were built in separate lanes against
+// this signature; joining them is the whole change.
+func overlayAIState(tv focus.ThreadView) string {
+	return tv.SessionState
 }
 
 // registerOverlayMethods adds the overlays surface: one read. Clients attach

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -68,7 +69,7 @@ func TestOverlaysGetServesTheAnchoredWindow(t *testing.T) {
 		t.Errorf("badge = %+v, want the active thread's filled badge", badge)
 	}
 	if _, present := row["ai_state"]; present {
-		t.Errorf("row = %+v carries ai_state; absent means absent until #137 classifies", row)
+		t.Errorf("row = %+v carries ai_state; a thread with no classified AI session shows no dot", row)
 	}
 	// The wire carries no window identity (ADR 0022).
 	raw, err := json.Marshal(after.Rows)
@@ -135,5 +136,42 @@ func TestOverlaysDisabledSwitchClearsTheSurface(t *testing.T) {
 	if res.Enabled || len(res.Rows) != 0 {
 		t.Fatalf("overlays.get with the switch off = %+v, want disabled and empty — "+
 			"overlays.enabled is the one global off switch", res)
+	}
+}
+
+// TestOverlayDotCarriesTheSessionClassification joins the two halves built in
+// separate lanes: #137 classifies an anchored AI session from its own
+// transcript, #127 draws a dot for it. Each side shipped with its half of the
+// contract and a hole where the other belonged — this is the test that the
+// hole is closed, end to end, over the real socket: a transcript ending on
+// the assistant's question reaches the wire as needs_you, and the thread
+// anchored to nothing at all still carries no state, so the dot stays honest
+// about what it does not know.
+func TestOverlayDotCarriesTheSessionClassification(t *testing.T) {
+	cfg := testConfig()
+	cfg.Context.Window = true
+	finder := transcriptFixtureFinder(t, 4242)
+	h := startFocusDaemonSessions(t, cfg, finder, desktop.Window{
+		Address: "0xa", Class: "Alacritty", Title: "✳ rotating keys — claude",
+		Focused: true, PID: 4242,
+		Workspace: 1, X: 100, Y: 50, Width: 800, Height: 600,
+	})
+	ctx := context.Background()
+	if _, _, err := h.d.focus.Create(ctx, "the key rotation", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	client := dialDaemon(t, h.socket)
+	var got struct {
+		Rows []map[string]any `json:"rows"`
+	}
+	if err := client.Call("overlays.get", nil, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Rows) != 1 {
+		t.Fatalf("rows = %+v, want the one anchored window", got.Rows)
+	}
+	if state := got.Rows[0]["ai_state"]; state != "needs_you" {
+		t.Errorf("ai_state = %v, want needs_you — the session is waiting on an answer", state)
 	}
 }
