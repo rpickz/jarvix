@@ -30,6 +30,7 @@ import (
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
+	"github.com/rpickz/jarvix/internal/transcript"
 	"github.com/rpickz/jarvix/internal/tts"
 	"github.com/rpickz/jarvix/internal/vocabulary"
 	"github.com/rpickz/jarvix/internal/wake"
@@ -104,6 +105,12 @@ type Daemon struct {
 	// nothing enrolled the loop parks and costs nothing — and drained as its
 	// own shutdown stage like the schedulers beside it.
 	overlays *overlay.Service
+	// sessions reads AI-CLI session transcripts for the AI-session recap and
+	// classification (#137, ADR 0047): the richer content gatherer behind the
+	// focus Capture seam. Nil when home could not be resolved at start-up —
+	// the recap then stays on the window-title layer, and focus.list simply
+	// never carries a session state.
+	sessions *transcript.Finder
 	// toolsPolicy is the compiled permission gate, held so the scheduler's
 	// fire path consults the very same tier resolution the session gate does
 	// — the clock and the voice can never disagree about what is permitted.
@@ -275,6 +282,11 @@ type Deps struct {
 	// deterministically — the validated config cannot express one shorter
 	// than a second, and a socket test must not wait one out.
 	ConfirmTimer func(d time.Duration) (<-chan time.Time, func())
+	// Sessions overrides the AI-session transcript reader (#137); nil builds
+	// the production one over the real CLI state dirs and /proc. Injected by
+	// tests so no test ever reads a real CLI's sessions or the real process
+	// table.
+	Sessions *transcript.Finder
 }
 
 // New builds a daemon from configuration. cfg must already be validated.
@@ -670,6 +682,19 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		paths: paths, injected: injected, cfg: cfg, warm: workers,
 		provider:      deps.Provider,
 		shutdownGrace: DefaultShutdownGrace,
+	}
+	d.sessions = deps.Sessions
+	if d.sessions == nil {
+		// Best effort by design: a daemon whose home cannot be resolved still
+		// runs — the recap keeps the window-title layer (#124) and the
+		// session-state dot stays unknown, both of which are the documented
+		// degradations, not failures.
+		if finder, err := transcript.NewFinder(); err == nil {
+			d.sessions = finder
+		} else {
+			logger.Warn("AI-session transcripts unavailable; recaps stay on the window title",
+				"component", "focus", "error", err.Error())
+		}
 	}
 	capture.committed = d.captureCommitted
 	d.bindFocus()

@@ -110,6 +110,11 @@ lands, it is a first line the model emits and the daemon parses off before
 speech — an extension of `Summarise`'s contract behind the same seam, not a
 second capture or a second call.
 
+*(How it actually landed: #137 / ADR 0047 made the classification
+deterministic — read from the session transcript's structure with no model
+involved at all — which is stronger than the model-emitted line sketched
+above. The richer-gatherer slot below was taken by the same change.)*
+
 ## Consequences
 
 - Re-entering an AI session costs seconds of listening instead of a minute

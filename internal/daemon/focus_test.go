@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/focus"
 	"github.com/rpickz/jarvix/internal/stt"
+	"github.com/rpickz/jarvix/internal/transcript"
 	"github.com/rpickz/jarvix/internal/tts"
 )
 
@@ -42,6 +44,17 @@ func startFocusDaemon(t *testing.T) *focusHarness {
 // window source on and a window class of their choosing.
 func startFocusDaemonWith(t *testing.T, cfg config.Config, windows ...desktop.Window) *focusHarness {
 	t.Helper()
+	return startFocusDaemonSessions(t, cfg, nil, windows...)
+}
+
+// startFocusDaemonSessions additionally injects the transcript reader
+// (#137), pointed at fixture roots — no daemon test ever reads a real CLI's
+// state or the real /proc. Nil keeps the production reader, whose real
+// lookups all miss the fake windows' zero PIDs and degrade to the title
+// layer, which is exactly what the #124 tests exercise.
+func startFocusDaemonSessions(t *testing.T, cfg config.Config, sessions *transcript.Finder,
+	windows ...desktop.Window) *focusHarness {
+	t.Helper()
 	dir := t.TempDir()
 	paths := config.Paths{
 		Config: dir, Data: dir, State: dir, Runtime: dir,
@@ -60,6 +73,7 @@ func startFocusDaemonWith(t *testing.T, cfg config.Config, windows ...desktop.Wi
 		Notifier:    &desktop.FakeNotifier{},
 		OpenWindow:  func(context.Context) error { return nil },
 		Compositor:  desktop.NewFakeCompositor(windows...),
+		Sessions:    sessions,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -380,5 +394,160 @@ func TestFocusRecapRespectsTheWindowConsent(t *testing.T) {
 	}
 	if len(h.provider.Requests) != 0 {
 		t.Error("the recap read a window the user had switched off")
+	}
+}
+
+// transcriptFixtureFinder builds a transcript reader over tempdir fixtures
+// (#137): one fake proc entry for the anchored window's process, whose cwd
+// hosts a Claude-shaped transcript ending on the assistant's question. One
+// line carries a key-shaped secret, so the same fixture proves redaction.
+func transcriptFixtureFinder(t *testing.T, pid int) *transcript.Finder {
+	t.Helper()
+	projectDir := t.TempDir()
+
+	procRoot := t.TempDir()
+	procDir := filepath.Join(procRoot, fmt.Sprint(pid))
+	if err := os.MkdirAll(procDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stat := fmt.Sprintf("%d (alacritty) S 1 1 1 0 -1 4194560", pid)
+	if err := os.WriteFile(filepath.Join(procDir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(projectDir, filepath.Join(procDir, "cwd")); err != nil {
+		t.Fatal(err)
+	}
+
+	slug := strings.NewReplacer("/", "-", ".", "-", "_", "-").Replace(projectDir)
+	sessionDir := filepath.Join(t.TempDir(), "projects", slug)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"Rotate the deploy key."}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The old key sk-ant-api03-aaaabbbbccccdddd is compromised."}],"stop_reason":"tool_use"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}],"stop_reason":"tool_use"}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"rotated"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The new key is live. Should I revoke the old one now?"}],"stop_reason":"end_turn"}}`,
+	}
+	transcriptPath := filepath.Join(sessionDir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &transcript.Finder{
+		ClaudeDir:   filepath.Dir(filepath.Dir(sessionDir)),
+		OpencodeDir: filepath.Join(procRoot, "no-opencode"),
+		ProcDir:     procRoot,
+	}
+}
+
+// TestFocusSwitchRecapsFromTheSessionTranscript is #137 end to end through
+// the daemon's wiring: the anchored terminal's process resolves to a working
+// directory, the directory to a Claude transcript, and the transcript's tail
+// — redacted — reaches the model inside the transcript prompt. The spoken
+// recap is the model's summary, and focus.list carries the deterministic
+// session state for the overlay dot (#127).
+func TestFocusSwitchRecapsFromTheSessionTranscript(t *testing.T) {
+	cfg := testConfig()
+	cfg.Context.Window = true
+	finder := transcriptFixtureFinder(t, 4242)
+	h := startFocusDaemonSessions(t, cfg, finder, desktop.Window{
+		Address: "0xa", Class: "Alacritty", Title: "✳ rotating keys — claude",
+		Focused: true, PID: 4242,
+	})
+	summary := "The new deploy key is live. Claude is asking whether to revoke the old one. Next step is answering it."
+	h.provider.Response = summary
+
+	ctx := context.Background()
+	if _, _, err := h.d.focus.Create(ctx, "the key rotation", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.d.focus.Create(ctx, "deploy", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, recap, err := h.d.focus.Switch(ctx, "key rotation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recap != summary {
+		t.Errorf("recap = %q\nwant    %q", recap, summary)
+	}
+
+	prompt := h.provider.LastRequest.Messages[0].Content
+	if !strings.Contains(prompt, "--- session transcript ---") {
+		t.Errorf("the capture is not the transcript layer:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Should I revoke the old one now?") {
+		t.Errorf("the session's actual last exchange never reached the prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Assistant ran Bash.") {
+		t.Errorf("the tool-run note is missing:\n%s", prompt)
+	}
+	// Redaction: the key-shaped line is replaced wholesale; its neighbours
+	// survive.
+	if strings.Contains(prompt, "sk-ant-api03") {
+		t.Errorf("a secret reached the prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, desktop.RedactedMarker) {
+		t.Errorf("the redaction marker is missing:\n%s", prompt)
+	}
+
+	// focus.list exposes the deterministic classification — the #127
+	// contract: `session_state` per thread, absent when unknown.
+	client := dialDaemon(t, h.socket)
+	var listing struct {
+		Threads []struct {
+			Name         string `json:"name"`
+			SessionState string `json:"session_state"`
+		} `json:"threads"`
+	}
+	if err := client.Call("focus.list", nil, &listing); err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{}
+	for _, th := range listing.Threads {
+		states[th.Name] = th.SessionState
+	}
+	if states["the key rotation"] != "needs_you" {
+		t.Errorf("session_state = %q, want needs_you", states["the key rotation"])
+	}
+	if states["deploy"] != "" {
+		t.Errorf("an unanchored thread claims a state: %q", states["deploy"])
+	}
+
+	// Transient means transient, transcript included: nothing of the session
+	// reaches the store.
+	stored, err := os.ReadFile(h.d.focus.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"revoke", "sk-ant", "deploy key"} {
+		if strings.Contains(string(stored), marker) {
+			t.Errorf("transcript content %q reached the thread store", marker)
+		}
+	}
+}
+
+// TestFocusListClassificationRespectsTheWindowConsent: with the window
+// source off, the session-state read is disabled wholesale — a transcript
+// sitting right there on disk is still not read, and focus.list carries no
+// session_state (#137's consent criterion).
+func TestFocusListClassificationRespectsTheWindowConsent(t *testing.T) {
+	finder := transcriptFixtureFinder(t, 4242)
+	h := startFocusDaemonSessions(t, testConfig(), finder, desktop.Window{
+		Address: "0xa", Class: "Alacritty", Title: "claude", Focused: true, PID: 4242,
+	})
+	ctx := context.Background()
+	if _, _, err := h.d.focus.Create(ctx, "the key rotation", 1); err != nil {
+		t.Fatal(err)
+	}
+	v := h.d.focus.Snapshot(ctx)
+	for _, tv := range v.Threads {
+		if tv.SessionState != "" {
+			t.Errorf("consent off, yet thread %q classified as %q", tv.Name, tv.SessionState)
+		}
+	}
+	if len(h.provider.Requests) != 0 {
+		t.Error("classification reached the model — it must never involve one")
 	}
 }
