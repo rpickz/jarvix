@@ -4,5 +4,9 @@
 *.test
 coverage.out
 
+# Soak output (scripts/soak.sh). Kept out of the tree on purpose: the logs are
+# evidence for one run on one machine, and CI retains its own as artefacts.
+/soak-logs/
+
 # Stray agent worktrees
 .claude/

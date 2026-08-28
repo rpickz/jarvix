@@ -62,13 +62,28 @@ jobs:
         with:
           name: test-log
           path: test.log
-      - name: Coverage baseline (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          go test -coverprofile=coverage.out ./...
-          go tool cover -func=coverage.out | tail -1
-      - name: Upload coverage
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  # The coverage ratchet (issue #171). Its own job, not a step on `test`,
+  # because it must not add to the gate's wall-clock: it runs beside the race
+  # pass rather than after it, and a plain `go test -coverprofile ./...` is a
+  # fraction of the race run's cost.
+  #
+  # It replaced a "coverage baseline" step that measured the number on main and
+  # uploaded it — which recorded the slide rather than stopping it. See
+  # coverage.floor for what the floor is and is not.
+  coverage:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Coverage ratchet
+        run: scripts/coverage-ratchet.sh
+      - name: Upload coverage profile
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage

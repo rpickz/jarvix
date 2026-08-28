@@ -1,0 +1,23 @@
+# The total statement coverage this repo will not go below, as a percentage.
+#
+# It is a RATCHET, not a target. Raising it is a deliberate committed act — you
+# edit this file, in the change that earned the increase, and a reviewer sees
+# the number move. Nothing raises it automatically, because a floor that
+# follows the measurement is not a floor: it makes today's number the rule and
+# leaves the next drop with nothing to hit.
+#
+# Nor is it a goal. Coverage did not catch a single one of the four ordering
+# defects that motivated issue #171 (a data race on a fake's exported field, a
+# scheduler that parked forever, tests that passed only under -race, an archive
+# adoption window) — statement coverage does not measure ordering, which is why
+# the soak job exists beside this. What the floor buys is narrow and real: the
+# number cannot slide quietly while the suite grows.
+#
+# scripts/coverage-ratchet.sh allows a 0.5pp dip below this line before it
+# fails, because the total moves by a tenth or two on unrelated changes — a
+# refactor that deletes covered code, a new error path in a rarely-hit branch —
+# and a gate that reddens on noise gets ignored, then removed.
+#
+#   make coverage-ratchet          # measure and compare
+#   make coverage-ratchet-raise    # print the line to paste here, if it is time
+83.3
