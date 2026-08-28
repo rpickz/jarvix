@@ -18,6 +18,16 @@
 # refactor that deletes covered code, a new error path in a rarely-hit branch —
 # and a gate that reddens on noise gets ignored, then removed.
 #
+# THE NUMBER IS THE CI RUNNER'S, NOT YOUR MACHINE'S, and they differ by around
+# a point. The gate runs on a clean runner with none of the external engines
+# installed (no PipeWire, whisper, piper, kokoro), so the tests that probe for
+# them skip and their code goes uncovered; a development box has some of those
+# and reports a higher total. Measured on the same commit: 83.4% locally,
+# 82.2% on ubuntu-latest. The floor has to be the number the gate measures, or
+# it fails on the day it lands — which is exactly what it did. If your local
+# reading is a point above this line, that is the reason, and it is not a
+# licence to raise it: run the ratchet job's number, or read it off a CI run.
+#
 #   make coverage-ratchet          # measure and compare
 #   make coverage-ratchet-raise    # print the line to paste here, if it is time
-83.3
+82.2

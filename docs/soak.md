@@ -120,6 +120,14 @@ increase, so a reviewer sees the floor move. A floor that follows the
 measurement is not a floor — it makes today's number the rule and leaves the
 next drop with nothing to hit.
 
+**The number is the CI runner's, not yours.** The gate runs on a clean runner
+with none of the external engines installed (no PipeWire, whisper, piper,
+kokoro), so the tests that probe for them skip and their code goes uncovered. A
+development box has some of them and reports about a point higher — measured on
+the same commit, 83.4% locally against 82.2% on `ubuntu-latest`. The floor has
+to be the number the gate measures. If your local reading sits a point above
+the line, that is why, and it is not a licence to raise it.
+
 The 0.5pp tolerance is there because the total moves by a tenth or two on
 unrelated changes — a refactor that deletes covered code, a new error path in a
 rarely-hit branch — and a gate that reddens on noise is a gate people learn to

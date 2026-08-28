@@ -89,6 +89,11 @@ the number. If the drop is genuinely correct — covered code was deleted, or a
 package moved out of the module — say so in the commit message and edit
 coverage.floor in the same change, so the reviewer sees the floor move.
 
+If you are running this locally and CI disagrees: it will, by about a point.
+The gate's runner has none of the external engines installed, so the tests that
+probe for them skip and their code goes uncovered. The floor is the runner's
+number. See the note in coverage.floor.
+
 Which package moved:
 
     go tool cover -func=$PROFILE | sort -k3 -n | head -30
