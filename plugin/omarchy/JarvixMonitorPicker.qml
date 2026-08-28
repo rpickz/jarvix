@@ -2,9 +2,10 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// The monitor picker (#180): one labelled control that offers the screens
-// plugged in right now — each with its size and the name the user gave it —
-// plus "the current monitor", the reference that means "wherever I am".
+// The closed-set picker (#180 for screens, #181 for the rest of the window-
+// placement vocabulary): one labelled control that offers a short list the
+// daemon supplied — the screens plugged in right now with their sizes and
+// names, the modes a window may sit in, where the next window goes.
 //
 // It is a cycler rather than a dropdown, which is this window's house style
 // for a closed set (JarvixSettings' enum rows): the list is short, a cycler
@@ -14,18 +15,21 @@ import qs.Ui
 // Contract:
 //   label    — what is being chosen; also the accessible name.
 //   options  — [{value, label}], in the order to cycle. value is what the
-//              daemon is sent: a connector name, or "" for the current
-//              monitor. The caller builds it from monitors.list, because
-//              which screens exist is the daemon's answer, never this file's.
+//              daemon is sent: a connector name, a mode, "" for the choice
+//              that means "not said". The caller builds it from a daemon
+//              reply, because what the options ARE is the daemon's answer,
+//              never this file's.
 //   value    — the selected option's value; the caller owns it and updates
 //              it from chosen().
 //   problem  — the daemon's message for this field ("" hides the line).
 //   hint     — an optional dimmed explainer ("" hides it).
+//   emptyLabel — what to show before any options have arrived; the caller
+//              words it for what is being chosen.
 //   chosen(value) — fires with the newly selected value.
 //
-// Display-only (ADR 0013): no screen name, no size and no reserved word is
-// composed here. An option whose label this file invented would be an option
-// that could disagree with what a routine resolves.
+// Display-only (ADR 0013): no screen name, no size, no mode and no reserved
+// word is composed here. An option whose label this file invented would be an
+// option that could disagree with what a routine resolves.
 Column {
   id: picker
 
@@ -34,6 +38,7 @@ Column {
   property string value: ""
   property string problem: ""
   property string hint: ""
+  property string emptyLabel: "nothing to choose from yet"
 
   signal chosen(string value)
 
@@ -51,7 +56,7 @@ Column {
   }
 
   function currentLabel() {
-    if (picker.options.length === 0) return "no screens reported"
+    if (picker.options.length === 0) return picker.emptyLabel
     var i = picker.indexOfValue()
     return String(picker.options[i].label || picker.options[i].value)
   }

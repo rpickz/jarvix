@@ -1298,6 +1298,7 @@ func (d *Daemon) registerMethods() {
 	d.registerScriptMethods()
 	d.registerWindowMethods()
 	d.registerMonitorMethods()
+	d.registerPlacementMethods()
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
 	d.registerFocusMethods()

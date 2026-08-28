@@ -119,6 +119,7 @@ FloatingWindow {
       requestSpokenCommands()
       requestReminders()
       requestMonitors()
+      requestPlacementVocabulary()
     }
     else if (id === "knowledge") requestKnowledge()
     else if (id === "providers") requestProviders()
@@ -683,6 +684,7 @@ FloatingWindow {
       : { name: "", phrases: [""], path: "" }
     automationFormProblems = []
     automationFormNotes = []
+    automationFormPreview = {}
     automationFormNextFire = ""
     automationFormError = ""
     automationDeleteConfirm = false
@@ -715,6 +717,7 @@ FloatingWindow {
     automationsFingerprint = String(result.fingerprint || automationsFingerprint)
     automationFormProblems = []
     automationFormNotes = []
+    automationFormPreview = {}
     automationFormNextFire = ""
     automationFormError = ""
     automationDeleteConfirm = false
@@ -797,20 +800,36 @@ FloatingWindow {
         if (launch !== "") step.launch = launch
         var match = String(s.match || "").trim()
         if (match !== "") step.match = match
+        // The superseded spellings (float, size, tile), carried through
+        // byte-for-byte: a form that silently dropped a key it has no widget
+        // for would delete a working routine's placement the first time
+        // someone edited its name. The step's own clear button is how they
+        // go, so their removal is something the user did.
         if (s.float === true) step.float = true
-        var tile = String(s.tile || "").trim()
-        if (tile !== "") step.tile = tile
-        if (s.size !== undefined) step.size = s.size
-        if (s.position !== undefined) step.position = s.position
-        // The window-placement vocabulary (ADR 0056). The routine editor
-        // (#181) gives these their own controls; until then they are carried
-        // through byte-for-byte, because a form that silently dropped the
-        // keys it does not render would delete a user's placement the first
-        // time they edited the step's name.
         for (var k = 0; k < automationPlacementKeys.length; k++) {
           var key = automationPlacementKeys[k]
           if (s[key] !== undefined && String(s[key]) !== "") step[key] = s[key]
         }
+        // The window-placement vocabulary (ADR 0056), which #181 gave its own
+        // controls. Each key is written only when it says something, so a
+        // step that places nothing stays byte-identical to one written before
+        // the vocabulary existed — and the values are whatever the pickers
+        // were handed, never a word composed here.
+        var monitor = String(s.monitor || "").trim()
+        if (monitor !== "") step.monitor = monitor
+        var mode = String(s.mode || "").trim()
+        if (mode !== "") step.mode = mode
+        var width = String(s.width || "").trim()
+        if (width !== "") step.width = width
+        var height = String(s.height || "").trim()
+        if (height !== "") step.height = height
+        var placeNext = String(s.place_next || "").trim()
+        if (placeNext !== "") step.place_next = placeNext
+        if (s.master === true) step.master = true
+        var focus = String(s.focus || "").trim()
+        if (focus !== "") step.focus = focus
+        var position = win.automationStepPosition(s)
+        if (position !== undefined) step.position = position
         steps.push(step)
       }
       entry.steps = steps
@@ -824,6 +843,62 @@ FloatingWindow {
   function automationFormNumber(text) {
     var n = Number(text)
     return (text !== "" && isFinite(n) && Math.floor(n) === n) ? n : text
+  }
+
+  // automationStepPosition renders a step's floating position for the wire.
+  // Each half goes through automationFormNumber, and a HALF-filled pair is
+  // sent exactly as it stands: "position must be a pair of whole numbers" is
+  // a sentence the daemon already writes, and filling the missing number in
+  // here would put a window somewhere nobody asked for.
+  function automationStepPosition(step) {
+    var pair = step.position || []
+    var x = String(pair[0] === undefined ? "" : pair[0]).trim()
+    var y = String(pair[1] === undefined ? "" : pair[1]).trim()
+    if (x === "" && y === "") return undefined
+    return [automationFormNumber(x), automationFormNumber(y)]
+  }
+
+  // automationStepPositionAt reads one half of a step's position back out for
+  // its input, so the two fields and the pair on the wire stay one value.
+  function automationStepPositionAt(step, half) {
+    var pair = (step || {}).position || []
+    return String(pair[half] === undefined ? "" : pair[half])
+  }
+
+  // automationSetStepPosition writes one half of a step's position, creating
+  // the pair the first time either half is typed into.
+  function automationSetStepPosition(index, half, value) {
+    var step = automationDraft.steps[index]
+    if (!step.position) step.position = ["", ""]
+    step.position[half] = value
+  }
+
+  // automationStepSuperseded lists the pre-ADR-0056 keys a step still carries
+  // — `float`, `size`, `tile` — so the form can say which ones it is keeping
+  // and offer to remove them. They have no controls because they say what
+  // mode/width/height say, and the daemon refuses a step that says it twice.
+  function automationStepSuperseded(index) {
+    var step = (automationDraft.steps || [])[index] || {}
+    var out = []
+    if (step.float === true) out.push("float")
+    for (var i = 0; i < automationPlacementKeys.length; i++) {
+      var key = automationPlacementKeys[i]
+      if (step[key] !== undefined && String(step[key]) !== "") out.push(key)
+    }
+    return out
+  }
+
+  // automationClearSuperseded drops those keys from a step. It is a button
+  // rather than something the form does quietly on open: deleting a key
+  // someone wrote by hand is an edit, and an edit the user did not ask for is
+  // the kind a form should never make.
+  function automationClearSuperseded(index) {
+    var step = automationDraft.steps[index]
+    delete step.float
+    for (var i = 0; i < automationPlacementKeys.length; i++) {
+      delete step[automationPlacementKeys[i]]
+    }
+    reassignAutomationDraft()
   }
 
   // validateAutomationDraft is the dry run: field problems and the next-fire
@@ -848,6 +923,11 @@ FloatingWindow {
     automationFormProblems = result.problems || []
     automationFormNotes = result.notes || []
     automationFormNextFire = String(result.next_fire || "")
+    // The diagram (#181), computed by the daemon from the document this draft
+    // would save. It travels with the problems so the picture and the
+    // refusals can never be one edit apart, and an empty object is the honest
+    // answer for a draft too broken to describe — the problems say why.
+    automationFormPreview = result.preview || {}
     automationFormError = ""
   }
 
@@ -941,12 +1021,98 @@ FloatingWindow {
     return out.join("\n")
   }
 
+  // --- the placement vocabulary (#181) --------------------------------------
+  // Every closed set the step form's pickers offer, served whole by
+  // `placement.vocabulary`: how a window may sit, where the next one goes,
+  // whether the view follows, and what to do about a window that is already
+  // open — each as a value to write and the words to show for it.
+  //
+  // None of it is spelled here on purpose (ADR 0013, ADR 0056). The
+  // vocabulary is declared once, in one package, and a mode added there has
+  // to appear in this form without anyone remembering to add it — which a
+  // hard-coded list in QML cannot do, and would go stale silently rather than
+  // loudly.
+  property var placementModes: []
+  property var placementPlaceNext: []
+  property var placementFocusChoices: []
+  property var placementLaunchChoices: []
+  property var placementUnsupported: []
+  property int placementWorkspaceMin: 0
+  property int placementWorkspaceMax: 0
+  property int placementVocabularyRequestId: 0
+
+  function requestPlacementVocabulary() {
+    if (!daemon.connected) return
+    placementVocabularyRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: placementVocabularyRequestId,
+      method: "placement.vocabulary" }) + "\n")
+  }
+
+  function loadPlacementVocabulary(result) {
+    placementModes = result.modes || []
+    placementPlaceNext = result.place_next || []
+    placementFocusChoices = result.focus || []
+    placementLaunchChoices = result.launch || []
+    placementUnsupported = result.unsupported || []
+    var bounds = result.workspace || {}
+    placementWorkspaceMin = Number(bounds.min || 0)
+    placementWorkspaceMax = Number(bounds.max || 0)
+  }
+
+  // placementWorkspaceLabel is the workspace field's label, with the bounds
+  // the vocabulary declares rather than a range typed in here — the numbers
+  // are the daemon's and the field must not claim a different pair.
+  function placementWorkspaceLabel() {
+    if (placementWorkspaceMax <= 0) return "Workspace"
+    return "Workspace (" + placementWorkspaceMin + "–" + placementWorkspaceMax + ")"
+  }
+
+  // placementUnsupportedHint is the mode picker's explainer: the window states
+  // the compositor does offer and the vocabulary declines, each with the
+  // reason it was declined. Shown rather than omitted, because an option that
+  // is simply missing reads as an oversight and the same question gets asked
+  // again.
+  function placementUnsupportedHint() {
+    var out = []
+    for (var i = 0; i < placementUnsupported.length; i++) {
+      var u = placementUnsupported[i]
+      out.push(String(u.name) + " — " + String(u.reason))
+    }
+    if (out.length === 0) return ""
+    return "Not offered: " + out.join("; ")
+  }
+
+  // --- the preview (#181) ---------------------------------------------------
+  // What the routine WOULD do, computed by the daemon and carried in the same
+  // `config.validate_entry` reply the field problems arrive in — so the
+  // diagram and the validation can never be one edit apart, and the picture
+  // redraws on exactly the events the problems do: a field committing, a step
+  // being added, removed, or MOVED.
+  property var automationFormPreview: ({})
+
+  function automationPreviewWorkspaces() {
+    return (automationFormPreview || {}).workspaces || []
+  }
+
+  // automationStepSummary is one step's sentence — the arrangement in words,
+  // beside the fields that produced it. It is composed daemon-side; this
+  // looks it up by the step's position and renders it.
+  function automationStepSummary(index) {
+    var steps = (automationFormPreview || {}).steps || []
+    for (var i = 0; i < steps.length; i++) {
+      if (Number(steps[i].index) === index) return String(steps[i].summary || "")
+    }
+    return ""
+  }
+
   // automationPlacementKeys are the window-placement vocabulary's step keys
-  // (ADR 0056). The daemon owns their meaning and their validation; this list
-  // exists only so the form carries them through an edit untouched.
-  readonly property var automationPlacementKeys: [
-    "monitor", "mode", "width", "height", "place_next", "master", "focus"
-  ]
+  // the form has no control of its own for. The daemon owns their meaning and
+  // their validation; this list exists only so the form carries them through
+  // an edit untouched. It is down to the superseded spellings now that #181
+  // gave the vocabulary proper its own controls — a key with a widget is
+  // written by that widget, and carrying it here as well would write it twice.
+  readonly property var automationPlacementKeys: ["size", "tile"]
 
   // automationStepNoteFor collects the notes for one step, whichever of its
   // launching keys the daemon keyed them to — the caution belongs to the
@@ -963,11 +1129,15 @@ FloatingWindow {
   }
 
   // automationStepExtraProblems catches a step's problems on the keys the
-  // form carries through without an input (size, position, tile, and the
-  // placement vocabulary) so they still land inside the step that owns them.
+  // form carries through without an input — the superseded float/size/tile —
+  // and any whole-step message, so they still land inside the step that owns
+  // them. Nothing the daemon says about a step may be dropped, including a
+  // sentence about a key this form deliberately has no control for.
   function automationStepExtraProblems(index) {
     var shown = { app: true, desktop_entry: true, args: true, identity: true,
-      match: true, launch: true, workspace: true, float: true }
+      match: true, launch: true, workspace: true, monitor: true, mode: true,
+      width: true, height: true, position: true, place_next: true,
+      master: true, focus: true }
     var prefix = "steps[" + index + "]"
     var out = []
     for (var i = 0; i < automationFormProblems.length; i++) {
@@ -3598,6 +3768,8 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.monitorRequestId) {
           if (frame.result) win.loadMonitors(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.placementVocabularyRequestId) {
+          if (frame.result) win.loadPlacementVocabulary(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
                    frame.id === win.historyReadRequestId ||
                    frame.id === win.historyOpenRequestId ||
@@ -3652,6 +3824,7 @@ FloatingWindow {
         win.requestMemory()
         win.requestVocabulary()
         win.requestMonitors()
+        win.requestPlacementVocabulary()
         // The transcript's typography settings (issue #121) load with the
         // rest of the connect snapshot; until they arrive the property
         // defaults render the shipped look.
@@ -4854,7 +5027,16 @@ FloatingWindow {
               color: Color.urgent
             }
             Repeater {
-              model: (win.automationDraft.steps || []).length
+              // A FRESH array on every structural change, so moving a step
+              // rebuilds the delegates and each one re-reads the step it now
+              // is. A model that was only the length would keep the same
+              // delegates through a swap — the inputs are filled on
+              // completion, which never runs again — and every field would
+              // then be showing the other step's values while the draft, the
+              // validation and the diagram had all moved on. Adding and
+              // removing happened to work because the length changed; moving
+              // did not, and moving is what this editor has to make visible.
+              model: (win.automationDraft.steps || []).slice()
               delegate: Rectangle {
                 required property int index
                 width: parent.width
@@ -5049,30 +5231,22 @@ FloatingWindow {
                     onEdited: function(value) { win.automationDraft.steps[index].identity = value }
                     onCommitted: win.validateAutomationDraft()
                   }
-                  // Adopt or launch, per step (#175). A toggle rather than a
-                  // text field because there are exactly two answers, and the
-                  // daemon's word for the non-default one is what is written.
-                  JarvixFormToggle {
+                  // Adopt or launch, per step (#175). A closed set of two, so
+                  // it is a picker over the daemon's own two options rather
+                  // than a toggle whose "on" this file would have to spell.
+                  JarvixMonitorPicker {
                     width: parent.width
-                    label: "Always open a new window"
-                    detail: "Off re-uses a matching window when one is already open."
+                    label: "When a matching window is already open"
+                    options: win.placementLaunchChoices
+                    emptyLabel: "waiting for the daemon"
                     problem: win.automationProblemFor("steps[" + index + "].launch")
-                    checked: String((win.automationDraft.steps[index] || {}).launch || "") === "always"
-                    onToggled: function(state) {
-                      win.automationDraft.steps[index].launch = state ? "always" : ""
-                      win.reassignAutomationDraft()
+                    Component.onCompleted: value = String(
+                      (win.automationDraft.steps[index] || {}).launch || "")
+                    onChosen: function(chosen) {
+                      value = chosen
+                      win.automationDraft.steps[index].launch = chosen
+                      win.validateAutomationDraft()
                     }
-                  }
-                  JarvixFormField {
-                    width: parent.width
-                    label: "Workspace (1–99)"
-                    problem: win.automationProblemFor("steps[" + index + "].workspace")
-                    Component.onCompleted: {
-                      var w = (win.automationDraft.steps[index] || {}).workspace
-                      text = w === undefined ? "" : String(w)
-                    }
-                    onEdited: function(value) { win.automationDraft.steps[index].workspace = value.trim() }
-                    onCommitted: win.validateAutomationDraft()
                   }
                   JarvixFormField {
                     width: parent.width
@@ -5082,14 +5256,152 @@ FloatingWindow {
                     onEdited: function(value) { win.automationDraft.steps[index].match = value }
                     onCommitted: win.validateAutomationDraft()
                   }
+
+                  // Where the window goes (#181): the window-placement
+                  // vocabulary (ADR 0056), one control per key. Every closed
+                  // set is the daemon's list and every message is the
+                  // daemon's sentence — this form renders them and decides
+                  // nothing about what fits.
+                  JarvixFormField {
+                    width: parent.width
+                    label: win.placementWorkspaceLabel()
+                    problem: win.automationProblemFor("steps[" + index + "].workspace")
+                    Component.onCompleted: {
+                      var w = (win.automationDraft.steps[index] || {}).workspace
+                      text = w === undefined ? "" : String(w)
+                    }
+                    onEdited: function(value) { win.automationDraft.steps[index].workspace = value.trim() }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  // The screens, from the same picker and the same
+                  // monitors.list reply the Screens section below uses, so a
+                  // name given there is offered here without a reload (#180).
+                  JarvixMonitorPicker {
+                    width: parent.width
+                    label: "Which screen"
+                    options: win.monitorPickerOptions()
+                    emptyLabel: "no screens reported"
+                    problem: win.automationProblemFor("steps[" + index + "].monitor")
+                    hint: "Leaving it on the current monitor keeps the workspace where the compositor has it."
+                    Component.onCompleted: value = String(
+                      (win.automationDraft.steps[index] || {}).monitor || "")
+                    onChosen: function(chosen) {
+                      value = chosen
+                      win.automationDraft.steps[index].monitor = chosen
+                      win.validateAutomationDraft()
+                    }
+                  }
+                  JarvixMonitorPicker {
+                    width: parent.width
+                    label: "How the window sits"
+                    options: win.placementModes
+                    emptyLabel: "waiting for the daemon"
+                    problem: win.automationProblemFor("steps[" + index + "].mode")
+                    hint: win.placementUnsupportedHint()
+                    Component.onCompleted: value = String(
+                      (win.automationDraft.steps[index] || {}).mode || "")
+                    onChosen: function(chosen) {
+                      value = chosen
+                      win.automationDraft.steps[index].mode = chosen
+                      win.validateAutomationDraft()
+                    }
+                  }
+                  JarvixFormField {
+                    width: parent.width
+                    label: "Width (a share of the screen, or pixels)"
+                    placeholder: "66%"
+                    monospace: true
+                    problem: win.automationProblemFor("steps[" + index + "].width")
+                    Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).width || "")
+                    onEdited: function(value) { win.automationDraft.steps[index].width = value }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  JarvixFormField {
+                    width: parent.width
+                    label: "Height (a share of the screen, or pixels)"
+                    placeholder: "50%"
+                    monospace: true
+                    problem: win.automationProblemFor("steps[" + index + "].height")
+                    Component.onCompleted: text = String((win.automationDraft.steps[index] || {}).height || "")
+                    onEdited: function(value) { win.automationDraft.steps[index].height = value }
+                    onCommitted: win.validateAutomationDraft()
+                  }
+                  // The floating position, as two numbers rather than one
+                  // "x, y" box: a single field would mean this file splitting
+                  // a value and inventing a rule for what is between them.
+                  Row {
+                    id: positionRow
+                    readonly property int stepIndex: index
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    JarvixFormField {
+                      width: (parent.width - Style.space(8)) / 2
+                      label: "Position across (floating only)"
+                      placeholder: "100"
+                      problem: win.automationProblemFor(
+                        "steps[" + positionRow.stepIndex + "].position")
+                      Component.onCompleted: text = win.automationStepPositionAt(
+                        win.automationDraft.steps[positionRow.stepIndex], 0)
+                      onEdited: function(value) {
+                        win.automationSetStepPosition(positionRow.stepIndex, 0, value.trim())
+                      }
+                      onCommitted: win.validateAutomationDraft()
+                    }
+                    JarvixFormField {
+                      width: (parent.width - Style.space(8)) / 2
+                      label: "Position down (floating only)"
+                      placeholder: "200"
+                      Component.onCompleted: text = win.automationStepPositionAt(
+                        win.automationDraft.steps[positionRow.stepIndex], 1)
+                      onEdited: function(value) {
+                        win.automationSetStepPosition(positionRow.stepIndex, 1, value.trim())
+                      }
+                      onCommitted: win.validateAutomationDraft()
+                    }
+                  }
+                  // Where the NEXT window goes. This is the control that makes
+                  // step order matter, which is why the diagram below has to
+                  // redraw when a step moves.
+                  JarvixMonitorPicker {
+                    width: parent.width
+                    label: "Where the next window on this workspace goes"
+                    options: win.placementPlaceNext
+                    emptyLabel: "waiting for the daemon"
+                    problem: win.automationProblemFor("steps[" + index + "].place_next")
+                    Component.onCompleted: value = String(
+                      (win.automationDraft.steps[index] || {}).place_next || "")
+                    onChosen: function(chosen) {
+                      value = chosen
+                      win.automationDraft.steps[index].place_next = chosen
+                      win.validateAutomationDraft()
+                    }
+                  }
                   JarvixFormToggle {
                     width: parent.width
-                    label: "Float this window"
-                    problem: win.automationProblemFor("steps[" + index + "].float")
-                    checked: (win.automationDraft.steps[index] || {}).float === true
+                    label: "Promote it into the layout's master pane"
+                    detail: "Only master-family layouts have one; on any other the run says so."
+                    problem: win.automationProblemFor("steps[" + index + "].master")
+                    Component.onCompleted: checked =
+                      (win.automationDraft.steps[index] || {}).master === true
                     onToggled: function(state) {
-                      win.automationDraft.steps[index].float = state
-                      win.reassignAutomationDraft()
+                      checked = state
+                      win.automationDraft.steps[index].master = state
+                      win.validateAutomationDraft()
+                    }
+                  }
+                  JarvixMonitorPicker {
+                    width: parent.width
+                    label: "After it is placed"
+                    options: win.placementFocusChoices
+                    emptyLabel: "waiting for the daemon"
+                    problem: win.automationProblemFor("steps[" + index + "].focus")
+                    Component.onCompleted: value = String(
+                      (win.automationDraft.steps[index] || {}).focus || "")
+                    onChosen: function(chosen) {
+                      value = chosen
+                      win.automationDraft.steps[index].focus = chosen
+                      win.validateAutomationDraft()
                     }
                   }
                   Text {
@@ -5101,16 +5413,48 @@ FloatingWindow {
                     font.pixelSize: Style.font.subtitle
                     color: Color.urgent
                   }
+                  // The step's own sentence: the arrangement in words, beside
+                  // the fields that produced it. Composed by the daemon and
+                  // rendered verbatim, so the diagram is never the only way to
+                  // read what this step does.
                   Text {
-                    visible: (win.automationDraft.steps[index] || {}).size !== undefined
-                      || (win.automationDraft.steps[index] || {}).position !== undefined
-                      || (win.automationDraft.steps[index] || {}).tile !== undefined
+                    visible: win.automationStepSummary(index) !== ""
                     width: parent.width
                     wrapMode: Text.Wrap
-                    text: "Captured sizing (size/position/tile) is kept as it is; edit config.toml to change it."
+                    text: win.automationStepSummary(index)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.subtitle
-                    color: Util.alpha(Color.popups.text, 0.6)
+                    color: Util.alpha(Color.popups.text, 0.85)
+                  }
+                  // The pre-ADR-0056 keys a hand edit or an old capture left
+                  // behind. They say what the controls above say, and the
+                  // daemon refuses a step that says it twice — so the form
+                  // keeps them until the user presses the button, and never
+                  // deletes something nobody asked it to.
+                  Column {
+                    id: supersededColumn
+                    readonly property int stepIndex: index
+                    readonly property var keys: win.automationStepSuperseded(index)
+                    visible: keys.length > 0
+                    width: parent.width
+                    spacing: Style.space(6)
+
+                    Text {
+                      width: parent.width
+                      wrapMode: Text.Wrap
+                      text: "This step still carries the older spelling: "
+                        + supersededColumn.keys.join(", ")
+                        + ". The controls above are the current one."
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.subtitle
+                      color: Util.alpha(Color.popups.text, 0.7)
+                    }
+                    JarvixFormButton {
+                      label: "Remove " + supersededColumn.keys.join(", ")
+                      name: "Remove the older placement keys from step "
+                        + (supersededColumn.stepIndex + 1)
+                      onClicked: win.automationClearSuperseded(supersededColumn.stepIndex)
+                    }
                   }
                 }
               }
@@ -5122,6 +5466,44 @@ FloatingWindow {
                 if (!win.automationDraft.steps) win.automationDraft.steps = []
                 win.automationDraft.steps.push({ app: "", args: [], workspace: 1 })
                 win.reassignAutomationDraft()
+              }
+            }
+          }
+
+          // The preview (#181): what this routine would look like, one
+          // drawing per workspace, updating on every change the validation
+          // updates on — a field committing, a step added, removed, or moved.
+          //
+          // Every number in it is the daemon's (ADR 0013). This section
+          // decides only what order to stack the drawings in, which is the
+          // order the daemon sent them: the order the routine first mentions
+          // each workspace.
+          Column {
+            visible: win.automationFormFamily === "routines"
+            width: parent.width
+            spacing: Style.space(10)
+
+            Text {
+              text: "What this will look like"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Text {
+              visible: win.automationPreviewWorkspaces().length === 0
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Nothing to draw yet — the preview appears once the routine has a name and a step."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Util.alpha(Color.popups.text, 0.7)
+            }
+            Repeater {
+              model: win.automationPreviewWorkspaces().length
+              delegate: JarvixLayoutPreview {
+                required property int index
+                width: parent.width
+                workspace: win.automationPreviewWorkspaces()[index]
               }
             }
           }
@@ -5385,6 +5767,7 @@ FloatingWindow {
             width: parent.width
             label: "Which screen"
             options: win.monitorPickerOptions()
+            emptyLabel: "no screens reported"
             value: win.monitorFormConnector
             problem: win.monitorProblemFor("connector")
             hint: "The screens plugged in right now, and “the current monitor” for the one you are on."

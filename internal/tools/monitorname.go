@@ -207,6 +207,18 @@ func (d *Desktop) MonitorListings(ctx context.Context) ([]MonitorListing, []Nick
 	return out, names, nil
 }
 
+// MonitorInventory is the output inventory as the compositor reports it —
+// geometry, scale and the bars' reservation — for the surfaces that need to
+// do arithmetic against a real screen rather than list one.
+//
+// It is separate from MonitorListings because the two answer different
+// questions. A listing is for a person choosing a screen and carries the
+// words to choose by; this is for placement.Arrange, which needs the numbers
+// (#181) and must have exactly the numbers a run would resolve against.
+func (d *Desktop) MonitorInventory(ctx context.Context) ([]placement.Monitor, error) {
+	return d.presentMonitors(ctx)
+}
+
 // MonitorNicknamePath is where the names live, so every surface can tell the
 // user which file to open. "" when no store is configured.
 func (d *Desktop) MonitorNicknamePath() string {

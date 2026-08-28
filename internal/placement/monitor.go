@@ -203,13 +203,11 @@ type Area struct {
 	Width, Height int
 }
 
-// Usable is the part of the monitor a window can actually occupy: the logical
-// size with the bars' reservation removed. It is what a percentage resolves
-// against, because "two thirds of the screen" means two thirds of the part
-// that is not already spoken for — a window sized against the whole output
-// would overhang the bar by exactly the bar's height and look wrong on every
-// monitor the user owns.
-func (m Monitor) Usable() Area {
+// Logical is the whole output in the coordinate space every dispatch uses:
+// the mode's pixels divided by the scale, at the monitor's own origin. It is
+// the glass, bars included — what a preview draws its frame to (#181), and
+// what a fullscreen window covers.
+func (m Monitor) Logical() Area {
 	w, h := m.Width, m.Height
 	if m.Scale > 0 && m.Scale != 1 {
 		// Logical pixels are the mode's pixels divided by the scale, and
@@ -221,11 +219,22 @@ func (m Monitor) Usable() Area {
 		w = int(float64(w)/m.Scale + 0.5)
 		h = int(float64(h)/m.Scale + 0.5)
 	}
+	return Area{X: m.X, Y: m.Y, Width: w, Height: h}
+}
+
+// Usable is the part of the monitor a window can actually occupy: the logical
+// size with the bars' reservation removed. It is what a percentage resolves
+// against, because "two thirds of the screen" means two thirds of the part
+// that is not already spoken for — a window sized against the whole output
+// would overhang the bar by exactly the bar's height and look wrong on every
+// monitor the user owns.
+func (m Monitor) Usable() Area {
+	logical := m.Logical()
 	return Area{
-		X:      m.X + m.Reserved[0],
-		Y:      m.Y + m.Reserved[1],
-		Width:  w - m.Reserved[0] - m.Reserved[2],
-		Height: h - m.Reserved[1] - m.Reserved[3],
+		X:      logical.X + m.Reserved[0],
+		Y:      logical.Y + m.Reserved[1],
+		Width:  logical.Width - m.Reserved[0] - m.Reserved[2],
+		Height: logical.Height - m.Reserved[1] - m.Reserved[3],
 	}
 }
 
