@@ -646,10 +646,20 @@ func followSession(client *ipc.Client, showTranscript bool) error {
 	}
 }
 
-func cmdDoctor(cfg config.Config, paths config.Paths) error {
-	fmt.Println("Jarvix Doctor")
+// cmdDoctor prints the full diagnostic run — or, with gate set, only the
+// critical subset `jarvix upgrade` holds a fresh install to (doctor.GateChecks,
+// ADR 0044): the upgrade execs the newly installed CLI with --gate so the
+// probes and the protocol comparison run in the new build's own generation.
+func cmdDoctor(cfg config.Config, paths config.Paths, gate bool) error {
+	var results []doctor.Result
+	if gate {
+		fmt.Println("Jarvix upgrade health gate")
+		results = doctor.GateChecks(cfg, paths)
+	} else {
+		fmt.Println("Jarvix Doctor")
+		results = doctor.Run(cfg, paths)
+	}
 	fmt.Println()
-	results := doctor.Run(cfg, paths)
 	for _, r := range results {
 		tag := map[doctor.Status]string{
 			doctor.OK: "[OK]  ", doctor.Warn: "[WARN]", doctor.Fail: "[FAIL]",
@@ -667,7 +677,11 @@ func cmdDoctor(cfg config.Config, paths config.Paths) error {
 	}
 	fmt.Println()
 	if doctor.Healthy(results) {
-		fmt.Println("Jarvix appears ready.")
+		if gate {
+			fmt.Println("Gate green.")
+		} else {
+			fmt.Println("Jarvix appears ready.")
+		}
 		return nil
 	}
 	fmt.Println("Fix the failures above, then run jarvix doctor again.")

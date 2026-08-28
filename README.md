@@ -105,6 +105,36 @@ ollama pull llama3.2:3b
 `jarvix --version` + `jarvix doctor` together describe an installation —
 include both in bug reports.
 
+### Upgrading
+
+A source install updates itself, safely:
+
+```bash
+jarvix upgrade --check  # what's available vs what's installed — changes nothing
+jarvix upgrade          # fetch, build, install, restart, health-gate
+```
+
+`jarvix upgrade` fast-forwards your checkout to `origin/main`, builds
+through the Makefile, installs the pair into a versioned slot under
+`~/.local/share/jarvix/releases/`, restarts the daemon, and then holds the
+result to the doctor's health gate: socket answering, protocol match, and
+the real engine probes — whisper actually transcribes, the TTS engine
+actually synthesizes. **If any of that fails, it automatically rolls back**
+to the previous release, restarts onto it, re-runs the gate to confirm
+recovery, and names the failing check verbatim. The previous version is
+always kept on disk, so a bad build costs a restart, not your assistant.
+
+Some ground rules it enforces (ADR 0044):
+
+- your checkout is yours: uncommitted changes, a diverged branch, or being
+  off `main` make it refuse with the exact git state — it never stashes,
+  resets, or touches your work;
+- a build failure installs nothing and leaves the running daemon untouched;
+- when the update changed the shell plugin's QML it tells you a shell
+  restart is pending and offers `omarchy-restart-shell` (daemon-only
+  changes say so) — it never restarts your shell for you;
+- one upgrade at a time — a second invocation refuses on the lock.
+
 ## Configuration
 
 Jarvix works with **no configuration file** on a machine with Ollama and
