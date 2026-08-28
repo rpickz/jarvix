@@ -181,6 +181,14 @@ func TestAPreApprovedRunAppearsInTheActivityFeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForEvent(t, client, "tool.pre_approved")
+	// The row is not the event. Feed rows are derived by the daemon's own
+	// subscriber *from* tool.pre_approved, so the event proves only that the
+	// gate spoke — never that the watcher has appended the row yet
+	// (docs/ipc.md says exactly this of every activity.row). Sampling
+	// activity.get on the event's heels races that watcher, which is how this
+	// passed locally and failed in CI. Wait for the row itself, as every
+	// other feed assertion in this package does.
+	waitForActivityRow(t, client, "Ran without asking: shell.run")
 	waitForEvent(t, client, "session.finished")
 
 	var feed struct {
