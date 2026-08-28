@@ -125,8 +125,18 @@ func TestCIWorkflowGradesEveryBranchWithAPinnedLinter(t *testing.T) {
 	// neutral, a cancelled one shows up red next to the green result. Fork
 	// PRs still need the pull_request trigger, hence a guard rather than
 	// dropping it.
-	if guards := strings.Count(workflow, "github.event.pull_request.head.repo.full_name != github.repository"); guards != 2 {
-		t.Errorf("both jobs must skip the duplicate same-repo pull_request run, found %d guards", guards)
+	//
+	// Counted against the number of jobs rather than a literal, because the
+	// count changed the first time a job was added (the coverage ratchet,
+	// #171) and a hard-coded 2 turns "a new job forgot the guard" into "the
+	// number moved", which is a different and much less useful failure.
+	jobs := jobNames(workflow)
+	if len(jobs) < 2 {
+		t.Fatalf("found %v jobs in ci.yml; this guard is no longer watching anything", jobs)
+	}
+	if guards := strings.Count(workflow, "github.event.pull_request.head.repo.full_name != github.repository"); guards != len(jobs) {
+		t.Errorf("all %d jobs (%v) must skip the duplicate same-repo pull_request run, found %d guards",
+			len(jobs), jobs, guards)
 	}
 	// Cancelling is the usual concurrency setting and the wrong one here: a
 	// cancelled run is a lost verdict. Observed for real — the skipped
@@ -134,4 +144,155 @@ func TestCIWorkflowGradesEveryBranchWithAPinnedLinter(t *testing.T) {
 	if strings.Contains(workflow, "cancel-in-progress: true") {
 		t.Error("cancel-in-progress must stay false: a cancelled run is a push without a verdict")
 	}
+	// The gate's other promise is speed, so every push can afford it. The
+	// soak's high-count runs belong on a schedule; a `-count=50` that crept in
+	// here would put tens of minutes on every push and the soak would be
+	// deleted for being slow rather than for being wrong (issue #171).
+	for _, banned := range []string{"-count=50", "-count=25", "GOMAXPROCS=2"} {
+		if strings.Contains(workflow, banned) {
+			t.Errorf("the PR gate must not run %s; that is soak.yml's job", banned)
+		}
+	}
+	if !strings.Contains(workflow, "scripts/coverage-ratchet.sh") {
+		t.Error("the gate does not run the coverage ratchet, so coverage can slide unnoticed")
+	}
+}
+
+// The soak workflow (issue #171) is the one job in this repo whose value is
+// entirely in the shape of its commands: the wrong flags produce a green run
+// that proves nothing, on a schedule, where nobody is looking. So the shape is
+// asserted rather than trusted.
+func TestSoakWorkflowRunsTheCommandsThatFoundTheDefects(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "soak.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+
+	// Scheduled, never on the PR path. Both halves matter: without the
+	// schedule it never runs, and on the PR path it would be turned off.
+	if !strings.Contains(workflow, "schedule:") || !strings.Contains(workflow, "cron:") {
+		t.Error("the soak has no schedule, so nothing runs it")
+	}
+	for _, trigger := range []string{"\n  push:", "\n  pull_request:"} {
+		if strings.Contains(workflow, trigger) {
+			t.Errorf("the soak must not run on %s: the PR gate's promise is a verdict in minutes",
+				strings.TrimSpace(trigger))
+		}
+	}
+
+	// The three modes, each earned by a defect that only it catches. See
+	// docs/soak.md and scripts/soak.sh for which is which.
+	for _, mode := range []string{"repeat", "constrained", "unraced"} {
+		if !strings.Contains(workflow, "scripts/soak.sh "+mode+" ") {
+			t.Errorf("the soak does not run the %q mode", mode)
+		}
+	}
+
+	// Every step bounded, and the job bounded behind them. A soak that hangs
+	// has stopped being a soak and started being a bill.
+	if got := strings.Count(workflow, "timeout-minutes:"); got < 4 {
+		t.Errorf("timeout-minutes appears %d times; want the job plus each soak step", got)
+	}
+
+	// The artefact is the whole point of capturing output at all. #170's first
+	// sighting was piped through `tail` and the evidence was lost.
+	if !strings.Contains(workflow, "upload-artifact") || !strings.Contains(workflow, "retention-days:") {
+		t.Error("the soak does not retain its logs as an artefact")
+	}
+	for _, truncator := range []string{"| tail", "|tail", "| head", "|head"} {
+		if strings.Contains(workflow, truncator) {
+			t.Errorf("the soak pipes output through %q: that is how #170's first failure lost its evidence", truncator)
+		}
+	}
+	if strings.Contains(workflow, "fail-fast: true") {
+		t.Error("fail-fast would hide five packages behind the first failure; #155 and #166 were the same defect in two")
+	}
+
+	// The workflow's matrix and the script's default list are two copies of
+	// one fact, and a package that falls out of either stops being soaked
+	// silently.
+	script, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "soak.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range []string{"session", "daemon", "focus", "reminders", "conversations", "automation"} {
+		if !strings.Contains(workflow, "\n          - "+pkg+"\n") {
+			t.Errorf("internal/%s is not in the soak matrix", pkg)
+		}
+		if !strings.Contains(string(script), "./internal/"+pkg+"\n") {
+			t.Errorf("internal/%s is not in scripts/soak.sh's default package list", pkg)
+		}
+	}
+}
+
+// The coverage floor is a committed number with an argument attached (issue
+// #171). This test is the argument's guard: the file must still hold a number
+// a script can read, and the script must still fail on a real drop and forgive
+// noise — a ratchet nobody has watched fail is a ratchet nobody trusts.
+func TestCoverageRatchetFailsOnADropAndForgivesNoise(t *testing.T) {
+	root := repoRoot(t)
+	floor, err := os.ReadFile(filepath.Join(root, "coverage.floor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var number string
+	for _, line := range strings.Split(string(floor), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		number = line
+	}
+	value, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		t.Fatalf("coverage.floor holds %q, which is not a percentage: %v", number, err)
+	}
+	if value <= 0 || value > 100 {
+		t.Fatalf("coverage.floor holds %v, which is not a percentage", value)
+	}
+
+	// COVERAGE_TOTAL short-circuits the measurement, so the comparison can be
+	// exercised in milliseconds instead of behind a full `go test ./...`.
+	for _, tc := range []struct {
+		total    float64
+		wantPass bool
+		why      string
+	}{
+		{value + 1, true, "above the floor"},
+		{value, true, "exactly the floor"},
+		{value - 0.4, true, "within the 0.5pp tolerance: unrelated changes move the total by a tenth or two"},
+		{value - 0.6, false, "past the tolerance: this is the slide the ratchet exists to stop"},
+		{value - 20, false, "a collapse"},
+	} {
+		cmd := exec.Command(filepath.Join(root, "scripts", "coverage-ratchet.sh"))
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"COVERAGE_TOTAL="+strconv.FormatFloat(tc.total, 'f', 2, 64))
+		out, err := cmd.CombinedOutput()
+		if gotPass := err == nil; gotPass != tc.wantPass {
+			t.Errorf("coverage %.2f%% (%s): pass=%v, want %v\n%s",
+				tc.total, tc.why, gotPass, tc.wantPass, out)
+		}
+	}
+}
+
+// jobNames returns the top-level job keys of a workflow. A two-space-indented
+// `name:` under `jobs:` is a job and nothing else is, which is enough
+// structure to count without pulling a YAML parser into the module for one
+// test (the module has exactly one dependency and it is a TOML parser).
+func jobNames(workflow string) []string {
+	_, after, found := strings.Cut(workflow, "\njobs:\n")
+	if !found {
+		return nil
+	}
+	var names []string
+	for _, line := range strings.Split(after, "\n") {
+		trimmed := strings.TrimSuffix(line, ":")
+		if trimmed == line || !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
+			continue
+		}
+		names = append(names, strings.TrimSpace(trimmed))
+	}
+	return names
 }

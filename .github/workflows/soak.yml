@@ -1,0 +1,127 @@
+# Soak: the commands that actually catch this repo's failures (issue #171).
+#
+# In one week, four real defects got past `go test -race -count=2` — the gate
+# ci.yml runs on every push:
+#
+#   #149  a data race on a test fake's exported field (tts.Fake.LastRequest)
+#   #155  a focus scheduler that parked forever and stopped reading its store,
+#         and #166, the same defect again in internal/reminders
+#   #156  speech tests that passed ONLY because -race changed their timing
+#   #170  an archive adoption window: 2 failures in 100 whole-package runs
+#
+# Every one was found by a human running an unusual command by hand. This job
+# is those commands, on a schedule. It is deliberately NOT on the PR path: the
+# gate's promise is a verdict in minutes, and these runs take tens of minutes
+# each. scripts/soak.sh is the same code path a human runs locally, so
+# reproducing a nightly failure is copying one line out of the log — see
+# docs/soak.md.
+name: soak
+
+on:
+  schedule:
+    # 04:00 UTC nightly. test-depth.yml's weekly mutation run is at 03:00 on
+    # Mondays; an hour's gap keeps the two off the same runner queue.
+    - cron: "0 4 * * *"
+  # Manual runs take no inputs on purpose: a soak with the counts turned down
+  # is not a soak, and the one thing worth being able to do by hand is run the
+  # real thing against a branch before merging something schedule-shaped.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a soak in progress. The point of the job is to accumulate runs,
+# and a cancelled soak is not a faster soak — it is no soak, reported as a red
+# check. Two overlapping runs of the same ref are unlikely (the schedule is
+# daily and a full run is well under an hour) and harmless if they happen.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: soak ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    # The job's own backstop, behind the per-step bounds below. Every one of
+    # them sits ABOVE scripts/soak.sh's `go test -timeout` (40m), on purpose:
+    # when a soak hangs, the timeout that fires should be Go's, because Go
+    # panics and dumps every goroutine's stack, and for a park-forever fault
+    # that dump IS the diagnosis (#155). A step killed on the wall clock leaves
+    # "the job was cancelled" and nothing else. These are the outer bound for
+    # when even that fails — a soak that hangs has stopped being a soak and
+    # started being a bill.
+    #
+    # For scale: on a 32-core box the slowest combination (internal/daemon,
+    # -race -count=50) takes about five and a half minutes.
+    timeout-minutes: 170
+    strategy:
+      # A failure in one package must not hide the other five. That is not
+      # theoretical: #155 and #166 were the same defect in two packages, and
+      # fail-fast would have shown one of them.
+      fail-fast: false
+      matrix:
+        # The concurrency-prone packages: each one either runs a scheduler
+        # loop, owns a socket with a watcher behind it, or flushes on a
+        # goroutine its caller does not join. Kept in step with
+        # DEFAULT_PACKAGES in scripts/soak.sh, which a test asserts.
+        package:
+          - session
+          - daemon
+          - focus
+          - reminders
+          - conversations
+          - automation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Build the test binaries once, outside the timed steps, so a slow
+      # compile cannot be mistaken for a slow soak.
+      - name: Warm the build cache
+        run: go build ./... && go vet ./internal/${{ matrix.package }}
+
+      # Whole-package repetition under the race detector. Whole-package is the
+      # load-bearing word: #170 needed the rest of the package running
+      # alongside to perturb the schedule, and a -run=TheOneTest soak found
+      # nothing.
+      - name: Soak (-race -count=50, whole package)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 50
+        run: scripts/soak.sh repeat ./internal/${{ matrix.package }}
+
+      # Constrained parallelism. Fewer processors means goroutines queue behind
+      # each other rather than running side by side, which is what surfaces a
+      # loop that stops reading its own store. This is the command that found
+      # #155 and #166; neither was ever caught by an unconstrained run.
+      - name: Soak (GOMAXPROCS=2 -race -count=25)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 50
+        run: scripts/soak.sh constrained ./internal/${{ matrix.package }}
+
+      # Without the detector. The detector changes timing, and #156 was a
+      # family of tests that passed only because it did — green under -race and
+      # red without it, which a race-only soak cannot see by construction.
+      - name: Soak (-count=50, no race detector)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 50
+        run: scripts/soak.sh unraced ./internal/${{ matrix.package }}
+
+      # Always retained, pass or fail. The first sighting of #170 was piped
+      # through `tail` and the evidence was lost; it took another day to see it
+      # again. Nothing in this workflow truncates, and the logs outlive the
+      # console.
+      #
+      # The logs are `go test` output from a runner that has none of the user's
+      # config, keys or state on it — the same hermetic-test discipline ci.yml
+      # exists to prove — so there is nothing personal in them to redact.
+      - name: Upload soak logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-${{ matrix.package }}-${{ github.run_id }}
+          path: soak-logs/
+          retention-days: 30
+          if-no-files-found: error

@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test ci coverage vet gofmt-check lint generate install install-kokoro install-wake install-plugin install-systemd install-hyprland uninstall clean release-snapshot
+.PHONY: all build test ci coverage coverage-ratchet coverage-ratchet-raise vet gofmt-check lint generate install install-kokoro install-wake install-plugin install-systemd install-hyprland uninstall clean release-snapshot
 
 all: build
 
@@ -27,6 +27,15 @@ ci: vet gofmt-check lint
 coverage:
 	$(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -1
+
+# The coverage ratchet (issue #171). Same script CI runs, so the local answer
+# is the gate's answer. `-raise` prints the line to paste into coverage.floor;
+# nothing ever writes that file for you, which is the whole point of it.
+coverage-ratchet:
+	scripts/coverage-ratchet.sh
+
+coverage-ratchet-raise:
+	scripts/coverage-ratchet.sh --raise
 
 vet:
 	$(GO) vet ./...
@@ -95,7 +104,7 @@ clean:
 # --- Test-depth targets (issue #8) -----------------------------------------
 # Local and CI invocations are identical: CI calls these same targets.
 
-.PHONY: fuzz bench bench-engines mutate
+.PHONY: fuzz bench bench-engines mutate soak soak-repeat soak-constrained soak-unraced
 
 # Fuzz every parser that eats external input. Each target runs briefly; the
 # committed seed corpora under testdata/fuzz regression-check known inputs on
@@ -134,3 +143,24 @@ bench-engines:
 GREMLINS_VERSION ?= v0.6.0
 mutate:
 	GOFLAGS=-count=1 $(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@$(GREMLINS_VERSION) unleash --timeout-coefficient 3 ./internal/session
+
+# --- Soak (issue #171) ------------------------------------------------------
+# The commands that catch this repo's ordering failures, which the PR gate's
+# `-race -count=2` does not. .github/workflows/soak.yml runs these same
+# targets nightly; docs/soak.md explains what each mode is for and how to read
+# a failure. SOAKPKG narrows a run to one package while you chase something:
+#
+#   make soak-repeat SOAKPKG=./internal/session
+#
+SOAKPKG ?=
+soak:
+	scripts/soak.sh all $(SOAKPKG)
+
+soak-repeat:
+	scripts/soak.sh repeat $(SOAKPKG)
+
+soak-constrained:
+	scripts/soak.sh constrained $(SOAKPKG)
+
+soak-unraced:
+	scripts/soak.sh unraced $(SOAKPKG)

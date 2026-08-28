@@ -535,18 +535,31 @@ manifest, placement, IPC, and whether the icon actually follows a session.
 ## Development
 
 ```bash
-make build   # binaries into ./bin
-make test    # unit + integration tests (no hardware or network needed)
-make lint    # go vet (+ staticcheck when installed)
+make build             # binaries into ./bin
+make test              # unit + integration tests (no hardware or network needed)
+make lint              # go vet (+ staticcheck when installed)
+make ci                # exactly what the CI gate runs
+make coverage-ratchet  # total coverage vs the floor in coverage.floor
+make soak              # the high-count, constrained runs that catch ordering faults
 ```
 
 The entire session lifecycle is testable with fakes — `internal/session`'s
 tests run fake speech → fake transcript → fake AI stream → fake TTS through
-the real engine and real IPC. Architecture, protocol, and design decisions:
+the real engine and real IPC.
+
+`make test` and the CI gate are fast on purpose, and there is a class of defect
+they cannot see: ordering faults that need dozens of repetitions, or constrained
+parallelism, to show up at all. Those are soaked nightly instead —
+[docs/soak.md](docs/soak.md) has the exact commands to run one by hand, what the
+coverage floor is (and is not), and the two guards that catch the ordering traps
+this repo has already fallen into.
+
+Architecture, protocol, and design decisions:
 
 - [docs/architecture.md](docs/architecture.md) — components and session lifecycle
 - [docs/ipc.md](docs/ipc.md) — the JSON-RPC protocol
 - [docs/providers.md](docs/providers.md) — provider abstractions
+- [docs/soak.md](docs/soak.md) — soaking, the coverage floor, and the test guards
 - [docs/adr/](docs/adr/) — architecture decision records
 - [docs/CHECKLIST.md](docs/CHECKLIST.md) — development checklist
 
