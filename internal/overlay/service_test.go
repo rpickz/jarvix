@@ -145,11 +145,13 @@ func startService(t *testing.T, h *harness) *Service {
 }
 
 func anchoredDesktop() ([]desktop.Window, []Thread) {
-	return []desktop.Window{
-			{Address: "0xa", Workspace: 1, Width: 800, Height: 600, Focused: true},
-		}, []Thread{
-			{Name: "th", Active: true, Anchors: []string{"0xa"}},
-		}
+	windows := []desktop.Window{
+		{Address: "0xa", Workspace: 1, Width: 800, Height: 600, Focused: true},
+	}
+	threads := []Thread{
+		{Name: "th", Active: true, Anchors: []string{"0xa"}},
+	}
+	return windows, threads
 }
 
 func TestServicePublishesOnceAndOnlyOnChange(t *testing.T) {
