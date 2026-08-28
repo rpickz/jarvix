@@ -357,6 +357,12 @@ func TestProviderCredentialNeverEscapesAnyPath(t *testing.T) {
 		"family": "ai", "name": "cloud", "entry": edited, "fingerprint": fresh["fingerprint"]}))
 	record("entry_changed", waitForEvent(t, client, "config.entry_changed"))
 
+	// testdiscipline:allow this samples the feed to prove a NEGATIVE — that
+	// whatever rows exist do not carry the credential. The usual trap (#167)
+	// is asserting a row is present having waited only for the event the
+	// watcher derives it from; here a row that has not landed yet weakens the
+	// sweep by one row and can never fail it, so waiting for the row would buy
+	// nothing and would need a label this test does not otherwise care about.
 	var activity map[string]any
 	if err := client.Call("activity.get", nil, &activity); err != nil {
 		t.Fatal(err)
