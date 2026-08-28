@@ -231,6 +231,140 @@ func TestPipeWirePlayerBuildsPlaybackArgvAndStreamsPCM(t *testing.T) {
 	}
 }
 
+func TestPipeWirePlayerOmitsTargetWithoutDevice(t *testing.T) {
+	stubDir := installStubs(t)
+	p := &PipeWirePlayer{}
+	chunks := make(chan []byte, 1)
+	chunks <- []byte("pcm")
+	close(chunks)
+	if err := p.Play(context.Background(), 24000, 1, chunks); err != nil {
+		t.Fatal(err)
+	}
+	// No --target: the stream follows the default sink, which is what lets
+	// WirePlumber move live speech to a newly-chosen device (issue #142).
+	// This is the chosen binding behaviour, pinned.
+	for _, a := range stubArgs(t, stubDir, "pw-play") {
+		if a == "--target" {
+			t.Fatalf("argv %q must not include --target for the default sink", stubArgs(t, stubDir, "pw-play"))
+		}
+	}
+}
+
+// pwPlayDyingStub scripts the mid-stream death of issue #142's diagnosis. Its
+// first invocation consumes exactly JARVIX_STUB_DIE_AFTER bytes (dd bs=1
+// reads byte-at-a-time, so it can never over-consume from the pipe), closes
+// its stdin read end, publishes a marker by atomic rename, and exits — so
+// once the marker exists, the next write into the pipe deterministically
+// fails. Every later invocation consumes everything, like a healthy pw-play.
+// Captures are indexed per invocation; invocations are sequential (Play
+// respawns serially), so the count file needs no locking.
+const pwPlayDyingStub = `#!/bin/sh
+n=$(cat "$JARVIX_STUB_DIR/pw-play.count" 2>/dev/null || echo 0)
+echo $((n+1)) > "$JARVIX_STUB_DIR/pw-play.count"
+printf '%s\n' "$@" > "$JARVIX_STUB_DIR/pw-play.args.tmp.$n"
+mv "$JARVIX_STUB_DIR/pw-play.args.tmp.$n" "$JARVIX_STUB_DIR/pw-play.args.$n"
+if [ "$n" = 0 ] && [ -n "${JARVIX_STUB_DIE_AFTER:-}" ]; then
+	dd bs=1 count="$JARVIX_STUB_DIE_AFTER" of="$JARVIX_STUB_DIR/pw-play.stdin.$n" status=none
+	exec 0<&-
+	printf done > "$JARVIX_STUB_DIR/pw-play.died.tmp"
+	mv "$JARVIX_STUB_DIR/pw-play.died.tmp" "$JARVIX_STUB_DIR/pw-play.died"
+	exit 9
+fi
+exec cat > "$JARVIX_STUB_DIR/pw-play.stdin.$n"
+`
+
+func installDyingPlayStub(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pw-play"), []byte(pwPlayDyingStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("JARVIX_STUB_DIR", dir)
+	return dir
+}
+
+// TestPipeWirePlayerResumesAfterMidStreamDeath pins the issue #142 fix: a
+// pw-play that dies with audio still to play is replaced, and the replacement
+// receives exactly the bytes the dead process never accepted — no byte lost
+// from the stream Jarvix still holds, no byte written twice.
+func TestPipeWirePlayerResumesAfterMidStreamDeath(t *testing.T) {
+	stubDir := installDyingPlayStub(t)
+	t.Setenv("JARVIX_STUB_DIE_AFTER", "6")
+	p := &PipeWirePlayer{}
+
+	chunks := make(chan []byte)
+	done := make(chan error, 1)
+	go func() { done <- p.Play(context.Background(), 24000, 1, chunks) }()
+
+	// Feed the dying process its quota, then wait for it to be dead — the
+	// marker is published only after its stdin is closed, so the next write
+	// must fail rather than land in a live pipe buffer.
+	chunks <- []byte("aaaa")
+	chunks <- []byte("bb")
+	waitForFile(t, filepath.Join(stubDir, "pw-play.died"))
+	chunks <- []byte("cccc")
+	close(chunks)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Play = %v, want playback resumed on a fresh process", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Play did not return")
+	}
+	first, err := os.ReadFile(filepath.Join(stubDir, "pw-play.stdin.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != "aaaabb" {
+		t.Errorf("first pw-play consumed %q, want %q", first, "aaaabb")
+	}
+	second, err := os.ReadFile(filepath.Join(stubDir, "pw-play.stdin.1"))
+	if err != nil {
+		t.Fatalf("no second pw-play was spawned: %v", err)
+	}
+	if string(second) != "cccc" {
+		t.Errorf("resumed pw-play received %q, want %q", second, "cccc")
+	}
+}
+
+// TestPipeWirePlayerDrainsProducerOnTerminalFailure pins the Player contract
+// the issue #142 diagnosis found broken: when playback cannot happen at all,
+// Play must still consume the channel until it closes, because its producers
+// (the speaker) block on the handoff and only read the result afterwards. An
+// early return without draining wedged the rest of the answer for the life of
+// the session.
+func TestPipeWirePlayerDrainsProducerOnTerminalFailure(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no pw-play anywhere: playback is impossible
+	p := &PipeWirePlayer{}
+
+	chunks := make(chan []byte)
+	done := make(chan error, 1)
+	go func() { done <- p.Play(context.Background(), 24000, 1, chunks) }()
+
+	// The producer keeps feeding after the failure, exactly as a synthesizer
+	// mid-answer does; every handoff must be accepted.
+	for i := 0; i < 32; i++ {
+		select {
+		case chunks <- []byte("pcm"):
+		case <-time.After(5 * time.Second):
+			t.Fatal("producer blocked feeding a failed playback")
+		}
+	}
+	close(chunks)
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "pw-play") {
+			t.Fatalf("err = %v, want a pw-play failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Play did not return after the channel closed")
+	}
+}
+
 func TestPipeWirePlayerReportsProcessFailure(t *testing.T) {
 	installStubs(t)
 	t.Setenv("JARVIX_STUB_EXIT", "3")
