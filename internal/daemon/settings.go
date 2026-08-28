@@ -17,6 +17,7 @@ import (
 	"github.com/rpickz/jarvix/internal/doctor"
 	"github.com/rpickz/jarvix/internal/focus"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/reminders"
 	"github.com/rpickz/jarvix/internal/session"
 )
 
@@ -345,10 +346,14 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.vocabulary, d.knowledge,
 		d.conversations, d.windows, d.log)
 	opts.Capture = capture
-	// The focus runner is rebuilt around the same construction-wired service
-	// (ADR 0041): the store instance survives every reload, exactly like the
-	// memory book it is modelled on.
-	opts.IntentRunner = &focus.IntentRunner{Service: d.focus, Log: d.log}
+	// The runner chain is rebuilt around the same construction-wired
+	// services (ADR 0041, ADR 0046): the store instances survive every
+	// reload, exactly like the memory book they are modelled on.
+	opts.IntentRunner = &reminders.IntentRunner{
+		Service:  d.reminders,
+		Fallback: &focus.IntentRunner{Service: d.focus, Log: d.log},
+		Log:      d.log,
+	}
 	if err := d.engine.Reconfigure(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, opts); err != nil {
 		// The engine kept its old collaborators, so the workers just built are
