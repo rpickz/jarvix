@@ -19,7 +19,7 @@ import qs.Ui
 // {x, y, width, height, tag?, badge?{thread, active}, ai_state?} — over
 // overlays.get / overlays.changed (docs/ipc.md) and draws them verbatim.
 //
-// Surface architecture (recorded in ADR 0044): ONE full-output, fully
+// Surface architecture (recorded in ADR 0048): ONE full-output, fully
 // click-through layer surface per monitor, with chips positioned inside it —
 // not one layer surface per overlaid window. Per-window surfaces would be
 // created and destroyed as windows enroll, close, and change workspace, and

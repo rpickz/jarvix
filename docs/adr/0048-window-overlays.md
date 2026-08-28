@@ -1,4 +1,4 @@
-# ADR 0044 — Window overlays: one click-through panel per monitor, fed by a gentle poll
+# ADR 0048 — Window overlays: one click-through panel per monitor, fed by a gentle poll
 
 **Status:** accepted
 
