@@ -108,7 +108,7 @@ func RewriteTOML(doc []byte, changes map[string]any) ([]byte, error) {
 // again in a parsed Config, which is what SettingFor supplies for the
 // registry keys and what the caller must supply here.
 //
-// It exists for `[tools.policy] shell_allow` (issue #162, ADR 0052). That key
+// It exists for `[tools.policy] shell_allow` (issue #162, ADR 0053). That key
 // is structurally absent from the registry — the whole [tools.policy] table
 // is, so the assistant's settings tool cannot address it (#109, ADR 0036) —
 // and it must stay absent, because the registry is the surface the assistant

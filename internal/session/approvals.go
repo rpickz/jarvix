@@ -3,7 +3,7 @@ package session
 import "fmt"
 
 // This file is the engine's half of "what have I pre-approved?" (issue #162,
-// ADR 0052).
+// ADR 0053).
 //
 // The seam is a lister and nothing more. There is no Grant method here and no
 // Forget: the engine can *read* what standing grants exist so it can say them

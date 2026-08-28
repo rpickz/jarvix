@@ -245,7 +245,7 @@ type Engine struct {
 	// (remember_for_conversation). Cleared with the conversation; guarded
 	// by mu.
 	approvals map[string]bool
-	// grants are conversation-scoped allow patterns (issue #162, ADR 0052):
+	// grants are conversation-scoped allow patterns (issue #162, ADR 0053):
 	// word prefixes the user granted on a confirmation card by choosing
 	// "just this conversation". They are the same vocabulary as
 	// `[tools.policy] shell_allow` and are applied by the same classifier,

@@ -88,7 +88,7 @@ FloatingWindow {
     // generic entry-admin verbs with family "ai" and "advisors".
     { id: "providers", label: "Providers" },
     { id: "memory", label: "Memory" },
-    // approvals — the standing grants (#162, ADR 0052): every command
+    // approvals — the standing grants (#162, ADR 0053): every command
     // pattern that runs without asking, when it was agreed to, how often it
     // has fired, and a Forget button on each. Its own tab rather than a
     // corner of Settings because a permission you cannot find is a
@@ -2034,7 +2034,7 @@ FloatingWindow {
   }
 
   // --- approvals -----------------------------------------------------------
-  // The Approvals tab (#162, ADR 0052): what runs without asking. Display
+  // The Approvals tab (#162, ADR 0053): what runs without asking. Display
   // only, like every other surface here — the daemon composes each row's
   // facts, this file places them, and Forget is one verb call.
   property var approvals: []
@@ -4952,7 +4952,7 @@ FloatingWindow {
     // Add and Edit (#100) open a form pane whose saves go to memory.add /
     // memory.update — the book's own write path, never the config editor —
     // ungated because nothing they do destroys (Forget keeps its card).
-    // The Approvals tab (#162, ADR 0052): every command pattern that runs
+    // The Approvals tab (#162, ADR 0053): every command pattern that runs
     // without being asked about, with when it was agreed to, how often it
     // has fired, and Forget on each row. Read-only apart from Forget — there
     // is no Add here, deliberately: a standing grant is made on the

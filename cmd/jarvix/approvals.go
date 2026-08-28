@@ -8,7 +8,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 )
 
-// `jarvix approvals` (issue #162, ADR 0052): what runs without asking, and
+// `jarvix approvals` (issue #162, ADR 0053): what runs without asking, and
 // how to stop it.
 //
 // There is no `jarvix approvals add`, and that absence is the design. A

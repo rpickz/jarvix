@@ -367,7 +367,7 @@ window's **Approvals** tab, take one back with `jarvix approvals forget docker
 ps` (immediate, no restart), or ask "what have I pre-approved?" out loud. The
 assistant cannot add, change or remove one: only a human click or spoken yes
 on a card writes a rule
-([ADR 0052](docs/adr/0052-remembered-approvals.md)).
+([ADR 0053](docs/adr/0053-remembered-approvals.md)).
 
 Conversations are durable ([ADR 0027](docs/adr/0027-durable-conversation-archive.md)):
 `jarvix new` archives the thread instead of destroying it, whole — the

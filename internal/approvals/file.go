@@ -16,7 +16,7 @@ import (
 // the XDG state dir, written atomically with the fsync-and-rename discipline
 // of conversation history (ADR 0011), private to the user (0600 in a 0700
 // directory) — the reminder store's storage contract, applied to approval
-// history (issue #162, ADR 0052).
+// history (issue #162, ADR 0053).
 //
 // Deliberately NOT config.toml, and the distinction matters more here than
 // anywhere else in the project. config.toml holds what Jarvix MAY DO; this

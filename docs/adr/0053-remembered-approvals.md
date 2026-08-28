@@ -1,4 +1,4 @@
-# ADR 0052 — Remembered approvals: a narrow, named, revocable standing grant
+# ADR 0053 — Remembered approvals: a narrow, named, revocable standing grant
 
 **Status:** accepted
 **Supersedes (in part):** ADR 0014's "approvals are never persisted"

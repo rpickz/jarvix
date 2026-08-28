@@ -265,7 +265,7 @@ type Daemon struct {
 	lastRuns map[string]automationRun
 
 	// approvals is the ledger behind pre-approved command patterns (#162,
-	// ADR 0052): when each `[tools.policy] shell_allow` rule was agreed to
+	// ADR 0053): when each `[tools.policy] shell_allow` rule was agreed to
 	// and how often it has fired. One instance for the daemon's life, on the
 	// memory book's terms — the config file remains the source of truth for
 	// which rules exist, and this only holds the history beside them.
@@ -659,7 +659,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// only exists once the daemon does, including the live config the three
 	// briefing.* settings are read from.
 	briefingSvc := newBriefingService(convs, bus, logger)
-	// The approval store (#162, ADR 0052) is built before the engine for the
+	// The approval store (#162, ADR 0053) is built before the engine for the
 	// briefing service's exact reason: the engine carries it
 	// (Options.Approvals, the read-only half that answers "what have I
 	// pre-approved?") and cannot be built without it. It is the same object

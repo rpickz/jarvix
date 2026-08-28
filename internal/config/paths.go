@@ -83,7 +83,7 @@ func (p Paths) FocusFile() string { return filepath.Join(p.State, "focus.toml") 
 // one by voice needs no config-write ceremony.
 func (p Paths) RemindersFile() string { return filepath.Join(p.State, "reminders.toml") }
 
-// ApprovalsFile is the approval ledger (#162, ADR 0052): when each
+// ApprovalsFile is the approval ledger (#162, ADR 0053): when each
 // `[tools.policy] shell_allow` pattern was agreed to on a confirmation card,
 // and how often it has since let a command run unprompted.
 //

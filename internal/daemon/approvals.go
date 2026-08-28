@@ -1,7 +1,7 @@
 package daemon
 
 // This file is the daemon half of remembered command approvals (issue #162,
-// ADR 0052): the writer that appends one word-prefix rule to
+// ADR 0053): the writer that appends one word-prefix rule to
 // `[tools.policy] shell_allow`, the ledger that remembers when it was added
 // and how often it has fired, the two IPC verbs that list and revoke, and the
 // spoken listing behind "what have I pre-approved?".

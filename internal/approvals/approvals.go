@@ -1,5 +1,5 @@
 // Package approvals is the ledger behind remembered command approvals (issue
-// #162, ADR 0052): when each `[tools.policy] shell_allow` pattern was added,
+// #162, ADR 0053): when each `[tools.policy] shell_allow` pattern was added,
 // who added it, and how many times it has since let a command run without
 // asking.
 //

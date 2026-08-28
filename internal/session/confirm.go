@@ -320,7 +320,7 @@ func (e *Engine) gateAndExecute(s *sess, call ai.ToolCall, turn spokenTurn) (res
 	}
 }
 
-// auditPreApproved puts a pre-approved run on the bus (#162, ADR 0052).
+// auditPreApproved puts a pre-approved run on the bus (#162, ADR 0053).
 //
 // This is the price of the feature and the reason it is acceptable: a command
 // that runs because of a rule the user once agreed to is not asked about, so

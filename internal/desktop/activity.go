@@ -190,7 +190,7 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Detail: joinActivity(activityString(data, "pattern"), preApprovedScope(activityString(data, "scope")))})
 	case "tool.pre_approved":
 		// A command that ran WITHOUT being asked about, because a rule the
-		// user once agreed to allowed it (#162, ADR 0052). This row is the
+		// user once agreed to allowed it (#162, ADR 0053). This row is the
 		// price of that feature and the reason it is acceptable: a standing
 		// grant removes the question, so it must not also remove the
 		// evidence. The rule is named, the command is verbatim (the gate has

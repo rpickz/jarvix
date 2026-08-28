@@ -1845,7 +1845,7 @@ structurally unreachable from its configuration tools
 ([ADR 0036](adr/0036-assistant-self-configuration.md)), and only a human click
 or spoken yes on a card writes one. Full reasoning, including the refusal
 matrix and the prompt-injection argument, is in
-[ADR 0052](adr/0052-remembered-approvals.md).
+[ADR 0053](adr/0053-remembered-approvals.md).
 
 ### What the ask sounds like (`[confirmations]`)
 

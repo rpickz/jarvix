@@ -1,7 +1,7 @@
 package intent
 
 // This file is the router's half of remembered command approvals (issue
-// #162, ADR 0052): the deterministic phrases that read back what the user has
+// #162, ADR 0053): the deterministic phrases that read back what the user has
 // pre-approved.
 //
 // Only the listing is here, and that is the point. There is no phrase that

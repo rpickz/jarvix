@@ -70,13 +70,13 @@ conversation ends — `jarvix new`, the follow-up window, or a daemon restart.
 Approvals are never persisted; the risk of a stale yes outliving its context
 outweighs the convenience.
 
-> **Amended by ADR 0052 (issue #162).** That paragraph is still true of an
+> **Amended by ADR 0053 (issue #162).** That paragraph is still true of an
 > *approval* — a (tool, exact command) pair inferred from one yes. It was
 > never an argument against a *rule*: since #162 the card offers a third
 > answer that appends one narrow word-prefix pattern to
 > `[tools.policy] shell_allow`, named on the button before the user commits,
 > listed and revocable afterwards, and audited on every use. Nothing about
-> the classifier, its segmentation, or its precedence changed; see ADR 0052
+> the classifier, its segmentation, or its precedence changed; see ADR 0053
 > for the refusal matrix and the injection reasoning.
 
 **Observable.** Every ask/deny decision is logged (command, decision, rule,

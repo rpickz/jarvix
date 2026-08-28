@@ -36,7 +36,7 @@ import (
 //     what stops a bare multiplexer binary ever being proposed, without a
 //     hand-written "never propose a bare binary" list to keep in step.
 //
-// The residual risk is stated plainly in ADR 0052 rather than engineered
+// The residual risk is stated plainly in ADR 0053 rather than engineered
 // away: a standing allow is a standing grant, and the controls that make it
 // acceptable are narrowness, this refusal matrix, deny-always-wins, the
 // audit row on every pre-approved run, and one-word revocation.
@@ -208,7 +208,7 @@ func deniedReason(rule string) string {
 // the feature exists to remove is identical from either side. The
 // consequence is real and stated on the card by showing the pattern: the two
 // identities share one `shell_allow` list, so a rule remembered from an
-// intent's card also stops the model being asked about that prefix. ADR 0052
+// intent's card also stops the model being asked about that prefix. ADR 0053
 // argues why one shared list is nonetheless right — two lists would mean two
 // classifiers' worth of precedence to reason about, and the narrowness of the
 // pattern, not the identity that produced it, is what bounds the grant.

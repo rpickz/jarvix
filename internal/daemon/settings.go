@@ -310,7 +310,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	merged := next
 	merged.Activation = running.Activation
 	merged.Tools = running.Tools
-	// …except the gate's two pattern lists (#162, ADR 0052). Everything else
+	// …except the gate's two pattern lists (#162, ADR 0053). Everything else
 	// under [tools] is restart-class because it is wired at construction —
 	// which tools exist, what they may reach — but `shell_allow` and
 	// `shell_deny` are read on every classification, and the permission gate
