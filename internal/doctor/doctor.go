@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/ai/openaicompat"
+	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/ipc"
@@ -48,6 +49,7 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkPipeWire,
 		checkMicrophone,
 		checkOutput,
+		checkAudioDevices,
 		checkWhisperBinary,
 		checkWhisperModel,
 		// The probe sits beside the existence checks it corrects for: an
@@ -177,6 +179,44 @@ func checkOutput(config.Config, config.Paths) Result {
 			Fix:    "Check `wpctl status` for playback devices"}
 	}
 	return Result{Status: OK, Name: "audio output available", Detail: device}
+}
+
+// checkAudioDevices names the nodes Jarvix will actually bind, right now —
+// not whether *a* device exists (checkMicrophone/checkOutput say that) but
+// *which one* speech will come out of and capture will listen to (issue
+// #142). Names, not descriptions, on the binding lines: node.name is the
+// exact string an audio.input_device / audio.output_device pin uses, so this
+// line is also how a user checks a pin is spelled right.
+//
+// The unpinned default is called out as such because it is the load-bearing
+// choice: a default-following stream is one WirePlumber moves live when the
+// default changes, which is what makes switching headsets mid-sentence work.
+func checkAudioDevices(cfg config.Config, _ config.Paths) Result {
+	const name = "audio devices"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sink, sinkErr := audio.DefaultSink(ctx)
+	source, sourceErr := audio.DefaultSource(ctx)
+	if sinkErr != nil || sourceErr != nil {
+		err := sinkErr
+		if err == nil {
+			err = sourceErr
+		}
+		return Result{Status: Warn, Name: name,
+			Detail: "cannot read the current defaults: " + err.Error(),
+			Fix:    "Check `wpctl status` (sudo pacman -S wireplumber if wpctl is missing)"}
+	}
+	speaks := fmt.Sprintf("speaks to %s (the default sink)", sink.Name)
+	if cfg.Audio.OutputDevice != "" {
+		speaks = fmt.Sprintf("speaks to %s (pinned by audio.output_device; default sink is %s)",
+			cfg.Audio.OutputDevice, sink.Name)
+	}
+	listens := fmt.Sprintf("listens to %s (the default source)", source.Name)
+	if cfg.Audio.InputDevice != "" {
+		listens = fmt.Sprintf("listens to %s (pinned by audio.input_device; default source is %s)",
+			cfg.Audio.InputDevice, source.Name)
+	}
+	return Result{Status: OK, Name: name, Detail: speaks + "; " + listens}
 }
 
 func checkWhisperBinary(cfg config.Config, _ config.Paths) Result {

@@ -30,6 +30,16 @@ const wpctlStubOutput = `Audio
  │
 `
 
+const wpctlInspectSink = `id 44, type PipeWire:Interface:Node
+    node.description = "Fake Speakers"
+    node.name = "alsa_output.fake-speakers.analog-stereo"
+`
+
+const wpctlInspectSource = `id 55, type PipeWire:Interface:Node
+    node.description = "Fake Microphone"
+    node.name = "alsa_input.fake-mic.mono-fallback"
+`
+
 // installDoctorStubs populates PATH with every binary a healthy system has.
 func installDoctorStubs(t *testing.T) string {
 	t.Helper()
@@ -38,7 +48,15 @@ func installDoctorStubs(t *testing.T) string {
 		"pw-record": "#!/bin/sh\nexit 0\n",
 		"pw-play":   "#!/bin/sh\nexit 0\n",
 		"pw-cli":    "#!/bin/sh\nexit 0\n",
-		"wpctl":     "#!/bin/sh\ncat <<'EOF'\n" + wpctlStubOutput + "EOF\n",
+		// wpctl answers both `status` (the presence checks) and
+		// `inspect @DEFAULT_AUDIO_SINK@/@DEFAULT_AUDIO_SOURCE@` (the
+		// device-binding check, issue #142).
+		"wpctl": "#!/bin/sh\n" +
+			"case \"$1$2\" in\n" +
+			"inspect*SINK*) cat <<'EOF'\n" + wpctlInspectSink + "EOF\n;;\n" +
+			"inspect*SOURCE*) cat <<'EOF'\n" + wpctlInspectSource + "EOF\n;;\n" +
+			"*) cat <<'EOF'\n" + wpctlStubOutput + "EOF\n;;\n" +
+			"esac\n",
 		// The engine stubs behave like working engines, because the probes
 		// (issue #113) actually run them: whisper prints a transcript (and a
 		// ggml backend-load line, as ggml ≥ 0.20 does), piper consumes stdin
@@ -153,6 +171,7 @@ func TestRunOnHealthyMachineHasNoFailures(t *testing.T) {
 		"PipeWire available",
 		"microphone detected",
 		"audio output available",
+		"audio devices",
 		"whisper.cpp installed",
 		"Whisper model available",
 		"whisper.cpp transcribes",
@@ -179,6 +198,55 @@ func TestRunOnHealthyMachineHasNoFailures(t *testing.T) {
 	if !strings.Contains(mic.Detail, "Fake Microphone") {
 		t.Errorf("microphone detail = %q", mic.Detail)
 	}
+}
+
+// TestAudioDevicesCheckNamesTheBindings pins the issue #142 doctor line: the
+// devices Jarvix will bind right now, by node.name — the pin's spelling —
+// with the default-following choice called out, and a pin shown as a pin.
+func TestAudioDevicesCheckNamesTheBindings(t *testing.T) {
+	cfg, paths := healthyWorld(t)
+
+	t.Run("default-following", func(t *testing.T) {
+		r := resultByName(t, Run(cfg, paths), "audio devices")
+		if r.Status != OK {
+			t.Fatalf("result = %+v", r)
+		}
+		for _, want := range []string{
+			"speaks to alsa_output.fake-speakers.analog-stereo (the default sink)",
+			"listens to alsa_input.fake-mic.mono-fallback (the default source)",
+		} {
+			if !strings.Contains(r.Detail, want) {
+				t.Errorf("detail %q missing %q", r.Detail, want)
+			}
+		}
+	})
+
+	t.Run("pinned devices are shown as pins", func(t *testing.T) {
+		pinned := cfg
+		pinned.Audio.OutputDevice = "my-usb-dac"
+		pinned.Audio.InputDevice = "my-xlr-mic"
+		r := resultByName(t, Run(pinned, paths), "audio devices")
+		if r.Status != OK {
+			t.Fatalf("result = %+v", r)
+		}
+		for _, want := range []string{
+			"speaks to my-usb-dac (pinned by audio.output_device",
+			"default sink is alsa_output.fake-speakers.analog-stereo",
+			"listens to my-xlr-mic (pinned by audio.input_device",
+		} {
+			if !strings.Contains(r.Detail, want) {
+				t.Errorf("detail %q missing %q", r.Detail, want)
+			}
+		}
+	})
+
+	t.Run("warns when wpctl cannot answer", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		r := checkAudioDevices(cfg, paths)
+		if r.Status != Warn || !strings.Contains(r.Detail, "wpctl") {
+			t.Errorf("result = %+v, want a Warn naming wpctl", r)
+		}
+	})
 }
 
 func TestRunDiagnosesMissingPieces(t *testing.T) {
