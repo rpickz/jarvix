@@ -1104,6 +1104,37 @@ reporting a step placed:
   it means DP-2, which is not plugged in"* — so you know which cable to find.
   Either way the step fails and the rest of the routine still runs.
 
+#### Editing a routine in the window, with a picture of the result
+
+Every key above has a control in the conversation window — **Automations →
+Routines → Edit** ([ADR 0059](adr/0059-the-routine-preview-is-the-daemons-drawing.md)).
+A routine you captured from the live desktop ("save this as my morning setup")
+opens in the same editor, with its captured placement in the same vocabulary.
+
+Beside the fields is a **preview diagram**, one per workspace, drawn to the
+target screen's real proportions: a rectangle per window, in the order the
+routine opens them, labelled with what it launches and the share it ends up
+with. It updates as you edit — including when you move a step **up or down**,
+because insertion order decides the tiling structure and a preview that hid
+that would be showing you a layout you are not going to get.
+
+Three things about it are worth knowing.
+
+- **It refuses to draw an arrangement that cannot happen.** Two thirds beside
+  a half is more screen than there is; a mode the vocabulary declines is not a
+  mode. In either case there is no picture — the reason appears where the
+  drawing would have been, and the same message appears on the field that
+  caused it.
+- **Every number in it is the daemon's.** The screen's shape and usable area
+  come from the compositor; the shares come from the same arithmetic a run
+  resolves them with. The window draws rectangles it was handed and works
+  nothing out for itself, so the picture and the run cannot come to disagree.
+- **The arrangement is in words as well.** Each step carries a sentence — *"X
+  opens on workspace 1, on HDMI-A-1, tiled, taking 66% of the width. The next
+  window on this workspace goes to its right."* — and those sentences are
+  what remain when the target screen is not plugged in and there is nothing to
+  draw.
+
 #### Names for your screens (ADR 0057)
 
 Connector names are exact and brittle: move a cable or a dock and `DP-2`

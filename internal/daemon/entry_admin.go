@@ -221,6 +221,19 @@ type entryFamilySpec struct {
 	// notes, when set, states what the draft's configuration EARNS, so the
 	// form can show it beside the field that decides it.
 	notes func(name string, draft map[string]any) []entryNote
+	// preview, when set, computes what the SAVED draft would produce, for a
+	// form that has something to show beside its fields. The routines family
+	// is the case that demands it (#181, ADR 0059): a routine is a
+	// description of a desktop, and the only other way to find out whether it
+	// is the description you meant is to run it and watch six windows land.
+	//
+	// It is handed the rewritten document rather than the draft map, so the
+	// picture is drawn from the values a LOAD would read — one conversion,
+	// not a parallel one that could come to disagree — plus the problems
+	// found so far, so an arrangement the loader already refused is not drawn
+	// around. Nil result means "nothing to show", which is what an
+	// unparsable draft and a family without a preview both are.
+	preview func(d *Daemon, doc []byte, name string, problems []entryProblem) any
 	// nameProblems lists substrings that mark a whole-document problem as
 	// belonging on the name field even though it carries no `family.name.key`
 	// label — the validators that word a bad name as a sentence about the
@@ -276,7 +289,8 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 			"workspace", "monitor", "mode", "width", "height",
 			"position", "place_next", "master", "focus", "float", "size", "tile",
 		}},
-		notes: routineInstallNotes,
+		notes:   routineInstallNotes,
+		preview: routinePreview,
 	},
 	"scripts": {
 		family: "scripts", kind: "script",
@@ -731,8 +745,16 @@ func (d *Daemon) entryAdminValidate(params json.RawMessage) (any, error) {
 	scrub, secretProblems := d.applyEntrySecrets(spec, raw, p.Name, draft, p.Secrets)
 	problems = append(problems, secretProblems...)
 	problems = append(problems, entryShapeProblems(spec, raw, p.Name, draft)...)
+	// newRaw is the document the save would write. It is kept beyond the
+	// validation because the preview is drawn from it (#181): the picture must
+	// come from the values a LOAD would read, not from a second reading of the
+	// draft map, and it is worth drawing even when a problem was found — a
+	// workspace whose numbers are fine still shows, and one whose numbers are
+	// not says so where the problem is.
+	var newRaw []byte
 	if len(problems) == 0 {
-		newRaw, err := entryRewriteUpsert(spec, raw, p.Name, draft)
+		var err error
+		newRaw, err = entryRewriteUpsert(spec, raw, p.Name, draft)
 		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeInvalidParams, "%s", scrub(err.Error()))
 		}
@@ -740,6 +762,11 @@ func (d *Daemon) entryAdminValidate(params json.RawMessage) (any, error) {
 	}
 	if spec.notes != nil {
 		result["notes"] = spec.notes(spec.entryName(draft), draft)
+	}
+	if spec.preview != nil {
+		if preview := spec.preview(d, newRaw, spec.entryName(draft), problems); preview != nil {
+			result["preview"] = preview
+		}
 	}
 	result["valid"] = len(problems) == 0
 	result["problems"] = scrubProblems(scrub, problems)
