@@ -20,6 +20,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -122,12 +123,71 @@ func (d *Daemon) remindersInFlight() int {
 }
 
 // registerReminderMethods adds the reminders.* verbs: the Automations tab's
-// one-shot section. Reads are reminders.list; the one mutation a tab needs
-// is cancel-by-id, and it returns the same spoken-style sentence the voice
-// path earns, publishing reminders.changed for the surfaces that watch.
+// one-shot section. Reads are reminders.list; the mutations are create,
+// cancel-by-id, and the create form's dry run, and each returns the same
+// spoken-style sentence the voice path earns, publishing reminders.changed for
+// the surfaces that watch.
+//
+// reminders.create exists because a reminder was creatable only by SPEAKING one
+// (#164). Everything about it is the spoken path's: the same time grammar
+// (intent.ParseWhen through Service.Create), the same store, the same
+// next-occurrence rule, the same confirmation sentence. What the form adds is
+// reminders.preview — the resolution shown BEFORE the save, because a spoken
+// reminder hears which reading of "at three" won and a typed one would
+// otherwise find out tomorrow morning.
 func (d *Daemon) registerReminderMethods() {
 	d.server.Handle("reminders.list", func(json.RawMessage) (any, error) {
 		return remindersViewReport(d.reminders.Snapshot()), nil
+	})
+
+	d.server.Handle("reminders.preview", func(params json.RawMessage) (any, error) {
+		p := struct {
+			When string `json:"when"`
+		}{}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "reminders.preview params: %v", err)
+			}
+		}
+		due, spoken, err := d.reminders.Preview(p.When)
+		if err != nil {
+			// A problem, not an error: the form is asking about text somebody is
+			// still typing, and every keystroke of a half-written "at thre"
+			// would otherwise be an RPC failure. Field-keyed like the entry
+			// pipeline's, so the form pins it to the same input.
+			return map[string]any{"valid": false, "problems": []entryProblem{
+				{Field: "when", Message: err.Error()},
+			}}, nil
+		}
+		return map[string]any{
+			"valid": true, "due": due.Format(time.RFC3339), "due_spoken": spoken,
+		}, nil
+	})
+
+	d.server.Handle("reminders.create", func(params json.RawMessage) (any, error) {
+		p := struct {
+			When string `json:"when"`
+			Text string `json:"text"`
+		}{}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "reminders.create params: %v", err)
+			}
+		}
+		// Service.Create is the spoken path's own verb, called with the words a
+		// person typed instead of the words a person said. There is no second
+		// validation, no second store write, and no second confirmation
+		// sentence — which is the whole of "it behaves identically to a spoken
+		// one".
+		spoken, err := d.reminders.Create(p.When, p.Text)
+		if err != nil {
+			return nil, &ipc.Error{
+				Code:    ipc.CodeConfigInvalid,
+				Message: err.Error(),
+				Data:    map[string]any{"problems": reminderCreateProblems(err)},
+			}
+		}
+		return map[string]any{"spoken": spoken}, nil
 	})
 
 	d.server.Handle("reminders.cancel", func(params json.RawMessage) (any, error) {
@@ -145,6 +205,21 @@ func (d *Daemon) registerReminderMethods() {
 		}
 		return map[string]any{"spoken": spoken}, nil
 	})
+}
+
+// reminderCreateProblems keys one refusal to the form field that caused it, so
+// the create form pins it under the input the user must change — the entry
+// pipeline's contract, reused rather than a second shape for the window to
+// learn. Anything else (a full store, an unwritable file) is a whole-form
+// problem and keeps an empty field.
+func reminderCreateProblems(err error) []entryProblem {
+	switch {
+	case errors.Is(err, reminders.ErrNoText):
+		return []entryProblem{{Field: "text", Message: err.Error()}}
+	case errors.Is(err, reminders.ErrBadTime):
+		return []entryProblem{{Field: "when", Message: err.Error()}}
+	}
+	return []entryProblem{{Message: err.Error()}}
 }
 
 // remindersViewReport renders the snapshot for the wire. Times are RFC 3339;

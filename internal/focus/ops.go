@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/rpickz/jarvix/internal/desktop"
 )
@@ -319,4 +320,143 @@ func (s *Service) liveWindows(ctx context.Context) map[string]desktop.Window {
 		live[w.Address] = w
 	}
 	return live
+}
+
+// ------------------------------------------------------------- the form save
+
+// ThreadForm is one whole thread as a FORM describes it (#164): everything the
+// voice path can set about a thread, in one draft, so the window can create or
+// edit one without typing four sentences at a microphone.
+//
+// It exists because a thread's settings were reachable only in pieces and only
+// by speaking: "new thread" then a name, "with this window" to anchor, "check
+// in every twenty minutes" for the interval — and the recap mode was not
+// reachable by voice at all, only by hand-editing focus.json. A form that
+// applied those as four separate operations would be four separate writes, and
+// a failure between two of them would leave a thread half-configured, which is
+// the one thing the ticket forbids. So Save applies the whole draft to one
+// cloned store and persists it once.
+type ThreadForm struct {
+	// Name is the thread's name. Required, and unique the same way Create
+	// requires it: two threads answering to one name make every later spoken
+	// reference a coin toss.
+	Name string
+	// AnchorWindows asks for the n most-recently-focused windows as anchors,
+	// replacing whatever was anchored — the meaning "anchor this window"
+	// already has. nil leaves the anchors exactly as they are, which is what an
+	// edit that only renames must do; 0 clears them.
+	AnchorWindows *int
+	// RemindEveryMin is the check-in interval in minutes, 0 for none.
+	RemindEveryMin int
+	// Recap is the AI-session recap trigger: RecapAuto, RecapAlways, RecapNever.
+	Recap string
+}
+
+// Save creates or edits one thread from a form draft, in a single write.
+//
+// ref "" creates and makes the thread active, exactly as Create does — a new
+// thread is what you just started working on. A non-empty ref edits the thread
+// it resolves and changes nothing about which thread is active: renaming a
+// parked thread must not steal the floor from the one in front of you.
+//
+// Every rule it enforces is a rule the voice path already enforces, reached
+// through the same fields: the name is required and unique (Create), the
+// interval cannot be negative (remind), the recap mode is one of three
+// (normalize), and the anchors come from the same captureAnchors that "with
+// this window" uses — including its graceful degradation, which is reported
+// rather than fatal, because a thread must never fail to exist because a
+// compositor could not be read.
+func (s *Service) Save(ctx context.Context, ref string, form ThreadForm) (Thread, string, error) {
+	name := strings.TrimSpace(form.Name)
+	if name == "" {
+		return Thread{}, "", ErrNoName
+	}
+	if form.RemindEveryMin < 0 {
+		return Thread{}, "", fmt.Errorf("a check-in interval cannot be negative")
+	}
+	recap := strings.TrimSpace(form.Recap)
+	if recap != RecapAuto && recap != RecapAlways && recap != RecapNever {
+		return Thread{}, "", fmt.Errorf(
+			"recap %q is not a mode; use %q (read a terminal only), %q, or %q",
+			form.Recap, RecapAuto, RecapAlways, RecapNever)
+	}
+
+	// The window inventory is read OUTSIDE the store lock, like every other
+	// operation that needs it: a compositor call must never hold it.
+	var anchors []Anchor
+	anchorNote := ""
+	wanted := 0
+	if form.AnchorWindows != nil {
+		wanted = *form.AnchorWindows
+		anchors, anchorNote = s.captureAnchors(ctx, wanted)
+	}
+
+	s.mu.Lock()
+	s.refreshLocked()
+	creating := strings.TrimSpace(ref) == ""
+	i := -1
+	if !creating {
+		var err error
+		if i, err = s.resolveLocked(ref); err != nil {
+			s.mu.Unlock()
+			return Thread{}, "", err
+		}
+	} else if len(s.st.threads) >= maxThreads {
+		s.mu.Unlock()
+		return Thread{}, "", fmt.Errorf("%w (%d threads); end something finished first",
+			ErrStoreFull, maxThreads)
+	}
+	key := nameKey(name)
+	for j, th := range s.st.threads {
+		if j != i && nameKey(th.Name) == key {
+			s.mu.Unlock()
+			return Thread{}, "", fmt.Errorf(
+				"a thread called %q already exists; switch to it, or end it first", th.Name)
+		}
+	}
+
+	now := s.now()
+	next := clone(s.st)
+	if creating {
+		th := Thread{
+			ID:      fmt.Sprintf("t%d", next.nextThread),
+			Name:    name,
+			Created: now, LastSwitched: now, LastActivity: now,
+		}
+		// Bumped before the save on purpose, as Create does it: a failed write
+		// may skip an id, but no path can ever reuse one.
+		next.nextThread++
+		s.st.nextThread = next.nextThread
+		next.threads = append(next.threads, th)
+		next.active = th.ID
+		i = len(next.threads) - 1
+	}
+	next.threads[i].Name = name
+	next.threads[i].RemindEveryMin = form.RemindEveryMin
+	next.threads[i].Recap = recap
+	next.threads[i].LastActivity = now
+	if form.AnchorWindows != nil {
+		next.threads[i].Anchors = anchors
+	}
+	th := next.threads[i]
+	if err := s.saveLocked(next); err != nil {
+		s.mu.Unlock()
+		return Thread{}, "", err
+	}
+	if form.RemindEveryMin > 0 {
+		s.reminderNext[th.ID] = now.Add(time.Duration(form.RemindEveryMin) * time.Minute)
+	} else {
+		delete(s.reminderNext, th.ID)
+	}
+	s.mu.Unlock()
+
+	reason := "edited"
+	if creating {
+		reason = "created"
+	}
+	s.log.Info("thread saved", "component", "focus", "thread", th.ID,
+		"created", creating, "anchors", len(th.Anchors), "every_min", th.RemindEveryMin)
+	s.emit(reason, map[string]any{"thread": th.ID})
+	s.Rearm()
+	return th, saveAck(th, creating, wanted, anchorNote), nil
 }

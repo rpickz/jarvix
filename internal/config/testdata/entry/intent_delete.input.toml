@@ -1,0 +1,13 @@
+# my config, hand-written
+[intents]
+terminal = "alacritty"
+
+# lock it when I walk away
+[[intents.custom]]
+match = "lock the screen"
+run = "hyprlock"
+say = "Locking."
+
+[[intents.custom]]
+match = "mute the music"
+run = "playerctl pause"

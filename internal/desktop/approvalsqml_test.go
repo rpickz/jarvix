@@ -108,8 +108,18 @@ func TestTheCardShowsTheRuleItWouldAdd(t *testing.T) {
 	}
 }
 
-// The Approvals tab exists, lists, and revokes — and offers no way to add.
-func TestApprovalsTabListsAndRevokesOnly(t *testing.T) {
+// The Approvals tab lists and edits both lists (#164), and — this is the part
+// worth pinning — it decides nothing about either.
+//
+// It replaces an earlier version of this test that banned `approvals.add`
+// outright. That ban was the right guard while the card was the only way to
+// make a standing grant; #164 gives the view an add form on purpose, and ADR
+// 0054 states why the two routes are not the same door. What survives is the
+// property that mattered underneath the ban: the window never judges a pattern
+// and never words a refusal. It types a rule, sends it, and shows what the
+// daemon says — which is what makes "the card's refusal matrix, verbatim" true
+// of the screen and not only of the Go code.
+func TestApprovalsTabEditsBothListsAndJudgesNeither(t *testing.T) {
 	raw, err := os.ReadFile(pluginFilePath(t, "JarvixWindow.qml"))
 	if err != nil {
 		t.Fatal(err)
@@ -119,13 +129,36 @@ func TestApprovalsTabListsAndRevokesOnly(t *testing.T) {
 		`{ id: "approvals", label: "Approvals" }`,
 		`method: "approvals.list"`,
 		`method: "approvals.forget"`,
+		`method: "approvals.add"`,
 		`case "approvals.changed":`,
+		// Both lists are rendered, so a deny rule is visible as the reason
+		// something still asks.
+		`win.denials`,
+		// The deny removal is the daemon's two-step: the first call carries
+		// confirmed:false and the answer comes back as a sentence to show.
+		`params: { pattern: pattern, list: "deny", confirmed: confirmed === true }`,
+		`win.denyRemovalConfirmation`,
 	} {
 		if !strings.Contains(qml, want) {
 			t.Errorf("JarvixWindow.qml is missing %q", want)
 		}
 	}
-	if strings.Contains(qml, `method: "approvals.add"`) {
-		t.Error("the window offers a way to add a rule outside the confirmation card")
+	// The refusal matrix lives in one place (internal/tools/approvals.go) and
+	// the window must not grow a copy of it — a client-side "we know docker is
+	// risky" would be a second matrix, and the two would drift on the first
+	// entry somebody added to only one of them.
+	for _, banned := range []string{
+		"unrememberable", "riskWords", "docker run", "docker exec",
+		"it runs whatever command follows", "cannot be remembered",
+	} {
+		if strings.Contains(qml, banned) {
+			t.Errorf("JarvixWindow.qml mentions %q — the refusal matrix is the daemon's, "+
+				"and a copy here is a second matrix to drift", banned)
+		}
+	}
+	// And the sentence a refused add shows is the daemon's own, taken out of
+	// the problems it returned rather than composed here.
+	if !strings.Contains(qml, `approvalFormProblem = problems.length > 0`) {
+		t.Error("the add form should show the daemon's refusal verbatim")
 	}
 }

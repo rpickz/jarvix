@@ -613,9 +613,18 @@ func New(opts Options) (*Router, error) {
 		if err != nil {
 			return nil, err
 		}
-		if owner, clash := builtinNames[p.key()]; clash {
-			return nil, fmt.Errorf("%s: match %q is already the built-in intent %q; "+
-				"choose a different phrase", customLabel(i), c.Match, owner)
+		// Against everything compiled so far, not only the built-ins (#164).
+		// `taken` is seeded from builtinNames, so a built-in clash still reads
+		// exactly as it always did; what is new is that an EARLIER CUSTOM INTENT
+		// now clashes too. Until the window could add one there was no cheap way
+		// to arrive at two entries claiming one phrase, and the second simply
+		// never fired: rules are tried in insertion order, so it sat in the file
+		// doing nothing, answering with a different intent's ack. A form that
+		// offers to create one has to say so at the field the user typed — which
+		// is the same thing the routine and script loops below have always done.
+		if owner, clash := taken[p.key()]; clash {
+			return nil, fmt.Errorf("%s: match %q is already %s; choose a different phrase",
+				customLabel(i), c.Match, owner)
 		}
 		taken[p.key()] = fmt.Sprintf("%s (%q)", customLabel(i), c.Match)
 		ack := strings.TrimSpace(c.Say)

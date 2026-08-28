@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,11 @@ func startRememberDaemon(t *testing.T, commands ...string) (*ipc.Client, config.
 	cfg := testConfig()
 	cfg.Audio.MinRecordingMs = 0
 	cfg.Tools.Shell = true
+	// The running gate holds what the file on disk says (#164): the deny list
+	// is now editable through the same surface, so a test that compared the two
+	// would be comparing a daemon booted from one document against a file
+	// holding another.
+	cfg.Tools.Policy.ShellDeny = []string{"httpie post"}
 	provider := &ai.Fake{Response: "Done."}
 	for _, command := range commands {
 		if command == "" {
@@ -587,7 +593,7 @@ func TestWritingOverAChangedFileIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &Daemon{paths: paths}
-	err := d.writeShellAllow([]string{"zzprobe status"}, "sha256:not-what-is-on-disk")
+	err := d.writeApprovalList(approvalListAllow, []string{"zzprobe status"}, "sha256:not-what-is-on-disk")
 	if err == nil {
 		t.Fatal("a stale fingerprint was accepted")
 	}
@@ -661,5 +667,294 @@ func TestSpokenApprovalsListing(t *testing.T) {
 	}
 	if strings.Contains(spoken, "h8") {
 		t.Errorf("capped listing read past the cap: %q", spoken)
+	}
+}
+
+// ---------------------------------------------------------------- #164
+
+// approvalsSnapshot reads both lists off approvals.list.
+func approvalsSnapshot(t *testing.T, client *ipc.Client) (allow, deny []string) {
+	t.Helper()
+	var out struct {
+		Approved []struct {
+			Pattern string `json:"pattern"`
+			Scope   string `json:"scope"`
+		} `json:"approved"`
+		Denied []struct {
+			Pattern string `json:"pattern"`
+		} `json:"denied"`
+	}
+	if err := client.Call("approvals.list", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range out.Approved {
+		if row.Scope == string(tools.RememberAlways) {
+			allow = append(allow, row.Pattern)
+		}
+	}
+	for _, row := range out.Denied {
+		deny = append(deny, row.Pattern)
+	}
+	return allow, deny
+}
+
+// TestAddingAnAllowRuleByHandFacesTheCardsRefusalMatrix is the #164 acceptance
+// criterion that this whole surface stands on.
+//
+// The refusal matrix is what makes a standing grant acceptable at all (ADR
+// 0053), and a second route to `shell_allow` that judged patterns by its own
+// rules would be a second, weaker gate wearing the same name. So the daemon
+// imports the matrix rather than restating it, and this pins BOTH halves of
+// that: the refusals come back in the matrix's own words, and the shapes it
+// refuses are exactly the shapes the card refuses — checked by asking the same
+// policy both questions and comparing.
+func TestAddingAnAllowRuleByHandFacesTheCardsRefusalMatrix(t *testing.T) {
+	client, paths := startRememberDaemon(t)
+
+	for _, tc := range []struct {
+		pattern string
+		reason  string
+	}{
+		// Group 1: a risk word. Refused because a rule naming one would be
+		// INERT — the classifier checks risk words before the allow list.
+		{"rm", "always asks"},
+		// Group 2: a binary whose danger lives in its flags, and a command
+		// wrapper, each with its own clause.
+		{"find", "-delete and -exec"},
+		{"timeout 5", "runs whatever command follows it"},
+		// Group 3, both directions: the shape itself, and a proposal that would
+		// cover one.
+		{"docker exec", "runs a command inside a container"},
+		{"docker", "would also cover"},
+		// A path-invoked command: the reason is time, not shape.
+		{"./deploy.sh", "what a file contains can change"},
+		// The configured deny list wins over an allow, in both directions.
+		{"httpie", "deny rule always wins"},
+		// A flag is not a command word, and a rule that stopped before it would
+		// be WIDER than the one that was typed — so it is refused rather than
+		// silently truncated, which is where the typed path differs from the
+		// derived one. (The head is deliberately a binary the matrix knows
+		// nothing about, so the refusal is about the flag and not about `git`.)
+		{"zzprobe status --json", "not a command word"},
+		// An empty rule matches everything.
+		{"   ", "type the leading words"},
+	} {
+		var rpcErr *ipc.Error
+		err := client.Call("approvals.add",
+			map[string]any{"pattern": tc.pattern, "list": "allow"}, nil)
+		if !errors.As(err, &rpcErr) {
+			t.Errorf("%q was accepted: %v", tc.pattern, err)
+			continue
+		}
+		if !strings.Contains(rpcErr.Message, tc.reason) {
+			t.Errorf("%q refused with %q, want it to say %q", tc.pattern, rpcErr.Message, tc.reason)
+		}
+		// Field-keyed, so the form pins it under the input that typed it.
+		data, _ := rpcErr.Data.(map[string]any)
+		if msg, ok := problemOn(entryProblemList(t, data), "pattern"); !ok || msg == "" {
+			t.Errorf("%q: problems = %v, want one on the pattern field", tc.pattern, rpcErr.Data)
+		}
+	}
+
+	// Nothing was written by any of that.
+	if allow, _ := approvalsSnapshot(t, client); len(allow) != 0 {
+		t.Errorf("allow list = %v after nine refusals", allow)
+	}
+	raw, err := os.ReadFile(paths.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != handWrittenConfig {
+		t.Errorf("a refused add rewrote the file:\n%s", raw)
+	}
+
+	// And an offerable rule lands, byte-preservingly, and the running gate
+	// holds it immediately.
+	added := map[string]any{}
+	if err := client.Call("approvals.add",
+		map[string]any{"pattern": "zzprobe status", "list": "allow"}, &added); err != nil {
+		t.Fatal(err)
+	}
+	if added["added"] != true || added["pattern"] != "zzprobe status" {
+		t.Errorf("receipt = %v", added)
+	}
+	allow, _ := approvalsSnapshot(t, client)
+	if strings.Join(allow, ",") != "zzprobe status" {
+		t.Errorf("allow list = %v", allow)
+	}
+	raw, _ = os.ReadFile(paths.ConfigFile())
+	if !strings.Contains(string(raw), "# I like being asked about most things.") ||
+		!strings.Contains(string(raw), `level = "info"   # trailing comment`) {
+		t.Errorf("the hand-written file did not survive:\n%s", raw)
+	}
+	// A rule already covered by a standing one is refused rather than silently
+	// duplicated — the same clause the card gives when it reaches the same
+	// state, and more useful than a no-op that looks like it worked. The
+	// whitespace is collapsed first, so "zzprobe  status" is the same rule.
+	var dupErr *ipc.Error
+	err = client.Call("approvals.add",
+		map[string]any{"pattern": "zzprobe  status", "list": "allow"}, nil)
+	if !errors.As(err, &dupErr) ||
+		!strings.Contains(dupErr.Message, "already on your allow list") {
+		t.Errorf("a duplicate add reported %v", err)
+	}
+	if allow, _ := approvalsSnapshot(t, client); len(allow) != 1 {
+		t.Errorf("allow list = %v after a refused duplicate", allow)
+	}
+}
+
+// TestTheTypedAndDerivedRoutesShareOneMatrix compares the two routes directly,
+// over the policy's own tables, so a shape added to one and not the other is a
+// test failure rather than a discovery.
+func TestTheTypedAndDerivedRoutesShareOneMatrix(t *testing.T) {
+	policy, err := tools.NewPolicy(tools.PolicyConfig{
+		Default:   tools.PolicyAsk,
+		ShellDeny: []string{"httpie post"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Commands whose DERIVED pattern the card refuses; the same pattern typed
+	// by hand must be refused too, with the same sentence.
+	for _, command := range []string{
+		"rm -rf ~/tmp", "find . -name '*.go'", "timeout 5 make deploy",
+		"docker run alpine", "docker version", "./deploy.sh", "httpie post /x",
+		"git status", "npm test", "jarvix approvals list",
+	} {
+		derived := policy.RememberOfferFor(tools.Verdict{
+			Decision: tools.PolicyAsk, Tool: "shell.run", Command: command,
+		})
+		if derived.Offered {
+			continue // the card would offer it; nothing to compare
+		}
+		// Type the same leading words the card would have proposed.
+		typed := policy.VetAllowPattern(strings.Fields(command)[0])
+		if typed.Offered {
+			t.Errorf("%q: the card refuses it (%q) but a hand-typed rule was accepted",
+				command, derived.Reason)
+		}
+	}
+	// And the offerable ones stay offerable from both directions, or the
+	// feature does nothing for the commands it exists for.
+	for _, pattern := range []string{"docker ps", "docker compose ps", "kubectl get pods", "xdg-open"} {
+		if offer := policy.VetAllowPattern(pattern); !offer.Offered {
+			t.Errorf("%q refused by hand: %s", pattern, offer.Reason)
+		}
+	}
+}
+
+// TestAddingADenyRuleIsNeverArgued: tightening the gate has no matrix, because
+// a gate that argued with someone making it stricter is a gate people route
+// around. What it does carry is a report of the standing grants it now beats.
+func TestAddingADenyRuleIsNeverArgued(t *testing.T) {
+	client, paths := startRememberDaemon(t)
+	if err := client.Call("approvals.add",
+		map[string]any{"pattern": "docker ps", "list": "allow"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	added := map[string]any{}
+	// `docker` heads the refusal matrix for an ALLOW rule; as a deny it is
+	// exactly what someone tightening the gate would type.
+	if err := client.Call("approvals.add",
+		map[string]any{"pattern": "docker", "list": "deny"}, &added); err != nil {
+		t.Fatal(err)
+	}
+	if added["added"] != true {
+		t.Fatalf("receipt = %v", added)
+	}
+	shadows, _ := added["shadows"].([]any)
+	if len(shadows) != 1 || shadows[0] != "docker ps" {
+		t.Errorf("shadows = %v, want the allow rule it now beats", added["shadows"])
+	}
+	_, deny := approvalsSnapshot(t, client)
+	if strings.Join(deny, ",") != "httpie post,docker" {
+		t.Errorf("deny list = %v", deny)
+	}
+	raw, _ := os.ReadFile(paths.ConfigFile())
+	if !strings.Contains(string(raw), `shell_deny = ["httpie post", "docker"]`) {
+		t.Errorf("file:\n%s", raw)
+	}
+
+	// The list name is required, so a request that forgot the field cannot
+	// widen the gate by omission.
+	var rpcErr *ipc.Error
+	err := client.Call("approvals.add", map[string]any{"pattern": "ls"}, nil)
+	if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "list") {
+		t.Errorf("a listless add was accepted: %v", err)
+	}
+}
+
+// TestRemovingADenyRuleRequiresAConfirmationNamingWhatItProtected is the
+// asymmetry #164 asks for, and the reason for it: removing an ALLOW rule
+// narrows what runs unasked and is answered immediately, while removing a DENY
+// rule widens it by deleting a protection whose whole job is that nothing has
+// been happening — no ledger row, no activity entry, nothing to remind anyone
+// what it has been stopping.
+func TestRemovingADenyRuleRequiresAConfirmationNamingWhatItProtected(t *testing.T) {
+	client, paths := startRememberDaemon(t)
+	if err := client.Call("approvals.add",
+		map[string]any{"pattern": "zzprobe status", "list": "allow"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// The unconfirmed call removes nothing and comes back with the sentence.
+	// Every call decodes into a FRESH map: unmarshalling into one that already
+	// has keys merges rather than replaces, and a stale key from the previous
+	// answer would make this test pass for the wrong reason.
+	out := map[string]any{}
+	if err := client.Call("approvals.forget",
+		map[string]any{"pattern": "httpie post", "list": "deny"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["forgotten"] != false || out["confirm_required"] != true {
+		t.Fatalf("an unconfirmed deny removal reported %v", out)
+	}
+	confirmation, _ := out["confirmation"].(string)
+	for _, want := range []string{
+		`"httpie post"`,                          // the rule, verbatim
+		"refuses every command beginning",        // what it protects
+		"deny always wins",                       // and that it beat the allow list
+		"they will ask instead of being refused", // what happens without it
+		"approve and don't ask again",            // including how it could then go silent
+		"Confirm to remove it.",
+	} {
+		if !strings.Contains(confirmation, want) {
+			t.Errorf("confirmation %q is missing %q", confirmation, want)
+		}
+	}
+	if _, deny := approvalsSnapshot(t, client); strings.Join(deny, ",") != "httpie post" {
+		t.Errorf("deny list = %v after an unconfirmed removal", deny)
+	}
+	raw, _ := os.ReadFile(paths.ConfigFile())
+	if !strings.Contains(string(raw), `shell_deny = ["httpie post"]`) {
+		t.Errorf("an unconfirmed removal touched the file:\n%s", raw)
+	}
+
+	// Confirmed, it goes.
+	out = map[string]any{}
+	if err := client.Call("approvals.forget",
+		map[string]any{"pattern": "httpie post", "list": "deny", "confirmed": true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["forgotten"] != true {
+		t.Errorf("a confirmed removal reported %v", out)
+	}
+	if _, deny := approvalsSnapshot(t, client); len(deny) != 0 {
+		t.Errorf("deny list = %v after a confirmed removal", deny)
+	}
+
+	// And removing an ALLOW rule still needs no confirmation at all: the
+	// asymmetry is the whole point.
+	out = map[string]any{}
+	if err := client.Call("approvals.forget",
+		map[string]any{"pattern": "zzprobe status"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["forgotten"] != true || out["confirm_required"] != nil {
+		t.Errorf("forgetting an allow rule asked a question: %v", out)
+	}
+	if allow, _ := approvalsSnapshot(t, client); len(allow) != 0 {
+		t.Errorf("allow list = %v", allow)
 	}
 }

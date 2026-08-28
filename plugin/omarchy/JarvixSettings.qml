@@ -44,6 +44,160 @@ Item {
   function refresh() {
     bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 11, method: "config.get" }) + "\n")
     bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 12, method: "doctor.get" }) + "\n")
+    requestLexicon()
+  }
+
+  // --- pronunciations ([tts.lexicon], #164) ---------------------------------
+  // The last of the small config-file families to reach the window: a written
+  // form and how Jarvix should say it. It is the generic entry surface, not a
+  // settings key — config.list_entries / get_entry / validate_entry /
+  // upsert_entry / delete_entry against the "tts.lexicon" family — which is
+  // what gives it per-entry field problems and, more usefully, the daemon's
+  // NOTE when the written form is an ordinary English word that will be
+  // respelled everywhere it appears.
+  //
+  // Request ids 20–29 are this section's own slice of the settings screen's
+  // fixed range (11–14 were the whole of it), so a reply can be matched to
+  // exactly the request that asked for it.
+  property var lexicon: []
+  property string lexiconFingerprint: ""
+  property bool lexiconFormOpen: false
+  property string lexiconOriginalTerm: "" // "" while creating
+  property string lexiconWritten: ""
+  property string lexiconSpoken: ""
+  property var lexiconProblems: []
+  property var lexiconNotes: []
+  property string lexiconFormError: ""
+  property bool lexiconDeleteConfirm: false
+
+  function requestLexicon() {
+    bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 20,
+      method: "config.list_entries", params: { family: "tts.lexicon" } }) + "\n")
+  }
+
+  function handleLexiconList(result) {
+    lexiconFingerprint = String(result.fingerprint || "")
+    var rows = result.entries || []
+    var out = []
+    for (var i = 0; i < rows.length; i++) out.push(rows[i].entry || {})
+    lexicon = out
+  }
+
+  function openLexiconCreate() {
+    lexiconOriginalTerm = ""
+    lexiconWritten = ""
+    lexiconSpoken = ""
+    lexiconProblems = []
+    lexiconNotes = []
+    lexiconFormError = ""
+    lexiconDeleteConfirm = false
+    lexiconFormOpen = true
+  }
+
+  function openLexiconEdit(term) {
+    bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 21,
+      method: "config.get_entry",
+      params: { family: "tts.lexicon", name: term } }) + "\n")
+  }
+
+  function handleLexiconGet(frame) {
+    if (frame.error) {
+      banner = "The pronunciation could not be read"
+      bannerDetail = String(frame.error.message || "")
+      return
+    }
+    var result = frame.result || {}
+    var entry = result.entry || {}
+    lexiconOriginalTerm = String(entry.name || "")
+    lexiconWritten = String(entry.name || "")
+    lexiconSpoken = String(entry.spoken || "")
+    lexiconFingerprint = String(result.fingerprint || lexiconFingerprint)
+    lexiconProblems = []
+    lexiconNotes = result.notes || []
+    lexiconFormError = ""
+    lexiconDeleteConfirm = false
+    lexiconFormOpen = true
+  }
+
+  function closeLexiconForm() {
+    lexiconFormOpen = false
+    lexiconDeleteConfirm = false
+    requestLexicon()
+  }
+
+  function lexiconDraft() {
+    return { name: String(lexiconWritten).trim(), spoken: String(lexiconSpoken).trim() }
+  }
+
+  function validateLexiconDraft() {
+    if (!lexiconFormOpen) return
+    bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 22,
+      method: "config.validate_entry",
+      params: { family: "tts.lexicon", name: lexiconOriginalTerm,
+        entry: lexiconDraft() } }) + "\n")
+  }
+
+  function handleLexiconValidate(frame) {
+    if (frame.error) {
+      lexiconFormError = String(frame.error.message || "validation failed")
+      return
+    }
+    var result = frame.result || {}
+    lexiconProblems = result.problems || []
+    // Notes are what the entry EARNS, not what is wrong with it: the daemon's
+    // warning that a written form is an ordinary word arrives here, and the
+    // form shows it without blocking the save.
+    lexiconNotes = result.notes || []
+    lexiconFormError = ""
+  }
+
+  function saveLexiconForm() {
+    bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 23,
+      method: "config.upsert_entry",
+      params: { family: "tts.lexicon", name: lexiconOriginalTerm,
+        entry: lexiconDraft(), fingerprint: lexiconFingerprint } }) + "\n")
+  }
+
+  function deleteLexiconEntry() {
+    bridge.write(JSON.stringify({ jsonrpc: "2.0", id: 24,
+      method: "config.delete_entry",
+      params: { family: "tts.lexicon", name: lexiconOriginalTerm,
+        fingerprint: lexiconFingerprint } }) + "\n")
+  }
+
+  function handleLexiconWrite(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) lexiconProblems = data.problems || []
+      lexiconFormError = String(frame.error.message || "the save failed")
+      lexiconDeleteConfirm = false
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) lexiconFingerprint = String(result.fingerprint)
+    lexiconFormOpen = false
+    lexiconDeleteConfirm = false
+    requestLexicon()
+  }
+
+  function lexiconProblemFor(field) {
+    var out = []
+    for (var i = 0; i < lexiconProblems.length; i++) {
+      if (String(lexiconProblems[i].field || "") === field) {
+        out.push(String(lexiconProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
+  function lexiconNoteFor(field) {
+    var out = []
+    for (var i = 0; i < lexiconNotes.length; i++) {
+      if (String(lexiconNotes[i].field || "") === field) {
+        out.push(String(lexiconNotes[i].message || ""))
+      }
+    }
+    return out.join("\n")
   }
 
   function editedValue(key, fallback) {
@@ -196,6 +350,19 @@ Item {
           break
         case 14:
           settings.handleReloadResult(frame.result, frame.error)
+          break
+        case 20:
+          if (frame.result) settings.handleLexiconList(frame.result)
+          break
+        case 21:
+          settings.handleLexiconGet(frame)
+          break
+        case 22:
+          settings.handleLexiconValidate(frame)
+          break
+        case 23:
+        case 24:
+          settings.handleLexiconWrite(frame)
           break
         }
       }
@@ -508,6 +675,167 @@ Item {
               return s.endpoint + ": inline key in config.toml (prefer api_key_env)"
             }
             return s.endpoint + ": no key configured (fine for local endpoints)"
+          }
+        }
+      }
+
+      // --- pronunciations (#164) -------------------------------------------
+      // Below the settings because it is a list rather than a knob: a word
+      // Jarvix says wrongly, and how it should say it instead. Editing one is
+      // the generic entry form, so a save is fingerprint-guarded, validated
+      // whole, and byte-preserving like every other config write.
+      Text {
+        visible: !settings.lexiconFormOpen
+        text: "Pronunciations"
+        font.family: Style.font.family
+        font.bold: true
+        font.pixelSize: Style.font.subtitle
+        color: Color.popups.text
+      }
+
+      Text {
+        visible: !settings.lexiconFormOpen
+        width: form.width
+        wrapMode: Text.Wrap
+        text: settings.lexicon.length === 0
+          ? "Nothing respelled yet. Jarvix already knows Kubernetes, nginx and a few others; "
+            + "add a word here when it says one wrongly."
+          : "Applied to the next thing Jarvix says, on whole words, whatever the capitalisation."
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.8)
+      }
+
+      Repeater {
+        model: settings.lexiconFormOpen ? [] : settings.lexicon
+
+        delegate: JarvixCollectionRow {
+          required property var modelData
+          width: form.width
+          title: String(modelData.name || "")
+          subtitle: "said “" + String(modelData.spoken || "") + "”"
+          interactive: true
+          onActivated: settings.openLexiconEdit(String(modelData.name || ""))
+        }
+      }
+
+      JarvixFormButton {
+        visible: !settings.lexiconFormOpen
+        label: "New pronunciation…"
+        name: "Add a word and how to say it"
+        accent: true
+        onClicked: settings.openLexiconCreate()
+      }
+
+      // The form, inline in this column rather than a pane: two fields, and
+      // the settings screen has no detail scaffold of its own.
+      Column {
+        visible: settings.lexiconFormOpen
+        width: form.width
+        spacing: Style.space(10)
+
+        Text {
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: settings.lexiconOriginalTerm === ""
+            ? "New pronunciation"
+            : "Editing “" + settings.lexiconOriginalTerm + "”"
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+
+        Text {
+          visible: settings.lexiconFormError !== "" || settings.lexiconProblemFor("") !== ""
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: (settings.lexiconFormError !== "" ? settings.lexiconFormError + "\n" : "")
+            + settings.lexiconProblemFor("")
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.urgent
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "Written form (the word as it appears in text)"
+          placeholder: "Kubernetes"
+          problem: settings.lexiconProblemFor("name")
+          Component.onCompleted: text = settings.lexiconWritten
+          onEdited: function(value) { settings.lexiconWritten = value }
+          onCommitted: settings.validateLexiconDraft()
+        }
+
+        // The daemon's note: what this entry will do to ordinary speech. Not a
+        // problem — the save is allowed — so it is worded and coloured as a
+        // consequence rather than an error.
+        Text {
+          visible: settings.lexiconNoteFor("name") !== ""
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: "Note: " + settings.lexiconNoteFor("name")
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Util.alpha(Color.popups.text, 0.8)
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "Spoken form (how it should sound)"
+          placeholder: "koo ber net eez"
+          problem: settings.lexiconProblemFor("spoken")
+          Component.onCompleted: text = settings.lexiconSpoken
+          onEdited: function(value) { settings.lexiconSpoken = value }
+          onCommitted: settings.validateLexiconDraft()
+        }
+
+        Row {
+          spacing: Style.space(8)
+
+          JarvixFormButton {
+            label: "Save"
+            name: "Save this pronunciation"
+            accent: true
+            onClicked: settings.saveLexiconForm()
+          }
+          JarvixFormButton {
+            label: "Cancel"
+            name: "Cancel and go back to the settings"
+            onClicked: settings.closeLexiconForm()
+          }
+          JarvixFormButton {
+            visible: settings.lexiconOriginalTerm !== "" && !settings.lexiconDeleteConfirm
+            label: "Delete…"
+            name: "Delete the pronunciation for " + settings.lexiconOriginalTerm
+            onClicked: settings.lexiconDeleteConfirm = true
+          }
+        }
+
+        Text {
+          visible: settings.lexiconDeleteConfirm
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: "Remove the pronunciation for “" + settings.lexiconOriginalTerm
+            + "”? Jarvix goes back to saying it however the voice engine reads it."
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+        Row {
+          visible: settings.lexiconDeleteConfirm
+          spacing: Style.space(8)
+
+          JarvixFormButton {
+            label: "Delete"
+            name: "Confirm removing the pronunciation for " + settings.lexiconOriginalTerm
+            accent: true
+            onClicked: settings.deleteLexiconEntry()
+          }
+          JarvixFormButton {
+            label: "Keep it"
+            name: "Keep the pronunciation for " + settings.lexiconOriginalTerm
+            onClicked: settings.lexiconDeleteConfirm = false
           }
         }
       }

@@ -7,14 +7,16 @@ package daemon
 // zero automations-specific logic so the knowledge form (#100) and the
 // Providers section (#163) are registry rows here, not new surfaces.
 //
-// Two document shapes, one pipeline (ADR 0052). The array families
-// (`[[routines]]`, `[[scripts]]`, `[[knowledge.feeds]]`) address an entry by
-// a `name` key inside it; the keyed families (`[ai.<name>]`,
-// `[advisors.<name>]`) address it by its table key. A family declares which
-// it is (entryFamilySpec.shape) and four one-line dispatch functions do the
-// rest, so everything below — the fingerprint guard, the whole-document
-// validation, the atomic write, the reload, the events — never learns which
-// shape it is serving.
+// Three document shapes, one pipeline (ADR 0052, extended by ADR 0054). The
+// array families (`[[routines]]`, `[[scripts]]`, `[[knowledge.feeds]]`,
+// `[[intents.custom]]`) address an entry by a key inside it — `name` for all
+// but the custom intents, whose identity is the phrase they match; the keyed
+// families (`[ai.<name>]`, `[advisors.<name>]`) address it by its table key;
+// and the scalar-map family (`[tts.lexicon]`) is one `key = "value"` line. A
+// family declares which it is (entryFamilySpec.shape) and four one-line
+// dispatch functions do the rest, so everything below — the fingerprint guard,
+// the whole-document validation, the atomic write, the reload, the events —
+// never learns which shape it is serving.
 //
 // Six verbs, one discipline (the settings discipline, ADR 0015, as
 // automations.set_enabled already applies it):
@@ -117,6 +119,14 @@ const (
 	// carries `name` — but that key renders as the table header rather than
 	// as a stored field, so one form drives both shapes.
 	entryShapeKeyed
+	// entryShapeScalarMap is the [family] table whose entries are single
+	// `key = "value"` LINES (#164): the speech lexicon, where the written form
+	// is the key and the spoken form is the value. It is addressed EXACTLY, for
+	// the keyed shape's reason, and the wire key its one value travels in is
+	// declared (valueKey) because a line has no keys of its own to name it
+	// with. The wire shape is unchanged again — a draft carries `name` and that
+	// one value — so the third shape costs the form nothing.
+	entryShapeScalarMap
 )
 
 // entrySecretSpec declares one key of a family that holds a credential. It is
@@ -163,6 +173,24 @@ type entryFamilySpec struct {
 	keyOrder []string
 	subKeys  map[string]map[string]entryKeyKind
 	subOrder map[string][]string
+	// idKey names the key carrying an ARRAY family's identity, "" meaning the
+	// "name" every family but one uses. `[[intents.custom]]` is that one: its
+	// identity is the phrase it matches (#164), and inventing a `name` key for
+	// it would change a file format the published examples already use. The
+	// keyed and scalar-map shapes are addressed by their TOML key instead, so
+	// this says nothing about them — a draft still carries `name` on the wire
+	// for every shape, which is what keeps one form driving all three.
+	idKey string
+	// valueKey names the wire key a SCALAR-MAP entry's single value travels in
+	// ("spoken", for the lexicon). Empty for every other shape.
+	valueKey string
+	// phraseKeys names the keys holding this family's trigger phrases, so a
+	// collision reported by ANOTHER entry — those quote the phrase and carry
+	// their own label — still lands on the input the user has to change. A
+	// string-list key contributes `key[i]` fields, a string key the key itself.
+	// Empty means "phrases", the list every phrase-carrying family used before
+	// #164 gave custom intents a single `match`.
+	phraseKeys []string
 	// reserved names the keys that share a keyed family's own table without
 	// being entries — [ai]'s provider, model, system_prompt and friends. Only
 	// the parser decides what is an entry; this set decides what an entry is
@@ -274,6 +302,12 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 	// — is family knowledge, and this map is the index, not the encyclopaedia.
 	"ai":       aiEndpointFamily,
 	"advisors": advisorFamily,
+	// The last two config-file holdouts (#164, ADR 0054), declared in
+	// entry_admin_holdouts.go: the phrases the user invents and the words the
+	// voice says wrongly. The first is the only array family whose identity is
+	// not a `name`; the second is the first of the third document shape.
+	"intents.custom": customIntentFamily,
+	"tts.lexicon":    lexiconFamily,
 }
 
 // assistantEntryFamily resolves a family name for the ASSISTANT's config
@@ -318,6 +352,44 @@ func (s entryFamilySpec) tableLabel() string {
 	return "[[" + s.family + "]]"
 }
 
+// identity is the key an entry of this family carries its name in — "name"
+// unless the family declares otherwise. An accessor rather than a default
+// filled in at registration, so a row that omits it cannot be half-initialised
+// by whichever code path happened to read it first.
+func (s entryFamilySpec) identity() string {
+	if s.idKey != "" {
+		return s.idKey
+	}
+	return "name"
+}
+
+// entryName reads a draft's identity: the value of its identity key.
+func (s entryFamilySpec) entryName(draft map[string]any) string {
+	name, _ := draft[s.identity()].(string)
+	return name
+}
+
+// phraseFields maps each trigger phrase in a draft to the form field holding
+// it. See phraseKeys for why this is declared rather than hard-coded.
+func (s entryFamilySpec) phraseFields(draft map[string]any) map[string]string {
+	keys := s.phraseKeys
+	if len(keys) == 0 {
+		keys = []string{"phrases"}
+	}
+	out := map[string]string{}
+	for _, key := range keys {
+		switch v := draft[key].(type) {
+		case string:
+			out[key] = v
+		case []string:
+			for i, phrase := range v {
+				out[fmt.Sprintf("%s[%d]", key, i)] = phrase
+			}
+		}
+	}
+	return out
+}
+
 // secretFor returns the declaration of key as a credential, or nil when the
 // family holds none by that name.
 func (s entryFamilySpec) secretFor(key string) *entrySecretSpec {
@@ -354,6 +426,9 @@ func entryFamily(family string) (entryFamilySpec, *ipc.Error) {
 // family the table key is folded in as `name`, so both shapes hand the form
 // the same map: identity in `name`, everything else as written.
 func entryReadValue(spec entryFamilySpec, raw []byte, name string) (map[string]any, bool, error) {
+	if spec.shape == entryShapeScalarMap {
+		return config.ScalarMapEntryValue(raw, spec.family, spec.valueKey, name, spec.reserved)
+	}
 	if spec.shape == entryShapeKeyed {
 		entry, ok, err := config.KeyedEntryValue(raw, spec.family, name, spec.reserved)
 		if !ok || err != nil {
@@ -366,54 +441,78 @@ func entryReadValue(spec entryFamilySpec, raw []byte, name string) (map[string]a
 		out["name"] = strings.TrimSpace(name)
 		return out, true, nil
 	}
-	return config.EntryValue(raw, spec.family, name)
+	return config.EntryValue(raw, spec.family, spec.identity(), name)
 }
 
 // entryRewriteUpsert writes one whole entry into the document, byte-preserving
 // everything outside its block.
 func entryRewriteUpsert(spec entryFamilySpec, raw []byte, name string, draft map[string]any) ([]byte, error) {
-	if spec.shape == entryShapeKeyed {
+	switch spec.shape {
+	case entryShapeScalarMap:
+		return config.UpsertScalarMapEntryTOML(raw, spec.family, spec.valueKey, name, draft, spec.reserved)
+	case entryShapeKeyed:
 		return config.UpsertKeyedEntryTOML(raw, spec.family, name, draft, spec.keyOrder, spec.reserved)
 	}
-	return config.UpsertEntryTOML(raw, spec.family, name, draft, spec.keyOrder, spec.subOrder)
+	return config.UpsertEntryTOML(raw, spec.family, spec.identity(), name, draft, spec.keyOrder, spec.subOrder)
 }
 
 // entryRewriteDelete removes one entry from the document.
 func entryRewriteDelete(spec entryFamilySpec, raw []byte, name string) ([]byte, error) {
-	if spec.shape == entryShapeKeyed {
+	switch spec.shape {
+	case entryShapeScalarMap:
+		return config.DeleteScalarMapEntryTOML(raw, spec.family, name, spec.reserved)
+	case entryShapeKeyed:
 		return config.DeleteKeyedEntryTOML(raw, spec.family, name, spec.reserved)
 	}
-	return config.DeleteEntryTOML(raw, spec.family, name)
+	return config.DeleteEntryTOML(raw, spec.family, spec.identity(), name)
 }
 
-// entryNameCollision reports a keyed draft whose name is already a table, as
-// a problem on the name field.
+// entryShapeProblems reports what a draft's IDENTITY makes impossible, for the
+// two shapes whose identity is a TOML key rather than a value inside the entry.
 //
-// It exists because the shapes fail differently. An array family's duplicate
-// is caught by the loader's own validator, which words it and names the
-// entry. A keyed duplicate is a duplicate TOML TABLE — the rewritten document
-// simply does not parse, and the read-back guard would refuse the save with
-// "unparsable document", which is true and useless. The user typed a name
-// that is taken; the form should say so on the name field.
-func entryNameCollision(spec entryFamilySpec, raw []byte, target string, draft map[string]any) *entryProblem {
-	if spec.shape != entryShapeKeyed {
+// It exists because the shapes fail differently. An array family's empty or
+// duplicated name is caught by the loader's own validators, which word it and
+// name the entry. A keyed duplicate is a duplicate TOML TABLE and a scalar-map
+// duplicate a duplicate KEY — the rewritten document simply does not parse, and
+// the read-back guard would refuse the save with "unparsable document", which
+// is true and useless. An empty one never reaches validation at all, because
+// there is no table to write it into. The user typed a name; the form should
+// say what is wrong with it, on the name field.
+func entryShapeProblems(spec entryFamilySpec, raw []byte, target string, draft map[string]any) []entryProblem {
+	if spec.shape == entryShapeArray {
 		return nil
 	}
 	name, _ := draft["name"].(string)
 	name = strings.TrimSpace(name)
-	if name == "" || name == strings.TrimSpace(target) {
+	if name == "" {
+		if spec.shape == entryShapeScalarMap {
+			return []entryProblem{{Field: "name", Message: fmt.Sprintf(
+				"the written form is empty; it is the word to respell and becomes the key in "+
+					"[%s]", spec.family)}}
+		}
+		return []entryProblem{{Field: "name", Message: fmt.Sprintf(
+			"the name is empty; it becomes the [%s.<name>] table this entry is written as",
+			spec.family)}}
+	}
+	if name == strings.TrimSpace(target) {
 		return nil
 	}
-	names, err := config.KeyedEntryNames(raw, spec.family, spec.reserved)
+	names, err := entryNamesOf(spec, raw)
 	if err != nil {
 		return nil // the document does not parse; the pipeline says so with its own words
 	}
 	for _, existing := range names {
-		if existing == name {
-			return &entryProblem{Field: "name", Message: fmt.Sprintf(
-				"there is already a [%s.%s] table; choose another name, or open that one to edit it",
-				spec.family, name)}
+		if existing != name {
+			continue
 		}
+		if spec.shape == entryShapeScalarMap {
+			return []entryProblem{{Field: "name", Message: fmt.Sprintf(
+				"[%s] already has an entry for %q; choose another written form, or open that "+
+					"one to edit it", spec.family, name)}}
+		}
+		return []entryProblem{{Field: "name", Message: fmt.Sprintf(
+			"there is already a [%s.%s] table; choose another name, or open that one to edit it",
+			spec.family, name)}}
 	}
 	return nil
 }
@@ -424,7 +523,7 @@ func entryNameCollision(spec entryFamilySpec, raw []byte, target string, draft m
 // tables by their key (`ai.openai`), because that is what each family's
 // validator already writes.
 func entryLabel(spec entryFamilySpec, index int, name string) (string, bool) {
-	if spec.shape == entryShapeKeyed {
+	if spec.shape != entryShapeArray {
 		trimmed := strings.TrimSpace(name)
 		if trimmed == "" {
 			return "", false
@@ -530,10 +629,13 @@ func (d *Daemon) entryAdminList(params json.RawMessage) (any, error) {
 // entryNamesOf lists one family's entry names in document order (arrays) or
 // sorted (keyed tables) — the order each shape can promise.
 func entryNamesOf(spec entryFamilySpec, raw []byte) ([]string, error) {
-	if spec.shape == entryShapeKeyed {
+	switch spec.shape {
+	case entryShapeScalarMap:
+		return config.ScalarMapEntryNames(raw, spec.family, spec.reserved)
+	case entryShapeKeyed:
 		return config.KeyedEntryNames(raw, spec.family, spec.reserved)
 	}
-	return config.EntryNames(raw, spec.family)
+	return config.EntryNames(raw, spec.family, spec.identity())
 }
 
 // entryAdminGet serves config.get_entry: one whole entry, straight from the
@@ -579,8 +681,7 @@ func (d *Daemon) entryAdminGet(params json.RawMessage) (any, error) {
 		result["secrets"] = secrets
 	}
 	if spec.notes != nil {
-		name, _ := entry["name"].(string)
-		result["notes"] = spec.notes(name, entry)
+		result["notes"] = spec.notes(spec.entryName(entry), entry)
 	}
 	return result, nil
 }
@@ -609,9 +710,7 @@ func (d *Daemon) entryAdminValidate(params json.RawMessage) (any, error) {
 	// of it, whatever any validator chooses to quote.
 	scrub, secretProblems := d.applyEntrySecrets(spec, raw, p.Name, draft, p.Secrets)
 	problems = append(problems, secretProblems...)
-	if collision := entryNameCollision(spec, raw, p.Name, draft); collision != nil {
-		problems = append(problems, *collision)
-	}
+	problems = append(problems, entryShapeProblems(spec, raw, p.Name, draft)...)
 	if len(problems) == 0 {
 		newRaw, err := entryRewriteUpsert(spec, raw, p.Name, draft)
 		if err != nil {
@@ -620,8 +719,7 @@ func (d *Daemon) entryAdminValidate(params json.RawMessage) (any, error) {
 		problems = d.entryDocProblems(newRaw, spec, draft)
 	}
 	if spec.notes != nil {
-		name, _ := draft["name"].(string)
-		result["notes"] = spec.notes(name, draft)
+		result["notes"] = spec.notes(spec.entryName(draft), draft)
 	}
 	result["valid"] = len(problems) == 0
 	result["problems"] = scrubProblems(scrub, problems)
@@ -644,9 +742,7 @@ func (d *Daemon) entryAdminUpsert(params json.RawMessage, source string) (map[st
 	}
 	scrub, secretProblems := d.applyEntrySecrets(spec, raw, p.Name, draft, p.Secrets)
 	problems = append(problems, secretProblems...)
-	if collision := entryNameCollision(spec, raw, p.Name, draft); collision != nil {
-		problems = append(problems, *collision)
-	}
+	problems = append(problems, entryShapeProblems(spec, raw, p.Name, draft)...)
 	if len(problems) > 0 {
 		return nil, entryProblemsError(scrubProblems(scrub, problems))
 	}
@@ -799,8 +895,7 @@ func (d *Daemon) writeEntryChange(spec entryFamilySpec, fingerprint string, crea
 		if created {
 			action = "created"
 		}
-		name, _ := draft["name"].(string)
-		d.publishEntryChanged(action, spec, name, source)
+		d.publishEntryChanged(action, spec, spec.entryName(draft), source)
 	}
 	result := map[string]any{
 		"fingerprint": newFP,
@@ -1021,15 +1116,12 @@ func (d *Daemon) entryDocProblems(newRaw []byte, spec entryFamilySpec, draft map
 		}
 		return out
 	}
-	name, _ := draft["name"].(string)
+	name := spec.entryName(draft)
 	index := -1
 	if spec.shape == entryShapeArray {
-		index = entryIndexByName(newRaw, spec.family, name)
+		index = entryIndexByName(newRaw, spec, name)
 	}
-	var phrases []string
-	if p, ok := draft["phrases"].([]string); ok {
-		phrases = p
-	}
+	phrases := spec.phraseFields(draft)
 	var out []entryProblem
 	for _, msg := range validationProblems(err) {
 		out = append(out, classifyEntryProblem(spec, index, name, phrases, msg))
@@ -1039,8 +1131,8 @@ func (d *Daemon) entryDocProblems(newRaw []byte, spec entryFamilySpec, draft map
 
 // entryIndexByName finds the draft's position in the rewritten document, for
 // building the label prefix the validators use.
-func entryIndexByName(doc []byte, family, name string) int {
-	index, ok, err := config.EntryIndex(doc, family, name)
+func entryIndexByName(doc []byte, spec entryFamilySpec, name string) int {
+	index, ok, err := config.EntryIndex(doc, spec.family, spec.identity(), name)
 	if err != nil || !ok {
 		return -1
 	}
@@ -1061,11 +1153,12 @@ var entryStepField = regexp.MustCompile(`^steps\[(\d+)\]: `)
 // the draft's phrase field when the quoted phrase is one of the draft's. A
 // problem this function cannot place keeps field "" and shows in the form's
 // general area — never dropped.
-func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases []string, msg string) entryProblem {
+func classifyEntryProblem(spec entryFamilySpec, index int, name string,
+	phrases map[string]string, msg string) entryProblem {
 	labelled := msg
 	prefixed := false
 	if label, ok := entryLabel(spec, index, name); ok {
-		if spec.shape == entryShapeKeyed {
+		if spec.shape != entryShapeArray {
 			// A keyed family's validators write `family.name.key …` — the
 			// dotted path a user would type — so the label and the field are
 			// separated by a dot, not a colon or a bracket.
@@ -1084,13 +1177,31 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases 
 			labelled, prefixed = rest, true
 		}
 	}
+	// The bare positional label, for an array family whose validators do not
+	// quote the entry's identity in it. `[[intents.custom]]` is the case (#164):
+	// the router writes `intents.custom[2]: match "…" is already …`, because a
+	// custom intent's identity IS the phrase the message already quotes, and
+	// repeating it in the prefix would say it twice.
+	//
+	// The position in the label is not trusted, and deliberately so: when a
+	// draft's identity DUPLICATES an existing entry's, the index we resolved for
+	// it is the existing entry's — that is what the collision means — so the
+	// label carries a different number than the message does. What is trusted
+	// instead is that the message quotes the draft's own identity, which is the
+	// same evidence the phrase-collision branch below already relies on.
+	if !prefixed && spec.shape == entryShapeArray && strings.TrimSpace(name) != "" {
+		if rest, ok := cutPositionalLabel(msg, spec.family); ok &&
+			strings.Contains(rest, strconv.Quote(strings.TrimSpace(name))) {
+			labelled, prefixed = rest, true
+		}
+	}
 	// Some validators word a bad NAME as a sentence about the name rather
 	// than about a key of the entry, so they carry no label to strip. The
 	// registry names those wordings; the field where the fix happens is the
 	// name either way.
 	for _, hint := range spec.nameProblems {
 		if strings.Contains(msg, hint) && strings.Contains(msg, strconv.Quote(strings.TrimSpace(name))) {
-			return entryProblem{Field: "name", Message: msg}
+			return entryProblem{Field: spec.identity(), Message: msg}
 		}
 	}
 	if !prefixed {
@@ -1104,7 +1215,7 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases 
 			// a rename that steals a later feed's name makes the OTHER entry
 			// carry the label, but the field where the fix happens is still
 			// the draft's own name.
-			return entryProblem{Field: "name", Message: msg}
+			return entryProblem{Field: spec.identity(), Message: msg}
 		}
 		return entryProblem{Message: msg}
 	}
@@ -1124,11 +1235,11 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases 
 		if field, ok := phraseField(phrases, phrase); ok {
 			return entryProblem{Field: field, Message: labelled}
 		}
-		return entryProblem{Field: "phrases", Message: labelled}
+		return entryProblem{Field: defaultPhraseField(spec), Message: labelled}
 	}
 	switch {
 	case strings.Contains(labelled, "no phrases"):
-		return entryProblem{Field: "phrases", Message: labelled}
+		return entryProblem{Field: defaultPhraseField(spec), Message: labelled}
 	case strings.Contains(labelled, "no steps"):
 		return entryProblem{Field: "steps", Message: labelled}
 	case strings.Contains(labelled, "duplicate feed name"):
@@ -1136,16 +1247,39 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string, phrases 
 		// without leading with the key — "duplicate feed name; each feed
 		// needs its own" — so the token match below would miss it. The name
 		// field is where the fix happens.
-		return entryProblem{Field: "name", Message: labelled}
+		return entryProblem{Field: spec.identity(), Message: labelled}
 	}
 	token := strings.TrimSuffix(strings.SplitN(labelled, " ", 2)[0], ":")
 	if token == "it" || token == "" {
 		return entryProblem{Message: labelled}
 	}
-	if _, ok := spec.keys[token]; ok || token == "name" {
+	if _, ok := spec.keys[token]; ok || token == spec.identity() {
 		return entryProblem{Field: token, Message: labelled}
 	}
 	return entryProblem{Message: labelled}
+}
+
+// defaultPhraseField is where a phrase problem lands when the quoted phrase is
+// not one of the draft's own — the family's first phrase-bearing key.
+func defaultPhraseField(spec entryFamilySpec) string {
+	if len(spec.phraseKeys) > 0 {
+		return spec.phraseKeys[0]
+	}
+	return "phrases"
+}
+
+// positionalLabel matches a validator's bare positional prefix — `routines[2]:`
+// — for a family named in the pattern's first group.
+var positionalLabel = regexp.MustCompile(`^([a-z.]+)\[\d+\]: `)
+
+// cutPositionalLabel strips `family[N]: ` from a message, reporting whether it
+// was there and belonged to this family.
+func cutPositionalLabel(msg, family string) (string, bool) {
+	m := positionalLabel.FindStringSubmatch(msg)
+	if m == nil || m[1] != family {
+		return msg, false
+	}
+	return msg[len(m[0]):], true
 }
 
 // quotedPhrase extracts the phrase a validator quoted: `phrase "wind down"`.
@@ -1164,11 +1298,18 @@ func quotedPhrase(msg string) (string, bool) {
 }
 
 // phraseField locates a quoted phrase in the draft's phrase list.
-func phraseField(phrases []string, phrase string) (string, bool) {
-	for i, p := range phrases {
+func phraseField(phrases map[string]string, phrase string) (string, bool) {
+	fields := make([]string, 0, len(phrases))
+	for field, p := range phrases {
 		if strings.EqualFold(strings.TrimSpace(p), strings.TrimSpace(phrase)) {
-			return fmt.Sprintf("phrases[%d]", i), true
+			fields = append(fields, field)
 		}
 	}
-	return "", false
+	if len(fields) == 0 {
+		return "", false
+	}
+	// A draft repeating one phrase in two fields is a user state, not a bug;
+	// sorting keeps the reported field deterministic rather than map-ordered.
+	sort.Strings(fields)
+	return fields[0], true
 }

@@ -218,8 +218,13 @@ func TestAutomationsListCarriesLastRunAfterARun(t *testing.T) {
 	if err := client.Call("scripts.run", map[string]string{"name": "backup notes"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	waitForActivityRow(t, client, "Script finished: backup notes")
-	waitForEvent(t, client, "session.finished")
+	// Both, in whichever order they arrive. They come off one bus through one
+	// channel and nothing orders them against each other: the row is written by
+	// the daemon's own activity subscriber, so it may trail the session's end or
+	// beat it. Two sequential drains would work only for one of those orders,
+	// and would eat the other event on the way past — which is exactly how this
+	// read as a five-second hang rather than as the race it is.
+	waitForRunObserved(t, client, "Script finished: backup notes")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("the stub script never ran: %v", err)
 	}
@@ -241,6 +246,32 @@ func TestAutomationsListCarriesLastRunAfterARun(t *testing.T) {
 	// The routine has not run; its row still says nothing.
 	if rows[0].LastRun != nil {
 		t.Errorf("the routine fabricated a last run: %+v", rows[0].LastRun)
+	}
+}
+
+// waitForRunObserved drains events until BOTH the named activity row and the
+// session's end have been seen, in either order. See the call site for why the
+// order cannot be assumed; the practical rule is that a test which needs two
+// events off one channel has to watch for both at once, because the first
+// single-event drain consumes whatever else arrives first.
+func waitForRunObserved(t *testing.T, client *ipc.Client, label string) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	row, finished := false, false
+	for !row || !finished {
+		select {
+		case ev := <-client.Events():
+			switch {
+			case ev.Type == "error":
+				t.Fatalf("waiting for row %q and session.finished, got error event: %v", label, ev.Data)
+			case ev.Type == "activity.row" && ev.Data["label"] == label:
+				row = true
+			case ev.Type == "session.finished":
+				finished = true
+			}
+		case <-timeout:
+			t.Fatalf("row %q seen: %v; session.finished seen: %v", label, row, finished)
+		}
 	}
 }
 

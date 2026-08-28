@@ -116,6 +116,7 @@ FloatingWindow {
     if (id === "library") requestHistory()
     else if (id === "automations") {
       requestAutomations()
+      requestSpokenCommands()
       requestReminders()
     }
     else if (id === "knowledge") requestKnowledge()
@@ -409,6 +410,92 @@ FloatingWindow {
       errorMessage = String(frame.error.message || "the reminder could not be cancelled")
     }
     requestReminders()
+  }
+
+  // The create form (#164). A reminder was makeable only by SAYING one, which
+  // left anyone who prefers typing with no way to make one at all. The form
+  // sends the same two things a spoken reminder carries — the words and the
+  // time expression — to reminders.create, which is the spoken path's own verb
+  // over the spoken path's own parser. reminders.preview is the one thing the
+  // form adds: the resolved moment, in the daemon's words, shown BEFORE the
+  // save, because a spoken reminder hears which reading of "at three" won and
+  // a typed one would otherwise find out in the morning.
+  property bool reminderFormOpen: false
+  property string reminderDraftText: ""
+  property string reminderDraftWhen: ""
+  property string reminderPreview: ""
+  property var reminderFormProblems: []
+  property string reminderFormError: ""
+  property int reminderPreviewRequestId: 0
+  property int reminderCreateRequestId: 0
+
+  function openReminderCreate() {
+    reminderDraftText = ""
+    reminderDraftWhen = ""
+    reminderPreview = ""
+    reminderFormProblems = []
+    reminderFormError = ""
+    reminderFormOpen = true
+  }
+
+  function closeReminderForm() {
+    reminderFormOpen = false
+    requestReminders()
+  }
+
+  function previewReminder() {
+    if (!daemon.connected || !reminderFormOpen) return
+    if (String(reminderDraftWhen).trim() === "") {
+      reminderPreview = ""
+      reminderFormProblems = []
+      return
+    }
+    reminderPreviewRequestId = takeReminderRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: reminderPreviewRequestId,
+      method: "reminders.preview", params: { when: reminderDraftWhen } }) + "\n")
+  }
+
+  function handleReminderPreviewReply(frame) {
+    if (frame.error) {
+      reminderFormError = String(frame.error.message || "the time could not be read")
+      return
+    }
+    var result = frame.result || {}
+    reminderFormError = ""
+    reminderFormProblems = result.problems || []
+    // The daemon's own wording for the moment ("at three this afternoon"), the
+    // same sentence the spoken confirmation says — never re-derived here, which
+    // is the whole reason the preview is a round trip rather than arithmetic.
+    reminderPreview = result.valid === true ? String(result.due_spoken || "") : ""
+  }
+
+  function createReminder() {
+    if (!daemon.connected) return
+    reminderCreateRequestId = takeReminderRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: reminderCreateRequestId,
+      method: "reminders.create",
+      params: { when: reminderDraftWhen, text: reminderDraftText } }) + "\n")
+  }
+
+  function handleReminderCreateReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      reminderFormProblems = data.problems || []
+      reminderFormError = String(frame.error.message || "the reminder could not be set")
+      return
+    }
+    reminderFormOpen = false
+    requestReminders()
+  }
+
+  function reminderProblemFor(field) {
+    var out = []
+    for (var i = 0; i < reminderFormProblems.length; i++) {
+      if (String(reminderFormProblems[i].field || "") === field) {
+        out.push(String(reminderFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
   }
 
   function loadAutomations(result) {
@@ -809,6 +896,187 @@ FloatingWindow {
       else if (f.indexOf(prefix + ".") === 0 && !shown[f.substring(prefix.length + 1)]) {
         out.push(msg)
       }
+    }
+    return out.join("\n")
+  }
+
+  // --- spoken commands ([[intents.custom]], #164) --------------------------
+  // The third collection of the Automations tab: the phrases the user
+  // invented, each with the command it runs and what Jarvix says back. It is
+  // the generic entry surface again and nothing else — config.list_entries to
+  // list, config.get_entry to open, config.validate_entry for live field
+  // errors, config.upsert_entry to save, config.delete_entry to remove — so
+  // every rule is the daemon's: the phrase is compiled by the REAL intent
+  // router on every keystroke that commits, which is what makes a taken phrase
+  // name its owner under the phrase field instead of being discovered at load.
+  //
+  // The family's identity is its `match` rather than a `name`, which the
+  // daemon knows and this file simply passes through: the draft carries the
+  // key the daemon returned, and `name` in the verbs' params is whichever
+  // entry is being edited.
+  property var spokenCommands: []
+  property string spokenFingerprint: ""
+  property bool spokenFormOpen: false
+  property string spokenFormOriginalMatch: "" // "" while creating
+  property var spokenDraft: ({})
+  property var spokenFormProblems: []
+  property string spokenFormError: ""
+  property bool spokenDeleteConfirm: false
+  property int spokenListRequestId: 0
+  property int spokenGetRequestId: 0
+  property int spokenValidateRequestId: 0
+  property int spokenSaveRequestId: 0
+  property int spokenDeleteRequestId: 0
+
+  function requestSpokenCommands() {
+    if (!daemon.connected) return
+    spokenListRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: spokenListRequestId,
+      method: "config.list_entries", params: { family: "intents.custom" } }) + "\n")
+  }
+
+  function loadSpokenCommands(result) {
+    spokenFingerprint = String(result.fingerprint || "")
+    var rows = result.entries || []
+    var out = []
+    for (var i = 0; i < rows.length; i++) out.push(rows[i].entry || {})
+    spokenCommands = out
+  }
+
+  function openSpokenCreate() {
+    spokenFormOriginalMatch = ""
+    spokenDraft = { match: "", run: "", say: "" }
+    spokenFormProblems = []
+    spokenFormError = ""
+    spokenDeleteConfirm = false
+    spokenFormOpen = true
+  }
+
+  function openSpokenEdit(match) {
+    if (!daemon.connected) return
+    spokenGetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: spokenGetRequestId,
+      method: "config.get_entry",
+      params: { family: "intents.custom", name: match } }) + "\n")
+  }
+
+  function loadSpokenEntry(frame) {
+    if (frame.error) {
+      errorStage = "automations"
+      errorMessage = String(frame.error.message || "the spoken command could not be read")
+      requestSpokenCommands()
+      return
+    }
+    var result = frame.result || {}
+    spokenDraft = result.entry || {}
+    spokenFormOriginalMatch = String((result.entry || {}).match || "")
+    spokenFingerprint = String(result.fingerprint || spokenFingerprint)
+    spokenFormProblems = []
+    spokenFormError = ""
+    spokenDeleteConfirm = false
+    spokenFormOpen = true
+    validateSpokenDraft()
+  }
+
+  function closeSpokenForm() {
+    spokenFormOpen = false
+    spokenDeleteConfirm = false
+    requestSpokenCommands()
+  }
+
+  function spokenDraftEntry() {
+    var d = spokenDraft
+    var entry = { match: String(d.match || "").trim(), run: String(d.run || "").trim() }
+    var say = String(d.say || "").trim()
+    // An absent `say` is the daemon's own default ("Done."), so an empty field
+    // leaves the key out rather than writing an empty acknowledgement — those
+    // are different states and only one of them is silence.
+    if (say !== "" || "say" in d) entry.say = say
+    return entry
+  }
+
+  function validateSpokenDraft() {
+    if (!daemon.connected || !spokenFormOpen) return
+    spokenValidateRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: spokenValidateRequestId,
+      method: "config.validate_entry",
+      params: { family: "intents.custom", name: spokenFormOriginalMatch,
+        entry: spokenDraftEntry() } }) + "\n")
+  }
+
+  function handleSpokenValidateReply(frame) {
+    if (frame.error) {
+      spokenFormError = String(frame.error.message || "validation failed")
+      return
+    }
+    spokenFormProblems = (frame.result || {}).problems || []
+    spokenFormError = ""
+  }
+
+  function saveSpokenForm() {
+    if (!daemon.connected) return
+    spokenSaveRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: spokenSaveRequestId,
+      method: "config.upsert_entry",
+      params: { family: "intents.custom", name: spokenFormOriginalMatch,
+        entry: spokenDraftEntry(), fingerprint: spokenFingerprint } }) + "\n")
+  }
+
+  function deleteSpokenEntry() {
+    if (!daemon.connected) return
+    spokenDeleteRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: spokenDeleteRequestId,
+      method: "config.delete_entry",
+      params: { family: "intents.custom", name: spokenFormOriginalMatch,
+        fingerprint: spokenFingerprint } }) + "\n")
+  }
+
+  function handleSpokenFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) spokenFormProblems = data.problems || []
+      spokenFormError = String(frame.error.message || "the save failed")
+      spokenDeleteConfirm = false
+      return
+    }
+    var result = frame.result || {}
+    if (result.fingerprint) spokenFingerprint = String(result.fingerprint)
+    spokenFormOpen = false
+    spokenDeleteConfirm = false
+    requestSpokenCommands()
+    if (result.applied === false) {
+      errorStage = "automations"
+      errorMessage = "Saved to config.toml, but the grammar has not been rebuilt yet: "
+        + String(result.reason || "the daemon is busy") + ". It applies on the next reload."
+    }
+  }
+
+  // spokenProblemFor pins the daemon's message for one field key; "" is the
+  // form-level area, which also catches problems on keys with no input so
+  // nothing the daemon says is dropped.
+  function spokenProblemFor(field) {
+    var out = []
+    for (var i = 0; i < spokenFormProblems.length; i++) {
+      if (String(spokenFormProblems[i].field || "") === field) {
+        out.push(String(spokenFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
+  function spokenGeneralProblems() {
+    var shown = { match: true, run: true, say: true }
+    var out = []
+    for (var i = 0; i < spokenFormProblems.length; i++) {
+      var f = String(spokenFormProblems[i].field || "")
+      var msg = String(spokenFormProblems[i].message || "")
+      if (f === "") out.push(msg)
+      else if (!shown[f]) out.push(f + ": " + msg)
     }
     return out.join("\n")
   }
@@ -2038,12 +2306,31 @@ FloatingWindow {
   // only, like every other surface here — the daemon composes each row's
   // facts, this file places them, and Forget is one verb call.
   property var approvals: []
+  property var denials: []
   property string approvalsPath: ""
+  // The add form (#164, ADR 0054). The card path still derives its pattern and
+  // still refuses to accept one over IPC — that rule is about a pattern the
+  // MODEL could reach, and nothing here is reachable from the model. What this
+  // form types goes to approvals.add, where the allow list is judged by the
+  // confirmation card's own refusal matrix; the refusal that comes back is the
+  // matrix's own sentence, shown verbatim rather than reworded here.
+  property bool approvalFormOpen: false
+  property string approvalFormList: "allow" // "allow" | "deny"
+  property string approvalFormPattern: ""
+  property string approvalFormProblem: ""
+  property string approvalFormError: ""
+  // The deny removal's confirmation: the daemon's sentence naming what the
+  // rule protected, and the pattern it belongs to. Held here rather than
+  // composed here — a client that wrote its own version of this sentence would
+  // be deciding, in prose, how serious the act is (ADR 0013).
+  property string denyRemovalPattern: ""
+  property string denyRemovalConfirmation: ""
   // JSON-RPC ids from this feature's own private range (900–949, the
   // reminders and overlay-confirm discipline) so its replies are
   // recognisable by construction.
   property int approvalsRequestId: 0
   property int approvalsForgetRequestId: 0
+  property int approvalsAddRequestId: 0
   property int nextApprovalsRequestId: 900
 
   function takeApprovalsRequestId() {
@@ -2062,16 +2349,106 @@ FloatingWindow {
 
   function loadApprovals(result) {
     approvals = result.approved || []
+    denials = result.denied || []
     approvalsPath = String(result.path || "")
   }
 
   function forgetApproval(pattern) {
     if (!daemon.connected) return
+    denyRemovalPattern = ""
+    denyRemovalConfirmation = ""
     approvalsForgetRequestId = takeApprovalsRequestId()
     daemon.write(JSON.stringify({
       jsonrpc: "2.0", id: approvalsForgetRequestId, method: "approvals.forget",
       params: { pattern: pattern }
     }) + "\n")
+  }
+
+  // removeDeny asks the daemon to remove a deny rule. The first call is
+  // deliberately not the removal: it comes back with the sentence saying what
+  // the rule protected, which this window shows and then answers with
+  // confirmed:true. The two-step lives on the wire rather than in this file so
+  // no client can skip it by not implementing it.
+  function removeDeny(pattern, confirmed) {
+    if (!daemon.connected) return
+    approvalsForgetRequestId = takeApprovalsRequestId()
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: approvalsForgetRequestId, method: "approvals.forget",
+      params: { pattern: pattern, list: "deny", confirmed: confirmed === true }
+    }) + "\n")
+  }
+
+  function handleApprovalsForgetReply(frame) {
+    if (frame.error) {
+      errorStage = "approvals"
+      errorMessage = String(frame.error.message || "the rule could not be removed")
+      return
+    }
+    var result = frame.result || {}
+    if (result.confirm_required === true) {
+      denyRemovalPattern = String(result.pattern || "")
+      denyRemovalConfirmation = String(result.confirmation || "")
+      return
+    }
+    denyRemovalPattern = ""
+    denyRemovalConfirmation = ""
+  }
+
+  function openApprovalAdd(list) {
+    approvalFormList = list
+    approvalFormPattern = ""
+    approvalFormProblem = ""
+    approvalFormError = ""
+    approvalFormOpen = true
+  }
+
+  function closeApprovalForm() {
+    approvalFormOpen = false
+    approvalFormProblem = ""
+    approvalFormError = ""
+  }
+
+  function submitApprovalAdd() {
+    if (!daemon.connected) return
+    approvalsAddRequestId = takeApprovalsRequestId()
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: approvalsAddRequestId, method: "approvals.add",
+      params: { pattern: approvalFormPattern, list: approvalFormList }
+    }) + "\n")
+  }
+
+  // handleApprovalsAddReply shows the refusal exactly as the daemon wrote it.
+  // The matrix's sentences were written to be read aloud on a confirmation
+  // card; the form that typed the rule shows the same words for the same
+  // refusal, which is what "the two routes cannot disagree" means to a person
+  // rather than to a test.
+  function handleApprovalsAddReply(frame) {
+    if (frame.error) {
+      var problems = ((frame.error.data || {}).problems) || []
+      approvalFormProblem = problems.length > 0
+        ? String(problems[0].message || "")
+        : ""
+      approvalFormError = String(frame.error.message || "the rule could not be added")
+      return
+    }
+    var result = frame.result || {}
+    approvalFormProblem = ""
+    approvalFormError = ""
+    if (result.added === false) {
+      approvalFormError = String(result.reason || "that rule is already on the list")
+      return
+    }
+    approvalFormOpen = false
+    // A new deny rule may beat allow rules the user granted months ago. Being
+    // told which is the difference between tightening the gate and finding out
+    // later that something quietly stopped working.
+    var shadows = result.shadows || []
+    if (shadows.length > 0) {
+      errorStage = "approvals"
+      errorMessage = "The deny rule “" + String(result.pattern || "")
+        + "” now overrides your allow " + (shadows.length === 1 ? "rule " : "rules ")
+        + "“" + shadows.join("”, “") + "” — deny always wins."
+    }
   }
 
   // approvalSubtitle says what the grant IS — how long it lasts — because
@@ -2673,6 +3050,7 @@ FloatingWindow {
       // scripts, or knowledge feeds — all three collections live in
       // config.toml.
       requestAutomations()
+      requestSpokenCommands()
       requestKnowledge()
       // The endpoints and advisors are config tables too (#163), so a save
       // from any surface — this form, a hand edit, the settings screen
@@ -2763,13 +3141,26 @@ FloatingWindow {
         } else if (frame.id !== undefined && frame.id === win.approvalsRequestId) {
           if (frame.result) win.loadApprovals(frame.result)
         } else if (frame.id !== undefined && frame.id === win.approvalsForgetRequestId) {
-          // A refusal must be seen in words; a success is followed by the
+          // A refusal must be seen in words, and a deny removal comes back
+          // asking its question; a completed removal is followed by the
           // approvals.changed event, which re-reads the list for every open
           // window rather than only this one.
-          if (frame.error) {
-            win.errorStage = "approvals"
-            win.errorMessage = String(frame.error.message || "the pre-approval could not be forgotten")
-          }
+          win.handleApprovalsForgetReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.approvalsAddRequestId) {
+          win.handleApprovalsAddReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.spokenListRequestId) {
+          if (frame.result) win.loadSpokenCommands(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.spokenGetRequestId) {
+          win.loadSpokenEntry(frame)
+        } else if (frame.id !== undefined && frame.id === win.spokenValidateRequestId) {
+          win.handleSpokenValidateReply(frame)
+        } else if (frame.id !== undefined && (frame.id === win.spokenSaveRequestId ||
+                   frame.id === win.spokenDeleteRequestId)) {
+          win.handleSpokenFormReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.reminderPreviewRequestId) {
+          win.handleReminderPreviewReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.reminderCreateRequestId) {
+          win.handleReminderCreateReply(frame)
         } else if (frame.id !== undefined && frame.id === win.vocabSaveRequestId) {
           win.handleVocabFormReply(frame)
         } else if (frame.id !== undefined && frame.id === win.vocabForgetRequestId) {
@@ -3516,142 +3907,175 @@ FloatingWindow {
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
-      // Centred in the routines/scripts half only: since #141 the lower
-      // part of this pane belongs to the reminders section, and an empty
-      // state centred on the whole tab would sit on top of it.
-      JarvixEmptyState {
-        visible: win.automations.length === 0 && !win.automationFormOpen
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.verticalCenterOffset: -Math.round(remindersSection.height / 2)
-        width: parent.width
-        text: "No routines or scripts yet — the New buttons below create one."
-      }
-
-      ListView {
-        id: automationsList
-        visible: win.automations.length > 0 && !win.automationFormOpen
-        anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: automationsNewRow.top
-        anchors.bottomMargin: Style.space(8)
+      // Three collections in one scroll (#164), the Providers section's shape
+      // rather than #141's fixed 40/60 split: the tab now holds routines and
+      // scripts, the user's own spoken commands, and the one-shot reminders,
+      // and three fixed shares of a 600px pane would leave every one of them
+      // too short to read. One Flickable, headings between, each collection's
+      // own empty state and its own New button — so a collection with nothing
+      // in it costs three lines rather than a third of the tab.
+      Flickable {
+        id: automationsScroll
+        visible: !win.automationFormOpen && !win.spokenFormOpen && !win.reminderFormOpen
+        anchors.fill: parent
+        contentHeight: automationsColumn.height + Style.space(12)
         clip: true
-        spacing: Style.space(10)
-        model: win.automations
 
-        delegate: JarvixCollectionRow {
-          required property var modelData
-          width: automationsList.width
-          title: modelData.name
-          subtitle: win.automationSubtitle(modelData)
-          detail: String(modelData.path || "")
-          meta: win.automationMeta(modelData)
-          flagged: win.automationFlagged(modelData)
-          // The row itself opens the edit form (#99) — name, phrases,
-          // schedule, steps, and Delete live there.
-          interactive: true
-          onActivated: win.openAutomationEdit(modelData.kind, modelData.name)
-          // A disabled entry cannot run — its phrases are out of the
-          // grammar and the daemon would refuse — so the row does not offer
-          // it; Enable is the way back (the Knowledge tab's rule).
-          actionLabel: modelData.enabled === false ? "" : "Run"
-          actionName: "Run the " + modelData.name + " " + modelData.kind
-          onActionTriggered: win.runAutomation(modelData.kind, modelData.name)
-          action2Label: modelData.enabled === false ? "Enable" : "Disable"
-          action2Name: (modelData.enabled === false ? "Enable" : "Disable")
-            + " the " + modelData.name + " " + modelData.kind
-          onAction2Triggered: win.setAutomationEnabled(modelData.kind, modelData.name,
-            modelData.enabled === false)
-        }
-      }
-
-      // The New buttons (#99), replacing #93's copyable TOML hint: creation
-      // is a form now, so the footer opens one instead of handing over text
-      // to paste. Since #141 it bottoms out on the reminders section rather
-      // than the pane.
-      Row {
-        id: automationsNewRow
-        visible: !win.automationFormOpen
-        anchors.bottom: remindersSection.top
-        anchors.bottomMargin: Style.space(12)
-        anchors.left: parent.left
-        spacing: Style.space(8)
-
-        JarvixFormButton {
-          label: "New routine…"
-          name: "Create a new routine"
-          accent: true
-          onClicked: win.openAutomationCreate("routines")
-        }
-        JarvixFormButton {
-          label: "New script…"
-          name: "Create a new script"
-          accent: true
-          onClicked: win.openAutomationCreate("scripts")
-        }
-      }
-
-      // The one-shot reminders section (#141, ADR 0046): the second
-      // collection of this tab — "remind me at three to …", from
-      // reminders.list, on the shared collection rows with Cancel. A fixed
-      // share of the pane rather than a flow, the Vocabulary section's rule:
-      // both collections keep their own scroll and neither can push the
-      // other off screen. There is no New button on purpose — a reminder is
-      // made by saying one, and the empty state says so.
-      Item {
-        id: remindersSection
-        visible: !win.automationFormOpen
-        anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: Math.round(parent.height * 0.4)
-
-        Text {
-          id: remindersHeader
-          anchors.top: parent.top
-          width: parent.width
-          text: win.oneShotReminders.length === 0
-            ? "Reminders"
-            : "Reminders — " + win.oneShotReminders.length + " pending"
-          font.family: Style.font.family
-          font.bold: true
-          font.pixelSize: Style.font.subtitle
-          color: Color.popups.text
-        }
-
-        JarvixEmptyState {
-          visible: win.oneShotReminders.length === 0
-          anchors.top: remindersHeader.bottom
-          anchors.topMargin: Style.space(24)
-          width: parent.width
-          text: "No reminders set — say “remind me at three to call the pharmacy”."
-        }
-
-        ListView {
-          id: remindersList
-          visible: win.oneShotReminders.length > 0
-          anchors.top: remindersHeader.bottom
-          anchors.topMargin: Style.space(8)
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.bottom: parent.bottom
-          clip: true
+        Column {
+          id: automationsColumn
+          width: automationsScroll.width
           spacing: Style.space(10)
-          model: win.oneShotReminders
 
-          // One pending reminder: its words, and the daemon's own wording
-          // for when it fires — this window does no clock arithmetic (ADR
-          // 0013). Cancel is the only operation: a reminder is not edited,
-          // it is cancelled and said again.
-          delegate: JarvixCollectionRow {
-            required property var modelData
-            width: remindersList.width
-            title: modelData.text
-            meta: String(modelData.due_spoken || "")
-            actionLabel: "Cancel"
-            actionName: "Cancel the reminder to " + modelData.text
-            onActionTriggered: win.cancelReminder(modelData.id)
+          Text {
+            text: "Routines and scripts"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.automations.length === 0
+            width: parent.width
+            text: "No routines or scripts yet — the New buttons below create one."
+          }
+
+          Repeater {
+            model: win.automations
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: automationsColumn.width
+              title: modelData.name
+              subtitle: win.automationSubtitle(modelData)
+              detail: String(modelData.path || "")
+              meta: win.automationMeta(modelData)
+              flagged: win.automationFlagged(modelData)
+              // The row itself opens the edit form (#99) — name, phrases,
+              // schedule, steps, and Delete live there.
+              interactive: true
+              onActivated: win.openAutomationEdit(modelData.kind, modelData.name)
+              // A disabled entry cannot run — its phrases are out of the
+              // grammar and the daemon would refuse — so the row does not
+              // offer it; Enable is the way back (the Knowledge tab's rule).
+              actionLabel: modelData.enabled === false ? "" : "Run"
+              actionName: "Run the " + modelData.name + " " + modelData.kind
+              onActionTriggered: win.runAutomation(modelData.kind, modelData.name)
+              action2Label: modelData.enabled === false ? "Enable" : "Disable"
+              action2Name: (modelData.enabled === false ? "Enable" : "Disable")
+                + " the " + modelData.name + " " + modelData.kind
+              onAction2Triggered: win.setAutomationEnabled(modelData.kind, modelData.name,
+                modelData.enabled === false)
+            }
+          }
+
+          // The New buttons (#99), replacing #93's copyable TOML hint:
+          // creation is a form now, so the footer opens one instead of
+          // handing over text to paste.
+          Row {
+            id: automationsNewRow
+            spacing: Style.space(8)
+
+            JarvixFormButton {
+              label: "New routine…"
+              name: "Create a new routine"
+              accent: true
+              onClicked: win.openAutomationCreate("routines")
+            }
+            JarvixFormButton {
+              label: "New script…"
+              name: "Create a new script"
+              accent: true
+              onClicked: win.openAutomationCreate("scripts")
+            }
+          }
+
+          // The user's own spoken commands ([[intents.custom]], #164): a
+          // phrase, the command it runs, and what Jarvix says back. Editable
+          // here rather than in a text editor, with the router's own collision
+          // rules judging the phrase — see openSpokenEdit.
+          Text {
+            text: "Spoken commands"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.spokenCommands.length === 0
+            width: parent.width
+            text: "No spoken commands yet — one is a phrase you say and a command it runs."
+          }
+
+          Repeater {
+            model: win.spokenCommands
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: automationsColumn.width
+              title: "“" + String(modelData.match || "") + "”"
+              subtitle: String(modelData.say || "") === ""
+                ? "Says “Done.” when it finishes"
+                : "Says “" + String(modelData.say) + "” when it finishes"
+              // The command verbatim, monospaced, exactly as the confirmation
+              // card shows one: what runs is what is on screen (ADR 0014).
+              detail: String(modelData.run || "")
+              interactive: true
+              onActivated: win.openSpokenEdit(String(modelData.match || ""))
+            }
+          }
+
+          JarvixFormButton {
+            label: "New spoken command…"
+            name: "Create a new spoken command"
+            accent: true
+            onClicked: win.openSpokenCreate()
+          }
+
+          // The one-shot reminders section (#141, ADR 0046): "remind me at
+          // three to …", from reminders.list, with Cancel. Since #164 it has a
+          // New button too — a reminder is still made by saying one, and now
+          // also by typing one, through the same parser and the same store.
+          Text {
+            text: win.oneShotReminders.length === 0
+              ? "Reminders"
+              : "Reminders — " + win.oneShotReminders.length + " pending"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.oneShotReminders.length === 0
+            width: parent.width
+            text: "No reminders set — say “remind me at three to call the pharmacy”, or use New reminder."
+          }
+
+          Repeater {
+            model: win.oneShotReminders
+
+            // One pending reminder: its words, and the daemon's own wording
+            // for when it fires — this window does no clock arithmetic (ADR
+            // 0013). Cancel is the only operation: a reminder is not edited,
+            // it is cancelled and said again.
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: automationsColumn.width
+              title: modelData.text
+              meta: String(modelData.due_spoken || "")
+              actionLabel: "Cancel"
+              actionName: "Cancel the reminder to " + modelData.text
+              onActionTriggered: win.cancelReminder(modelData.id)
+            }
+          }
+
+          JarvixFormButton {
+            label: "New reminder…"
+            name: "Create a new reminder"
+            accent: true
+            onClicked: win.openReminderCreate()
           }
         }
       }
@@ -3679,6 +4103,50 @@ FloatingWindow {
           anchors.fill: parent
           active: win.automationFormOpen
           sourceComponent: automationFormBody
+        }
+      }
+
+      // The spoken-command form (#164), on the same scaffold as every other
+      // entry form: Back cancels, the accent action saves, the body is loaded
+      // fresh per open so each input initialises from the draft.
+      JarvixDetailPane {
+        id: spokenFormPane
+        visible: win.spokenFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the list"
+        actionLabel: "Save"
+        actionName: "Save the spoken command"
+        note: win.spokenFormOriginalMatch === ""
+          ? "New spoken command"
+          : "Editing “" + win.spokenFormOriginalMatch + "”"
+        onBackRequested: win.closeSpokenForm()
+        onActionTriggered: win.saveSpokenForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.spokenFormOpen
+          sourceComponent: spokenFormBody
+        }
+      }
+
+      // The reminder form (#164). Not an entry form — a reminder is not in
+      // config.toml — but the same scaffold and the same discipline: the
+      // daemon parses the time, the daemon words the moment, this shows both.
+      JarvixDetailPane {
+        id: reminderFormPane
+        visible: win.reminderFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the list"
+        actionLabel: "Set reminder"
+        actionName: "Set this reminder"
+        note: "New reminder"
+        onBackRequested: win.closeReminderForm()
+        onActionTriggered: win.createReminder()
+
+        Loader {
+          anchors.fill: parent
+          active: win.reminderFormOpen
+          sourceComponent: reminderFormBody
         }
       }
     }
@@ -4050,6 +4518,176 @@ FloatingWindow {
                 onClicked: win.automationDeleteConfirm = false
               }
             }
+          }
+        }
+      }
+    }
+
+    // The spoken-command form body (#164), built per open. Three fields, each
+    // pinning the daemon's own message for its key: the phrase (where a
+    // collision names its owner), the command (verbatim, monospaced, the
+    // shell.run display doctrine applied at authoring time), and the
+    // acknowledgement.
+    Component {
+      id: spokenFormBody
+
+      Flickable {
+        id: spokenScroll
+        contentHeight: spokenColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: spokenColumn
+          width: spokenScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            visible: win.spokenFormError !== "" || win.spokenGeneralProblems() !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: (win.spokenFormError !== "" ? win.spokenFormError + "\n" : "")
+              + win.spokenGeneralProblems()
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.urgent
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Phrase to say"
+            placeholder: "lock the screen"
+            hint: "Said exactly, with no placeholders — a slot would have to be pasted into the command."
+            problem: win.spokenProblemFor("match")
+            Component.onCompleted: text = String(win.spokenDraft.match || "")
+            onEdited: function(value) { win.spokenDraft.match = value }
+            onCommitted: win.validateSpokenDraft()
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Command to run"
+            placeholder: "hyprlock"
+            monospace: true
+            hint: "Run through the same permission gate as anything else Jarvix runs."
+            problem: win.spokenProblemFor("run")
+            Component.onCompleted: text = String(win.spokenDraft.run || "")
+            onEdited: function(value) { win.spokenDraft.run = value }
+            onCommitted: win.validateSpokenDraft()
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "What Jarvix says back"
+            placeholder: "Done."
+            hint: "Left empty, it says “Done.”"
+            problem: win.spokenProblemFor("say")
+            Component.onCompleted: text = String(win.spokenDraft.say || "")
+            onEdited: function(value) { win.spokenDraft.say = value }
+            onCommitted: win.validateSpokenDraft()
+          }
+
+          // Delete, behind a confirmation that names what goes — the entry
+          // forms' shape, so removing a spoken command reads the same as
+          // removing a routine.
+          Column {
+            visible: win.spokenFormOriginalMatch !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            JarvixFormButton {
+              visible: !win.spokenDeleteConfirm
+              label: "Delete this spoken command…"
+              name: "Delete the spoken command " + win.spokenFormOriginalMatch
+              onClicked: win.spokenDeleteConfirm = true
+            }
+            Text {
+              visible: win.spokenDeleteConfirm
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Remove “" + win.spokenFormOriginalMatch
+                + "”? The phrase stops being recognised on the next reload."
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Row {
+              visible: win.spokenDeleteConfirm
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                label: "Delete"
+                name: "Confirm removing " + win.spokenFormOriginalMatch
+                accent: true
+                onClicked: win.deleteSpokenEntry()
+              }
+              JarvixFormButton {
+                label: "Keep it"
+                name: "Keep " + win.spokenFormOriginalMatch
+                onClicked: win.spokenDeleteConfirm = false
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // The reminder form body (#164): the words and the time, and the moment
+    // the daemon resolved them to, shown before the save. The resolution line
+    // is the daemon's own sentence — the same one a spoken reminder hears
+    // back — so an ambiguous "at three" is settled on screen rather than
+    // tomorrow morning.
+    Component {
+      id: reminderFormBody
+
+      Flickable {
+        id: reminderScroll
+        contentHeight: reminderColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: reminderColumn
+          width: reminderScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            visible: win.reminderFormError !== "" || win.reminderProblemFor("") !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: (win.reminderFormError !== "" ? win.reminderFormError + "\n" : "")
+              + win.reminderProblemFor("")
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.urgent
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Remind me to"
+            placeholder: "call the pharmacy"
+            problem: win.reminderProblemFor("text")
+            Component.onCompleted: text = String(win.reminderDraftText || "")
+            onEdited: function(value) { win.reminderDraftText = value }
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "When"
+            placeholder: "at three, or in twenty minutes"
+            hint: "The same words you would say — “at 15:00”, “tomorrow at nine”, “in half an hour”."
+            problem: win.reminderProblemFor("when")
+            Component.onCompleted: text = String(win.reminderDraftWhen || "")
+            onEdited: function(value) { win.reminderDraftWhen = value }
+            onCommitted: win.previewReminder()
+          }
+
+          Text {
+            visible: win.reminderPreview !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Fires " + win.reminderPreview + "."
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
           }
         }
       }
@@ -4949,16 +5587,20 @@ FloatingWindow {
     // daemon's own query, and per-fact Forget through the gated tool path:
     // the standard confirmation card appears in Chat (the tab badge points
     // there), and this list refreshes when the daemon's events resolve it.
-    // Add and Edit (#100) open a form pane whose saves go to memory.add /
-    // memory.update — the book's own write path, never the config editor —
-    // ungated because nothing they do destroys (Forget keeps its card).
-    // The Approvals tab (#162, ADR 0053): every command pattern that runs
-    // without being asked about, with when it was agreed to, how often it
-    // has fired, and Forget on each row. Read-only apart from Forget — there
-    // is no Add here, deliberately: a standing grant is made on the
-    // confirmation card, where the exact command that provoked it is on
-    // screen beside the rule, and a "new rule" form with neither would be
-    // the same permission with none of the context.
+    // The Approvals tab (#162, ADR 0053; extended by #164, ADR 0054): both
+    // halves of the gate's configured vocabulary — every command pattern that
+    // runs without being asked about, with when it was agreed to and how often
+    // it has fired, and every deny rule that refuses one whatever else says
+    // otherwise.
+    //
+    // A rule can now be added here as well as on the confirmation card, and the
+    // two routes are deliberately not equivalent: the CARD derives its pattern
+    // and this form does not, so what a person types is judged by the card's own
+    // refusal matrix before it can land, and the refusal it comes back with is
+    // the matrix's sentence verbatim. Removing an ALLOW rule is immediate —
+    // tightening the gate is never something to make hard — while removing a
+    // DENY rule asks first, with the daemon's own sentence saying what the rule
+    // protected.
     Item {
       id: approvalsScreen
       visible: win.socketReady && win.currentTab === "approvals"
@@ -4969,57 +5611,218 @@ FloatingWindow {
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
-      JarvixEmptyState {
-        visible: win.approvals.length === 0
-        anchors.fill: parent
-        text: "Nothing is pre-approved — every command still asks first.\n"
-          + "Answer a permission question with \u201cApprove and don\u2019t ask again\u201d "
-          + "to add a rule here."
-      }
-
-      ListView {
-        id: approvalsList
-        visible: win.approvals.length > 0
+      Flickable {
+        id: approvalsScroll
+        visible: !win.approvalFormOpen
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: approvalsFooter.top
         anchors.bottomMargin: Style.space(8)
+        contentHeight: approvalsColumn.height + Style.space(12)
         clip: true
-        spacing: Style.space(10)
-        model: win.approvals
 
-        delegate: JarvixCollectionRow {
-          required property var modelData
-          width: approvalsList.width
-          // The pattern in the monospace detail line, verbatim: it is a
-          // command prefix, and the card that added it showed it this way.
-          title: modelData.pattern
-          subtitle: win.approvalSubtitle(modelData)
-          meta: win.approvalMeta(modelData)
-          actionLabel: "Forget"
-          actionName: "Forget the pre-approval " + modelData.pattern
-            + " — that command will ask again"
-          onActionTriggered: win.forgetApproval(modelData.pattern)
+        Column {
+          id: approvalsColumn
+          width: approvalsScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            text: "Runs without asking"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.approvals.length === 0
+            width: parent.width
+            text: "Nothing is pre-approved — every command still asks first.\n"
+              + "Answer a permission question with \u201cApprove and don\u2019t ask again\u201d "
+              + "to add a rule here."
+          }
+
+          Repeater {
+            model: win.approvals
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: approvalsColumn.width
+              // The pattern verbatim: it is a command prefix, and the card
+              // that added it showed it this way.
+              title: modelData.pattern
+              subtitle: win.approvalSubtitle(modelData)
+              meta: win.approvalMeta(modelData)
+              actionLabel: "Forget"
+              actionName: "Forget the pre-approval " + modelData.pattern
+                + " — that command will ask again"
+              onActionTriggered: win.forgetApproval(modelData.pattern)
+            }
+          }
+
+          JarvixFormButton {
+            label: "Add an allow rule…"
+            name: "Add a command prefix that runs without asking"
+            onClicked: win.openApprovalAdd("allow")
+          }
+
+          Text {
+            text: "Always refused"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.denials.length === 0
+            width: parent.width
+            text: "No deny rules — only the always-risky commands are refused outright."
+          }
+
+          Repeater {
+            model: win.denials
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: approvalsColumn.width
+              title: modelData.pattern
+              subtitle: "Refused outright — deny beats every allow rule"
+              actionLabel: "Remove…"
+              actionName: "Remove the deny rule " + modelData.pattern
+              onActionTriggered: win.removeDeny(modelData.pattern, false)
+            }
+          }
+
+          // The confirmation a deny removal asks for, in the daemon's words:
+          // what the rule protected, and what happens without it. It appears
+          // under the list rather than as a popover because it is a paragraph
+          // to read, not a yes/no reflex.
+          Column {
+            visible: win.denyRemovalConfirmation !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: win.denyRemovalConfirmation
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              color: Color.popups.text
+            }
+            Row {
+              spacing: Style.space(8)
+
+              JarvixFormButton {
+                label: "Remove the rule"
+                name: "Confirm removing the deny rule " + win.denyRemovalPattern
+                accent: true
+                onClicked: win.removeDeny(win.denyRemovalPattern, true)
+              }
+              JarvixFormButton {
+                label: "Keep it"
+                name: "Keep the deny rule " + win.denyRemovalPattern
+                onClicked: {
+                  win.denyRemovalPattern = ""
+                  win.denyRemovalConfirmation = ""
+                }
+              }
+            }
+          }
+
+          JarvixFormButton {
+            label: "Add a deny rule…"
+            name: "Add a command prefix that is always refused"
+            accent: true
+            onClicked: win.openApprovalAdd("deny")
+          }
+        }
+      }
+
+      // The add form. One field, because a rule IS one field: the leading
+      // words of a command. The refusal that comes back sits under it like any
+      // other field problem.
+      JarvixDetailPane {
+        id: approvalFormPane
+        visible: win.approvalFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the list"
+        actionLabel: "Add rule"
+        actionName: win.approvalFormList === "deny"
+          ? "Add this deny rule" : "Add this allow rule"
+        note: win.approvalFormList === "deny"
+          ? "New deny rule — always refused"
+          : "New allow rule — runs without asking"
+        onBackRequested: win.closeApprovalForm()
+        onActionTriggered: win.submitApprovalAdd()
+
+        Loader {
+          anchors.fill: parent
+          active: win.approvalFormOpen
+          sourceComponent: approvalFormBody
         }
       }
 
       Text {
         id: approvalsFooter
+        visible: !win.approvalFormOpen
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.right: parent.right
         wrapMode: Text.Wrap
         text: win.approvalsPath === "" ? ""
-          : "Permanent rules live in " + win.approvalsPath
-            + " under [tools.policy] shell_allow — yours to edit. "
-            + "Deny rules and always-risky commands still ask, whatever is listed here."
+          : "Both lists live in " + win.approvalsPath
+            + " under [tools.policy] — yours to edit. "
+            + "Deny rules and always-risky commands still ask, or refuse, whatever is allowed here."
         font.family: Style.font.family
         font.pixelSize: Style.font.subtitle
         color: Util.alpha(Color.popups.text, 0.7)
       }
     }
 
+    // The add form's body, built per open. The hint under the field says what
+    // a rule means, in the same vocabulary the card uses, because the whole
+    // risk of typing one is thinking it is narrower than it is.
+    Component {
+      id: approvalFormBody
+
+      Column {
+        spacing: Style.space(10)
+
+        Text {
+          visible: win.approvalFormError !== ""
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: win.approvalFormError
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.urgent
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: win.approvalFormList === "deny"
+            ? "Command prefix to refuse"
+            : "Command prefix to allow"
+          placeholder: "docker ps"
+          monospace: true
+          hint: win.approvalFormList === "deny"
+            ? "Leading words, then anything: “git push” refuses every git push. Deny always wins."
+            : "Leading words, then anything: “docker ps” covers “docker ps --format x”. "
+              + "Risky commands and deny rules still stop it."
+          problem: win.approvalFormProblem
+          Component.onCompleted: text = String(win.approvalFormPattern || "")
+          onEdited: function(value) { win.approvalFormPattern = value }
+          onCommitted: win.submitApprovalAdd()
+        }
+      }
+    }
+
+    // Add and Edit (#100) open a form pane whose saves go to memory.add /
+    // memory.update — the book's own write path, never the config editor —
+    // ungated because nothing they do destroys (Forget keeps its card).
     Item {
       id: memoryScreen
       visible: win.socketReady && win.currentTab === "memory"

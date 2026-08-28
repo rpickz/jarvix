@@ -684,3 +684,39 @@ func TestScriptPhraseLosesToLiteralCaptureOverlap(t *testing.T) {
 		t.Errorf("literal script phrase lost to the capture slot: %+v, %v", m, ok)
 	}
 }
+
+// TestTwoCustomIntentsCannotClaimOnePhrase pins the collision the router used
+// to let through (#164).
+//
+// Until the window could create a custom intent there was no cheap way to
+// reach this state, and the failure it produced was silent: rules are tried in
+// insertion order, so the second entry never fired and answered — when the
+// user said its phrase — with the FIRST one's acknowledgement. A form that
+// offers to create one has to be able to say the phrase is taken, and it says
+// it with the same sentence and the same owner-naming the routine and script
+// loops have always used.
+func TestTwoCustomIntentsCannotClaimOnePhrase(t *testing.T) {
+	_, err := New(Options{Custom: []Custom{
+		{Match: "lock the screen", Run: "hyprlock"},
+		{Match: "Lock The Screen", Run: "loginctl lock-session"},
+	}})
+	if err == nil {
+		t.Fatal("two custom intents claimed one phrase")
+	}
+	// The message names WHICH entry to fix and WHO already owns the phrase.
+	for _, want := range []string{"intents.custom[1]", `"Lock The Screen"`, "is already",
+		`intents.custom[0] ("lock the screen")`, "choose a different phrase"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q is missing %q", err, want)
+		}
+	}
+}
+
+// TestACustomIntentStillClashesWithABuiltIn: the seeded collision map means a
+// built-in clash reads exactly as it did before the check was widened.
+func TestACustomIntentStillClashesWithABuiltIn(t *testing.T) {
+	_, err := New(Options{Custom: []Custom{{Match: "mute", Run: "true"}}})
+	if err == nil || !strings.Contains(err.Error(), "the built-in intent") {
+		t.Errorf("error = %v, want the built-in named", err)
+	}
+}

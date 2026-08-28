@@ -246,23 +246,18 @@ func (p *Policy) proposeFor(seg string) RememberOffer {
 		return refuse("I could not read a command name there, so there is nothing to remember.")
 	}
 	head := fields[0]
-	// The refusal matrix runs BEFORE the shape check, so a destructive
-	// command is always refused for being destructive rather than for
-	// whatever its spelling happens to trip. `mkfs.ext4` is the case that
-	// proves it: the dot would otherwise get it refused as "a path", which is
-	// true of the string and irrelevant about the command.
-	if reason, blocked := unrememberableWord(head); blocked {
-		return refuse(reason)
-	}
 	if !fixedWord(head) {
-		// A path-invoked script (`./deploy.sh`, `/opt/bin/thing`) is the
-		// important case, and the reason is not shape but time: a rule names
-		// a path, and the *contents* of that path can be rewritten by anything
-		// with write access — including, since #147, by the assistant acting
-		// on text someone else wrote. A word-prefix rule cannot express "and
-		// the file must still be the one I read", so it is not offered.
-		return refuse(fmt.Sprintf(
-			"%q is a path rather than a command name, and what a file contains can change after I remember it.", head))
+		// The refusal matrix (judgePattern) runs BEFORE this shape check for
+		// the head word, so a destructive command is always refused for being
+		// destructive rather than for whatever its spelling happens to trip:
+		// `mkfs.ext4` is the case that proves it, because the dot would
+		// otherwise get it refused as "a path", which is true of the string and
+		// irrelevant about the command. Hence the head-word matrix check inside
+		// judgePattern and this one after it.
+		if reason, blocked := unrememberableWord(head); blocked {
+			return refuse(reason)
+		}
+		return refuse(pathRatherThanCommand(head))
 	}
 	words := []string{head}
 	for _, f := range fields[1:] {
@@ -271,15 +266,84 @@ func (p *Policy) proposeFor(seg string) RememberOffer {
 		}
 		words = append(words, f)
 	}
+	offer := p.judgePattern(words)
+	offer.Segment = seg
+	return offer
+}
+
+// VetAllowPattern judges a pattern a PERSON typed into the Approvals view
+// (#164), against the identical matrix the confirmation card's proposal faces.
+//
+// It exists so the two routes to `[tools.policy] shell_allow` cannot disagree.
+// The card derives its pattern and this does not, which is the whole difference
+// — everything about WHICH patterns are acceptable is judgePattern's, shared
+// verbatim, so adding `podman rm` to the shape table refuses it on both routes
+// with one edit and no possibility of one list going stale.
+//
+// Two rules differ from the derived path, both because a person typed this:
+//
+//   - every word must be a command word, and a word that is not is REFUSED
+//     rather than silently dropped. The card truncates at the first argument
+//     because it is summarising a real command; a typed `git log --oneline`
+//     that quietly became `git log` would be a rule the user did not write.
+//   - there is no maxPatternWords cap. Three is where DERIVING stops guessing;
+//     a longer prefix a person typed is strictly narrower, so it is strictly
+//     safer, and refusing it would be refusing the careful answer.
+func (p *Policy) VetAllowPattern(pattern string) RememberOffer {
+	words := strings.Fields(pattern)
+	if len(words) == 0 {
+		return refuse("type the leading words of a command, like \"docker ps\".")
+	}
+	// The head word faces the matrix BEFORE the shape check, exactly as the
+	// derived path orders it: a destructive command must be refused for being
+	// destructive rather than for whatever its spelling happens to trip, and
+	// `timeout 5` must be refused as a wrapper rather than as "5 is not a
+	// command word", which is true and unhelpful.
+	if reason, blocked := unrememberableWord(words[0]); blocked {
+		return refuse(reason)
+	}
+	for _, w := range words {
+		if envAssignment.MatchString(w) {
+			// matchWordPrefix strips leading assignments off the command before
+			// comparing, so a rule containing one could never match anything.
+			return refuse(fmt.Sprintf(
+				"%q sets an environment variable, and a rule containing one would never match "+
+					"anything — leave it out and the rule still covers the command.", w))
+		}
+		if fixedWord(w) {
+			continue
+		}
+		if w == words[0] {
+			if reason, blocked := unrememberableWord(w); blocked {
+				return refuse(reason)
+			}
+			return refuse(pathRatherThanCommand(w))
+		}
+		return refuse(fmt.Sprintf(
+			"%q is not a command word. An allow rule is leading words and then anything, so it "+
+				"cannot contain a flag, a path, a value or a quoted string — and a rule that "+
+				"stopped before %q would be wider than the one you typed, not narrower.", w, w))
+	}
+	return p.judgePattern(words)
+}
+
+// judgePattern is the refusal matrix itself, applied to a candidate pattern
+// however it was arrived at: derived from a pending confirmation (proposeFor)
+// or typed by a person into the Approvals view (VetAllowPattern). It is the
+// single place the three groups of ADR 0053's matrix are consulted, which is
+// what stops the two routes drifting.
+func (p *Policy) judgePattern(words []string) RememberOffer {
+	if reason, blocked := unrememberableWord(words[0]); blocked {
+		return refuse(reason)
+	}
 	if reason, blocked := unrememberableShapeFor(words); blocked {
 		return refuse(reason)
 	}
-	pattern := strings.Join(words, " ")
-	// Deny, one last time, against the pattern itself. The command in hand
-	// passed the deny check above, but the *rule* is broader than the command:
-	// a deny of `docker exec` must stop a proposal of `docker` even though the
-	// command being confirmed was `docker version`. Both directions, for the
-	// reason unrememberableShapeFor checks both.
+	// Deny, against the pattern itself. A command in hand may have passed the
+	// deny check already, but the *rule* is broader than the command: a deny of
+	// `docker exec` must stop a proposal of `docker` even though the command
+	// being confirmed was `docker version`. Both directions, for the reason
+	// unrememberableShapeFor checks both.
 	for _, deny := range p.extraDeny {
 		if prefixOf(words, deny) || prefixOf(deny, words) {
 			return refuse(deniedReason(fmt.Sprintf("configured deny pattern %q", strings.Join(deny, " "))))
@@ -287,15 +351,28 @@ func (p *Policy) proposeFor(seg string) RememberOffer {
 	}
 	for _, allow := range p.extraAllow {
 		if prefixOf(allow, words) {
-			// Already covered by a standing rule. Reaching here means the
-			// segment asked for some other reason (a risk regex, say), which
-			// a second copy of the same pattern would not change.
+			// Already covered by a standing rule. On the card path, reaching
+			// here means the segment asked for some other reason (a risk regex,
+			// say), which a second copy of the same pattern would not change;
+			// on the typed path it means the user is about to add a rule that
+			// does nothing.
 			return refuse(fmt.Sprintf(
-				"%q is already on your allow list, and something else about that command is what asks.",
+				"%q is already on your allow list, and a second rule under it would change nothing.",
 				strings.Join(allow, " ")))
 		}
 	}
-	return RememberOffer{Offered: true, Pattern: pattern, Segment: seg}
+	return RememberOffer{Offered: true, Pattern: strings.Join(words, " ")}
+}
+
+// pathRatherThanCommand words the refusal of a path-invoked command
+// (`./deploy.sh`, `/opt/bin/thing`). The reason is not shape but time: a rule
+// names a path, and the *contents* of that path can be rewritten by anything
+// with write access — including, since #147, by the assistant acting on text
+// someone else wrote. A word-prefix rule cannot express "and the file must
+// still be the one I read", so it is not offered.
+func pathRatherThanCommand(word string) string {
+	return fmt.Sprintf(
+		"%q is a path rather than a command name, and what a file contains can change after I remember it.", word)
 }
 
 // prefixOf reports whether a is a prefix of b, word for word (equal counts as

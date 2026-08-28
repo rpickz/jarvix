@@ -302,3 +302,25 @@ func plural(n int, one, many string) string {
 	}
 	return many
 }
+
+// saveAck confirms one form save, in the voice path's own words: the create
+// sentence createAck speaks, then the check-in clause remindAck speaks, so a
+// thread made by form is acknowledged with the same sentences as one made by
+// speaking. The recap mode is not spoken — it decides what a LATER switch says
+// and has no sentence of its own on the voice path either.
+func saveAck(th Thread, created bool, wanted int, anchorNote string) string {
+	ack := createAck(th, wanted, anchorNote)
+	if !created {
+		ack = "Saved: " + th.Name + "."
+		switch {
+		case len(th.Anchors) > 0 && wanted > 0:
+			ack += " Anchored to " + anchorList(th.Anchors) + "."
+		case wanted > 0 && anchorNote != "":
+			ack += " " + capitalise(anchorNote) + "."
+		}
+	}
+	if th.RemindEveryMin > 0 {
+		ack += " " + remindAck(th, th.RemindEveryMin)
+	}
+	return ack
+}

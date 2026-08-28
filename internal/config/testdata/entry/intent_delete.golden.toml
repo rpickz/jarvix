@@ -1,0 +1,7 @@
+# my config, hand-written
+[intents]
+terminal = "alacritty"
+
+[[intents.custom]]
+match = "mute the music"
+run = "playerctl pause"

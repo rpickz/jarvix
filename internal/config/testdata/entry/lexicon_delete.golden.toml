@@ -1,0 +1,10 @@
+# my config, hand-written
+[tts]
+provider = "kokoro"
+
+[tts.lexicon]
+Kubernetes = "koo ber net eez"
+nginx = "engine ex"
+
+[stt.whisper]
+model = "base.en"

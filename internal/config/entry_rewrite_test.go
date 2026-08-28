@@ -219,7 +219,7 @@ func TestUpsertEntryTOMLGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := UpsertEntryTOML(input, tc.family, tc.entry, tc.draft, tc.keyOrder, tc.subOrder)
+			got, err := UpsertEntryTOML(input, tc.family, "name", tc.entry, tc.draft, tc.keyOrder, tc.subOrder)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -239,15 +239,15 @@ func TestUpsertEntryTOMLRoundTripsThroughEntryValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, ok, err := EntryValue(input, "routines", "Evening")
+	entry, ok, err := EntryValue(input, "routines", "name", "Evening")
 	if err != nil || !ok {
 		t.Fatalf("EntryValue = %v, %v", ok, err)
 	}
-	out, err := UpsertEntryTOML(input, "routines", "evening", entry, routineKeyOrder, routineSubOrder)
+	out, err := UpsertEntryTOML(input, "routines", "name", "evening", entry, routineKeyOrder, routineSubOrder)
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, ok, err := EntryValue(out, "routines", "evening")
+	back, ok, err := EntryValue(out, "routines", "name", "evening")
 	if err != nil || !ok || !entryMapEqual(back, entry) {
 		t.Errorf("round trip changed the entry: %v vs %v (%v)", back, entry, err)
 	}
@@ -263,11 +263,11 @@ func TestUpsertEntryTOMLRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UpsertEntryTOML(input, "scripts", "no such", map[string]any{"name": "x"},
+	if _, err := UpsertEntryTOML(input, "scripts", "name", "no such", map[string]any{"name": "x"},
 		scriptKeyOrder, nil); err == nil || !strings.Contains(err.Error(), `named "no such"`) {
 		t.Errorf("unknown entry error = %v, want it named", err)
 	}
-	if _, err := UpsertEntryTOML([]byte("not = toml ["), "scripts", "", map[string]any{"name": "x"},
+	if _, err := UpsertEntryTOML([]byte("not = toml ["), "scripts", "name", "", map[string]any{"name": "x"},
 		scriptKeyOrder, nil); err == nil || !strings.Contains(err.Error(), "fix it by hand") {
 		t.Errorf("unparsable document error = %v, want the hand-fix pointer", err)
 	}
@@ -302,7 +302,7 @@ func TestDeleteEntryTOMLGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := DeleteEntryTOML(input, tc.family, tc.entry)
+			got, err := DeleteEntryTOML(input, tc.family, "name", tc.entry)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -320,11 +320,11 @@ func TestDeleteEntryTOMLRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DeleteEntryTOML(input, "routines", "no such"); err == nil ||
+	if _, err := DeleteEntryTOML(input, "routines", "name", "no such"); err == nil ||
 		!strings.Contains(err.Error(), `named "no such"`) {
 		t.Errorf("unknown entry error = %v, want it named", err)
 	}
-	if _, err := DeleteEntryTOML([]byte("not = toml ["), "routines", "evening"); err == nil ||
+	if _, err := DeleteEntryTOML([]byte("not = toml ["), "routines", "name", "evening"); err == nil ||
 		!strings.Contains(err.Error(), "fix it by hand") {
 		t.Errorf("unparsable document error = %v, want the hand-fix pointer", err)
 	}
@@ -351,5 +351,70 @@ func TestSetEntryFieldOtherScalars(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "# watches the AMD price") {
 		t.Error("a hand comment vanished")
+	}
+}
+
+// TestEntryEditorAddressesByADeclaredKey pins the identity-key generalisation
+// (#164): `[[intents.custom]]` has no `name`, its identity is the phrase it
+// matches, and the array editor addresses it by whichever key the caller
+// names — insert, edit and delete, byte-preserving throughout.
+//
+// The three goldens are the same three motions the other families' goldens
+// pin, and for the same reason: what must survive is everything outside the
+// block, comments glued to a header included.
+func TestEntryEditorAddressesByADeclaredKey(t *testing.T) {
+	order := []string{"match", "run", "say"}
+	cases := []struct {
+		name   string
+		target string
+		draft  map[string]any
+	}{
+		{"intent_insert", "", map[string]any{
+			"match": "mute the music", "run": "playerctl pause"}},
+		{"intent_edit", "lock the screen", map[string]any{
+			"match": "lock the screen", "run": "hyprlock --immediate", "say": "Locking now."}},
+		{"intent_delete", "lock the screen", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := readGolden(t, tc.name+".input.toml")
+			golden := readGolden(t, tc.name+".golden.toml")
+			var got []byte
+			var err error
+			if tc.draft == nil {
+				got, err = DeleteEntryTOML(input, "intents.custom", "match", tc.target)
+			} else {
+				got, err = UpsertEntryTOML(input, "intents.custom", "match", tc.target,
+					tc.draft, order, nil)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(golden) {
+				t.Errorf("rewrite mismatch\n--- got ---\n%s\n--- want ---\n%s", got, golden)
+			}
+		})
+	}
+}
+
+// TestEntryEditorReadsAndIndexesByTheDeclaredKey: the read and the index verbs
+// address by the same key, so the whole-document problems a validator labels
+// `intents.custom[1]` can be matched back to the entry that caused them.
+func TestEntryEditorReadsAndIndexesByTheDeclaredKey(t *testing.T) {
+	input := readGolden(t, "intent_edit.input.toml")
+	entry, ok, err := EntryValue(input, "intents.custom", "match", "MUTE the music")
+	if err != nil || !ok {
+		t.Fatalf("read = %v, %v — array families still match case-insensitively", ok, err)
+	}
+	if entry["run"] != "playerctl pause" {
+		t.Errorf("entry = %v", entry)
+	}
+	index, ok, err := EntryIndex(input, "intents.custom", "match", "mute the music")
+	if err != nil || !ok || index != 1 {
+		t.Errorf("index = %d, %v, %v; want 1", index, ok, err)
+	}
+	names, err := EntryNames(input, "intents.custom", "match")
+	if err != nil || len(names) != 2 || names[0] != "lock the screen" {
+		t.Errorf("names = %v, %v", names, err)
 	}
 }

@@ -42,11 +42,122 @@ Item {
   property var briefing: null
   property bool briefingOpen: false
 
+  // The create/edit form (#164). A thread was makeable only by speaking, in
+  // pieces — "new thread", then a name, then "with this window", then "check in
+  // every twenty minutes" — and its recap mode was not reachable by voice at
+  // all, only by hand-editing focus.json. The form sends the whole draft to
+  // focus.save, which applies it in ONE write: four spoken acts would be four
+  // writes, and a failure between two of them would leave a half-configured
+  // thread. Everything it enforces is the voice path's own rule, reached
+  // through the same store.
+  property bool formOpen: false
+  property string formThreadId: "" // "" while creating
+  property string draftName: ""
+  property string draftRemind: ""
+  property string draftRecap: ""      // "" | "always" | "never"
+  property int draftAnchors: 0
+  property bool draftReanchor: false  // false leaves the anchors untouched
+  property var formProblems: []
+  property string formError: ""
+
   readonly property int listRequestId: 500
   readonly property int switchRequestId: 501
   readonly property int endRequestId: 502
   readonly property int sessionEndRequestId: 503
+  readonly property int saveRequestId: 504
   readonly property int briefingRequestId: 510
+
+  // The recap modes, in the daemon's own vocabulary (focus.RecapAuto/Always/
+  // Never) with the sentence each one means. A cycle rather than a dropdown:
+  // three values, and the label says which is chosen.
+  readonly property var recapModes: [
+    { value: "", label: "Automatic — read an anchored terminal only" },
+    { value: "always", label: "Always — read whatever the anchored window is" },
+    { value: "never", label: "Never — no model-composed recap for this thread" }
+  ]
+
+  function recapLabel(value) {
+    for (var i = 0; i < recapModes.length; i++) {
+      if (recapModes[i].value === String(value || "")) return recapModes[i].label
+    }
+    return String(value)
+  }
+
+  function stepRecap(delta) {
+    var at = 0
+    for (var i = 0; i < recapModes.length; i++) {
+      if (recapModes[i].value === draftRecap) { at = i; break }
+    }
+    draftRecap = String(recapModes[(at + delta + recapModes.length) % recapModes.length].value)
+  }
+
+  function openCreate() {
+    formThreadId = ""
+    draftName = ""
+    draftRemind = ""
+    draftRecap = ""
+    draftAnchors = 1
+    draftReanchor = true // a new thread is what you just started looking at
+    formProblems = []
+    formError = ""
+    formOpen = true
+  }
+
+  function openEdit(t) {
+    formThreadId = String(t.id || "")
+    draftName = String(t.name || "")
+    draftRemind = t.remind_every_min ? String(t.remind_every_min) : ""
+    draftRecap = String(t.recap || "")
+    draftAnchors = (t.anchors || []).length
+    // An edit leaves the anchors alone unless the user says otherwise: a
+    // rename must not silently re-point the thread at whatever happens to be
+    // in front of the window right now.
+    draftReanchor = false
+    formProblems = []
+    formError = ""
+    formOpen = true
+  }
+
+  function closeForm() {
+    formOpen = false
+    formProblems = []
+    formError = ""
+  }
+
+  function saveForm() {
+    var params = { name: draftName, recap: draftRecap }
+    if (formThreadId !== "") params.thread = formThreadId
+    var minutes = Number(String(draftRemind).trim())
+    // A non-number goes as text so the daemon words what is wrong with it,
+    // never this file (ADR 0013).
+    params.remind_every_min = (String(draftRemind).trim() === "") ? 0
+      : (isFinite(minutes) && Math.floor(minutes) === minutes ? minutes : String(draftRemind).trim())
+    if (draftReanchor) params.anchors = draftAnchors
+    bridge.write(JSON.stringify({ jsonrpc: "2.0", id: saveRequestId,
+      method: "focus.save", params: params }) + "\n")
+  }
+
+  function handleSaveReply(frame) {
+    if (frame.error) {
+      formProblems = ((frame.error.data || {}).problems) || []
+      formError = String(frame.error.message || "the thread could not be saved")
+      return
+    }
+    formOpen = false
+    formProblems = []
+    formError = ""
+    // Success needs no refresh here: focus.changed triggers one.
+  }
+
+  function problemFor(field) {
+    var out = []
+    for (var i = 0; i < formProblems.length; i++) {
+      if (String(formProblems[i].field || "") === field) {
+        out.push(String(formProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
 
   onActiveChanged: {
     if (active) {
@@ -58,6 +169,7 @@ Item {
       banner = ""
       briefingOpen = false
       briefing = null
+      formOpen = false
     }
   }
 
@@ -148,6 +260,10 @@ Item {
             focusTab.session = frame.result.session || null
             if (focusTab.detailId !== "" && !focusTab.detailThread()) focusTab.detailId = ""
           }
+          return
+        }
+        if (frame.id === focusTab.saveRequestId) {
+          focusTab.handleSaveReply(frame)
           return
         }
         if (frame.id === focusTab.briefingRequestId) {
@@ -265,15 +381,17 @@ Item {
   }
 
   JarvixEmptyState {
-    visible: focusTab.threads.length === 0 && focusTab.detailId === "" && !focusTab.briefingOpen
+    visible: focusTab.threads.length === 0 && focusTab.detailId === ""
+      && !focusTab.briefingOpen && !focusTab.formOpen
     anchors.centerIn: parent
     width: parent.width
-    text: "No focus threads yet — say “new thread”, then a name.\nAdd “with this window” to anchor it to what you're looking at."
+    text: "No focus threads yet — say “new thread”, then a name.\nAdd “with this window” to anchor it to what you're looking at, or use New thread below."
   }
 
   ListView {
     id: threadList
-    visible: focusTab.threads.length > 0 && focusTab.detailId === "" && !focusTab.briefingOpen
+    visible: focusTab.threads.length > 0 && focusTab.detailId === ""
+      && !focusTab.briefingOpen && !focusTab.formOpen
     anchors.top: sessionBanner.visible ? sessionBanner.bottom
       : (briefingBar.visible ? briefingBar.bottom
         : (focusBanner.visible ? focusBanner.bottom : parent.top))
@@ -281,7 +399,8 @@ Item {
       ? Style.space(10) : 0
     anchors.left: parent.left
     anchors.right: parent.right
-    anchors.bottom: parent.bottom
+    anchors.bottom: newThreadRow.top
+    anchors.bottomMargin: Style.space(10)
     clip: true
     spacing: Style.space(10)
     model: focusTab.threads
@@ -298,9 +417,144 @@ Item {
       actionLabel: modelData.active ? "" : "Switch"
       actionName: "Switch to the " + modelData.name + " thread"
       onActionTriggered: focusTab.switchTo(modelData.id)
-      action2Label: "End"
-      action2Name: "End the " + modelData.name + " thread"
-      onAction2Triggered: focusTab.endThread(modelData.id)
+      action2Label: "Edit"
+      action2Name: "Edit the " + modelData.name + " thread"
+      onAction2Triggered: focusTab.openEdit(modelData)
+      action3Label: "End"
+      action3Name: "End the " + modelData.name + " thread"
+      onAction3Triggered: focusTab.endThread(modelData.id)
+    }
+  }
+
+  Row {
+    id: newThreadRow
+    visible: focusTab.detailId === "" && !focusTab.briefingOpen && !focusTab.formOpen
+    anchors.bottom: parent.bottom
+    anchors.left: parent.left
+
+    JarvixFormButton {
+      label: "New thread…"
+      name: "Create a new focus thread"
+      accent: true
+      onClicked: focusTab.openCreate()
+    }
+  }
+
+  // The thread form, on the shared detail scaffold. Everything a thread has:
+  // its name, what it is anchored to, how often to check in, and what a switch
+  // back should read.
+  JarvixDetailPane {
+    visible: focusTab.formOpen
+    anchors.fill: parent
+    backName: "Cancel and go back to the threads"
+    actionLabel: "Save"
+    actionName: "Save this thread"
+    note: focusTab.formThreadId === "" ? "New thread" : "Editing “" + focusTab.draftName + "”"
+    onBackRequested: focusTab.closeForm()
+    onActionTriggered: focusTab.saveForm()
+
+    Flickable {
+      anchors.fill: parent
+      clip: true
+      contentWidth: width
+      contentHeight: formColumn.height + Style.space(12)
+
+      Column {
+        id: formColumn
+        width: parent.width
+        spacing: Style.space(10)
+
+        Text {
+          visible: focusTab.formError !== "" || focusTab.problemFor("") !== ""
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: (focusTab.formError !== "" ? focusTab.formError + "\n" : "")
+            + focusTab.problemFor("")
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Color.urgent
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "Name"
+          placeholder: "the refactor"
+          hint: "What you will call it out loud — “switch to the refactor”."
+          problem: focusTab.problemFor("name")
+          Component.onCompleted: text = focusTab.draftName
+          onEdited: function(value) { focusTab.draftName = value }
+        }
+
+        JarvixFormToggle {
+          width: parent.width
+          label: "Anchor to the windows in front of you"
+          detail: focusTab.formThreadId === ""
+            ? "Takes the most recently focused window, the way “with this window” does."
+            : "Leave this off to keep the anchors this thread already has."
+          checked: focusTab.draftReanchor
+          onToggled: function(on) { focusTab.draftReanchor = on }
+        }
+
+        Row {
+          visible: focusTab.draftReanchor
+          spacing: Style.space(8)
+
+          JarvixFormButton {
+            label: "1 window"
+            name: "Anchor to one window"
+            accent: focusTab.draftAnchors === 1
+            onClicked: focusTab.draftAnchors = 1
+          }
+          JarvixFormButton {
+            label: "2 windows"
+            name: "Anchor to two windows"
+            accent: focusTab.draftAnchors === 2
+            onClicked: focusTab.draftAnchors = 2
+          }
+          JarvixFormButton {
+            label: "None"
+            name: "Anchor to no windows"
+            accent: focusTab.draftAnchors === 0
+            onClicked: focusTab.draftAnchors = 0
+          }
+        }
+
+        JarvixFormField {
+          width: parent.width
+          label: "Check in every (minutes, empty for never)"
+          placeholder: "20"
+          problem: focusTab.problemFor("remind_every_min")
+          Component.onCompleted: text = focusTab.draftRemind
+          onEdited: function(value) { focusTab.draftRemind = value }
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+
+          Text {
+            text: "Recap when switching back"
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+          JarvixFormButton {
+            label: focusTab.recapLabel(focusTab.draftRecap) + "  ↔"
+            name: "Recap mode: " + focusTab.recapLabel(focusTab.draftRecap)
+              + ". Activate to choose another."
+            onClicked: focusTab.stepRecap(1)
+          }
+          Text {
+            visible: focusTab.problemFor("recap") !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Problem: " + focusTab.problemFor("recap")
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.urgent
+          }
+        }
+      }
     }
   }
 
@@ -377,7 +631,7 @@ Item {
 
   // One thread's parked thoughts, on the shared detail scaffold.
   JarvixDetailPane {
-    visible: focusTab.detailId !== "" && !focusTab.briefingOpen
+    visible: focusTab.detailId !== "" && !focusTab.briefingOpen && !focusTab.formOpen
     anchors.fill: parent
     note: focusTab.detailThread() ? focusTab.detailThread().name : ""
     onBackRequested: focusTab.detailId = ""
