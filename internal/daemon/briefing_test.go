@@ -149,13 +149,42 @@ func TestBriefingReadsTheSourcesJarvixAlreadyHas(t *testing.T) {
 // end to end (#147's shape): a briefing composed from a salted record leaves
 // a row saying one was given, and the salt reaches neither the row nor any
 // other field the feed serves.
+//
+// The salt goes on the reminder that has ALREADY FIRED, and that placement is
+// the whole soundness of the second scan below (#179). A leak salt only means
+// anything while it is exclusive to the thing under test, and a salt sitting on
+// a PENDING, past-due reminder is not: the reminder clockwork owns that record
+// too, and when it delivers it the intent row says what Jarvix said out loud —
+// "Intent: reminder.due · Reminder, two hours late: SECRET-PHARMACY-CODE-4312."
+// That row is the reminder feature's own honest account of its own delivery
+// (briefing.go's source comment says it plainly: reminder text is the user's
+// sentence, written to be spoken back), and it broke no rule ADR 0050 makes —
+// but it carried the salt, so the scan called it a briefing leak. It was
+// reported as one for a whole soak cycle. A fired history entry cannot be
+// delivered a second time, so nothing but the briefing can ever quote it.
+//
+// The owed reminder is then delivered ON PURPOSE, before the briefing, rather
+// than left to arrive whenever the clockwork's timer happens to land. What was
+// a one-in-two-hundred visitor is now in every run: the feed holds a spoken
+// reminder row, and the scan proves the briefing's own words are still not in
+// it.
 func TestBriefingActivityRowNeverCarriesItsContent(t *testing.T) {
 	const salt = "SECRET-PHARMACY-CODE-4312"
 	h := startFocusDaemon(t)
 	h.provider.Response = "One thing wants you."
 	client := dialDaemon(t, h.socket)
 
-	plantOvernightReminders(t, h, "something dull", salt)
+	plantOvernightReminders(t, h, salt, "file the expenses")
+	// Deliver the owed one and wait for its row, not for the event behind it:
+	// the row is written by the daemon's own subscriber and trails its cause.
+	// This is also the first read of the event stream, so the row cannot have
+	// been drained by an earlier wait however the clockwork's own timer raced.
+	h.d.reminders.Rearm()
+	spoken := waitActivityRow(t, client, "Intent: reminder.due")
+	if detail, _ := spoken["detail"].(string); !strings.Contains(detail, "file the expenses") {
+		t.Fatalf("the owed reminder was not the one delivered: %q", detail)
+	}
+
 	wasAway(h, 12)
 
 	view := getBriefing(t, client)
