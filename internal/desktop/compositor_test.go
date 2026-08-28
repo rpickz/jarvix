@@ -214,6 +214,32 @@ func TestParseClientsReadsTheFieldsMatchingNeeds(t *testing.T) {
 	}
 }
 
+// Hyprland has emitted `fullscreen` as a JSON bool and, since the
+// fullscreen-state rework, as a mode number (0 none, 1 maximised, 2
+// fullscreen). Both encodings must decode, and every non-zero mode reads as
+// "covering its siblings" — the only fact the window overlays (#127) need.
+func TestParseClientsDecodesFullscreenInBothEncodings(t *testing.T) {
+	windows, err := parseClients(`[
+		{"address":"0xaaa","class":"a","title":"legacy true","fullscreen":true,
+		 "workspace":{"id":1,"name":"1"},"mapped":true,"focusHistoryID":0},
+		{"address":"0xbbb","class":"b","title":"mode fullscreen","fullscreen":2,
+		 "workspace":{"id":1,"name":"1"},"mapped":true,"focusHistoryID":1},
+		{"address":"0xccc","class":"c","title":"mode none","fullscreen":0,
+		 "workspace":{"id":1,"name":"1"},"mapped":true,"focusHistoryID":2},
+		{"address":"0xddd","class":"d","title":"absent",
+		 "workspace":{"id":1,"name":"1"},"mapped":true,"focusHistoryID":3}
+	]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"0xaaa": true, "0xbbb": true, "0xccc": false, "0xddd": false}
+	for _, w := range windows {
+		if w.Fullscreen != want[w.Address] {
+			t.Errorf("%s (%s): Fullscreen = %t, want %t", w.Address, w.Title, w.Fullscreen, want[w.Address])
+		}
+	}
+}
+
 func TestParseClientsRejectsGarbage(t *testing.T) {
 	if _, err := parseClients("not json"); err == nil {
 		t.Error("malformed inventory must be an error, not an empty desktop")

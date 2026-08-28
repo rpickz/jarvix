@@ -416,6 +416,17 @@ letter_spacing = 0.0             # ems added between letters (0–0.3). A little
                                  # air stops letters crowding; WCAG's
                                  # reading-aid guidance is 0.12
 
+[overlays]                       # tiny per-window overlays (#127): thread
+                                 # badge, AI-state glyph, and nickname tag on
+                                 # windows you have anchored or named
+enabled = true                   # the one global off switch; false renders no
+                                 # overlay anywhere. Live class, so "turn the
+                                 # window overlays off" by voice clears every
+                                 # chip immediately. On by default because the
+                                 # surface is clean by default anyway: with
+                                 # nothing anchored and nothing named, nothing
+                                 # is drawn
+
 [log]
 level = "info"                   # debug | info | warn | error
 
@@ -1383,6 +1394,35 @@ and timings only.
 [focus]
 midpoint_checkin = false   # speak a halfway line during a timeboxed session;
                            # off by default — a timebox is a promise of quiet
+```
+
+## Window overlays (`[overlays]`)
+
+Anchor a window to a thread, or give one a nickname, and a tiny static chip
+appears in its top-right corner (#127, [ADR 0044](adr/0044-window-overlays.md)):
+a thread badge — filled while that thread is active, hollow otherwise — the
+nickname tag, and, once #137's classifier lands, a working / needs-you / done
+glyph for an anchored AI session. That is the entire vocabulary, and the
+anti-goals are as deliberate as the features: no timers, no counts, no drift
+indicators, nothing animated, ever. Windows you have not enrolled carry
+nothing at all; the chips never take a click (input passes straight through);
+a fullscreen window hides its workspace's overlays entirely.
+
+The daemon decides everything (internal/overlay; the shell only draws):
+which windows qualify, geometry from the shared compositor seam, and an
+honest suppression rule — an overlay whose corner a floating window covers is
+dropped rather than drawn over it, and only the focused workspace is overlaid
+because that is the one workspace whose visibility the inventory proves.
+Hyprland-specific, like all window features: on any other desktop the feed
+degrades to nothing.
+
+```toml
+[overlays]
+enabled = true             # the one global off switch (live class, so
+                           # "turn the window overlays off" lands by voice,
+                           # immediately). The default costs nobody anything:
+                           # with nothing anchored and nothing named, nothing
+                           # is drawn
 ```
 
 ## Vocabulary (`[vocabulary]`)

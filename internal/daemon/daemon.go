@@ -25,6 +25,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
+	"github.com/rpickz/jarvix/internal/overlay"
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
@@ -97,6 +98,12 @@ type Daemon struct {
 	// and write it, and its scheduler goroutines are tracked inside the
 	// service and drained as their own shutdown stage.
 	focus *focus.Service
+	// overlays is the window-overlay feed (#127): the poll-and-publish loop
+	// composing focus threads, nicknames, and the compositor inventory into
+	// the rows the shell's overlay surface draws. Always present — with
+	// nothing enrolled the loop parks and costs nothing — and drained as its
+	// own shutdown stage like the schedulers beside it.
+	overlays *overlay.Service
 	// toolsPolicy is the compiled permission gate, held so the scheduler's
 	// fire path consults the very same tier resolution the session gate does
 	// — the clock and the voice can never disagree about what is permitted.
@@ -670,6 +677,11 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// because its fire path is the daemon's: policy pre-check, refusal
 	// notification, session entry. Nothing fires before Run starts it.
 	d.automations = d.newAutomationService(cfg)
+	// The window-overlay feed (#127), built after the daemon exists because
+	// every seam it reads is the daemon's: the compositor, the focus store,
+	// the nickname registry, and the live overlays.enabled switch. Nothing
+	// polls before Run starts it.
+	d.overlays = d.newOverlayService()
 	if len(cfg.Activation.PTTChord) > 0 {
 		codes, err := hotkey.ResolveChord(cfg.Activation.PTTChord)
 		if err != nil {
@@ -760,6 +772,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// ran out while no daemon was up is closed quietly at this Start —
 	// reported in the journal, never re-announced (the ADR 0032 stance).
 	d.focus.Start(ctx)
+	// The window-overlay feed (#127) on the same terms: its loop derives
+	// from the daemon's own context and its tracked group is what the
+	// overlays shutdown stage drains. Its bus watcher subscribes before the
+	// feed starts so no enrolment-changing event can slip between the two.
+	overlayEvents, unsubscribeOverlays := d.bus.Subscribe()
+	d.post.Go(func() { d.watchOverlays(ctx, overlayEvents, unsubscribeOverlays) })
+	d.overlays.Start(ctx)
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -819,6 +838,10 @@ func (d *Daemon) shutdown() {
 		// already ended them all, so this drain is one loop unwinding a
 		// cancelled context (ADR 0041).
 		{"focus", d.focusDrain, d.focusInFlight},
+		// The overlay feed beside it: its loop is polls and publishes only —
+		// nothing session-shaped to wait on — so this drain is one loop
+		// unwinding a cancelled context (#127).
+		{"overlays", d.overlaysDrain, d.overlaysInFlight},
 		// The feed scheduler last of the drains: a draining session may be
 		// mid-Get, and its sync fetch finishes (or is killed by its own
 		// timeout) before this stage is reached. The drain kills any fetch
@@ -1109,6 +1132,7 @@ func (d *Daemon) registerMethods() {
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
 	d.registerFocusMethods()
+	d.registerOverlayMethods()
 	d.registerEntryAdminMethods()
 }
 

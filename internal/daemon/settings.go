@@ -359,6 +359,9 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 		workers.Close()
 		d.cfgMu.Lock()
 		d.cfg.UI = merged.UI
+		// The overlay switch is live-class on the same terms: turning the
+		// window overlays off must not wait for an idle engine.
+		d.cfg.Overlays = merged.Overlays
 		d.cfgMu.Unlock()
 		return false, err.Error()
 	}
