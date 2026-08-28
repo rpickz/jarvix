@@ -2,6 +2,9 @@ package placement_test
 
 import (
 	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -258,4 +261,110 @@ func tomlKeys(t *testing.T, example any) map[string]bool {
 		}
 	}
 	return keys
+}
+
+// TestEveryConsumerResolvesThroughTheNicknameTable is the #180 seam claim,
+// made mechanical. The whole design of monitor nicknames is that they are ONE
+// field of ONE resolver: fill it in, and the routine runner, the window tools
+// and every future consumer gain screen names at once. That only holds while
+// nobody builds a bare Resolver, which is exactly the mistake a new call site
+// makes by copying the old line — and it fails silently, as "no monitor is
+// called top right now" on one surface and success on another.
+//
+// So: no non-test file in the tree may construct placement.Resolver without
+// naming Nicknames. A daemon with no store passes nil deliberately (that is
+// the pre-#180 behaviour, pinned elsewhere); what is refused here is a
+// resolver that never had the chance.
+//
+// A text scan rather than an AST walk, for the reason the QML guards use one:
+// the shape is unambiguous in source, the occurrences are countable on one
+// hand, and a regex that reads like the thing it forbids is easier to trust
+// than a visitor that does not.
+func TestEveryConsumerResolvesThroughTheNicknameTable(t *testing.T) {
+	root := repoRoot(t)
+	var offenders []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir() && (d.Name() == ".git" || d.Name() == "testdata"):
+			return fs.SkipDir
+		case d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go"):
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, literal := range resolverLiterals(string(src)) {
+			if !strings.Contains(literal, "Nicknames") {
+				rel, _ := filepath.Rel(root, path)
+				offenders = append(offenders, rel+": placement.Resolver"+literal)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("these construct a monitor resolver with no nickname table, so screen names "+
+			"would silently not work there:\n  %s", strings.Join(offenders, "\n  "))
+	}
+}
+
+// resolverLiterals returns the body of every `placement.Resolver{…}` literal
+// in src, braces included, one entry per occurrence.
+func resolverLiterals(src string) []string {
+	const marker = "placement.Resolver{"
+	var out []string
+	for i := strings.Index(src, marker); i >= 0; {
+		start := i + len(marker) - 1
+		depth, end := 0, -1
+		for j := start; j < len(src); j++ {
+			switch src[j] {
+			case '{':
+				depth++
+			case '}':
+				if depth--; depth == 0 {
+					end = j
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			break // unbalanced; the compiler will have more to say than we do
+		}
+		out = append(out, src[start:end+1])
+		next := strings.Index(src[end:], marker)
+		if next < 0 {
+			break
+		}
+		i = end + next
+	}
+	return out
+}
+
+// repoRoot returns the checkout root, found by walking up from the test's
+// working directory for the directory holding go.mod — the same walk the
+// testdiscipline guards use.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the working directory")
+		}
+		dir = parent
+	}
 }

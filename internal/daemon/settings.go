@@ -373,7 +373,7 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	capture := newLayoutCapturer(d.paths, d.compositor, d.log)
 	capture.committed = d.captureCommitted
 	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.vocabulary, d.knowledge,
-		d.conversations, d.windows, d.log)
+		d.conversations, d.windows, d.screens, d.log)
 	opts.Capture = capture
 	// The approval store survives every reload like the memory book and the
 	// reminder service (#162): one instance for the daemon's life, so the

@@ -162,6 +162,41 @@ info "The daemon computes these same numbers (placement.Monitor.Usable). On a"
 info "SCALED output, check the logical size above against what you see: the"
 info "division by scale is reasoned from Hyprland's coordinate model, not probed."
 
+step "Screen names (#180), if the daemon is running"
+# Read-only, and deliberately so: naming a screen writes to the user's state
+# directory, and a verification script must not decide what their monitors are
+# called. What IS worth proving live is that the daemon's list agrees with the
+# compositor's — a picker offering a screen that is not there, or missing one
+# that is, is the failure this section catches.
+if jarvix monitors --json >/dev/null 2>&1; then
+  jarvix monitors --json | python3 -c '
+import json, subprocess, sys
+reply = json.load(sys.stdin)
+listed = sorted(m["connector"] for m in reply.get("monitors") or [])
+probe = subprocess.run(["hyprctl", "monitors", "-j"], capture_output=True, text=True)
+live = sorted(m["name"] for m in json.loads(probe.stdout) if not m.get("disabled"))
+# Bound to locals and joined before formatting: an f-string with quotes inside
+# its braces is what broke the monitors block once already (01e4761), and this
+# heredoc gives python no way to say so louder than a SyntaxError.
+listed_str = ", ".join(listed) or "(none)"
+live_str = ", ".join(live) or "(none)"
+print(f"       daemon lists: {listed_str}")
+print(f"       compositor:   {live_str}")
+if listed != live:
+    print("       MISMATCH — the picker would offer the wrong set")
+    raise SystemExit(1)
+for n in reply.get("nicknames") or []:
+    name, connector = n["name"], n["connector"]
+    where = "plugged in" if n.get("present") else "NOT plugged in right now"
+    print(f"       {name} means {connector} ({where})")
+path = reply.get("path") or "(nowhere yet)"
+print(f"       names are kept in {path}")
+' && pass "the daemon's screen list matches the compositor's" \
+    || fail "the daemon's screen list does not match the compositor's"
+else
+  info "SKIPPED: jarvixd is not running, so there is nothing to compare against."
+fi
+
 if [[ ${1:-} == --probe ]]; then
   step "Result (probe only)"
   printf '  %d passed, %d failed\n' "$passes" "$failures"
@@ -326,6 +361,20 @@ cat <<'CHECKS'
   [ ] Running it places the same arrangement, and says "all N apps placed".
   [ ] Unplug the second monitor and run it again: the step naming that screen
       says "no monitor is called <name> right now" and the others still land.
+
+  And for screen names (#180), on a routine whose steps say monitor = "top"
+  and monitor = "bottom":
+  [ ] `jarvix monitors name top` and `jarvix monitors name bottom DP-2` —
+      then `jarvix monitors` shows each screen with the name you gave it.
+  [ ] Running the routine places the same arrangement as it did with the
+      connector names spelled out.
+  [ ] `jarvix monitors name DP-2` is refused naming the screen that owns the
+      word, and `jarvix monitors name current` naming the reserved word.
+  [ ] Unplug the bottom screen: the step naming it says "no monitor is called
+      bottom right now: it means DP-2, which is not plugged in", the other
+      steps still land, and the name is still listed — marked not plugged in.
+  [ ] Plug it into a different port, then `jarvix monitors repoint bottom
+      <new connector>`: the routine works again with no edit to the routine.
   [ ] Set general:layout = master and run it: the arranging steps say the
       layout cannot arrange windows that way, rather than reporting placed.
 CHECKS

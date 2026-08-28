@@ -26,6 +26,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
+	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/overlay"
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/reminders"
@@ -81,6 +82,14 @@ type Daemon struct {
 	// reads its hard-to-hear phrases, and the vocabulary.* IPC methods serve
 	// it — every surface always agrees on what has been taught.
 	vocabulary *vocabulary.Store
+
+	// screens is the monitor-nickname store (#180, ADR 0057): what the user
+	// calls their screens. One instance for the daemon's life, like the
+	// memory book — the routine runner resolves through it, the window tools
+	// write to it, and the monitors.* IPC methods serve it, so a name means
+	// the same screen on every surface. Never nil: it is a file the daemon
+	// may never touch, not a feature to switch off.
+	screens *monitors.Store
 
 	// knowledge is the feed cache (ADR 0031), nil when no [[knowledge.feeds]]
 	// are configured. One instance for the daemon's life, like the memory
@@ -430,6 +439,10 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// so the assignment path reads whichever router is current rather than
 	// keeping the one it was built beside.
 	router := &routerHolder{}
+	// The screen names (#180, ADR 0057). Built unconditionally and before the
+	// window tools, because it is a store rather than a feature: with nothing
+	// named it costs one stat on the first resolution and no file at all.
+	screens := monitors.NewStore(paths.MonitorsFile(), monitors.StoreOptions{Gate: gate}, logger)
 	var windows *tools.Desktop
 	if cfg.Tools.Desktop || cfg.Tools.Typing.Enable {
 		windows = tools.NewDesktop(tools.DesktopOptions{
@@ -437,6 +450,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			Apps:        cfg.Tools.DesktopApps,
 			ScrubEnv:    providerKeyEnvNames(cfg),
 			PhraseOwner: router.owner,
+			Screens:     screens,
 			// The event carries what was done to which window so the overlay
 			// can show it; addresses stay daemon-side, and spoken summaries
 			// never mention either.
@@ -666,7 +680,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// the write path uses, so the voice can never describe a list the gate
 	// does not hold.
 	approvalSvc := newApprovalStore(cfg.Tools.Policy.ShellAllow, paths.ApprovalsFile(), logger)
-	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, logger)
+	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, screens, logger)
 	engOpts.Returning = briefingSvc
 	engOpts.Approvals = &approvalsVoice{store: approvalSvc}
 	// "Where did that come from?" (#168) is answered by the same resolver the
@@ -778,7 +792,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		started:       time.Now(),
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
-		compositor: compositor, windows: windows, router: router,
+		compositor: compositor, windows: windows, router: router, screens: screens,
 		paths: paths, injected: injected, cfg: cfg, warm: workers,
 		provider:      deps.Provider,
 		stateGate:     gate,
@@ -1283,6 +1297,7 @@ func (d *Daemon) registerMethods() {
 	d.registerRoutineMethods()
 	d.registerScriptMethods()
 	d.registerWindowMethods()
+	d.registerMonitorMethods()
 	d.registerAutomationMethods()
 	d.registerAutomationAdminMethods()
 	d.registerFocusMethods()

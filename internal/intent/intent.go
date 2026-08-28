@@ -137,6 +137,17 @@ type Match struct {
 	// WindowNames marks "what are my windows called" (#126): the engine
 	// answers with the window-name seam's one spoken listing.
 	WindowNames bool
+	// MonitorName is the nickname spoken to "call this monitor <name>"
+	// (#180), empty for every other intent. Only the raw spoken name
+	// travels, exactly as WindowName does: the router decides *whether* the
+	// utterance names a screen, and the monitor-name seam owns
+	// normalisation, the collision matrix, and the write.
+	MonitorName string
+	// MonitorForget is the nickname spoken to "forget the monitor called
+	// <name>" (#180), empty for every other intent.
+	MonitorForget string
+	// MonitorNames marks "what are my screens called" (#180).
+	MonitorNames bool
 	// Briefing marks "what did i miss" (#150, ADR 0050): the engine answers
 	// with the return briefing's one composed account of the absence. Like
 	// the listing above it is a flag rather than an argv — nothing about
@@ -327,6 +338,13 @@ type rule struct {
 	windowName bool
 	// windowNames marks the "what are my windows called" rules (#126).
 	windowNames bool
+	// monitorName marks the "call this monitor {name}" rules (#180) and
+	// monitorForget the "forget the monitor called {name}" rules; both hand
+	// the trailing free-text words to the monitor-name seam.
+	monitorName   bool
+	monitorForget bool
+	// monitorNames marks the "what are my screens called" rules (#180).
+	monitorNames bool
 	// briefing marks the "what did i miss" rules (#150).
 	briefing bool
 	// focus and focusWindows carry a focus rule's action (#123); focus is
@@ -521,6 +539,21 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: WindowNamesIntentName, pattern: p, windowNames: true})
 	}
 	r.names = append(r.names, WindowNamesIntentName)
+	// The screen-name listing (#180) is the window listing's twin and
+	// compiles on exactly the same terms: literal, whole-utterance, owned, so
+	// a custom intent or routine claiming one of these phrases is refused
+	// naming this owner.
+	for _, raw := range monitorNamesPatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list; a bad pattern added later must
+			// fail compilation, not silently never match.
+			return nil, fmt.Errorf("monitor names pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = MonitorNamesIntentName
+		r.add(&rule{name: MonitorNamesIntentName, pattern: p, monitorNames: true})
+	}
+	r.names = append(r.names, MonitorNamesIntentName)
 	// The return briefing (#150, ADR 0050) compiles on exactly the same
 	// terms as the listing above, and for the same reason: a flag-carrying
 	// built-in whose answer is composed elsewhere. It is in the router at all
@@ -786,6 +819,29 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: WindowNameIntentName, pattern: p, windowName: true})
 	}
 	r.names = append(r.names, WindowNameIntentName)
+
+	// The screen-name assignment and forget patterns (#180) sit beside the
+	// window ones, in the same position and for the same reason: compiled
+	// after every literal phrase, so a routine trigger that happens to open
+	// with the same words wins over the slot.
+	for _, raw := range monitorNamePatterns {
+		p, err := compileCapture(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the capture table's.
+			return nil, fmt.Errorf("monitor name pattern %q: %w", raw, err)
+		}
+		r.add(&rule{name: MonitorNameIntentName, pattern: p, monitorName: true})
+	}
+	r.names = append(r.names, MonitorNameIntentName)
+	for _, raw := range monitorForgetPatterns {
+		p, err := compileCapture(raw)
+		if err != nil {
+			// Unreachable for the shipped list, same as the capture table's.
+			return nil, fmt.Errorf("monitor forget pattern %q: %w", raw, err)
+		}
+		r.add(&rule{name: MonitorForgetIntentName, pattern: p, monitorForget: true})
+	}
+	r.names = append(r.names, MonitorForgetIntentName)
 
 	// The vocabulary teach and listen patterns (#129) compile with the
 	// free-text group, after every literal phrase, for the capture table's
@@ -1102,6 +1158,20 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		}
 		return Match{Name: ru.name, WindowName: name}, true
 	}
+	if ru.monitorName {
+		name, ok := ru.pattern.matchText(fields)
+		if !ok {
+			return Match{}, false
+		}
+		return Match{Name: ru.name, MonitorName: name}, true
+	}
+	if ru.monitorForget {
+		name, ok := ru.pattern.matchText(fields)
+		if !ok {
+			return Match{}, false
+		}
+		return Match{Name: ru.name, MonitorForget: name}, true
+	}
 	if ru.vocabTeach {
 		phrase, meaning, ok := ru.pattern.matchVocab(fields)
 		if !ok {
@@ -1125,9 +1195,10 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		Desktop: ru.desktop, Program: ru.program,
 		Command: ru.command, UserDefined: ru.userDefined,
 		Routine: ru.routine, Script: ru.script,
-		WindowNames: ru.windowNames,
-		Briefing:    ru.briefing,
-		Focus:       ru.focus, FocusWindows: ru.focusWindows,
+		WindowNames:  ru.windowNames,
+		MonitorNames: ru.monitorNames,
+		Briefing:     ru.briefing,
+		Focus:        ru.focus, FocusWindows: ru.focusWindows,
 		Reminder:       ru.reminder,
 		VocabList:      ru.vocabList,
 		ApprovalsList:  ru.approvalsList,

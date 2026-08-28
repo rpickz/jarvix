@@ -94,6 +94,17 @@ func (p Paths) RemindersFile() string { return filepath.Join(p.State, "reminders
 // they agreed to something — never a permission, in either direction.
 func (p Paths) ApprovalsFile() string { return filepath.Join(p.State, "approvals.toml") }
 
+// MonitorsFile is the monitor-nickname store (#180, ADR 0057): the names the
+// user gave their screens — "top" for HDMI-A-1, "bottom" for DP-2 — resolved
+// at run time so a routine survives a cable moving.
+//
+// State rather than config.toml, on the reminder store's exact terms: it is
+// written by voice ("call this monitor top"), and a write that needs
+// config-write ceremony is a write the user cannot make by talking. It is
+// hand-editable all the same — a nickname the user cannot see is a nickname
+// they cannot correct.
+func (p Paths) MonitorsFile() string { return filepath.Join(p.State, "monitors.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

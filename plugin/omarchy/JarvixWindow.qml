@@ -118,6 +118,7 @@ FloatingWindow {
       requestAutomations()
       requestSpokenCommands()
       requestReminders()
+      requestMonitors()
     }
     else if (id === "knowledge") requestKnowledge()
     else if (id === "providers") requestProviders()
@@ -2135,6 +2136,155 @@ FloatingWindow {
     return meta
   }
 
+  // --- screen names (#180) -------------------------------------------------
+  // The Screens section lives INSIDE the Automations tab, under the routines
+  // and the spoken commands: a screen name is placement vocabulary, and the
+  // things that use it — a routine step's `monitor` key — are on this tab.
+  // (It is deliberately NOT in Memory beside the taught words: "top" is a
+  // fact about furniture, not about the user.)
+  //
+  // Same thin-client shape as every other collection: monitors.list for the
+  // listing, monitors.name / monitors.repoint / monitors.forget for the
+  // writes, and every rule — the collision matrix, the reserved words, which
+  // screens exist — decided daemon-side.
+  property var monitorScreens: []      // outputs plugged in right now
+  property var monitorNicknames: []    // every stored name, present or not
+  property string monitorPath: ""      // the file the names live in
+  property int monitorCount: 0
+  property int monitorMax: 0
+  property var monitorReserved: []     // words a name may not take
+  property string monitorCurrentRef: "current"
+  property int monitorRequestId: 0
+
+  function requestMonitors() {
+    if (!daemon.connected) return
+    monitorRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: monitorRequestId,
+      method: "monitors.list" }) + "\n")
+  }
+
+  function loadMonitors(result) {
+    monitorScreens = result.monitors || []
+    monitorNicknames = result.nicknames || []
+    monitorPath = String(result.path || "")
+    monitorCount = Number(result.count || 0)
+    monitorMax = Number(result.max || 0)
+    monitorReserved = result.reserved || []
+    monitorCurrentRef = String(result.current || "current")
+  }
+
+  // monitorPickerOptions is the picker's data: "the current monitor" first,
+  // because it is the answer that keeps working when everything else moves,
+  // then each present output with its size and any name it already answers
+  // to. Every word of every label comes from the daemon's reply.
+  function monitorPickerOptions() {
+    var out = [{ value: "", label: "the current monitor" }]
+    for (var i = 0; i < monitorScreens.length; i++) {
+      var m = monitorScreens[i]
+      var label = String(m.describe || m.connector)
+      if (String(m.nickname || "") !== "") label += " — called " + String(m.nickname)
+      out.push({ value: String(m.connector), label: label })
+    }
+    return out
+  }
+
+  // monitorRowMeta words one stored name for its row: which screen it means,
+  // and — the case the whole feature exists for — that the screen is not
+  // plugged in right now. Said in words, never by colour alone.
+  function monitorRowMeta(entry) {
+    var meta = "means " + String(entry.connector)
+    if (entry.present !== true) meta += " · not plugged in right now"
+    var named = String(entry.named || "").substring(0, 10)
+    if (named !== "") meta += " · named " + named
+    var updated = String(entry.updated || "").substring(0, 10)
+    if (updated !== "" && updated !== named) meta += " · moved " + updated
+    return meta
+  }
+
+  // --- screen name form ----------------------------------------------------
+  // Add ("Name a screen…") and Edit share one form. A new name is
+  // monitors.name; editing an existing one is monitors.repoint, which is a
+  // separate verb daemon-side precisely because moving a name changes what
+  // every routine using it does — so it is something done on a name you can
+  // see, never something a misheard sentence can do.
+  property bool monitorFormOpen: false
+  property string monitorFormExisting: "" // "" while naming a screen for the first time
+  property string monitorFormName: ""
+  property string monitorFormConnector: "" // "" means the current monitor
+  property var monitorFormProblems: []     // [{field, message}] from the daemon
+  property string monitorFormError: ""
+  property int monitorSaveRequestId: 0
+  property int monitorForgetRequestId: 0
+
+  function openMonitorAdd() {
+    monitorFormExisting = ""
+    monitorFormName = ""
+    monitorFormConnector = ""
+    monitorFormProblems = []
+    monitorFormError = ""
+    monitorFormOpen = true
+  }
+
+  // openMonitorEdit opens the form on one stored name. The listing carries
+  // every field, so no round trip is needed.
+  function openMonitorEdit(entry) {
+    monitorFormExisting = String(entry.name)
+    monitorFormName = String(entry.name)
+    monitorFormConnector = String(entry.connector || "")
+    monitorFormProblems = []
+    monitorFormError = ""
+    monitorFormOpen = true
+  }
+
+  function closeMonitorForm() {
+    monitorFormOpen = false
+    requestMonitors()
+  }
+
+  function saveMonitorForm() {
+    if (!daemon.connected) return
+    monitorSaveRequestId = nextRequestId
+    nextRequestId++
+    var frame = { jsonrpc: "2.0", id: monitorSaveRequestId }
+    frame.method = monitorFormExisting === "" ? "monitors.name" : "monitors.repoint"
+    frame.params = { name: monitorFormName, connector: monitorFormConnector }
+    daemon.write(JSON.stringify(frame) + "\n")
+  }
+
+  // forgetMonitorNickname drops a name. Ungated, like the assignment: it
+  // changes nothing on screen and naming it again undoes it.
+  function forgetMonitorNickname(name) {
+    if (!daemon.connected) return
+    monitorForgetRequestId = nextRequestId
+    nextRequestId++
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: monitorForgetRequestId,
+      method: "monitors.forget", params: { name: name } }) + "\n")
+  }
+
+  function handleMonitorFormReply(frame) {
+    if (frame.error) {
+      var data = frame.error.data || {}
+      if (data.problems !== undefined) {
+        monitorFormProblems = data.problems || []
+      }
+      monitorFormError = String(frame.error.message || "the save failed")
+      return
+    }
+    monitorFormOpen = false
+    requestMonitors()
+  }
+
+  function monitorProblemFor(field) {
+    var out = []
+    for (var i = 0; i < monitorFormProblems.length; i++) {
+      if (String(monitorFormProblems[i].field || "") === field) {
+        out.push(String(monitorFormProblems[i].message || ""))
+      }
+    }
+    return out.join("\n")
+  }
+
   // --- what went into this answer (issue #168) ----------------------------
   // One panel at a time: the expanded turn is named by its record position,
   // and expanding another simply moves the pointer. That keeps the resolved
@@ -3373,6 +3523,17 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.vocabRequestId) {
           if (frame.result) win.loadVocabulary(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.monitorSaveRequestId) {
+          win.handleMonitorFormReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.monitorForgetRequestId) {
+          if (frame.error) {
+            win.errorStage = "monitors"
+            win.errorMessage = String(frame.error.message || "the screen name could not be forgotten")
+          } else {
+            win.requestMonitors()
+          }
+        } else if (frame.id !== undefined && frame.id === win.monitorRequestId) {
+          if (frame.result) win.loadMonitors(frame.result)
         } else if (frame.id !== undefined && (frame.id === win.historyListRequestId ||
                    frame.id === win.historyReadRequestId ||
                    frame.id === win.historyOpenRequestId ||
@@ -3426,6 +3587,7 @@ FloatingWindow {
         win.requestProviders()
         win.requestMemory()
         win.requestVocabulary()
+        win.requestMonitors()
         // The transcript's typography settings (issue #121) load with the
         // rest of the connect snapshot; until they arrive the property
         // defaults render the shipped look.
@@ -4117,6 +4279,7 @@ FloatingWindow {
       Flickable {
         id: automationsScroll
         visible: !win.automationFormOpen && !win.spokenFormOpen && !win.reminderFormOpen
+          && !win.monitorFormOpen
         anchors.fill: parent
         contentHeight: automationsColumn.height + Style.space(12)
         clip: true
@@ -4277,6 +4440,68 @@ FloatingWindow {
             accent: true
             onClicked: win.openReminderCreate()
           }
+
+          // The screen names (#180, ADR 0057): what the user calls their
+          // monitors, so a routine step can say `monitor = "top"` and keep
+          // working after a cable moves. On this tab because that step is on
+          // this tab; a fourth collection rather than a tab of its own for
+          // the reason the other three share one scroll.
+          Text {
+            text: "Screens"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.monitorNicknames.length === 0
+            width: parent.width
+            text: "No screens have names — say “call this monitor top”, or use Name a screen."
+          }
+
+          Repeater {
+            model: win.monitorNicknames
+
+            // One screen name. The detail line is the connector it means —
+            // monospace, because it is the exact word a routine step and the
+            // window manager both use — and the meta line says in words when
+            // that screen is not plugged in, which is the state this feature
+            // exists to make visible rather than mysterious.
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: automationsColumn.width
+              title: modelData.name
+              detail: String(modelData.connector)
+              meta: win.monitorRowMeta(modelData)
+              flagged: modelData.present !== true
+              interactive: true
+              onActivated: win.openMonitorEdit(modelData)
+              actionLabel: "Edit"
+              actionName: "Change which screen " + modelData.name + " means"
+              onActionTriggered: win.openMonitorEdit(modelData)
+              action2Label: "Forget"
+              action2Name: "Forget the screen name " + modelData.name
+              onAction2Triggered: win.forgetMonitorNickname(modelData.name)
+            }
+          }
+
+          JarvixFormButton {
+            label: "Name a screen…"
+            name: "Give a screen a name"
+            accent: true
+            onClicked: win.openMonitorAdd()
+          }
+
+          Text {
+            visible: win.monitorPath !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Names are kept in " + win.monitorPath + " — edit it by hand if you prefer."
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.7)
+          }
         }
       }
 
@@ -4347,6 +4572,30 @@ FloatingWindow {
           anchors.fill: parent
           active: win.reminderFormOpen
           sourceComponent: reminderFormBody
+        }
+      }
+
+      // The screen-name form (#180). Not an entry form — screen names are not
+      // in config.toml — but the same scaffold and the same discipline: the
+      // daemon owns the collision matrix, this shows the refusal on the field
+      // it belongs to.
+      JarvixDetailPane {
+        id: monitorFormPane
+        visible: win.monitorFormOpen
+        anchors.fill: parent
+        backName: "Cancel and go back to the list"
+        actionLabel: "Save"
+        actionName: "Save this screen name"
+        note: win.monitorFormExisting === ""
+          ? "Name a screen"
+          : "Editing “" + win.monitorFormExisting + "”"
+        onBackRequested: win.closeMonitorForm()
+        onActionTriggered: win.saveMonitorForm()
+
+        Loader {
+          anchors.fill: parent
+          active: win.monitorFormOpen
+          sourceComponent: monitorFormBody
         }
       }
     }
@@ -4888,6 +5137,59 @@ FloatingWindow {
             font.family: Style.font.family
             font.pixelSize: Style.font.subtitle
             color: Color.popups.text
+          }
+        }
+      }
+    }
+
+    // The screen-name form body (#180), built per open. The name field pins
+    // the daemon's message for "name" — every collision the ticket names
+    // arrives there — and the picker pins "connector".
+    Component {
+      id: monitorFormBody
+
+      Flickable {
+        id: monitorFormScroll
+        contentHeight: monitorFormColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: monitorFormColumn
+          width: monitorFormScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            visible: win.monitorFormError !== "" || win.monitorProblemFor("") !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: win.monitorProblemFor("") !== "" ? win.monitorProblemFor("") : win.monitorFormError
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.urgent
+          }
+
+          JarvixFormField {
+            width: parent.width
+            label: "Call this screen"
+            placeholder: "top"
+            problem: win.monitorProblemFor("name")
+            hint: win.monitorFormExisting === ""
+              ? "One word, yours to choose — but not a connector name and not "
+                + win.monitorReserved.join(" or ") + "."
+              : "Changing the name here is not supported; forget it and name the screen again."
+            Component.onCompleted: text = win.monitorFormName
+            onEdited: function(value) { win.monitorFormName = value }
+            onCommitted: {}
+          }
+
+          JarvixMonitorPicker {
+            width: parent.width
+            label: "Which screen"
+            options: win.monitorPickerOptions()
+            value: win.monitorFormConnector
+            problem: win.monitorProblemFor("connector")
+            hint: "The screens plugged in right now, and “the current monitor” for the one you are on."
+            onChosen: function(value) { win.monitorFormConnector = value }
           }
         }
       }

@@ -13,6 +13,7 @@ import (
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/memory"
+	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/script"
 	"github.com/rpickz/jarvix/internal/session"
@@ -189,7 +190,7 @@ func assistantSystemPrompt(cfg config.Config) string {
 // dispatch dialect is discovered once for intents, window tools, and
 // routines alike.
 func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
-	logger *slog.Logger) session.RoutineRunner {
+	screens *monitors.Store, logger *slog.Logger) session.RoutineRunner {
 	defs := cfg.RoutineDefinitions()
 	if len(defs) == 0 {
 		return nil
@@ -198,6 +199,12 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Compositor:  compositor,
 		Definitions: defs,
 		Log:         logger,
+		// The screen names a step may use (#180). Handed over as the store's
+		// live lookup rather than a snapshot, so a nickname assigned by voice
+		// is in force on the very next run — and so a runner rebuilt by a
+		// config reload and the one it replaced can never disagree about what
+		// "top" means.
+		MonitorNicknames: screens.Lookup,
 		// routine.started / routine.step / routine.finished go out on the bus
 		// so the bar and the window can show progress; the user only ever
 		// *hears* the final summary.
@@ -246,7 +253,8 @@ func scriptRunner(cfg config.Config, bus *session.Bus, logger *slog.Logger) sess
 // here decides whether the engine writes to it.
 func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *session.Bus,
 	book *memory.Book, vocab *vocabulary.Store, feeds *knowledge.Service,
-	archive conversations.Store, windows *tools.Desktop, logger *slog.Logger) session.Options {
+	archive conversations.Store, windows *tools.Desktop, screens *monitors.Store,
+	logger *slog.Logger) session.Options {
 	return session.Options{
 		Model:             cfg.AI.Model,
 		SystemPrompt:      assistantSystemPrompt(cfg),
@@ -264,9 +272,10 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		// command (ADR 0014).
 		SpeakConfirmationDetails: cfg.Confirmations.SpeakDetails,
 		Intents:                  intentRouter(cfg),
-		Routines:                 routineRunner(cfg, compositor, bus, logger),
+		Routines:                 routineRunner(cfg, compositor, bus, screens, logger),
 		Scripts:                  scriptRunner(cfg, bus, logger),
 		WindowNames:              windowNamer(windows),
+		MonitorNames:             monitorNamer(windows),
 		Compositor:               compositor,
 		Context:                  contextCollector(cfg, logger),
 		Memory:                   memoryInjector(book),
@@ -290,6 +299,19 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 // the interface field would read as "nicknames exist" to the engine —
 // disabled must mean absent, so the intents refuse honestly.
 func windowNamer(windows *tools.Desktop) session.WindowNamer {
+	if windows == nil {
+		return nil
+	}
+	return windows
+}
+
+// monitorNamer adapts the same shared state for the engine's screen-name
+// intents (#180). It rides the window tools rather than the store directly
+// because naming "this monitor" needs the live output inventory, which the
+// tools have and the store deliberately does not — and it carries the same
+// typed-nil guard windowNamer does, so a daemon with no window tools refuses
+// the phrase honestly instead of appearing to support it.
+func monitorNamer(windows *tools.Desktop) session.MonitorNamer {
 	if windows == nil {
 		return nil
 	}

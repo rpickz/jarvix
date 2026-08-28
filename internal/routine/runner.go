@@ -60,6 +60,16 @@ type Options struct {
 	// DefaultAppearTimeout.
 	CallTimeout   time.Duration
 	AppearTimeout time.Duration
+	// MonitorNicknames resolves a user-chosen screen name to a connector
+	// (#180) — monitors.Store.Lookup behind a func so this package never
+	// imports the store. Nil leaves the runner resolving connector names and
+	// "current" only, which is what a daemon with no nicknames does.
+	//
+	// It is held as a func and called on every run rather than snapshotted,
+	// because a nickname assigned by voice thirty seconds ago must be live on
+	// the next run — a routine that needed a restart to see its own screen
+	// name would be a worse indirection than the connector it replaced.
+	MonitorNicknames func(name string) (connector string, known bool)
 }
 
 // Runner executes routines, one at a time. It is stateless between runs
@@ -73,6 +83,9 @@ type Runner struct {
 	log           *slog.Logger
 	callTimeout   time.Duration
 	appearTimeout time.Duration
+	// monitorNames is the nickname table every monitor reference resolves
+	// through (#180). Nil is the no-nicknames daemon.
+	monitorNames func(name string) (string, bool)
 
 	// now and timer are the run's clock, injectable so the appear-wait is
 	// deterministic in tests — the same shape the session engine uses, because
@@ -93,6 +106,7 @@ func New(opts Options) *Runner {
 		log:           opts.Log,
 		callTimeout:   opts.CallTimeout,
 		appearTimeout: opts.AppearTimeout,
+		monitorNames:  opts.MonitorNicknames,
 		now:           time.Now,
 		timer: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTimer(d)
@@ -381,10 +395,11 @@ type stepTarget struct {
 func (r *Runner) targetMonitors(ctx context.Context, def Definition, monitors []placement.Monitor,
 	invErr error) []stepTarget {
 	targets := make([]stepTarget, len(def.Steps))
-	// Nicknames is nil: connector names and "current" are the two forms this
-	// vocabulary resolves today, and #180 fills the third in here — one
-	// field, and every consumer of the vocabulary gains nicknames at once.
-	resolver := placement.Resolver{}
+	// One field, and every consumer of the vocabulary gained nicknames at
+	// once (#180): the runner, the window tools and the placer all resolve a
+	// monitor through this one seam, so "top" means the same screen in a
+	// routine step, a spoken request and a tool call.
+	resolver := placement.Resolver{Nicknames: r.monitorNames}
 	moved := make(map[int]bool, len(def.Steps))
 	for i, step := range def.Steps {
 		if invErr != nil {

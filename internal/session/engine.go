@@ -104,6 +104,11 @@ type Options struct {
 	// tools are switched off — makes a matched nickname phrase an honest
 	// spoken refusal rather than a silent drop.
 	WindowNames WindowNamer
+	// MonitorNames assigns, forgets and lists monitor nicknames (#180)
+	// through the same shared seam. Nil — a daemon whose window tools are
+	// switched off — makes a matched screen-name phrase an honest spoken
+	// refusal rather than a silent drop.
+	MonitorNames MonitorNamer
 	// Context gathers opt-in desktop context — active window, selection,
 	// clipboard — for turns that reach the model (ADR 0019). Nil disables it
 	// entirely: no gathering, no message, no cost.

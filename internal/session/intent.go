@@ -152,6 +152,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runNicknameAssign(s, m)
 	case m.WindowNames:
 		ack, runErr = e.runNicknameList(s)
+	case m.MonitorName != "":
+		ack, runErr = e.runMonitorNameAssign(s, m)
+	case m.MonitorForget != "":
+		ack, runErr = e.runMonitorNameForget(s, m)
+	case m.MonitorNames:
+		ack, runErr = e.runMonitorNameList(s)
 	case m.Briefing:
 		ack, runErr = e.runBriefing(s)
 	case m.Focus != intent.FocusNone:
