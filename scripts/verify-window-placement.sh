@@ -152,8 +152,10 @@ for m in json.load(sys.stdin):
     lw, lh = round(m["width"] / scale), round(m["height"] / scale)
     uw = lw - res[0] - res[2]
     uh = lh - res[1] - res[3]
-    print(f"       {m[\"name\"]}: mode {m[\"width\"]}x{m[\"height\"]} @ scale {scale}"
-          f" -> logical {lw}x{lh}, bars {res}, usable {uw}x{uh} at ({m[\"x\"]+res[0]},{m[\"y\"]+res[1]})")
+    name, mw, mh = m["name"], m["width"], m["height"]
+    ox, oy = m["x"] + res[0], m["y"] + res[1]
+    print(f"       {name}: mode {mw}x{mh} @ scale {scale}"
+          f" -> logical {lw}x{lh}, bars {res}, usable {uw}x{uh} at ({ox},{oy})")
     print(f"         two thirds of its usable width = {round(uw*66/100)}px")
 '
 info "The daemon computes these same numbers (placement.Monitor.Usable). On a"
