@@ -331,6 +331,23 @@ func settingRows() []Setting {
 			Get: func(c Config) any { return c.Focus.MidpointCheckin },
 			set: func(c *Config, v any) { c.Focus.MidpointCheckin = v.(bool) }},
 
+		// The return briefing (#150, ADR 0050). All three are live class on
+		// focus.midpoint_checkin's terms: the briefing service reads the
+		// running config at the moment it decides — return, offer, compose —
+		// and never at construction, so "stop offering me briefings" spoken
+		// mid-conversation is true by the next answer. Nothing here is
+		// dangerous: the widest thing any of them can do is make Jarvix say
+		// one more sentence about work it already told you about.
+		{Key: "briefing.enabled", Label: "Offer an account of what happened while you were away", Type: TypeBool, Reload: ReloadLive,
+			Get: func(c Config) any { return c.Briefing.Enabled },
+			set: func(c *Config, v any) { c.Briefing.Enabled = v.(bool) }},
+		{Key: "briefing.after_hours", Label: "Hours away before a briefing is offered", Type: TypeInt, Reload: ReloadLive,
+			Get: func(c Config) any { return c.Briefing.AfterHours },
+			set: func(c *Config, v any) { c.Briefing.AfterHours = v.(int) }},
+		{Key: "briefing.speak_on_return", Label: "Speak the briefing on return instead of offering it", Type: TypeBool, Reload: ReloadLive,
+			Get: func(c Config) any { return c.Briefing.SpeakOnReturn },
+			set: func(c *Config, v any) { c.Briefing.SpeakOnReturn = v.(bool) }},
+
 		// The taught vocabulary (issue #129) is restart-class like memory and
 		// for the same reason: the store and the vocabulary tools are wired at
 		// daemon construction. speak_back is the exception — it only selects

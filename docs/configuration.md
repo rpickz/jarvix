@@ -49,7 +49,7 @@ to each field in the settings screen:
 
 | Class | Options | When it takes effect |
 |---|---|---|
-| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new, line_spacing, text_size, letter_spacing) | Immediately on save, even mid-session |
+| **live** | `ui.*` (notifications, notification_preview, show_transcript, show_response, activity_rows, activity_clear_on_new, line_spacing, text_size, letter_spacing), `overlays.enabled`, `focus.midpoint_checkin`, `briefing.*` (enabled, after_hours, speak_on_return) | Immediately on save, even mid-session |
 | **idle** | `assistant.aliases`, `ai.*` (provider, model, system_prompt, max_tokens, temperature), `tts.*` (including the `[tts.lexicon]` pronunciation table), `stt.whisper.*`, `conversation.*`, `confirmations.speak_details`, `context.*`, `audio.*`, `performance.*`, `intents.enabled`, `intents.terminal` | On save, when no session is in flight — the daemon swaps its adapters between sessions, never underneath one. Saved mid-session, the file is written and the change applies on the next `jarvix config reload` (or restart) |
 | **restart** | `assistant.name`, `activation.*` (mode, ptt_chord, and the wake-word settings), `tools.*`, `artifacts.*`, `log.level` | Written to the file, but the chord watcher, the wake listener, the tool registry, the artifact tool, and the logger are wired at daemon boot: `systemctl --user restart jarvixd` finishes the job (the screen/CLI says so explicitly). The live control for background listening is `jarvix mute`, not a setting |
 
@@ -426,6 +426,23 @@ enabled = true                   # the one global off switch; false renders no
                                  # surface is clean by default anyway: with
                                  # nothing anchored and nothing named, nothing
                                  # is drawn
+
+[briefing]                       # the return briefing (#150): what happened
+                                 # while you were away, offered rather than
+                                 # read at you
+enabled = true                   # the one global off switch; false prepares,
+                                 # offers and schedules nothing. On by default
+                                 # and safe to be: with nothing to report
+                                 # there is no offer at all
+after_hours = 8                  # hours away before the absence is worth an
+                                 # account (1–672). Eight is a night, or a day
+                                 # spent elsewhere; much lower and the offer
+                                 # fires after lunch and becomes noise
+speak_on_return = false          # speak the whole briefing on the first
+                                 # answer after an absence instead of offering
+                                 # it. Off by default: being read a report you
+                                 # did not ask for is the thing the default
+                                 # protects against
 
 [log]
 level = "info"                   # debug | info | warn | error
@@ -1423,6 +1440,55 @@ enabled = true             # the one global off switch (live class, so
                            # immediately). The default costs nobody anything:
                            # with nothing anchored and nothing named, nothing
                            # is drawn
+```
+
+## Return briefing (`[briefing]`)
+
+Come back after a night and Jarvix has an account of it (#150,
+[ADR 0050](adr/0050-the-return-briefing.md)). It does not read it at you. On
+the first answer after an absence of at least `after_hours` — and only when
+something actually happened — it appends one sentence: "I've got a briefing on
+what happened while you were away, whenever you want it." The account follows
+when you ask: "what did I miss?", "give me the briefing", "brief me", or the
+Focus tab's **What did I miss?** button, which shows the full version the
+spoken one shortens.
+
+What it reports is **only what Jarvix already participates in**: AI sessions
+anchored to your focus threads (finished, waiting on you, still working), your
+threads themselves, reminders that fired or are now due, the schedules that
+ran and the feeds that refreshed or are failing, and how many conversations
+were added to. It does not and will not watch your machine — no keystrokes, no
+window history, no browsing, no process list. That boundary is the reason the
+feature exists in this shape, and ADR 0050 records it so it stays.
+
+What the design guarantees:
+
+- **Nothing happened means nothing is said.** No offer is ever appended, and
+  an explicit ask gets "Nothing while you were away" — never a manufactured
+  report, and no model call to manufacture one with.
+- **A source it could not read is named**, never quietly dropped: you can tell
+  "nothing happened there" from "I did not look".
+- **The prose is checked.** The opening sentence may be worded by the model,
+  but every fact under it was composed from a record, and the sentence is
+  refused — falling back to a plainer, duller reading — if it claims something
+  finished, is waiting, or is still running when nothing did, or states a
+  number that is not true of the facts.
+- **It keeps nothing.** The account is composed when asked and discarded; it
+  is written to no file, added to no conversation memory, and the activity row
+  says a briefing was given and not a word of what was in it.
+- **It runs on nothing.** No timer prepares it, so an idle machine is never
+  summarised.
+
+```toml
+[briefing]
+enabled = true             # the one global off switch (live class); false
+                           # prepares, offers and schedules nothing
+after_hours = 8            # hours away before the absence earns an account
+                           # (1–672). A night, not a lunch break
+speak_on_return = false    # speak it on the first answer after an absence
+                           # instead of offering it. "Unprompted" still means
+                           # "once you are demonstrably back" — nothing here
+                           # runs on a clock
 ```
 
 ## Reminders (no configuration)

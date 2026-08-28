@@ -13,6 +13,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/automation"
+	"github.com/rpickz/jarvix/internal/briefing"
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/conversations"
@@ -120,6 +121,17 @@ type Daemon struct {
 	// goroutines are tracked inside the service and drained as their own
 	// shutdown stage.
 	reminders *reminders.Service
+	// briefing composes the return briefing (#150, ADR 0050). Always present
+	// and construction-wired like the two above: the engine carries it as its
+	// return seam, the model's tool relays it, and briefing.get serves the
+	// window's full version. It owns no goroutine and no clock — everything
+	// it does happens while the user is demonstrably back.
+	briefing *briefing.Service
+	// started is when this process began serving. The briefing reads it to
+	// admit that its in-memory activity record cannot cover an absence that
+	// began before the restart — a shortfall the ring's own doc comment names
+	// and this is the one caller that has to say out loud.
+	started time.Time
 	// toolsPolicy is the compiled permission gate, held so the scheduler's
 	// fire path consults the very same tier resolution the session gate does
 	// — the clock and the voice can never disagree about what is permitted.
@@ -630,7 +642,15 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// runner, the tools, the verbs, and the clockwork must always agree on
 	// what is owed.
 	remindersSvc := newRemindersService(paths, bus, logger)
+	// The return briefing (#150, ADR 0050) is built here for the third time
+	// in a row for the same reason: the engine carries it (Options.Returning)
+	// and cannot be built without it. Its sources and its provider seam bind
+	// after the daemon exists (bindBriefing) — most of what a briefing reads
+	// only exists once the daemon does, including the live config the three
+	// briefing.* settings are read from.
+	briefingSvc := newBriefingService(convs, bus, logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, logger)
+	engOpts.Returning = briefingSvc
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
 	// the engine's real timer (see session.Options.ConfirmTimer).
@@ -730,6 +750,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		registry: registry, policy: cfg.Tools.Policy, toolsPolicy: policy,
 		memory: book, vocabulary: vocab, knowledge: feeds, focus: focusSvc,
 		reminders:     remindersSvc,
+		briefing:      briefingSvc,
+		started:       time.Now(),
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor, windows: windows, router: router,
@@ -754,6 +776,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	capture.committed = d.captureCommitted
 	d.bindFocus()
 	d.bindReminders()
+	d.bindBriefing()
+	// The return-briefing tool (#150, ADR 0050): the model's path for the
+	// natural phrasings the deterministic grammar deliberately does not claim
+	// ("did anything happen overnight?"). Always registered — the service
+	// always exists — and allow-tier by built-in default: it is a read of the
+	// user's own work, answered to the user, at their own machine.
+	registry.Register(tools.NewBriefing(tools.BriefingOptions{Service: briefingSvc, Log: logger}))
+	logger.Info("tool enabled", "component", "tools", "tool", tools.BriefingToolName)
 	// The automation scheduler (ADR 0032), built after the daemon exists
 	// because its fire path is the daemon's: policy pre-check, refusal
 	// notification, session entry. Nothing fires before Run starts it.
@@ -1230,6 +1260,7 @@ func (d *Daemon) registerMethods() {
 	d.registerFocusMethods()
 	d.registerOverlayMethods()
 	d.registerReminderMethods()
+	d.registerBriefingMethods()
 	d.registerEntryAdminMethods()
 	d.registerStateMethods()
 }

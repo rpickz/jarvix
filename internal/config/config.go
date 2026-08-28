@@ -66,6 +66,10 @@ type Config struct {
 	// Focus is the focus-thread policy (see focus.go, ADR 0041). The threads
 	// themselves live in state (focus.toml), not configuration.
 	Focus Focus `toml:"focus"`
+	// Briefing is the return-briefing policy (see briefing.go, #150, ADR
+	// 0050): whether Jarvix offers an account of a long absence, how long
+	// away counts as one, and whether it speaks the account or offers it.
+	Briefing Briefing `toml:"briefing"`
 	// Advisors are the assistant CLIs Jarvix may delegate a question to, one
 	// [advisors.<name>] table each (see advisors.go). Empty disables
 	// delegation entirely — the tool is not registered.
@@ -647,6 +651,11 @@ func Default() Config {
 			// them renders pixel-identically to before the settings existed.
 			LineSpacing: 1.0, TextSize: 1.0, LetterSpacing: 0.0},
 		Overlays: Overlays{Enabled: true},
+		// On by default, and safe to be: with nothing to report there is no
+		// offer at all, so a machine that did nothing overnight is silent
+		// whatever this says. Eight hours is a night away; speaking without
+		// being asked stays opt-in (see briefing.go).
+		Briefing: Briefing{Enabled: true, AfterHours: defaultBriefingAfterHours},
 		Log:      Log{Level: "info"},
 	}
 }
@@ -777,6 +786,18 @@ const (
 	minTextSize      = 0.7
 	maxTextSize      = 1.6
 	maxLetterSpacing = 0.3
+)
+
+// Return-briefing bounds (#150, ADR 0050). The floor is one hour because the
+// briefing is an account of an *absence*: below an hour it would fire on a
+// meeting, and the offer line would become the interruption the feature is
+// meant to remove. The ceiling is four weeks — long enough for any sane
+// "only after a real break", short enough that a typo'd 8000 is caught
+// rather than silently switching the feature off.
+const (
+	defaultBriefingAfterHours = 8
+	minBriefingAfterHours     = 1
+	maxBriefingAfterHours     = 24 * 28
 )
 
 // Load reads the config file at path, applying defaults for anything unset.
@@ -914,6 +935,11 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"ui.letter_spacing is %g; use 0 to %g (ems added between letters in transcript messages; 0 is the shipped spacing)",
 			c.UI.LetterSpacing, maxLetterSpacing))
+	}
+	if c.Briefing.AfterHours < minBriefingAfterHours || c.Briefing.AfterHours > maxBriefingAfterHours {
+		problems = append(problems, fmt.Sprintf(
+			"briefing.after_hours is %d; use %d to %d (hours away before Jarvix offers an account of the absence)",
+			c.Briefing.AfterHours, minBriefingAfterHours, maxBriefingAfterHours))
 	}
 	if c.Performance.WarmMemoryCapMB < 0 {
 		problems = append(problems,
