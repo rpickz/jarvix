@@ -58,6 +58,13 @@ Usage:
   jarvix config set k=v [...]   Change settings: validated, written to
                                 config.toml, applied without a restart
   jarvix config reload          Re-read config.toml into the running daemon
+  jarvix backup [path]          Archive config + state — memory, vocabulary,
+                                threads, conversations, settings — as one
+                                tar.gz (--no-secrets redacts api keys;
+                                --quiet for cron; exit 0 ok / 1 failed)
+  jarvix restore <archive>      Validate an archive and restore it (daemon
+                                stopped; existing state moves aside to a
+                                timestamped safety copy, never deleted)
   jarvix version                Show version
 
 The daemon must be running for session commands:
@@ -251,6 +258,10 @@ func run(args []string) int {
 		default:
 			return fail(fmt.Errorf("usage: jarvix config [get [key] | set key=value ... | reload]"))
 		}
+	case "backup":
+		err = cmdBackup(paths, rest)
+	case "restore":
+		err = cmdRestore(paths, rest)
 	case "version", "--version", "-v":
 		fmt.Println("jarvix", build.Version)
 	case "help", "--help", "-h":
