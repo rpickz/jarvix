@@ -100,7 +100,10 @@ FloatingWindow {
   function openTab(id) {
     currentTab = id
     if (id === "library") requestHistory()
-    else if (id === "automations") requestAutomations()
+    else if (id === "automations") {
+      requestAutomations()
+      requestReminders()
+    }
     else if (id === "knowledge") requestKnowledge()
     else if (id === "memory") {
       requestMemory()
@@ -313,6 +316,55 @@ FloatingWindow {
     nextRequestId++
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: automationsRequestId,
       method: "automations.list" }) + "\n")
+  }
+
+  // --- one-shot reminders (#141, ADR 0046) --------------------------------
+  // The Automations tab's one-shot section: "remind me at three to …" as a
+  // managed list on the shared collection rows. Every row's facts — the text
+  // and the daemon-worded due moment — come from reminders.list (ADR 0013),
+  // and Cancel is reminders.cancel by id; the section refreshes on the
+  // reminders.changed event, so a firing or a spoken cancel updates the tab
+  // without a click. JSON-RPC ids use this feature's own private range
+  // (850–899, the overlay's confirm-range discipline) so its replies are
+  // recognisable by construction.
+  property var oneShotReminders: []
+  property int reminderListRequestId: 0
+  property int reminderCancelRequestId: 0
+  property int nextReminderRequestId: 850
+
+  function takeReminderRequestId() {
+    var id = nextReminderRequestId
+    nextReminderRequestId = nextReminderRequestId >= 899 ? 850 : nextReminderRequestId + 1
+    return id
+  }
+
+  function requestReminders() {
+    if (!daemon.connected) return
+    reminderListRequestId = takeReminderRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: reminderListRequestId,
+      method: "reminders.list" }) + "\n")
+  }
+
+  function loadReminders(result) {
+    oneShotReminders = result.reminders || []
+  }
+
+  function cancelReminder(id) {
+    if (!daemon.connected) return
+    reminderCancelRequestId = takeReminderRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: reminderCancelRequestId,
+      method: "reminders.cancel", params: { id: id } }) + "\n")
+  }
+
+  // handleReminderCancelReply surfaces a refused cancel in the shared banner
+  // and re-requests the listing either way — the daemon's record, not the
+  // click's assumption (the row itself refreshes on reminders.changed).
+  function handleReminderCancelReply(frame) {
+    if (frame.error) {
+      errorStage = "automations"
+      errorMessage = String(frame.error.message || "the reminder could not be cancelled")
+    }
+    requestReminders()
   }
 
   function loadAutomations(result) {
@@ -1905,6 +1957,12 @@ FloatingWindow {
       // record changed — re-request rather than guess (ADR 0013).
       requestAutomations()
       break
+    case "reminders.changed":
+      // A one-shot reminder was created, fired, deferred, or cancelled
+      // (#141): the section re-requests rather than guessing what the
+      // change meant (ADR 0013).
+      requestReminders()
+      break
     case "error":
       errorStage = String(params.stage || "")
       errorMessage = String(params.message || "something went wrong")
@@ -2036,6 +2094,10 @@ FloatingWindow {
           if (frame.result) win.loadTypography(frame.result)
         } else if (frame.id !== undefined && frame.id === win.automationsRequestId) {
           if (frame.result) win.loadAutomations(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.reminderListRequestId) {
+          if (frame.result) win.loadReminders(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.reminderCancelRequestId) {
+          win.handleReminderCancelReply(frame)
         } else if (frame.id !== undefined && (frame.id === win.automationsRunRequestId ||
                    frame.id === win.automationsEnableRequestId)) {
           win.handleAutomationsActionReply(frame)
@@ -2062,6 +2124,7 @@ FloatingWindow {
       if (connected) {
         win.requestConversation()
         win.requestAutomations()
+        win.requestReminders()
         // The snapshot replaces the model wholesale (seq keeps replays
         // honest), so a reconnect — possibly to a restarted daemon — always
         // converges on what the daemon actually holds.
@@ -2728,9 +2791,14 @@ FloatingWindow {
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
 
+      // Centred in the routines/scripts half only: since #141 the lower
+      // part of this pane belongs to the reminders section, and an empty
+      // state centred on the whole tab would sit on top of it.
       JarvixEmptyState {
         visible: win.automations.length === 0 && !win.automationFormOpen
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.verticalCenterOffset: -Math.round(remindersSection.height / 2)
         width: parent.width
         text: "No routines or scripts yet — the New buttons below create one."
       }
@@ -2775,11 +2843,13 @@ FloatingWindow {
 
       // The New buttons (#99), replacing #93's copyable TOML hint: creation
       // is a form now, so the footer opens one instead of handing over text
-      // to paste.
+      // to paste. Since #141 it bottoms out on the reminders section rather
+      // than the pane.
       Row {
         id: automationsNewRow
         visible: !win.automationFormOpen
-        anchors.bottom: parent.bottom
+        anchors.bottom: remindersSection.top
+        anchors.bottomMargin: Style.space(12)
         anchors.left: parent.left
         spacing: Style.space(8)
 
@@ -2794,6 +2864,70 @@ FloatingWindow {
           name: "Create a new script"
           accent: true
           onClicked: win.openAutomationCreate("scripts")
+        }
+      }
+
+      // The one-shot reminders section (#141, ADR 0046): the second
+      // collection of this tab — "remind me at three to …", from
+      // reminders.list, on the shared collection rows with Cancel. A fixed
+      // share of the pane rather than a flow, the Vocabulary section's rule:
+      // both collections keep their own scroll and neither can push the
+      // other off screen. There is no New button on purpose — a reminder is
+      // made by saying one, and the empty state says so.
+      Item {
+        id: remindersSection
+        visible: !win.automationFormOpen
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Math.round(parent.height * 0.4)
+
+        Text {
+          id: remindersHeader
+          anchors.top: parent.top
+          width: parent.width
+          text: win.oneShotReminders.length === 0
+            ? "Reminders"
+            : "Reminders — " + win.oneShotReminders.length + " pending"
+          font.family: Style.font.family
+          font.bold: true
+          font.pixelSize: Style.font.subtitle
+          color: Color.popups.text
+        }
+
+        JarvixEmptyState {
+          visible: win.oneShotReminders.length === 0
+          anchors.top: remindersHeader.bottom
+          anchors.topMargin: Style.space(24)
+          width: parent.width
+          text: "No reminders set — say “remind me at three to call the pharmacy”."
+        }
+
+        ListView {
+          id: remindersList
+          visible: win.oneShotReminders.length > 0
+          anchors.top: remindersHeader.bottom
+          anchors.topMargin: Style.space(8)
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          clip: true
+          spacing: Style.space(10)
+          model: win.oneShotReminders
+
+          // One pending reminder: its words, and the daemon's own wording
+          // for when it fires — this window does no clock arithmetic (ADR
+          // 0013). Cancel is the only operation: a reminder is not edited,
+          // it is cancelled and said again.
+          delegate: JarvixCollectionRow {
+            required property var modelData
+            width: remindersList.width
+            title: modelData.text
+            meta: String(modelData.due_spoken || "")
+            actionLabel: "Cancel"
+            actionName: "Cancel the reminder to " + modelData.text
+            onActionTriggered: win.cancelReminder(modelData.id)
+          }
         }
       }
 

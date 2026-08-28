@@ -27,6 +27,7 @@ import (
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/overlay"
 	"github.com/rpickz/jarvix/internal/quiesce"
+	"github.com/rpickz/jarvix/internal/reminders"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -111,6 +112,13 @@ type Daemon struct {
 	// the recap then stays on the window-title layer, and focus.list simply
 	// never carries a session state.
 	sessions *transcript.Finder
+	// reminders is the one-shot reminder store and its clockwork (#141, ADR
+	// 0046). Always present and construction-wired like the focus service:
+	// the engine's intent runner acts through it, the reminder tools and the
+	// reminders.* IPC methods read and write it, and its scheduler
+	// goroutines are tracked inside the service and drained as their own
+	// shutdown stage.
+	reminders *reminders.Service
 	// toolsPolicy is the compiled permission gate, held so the scheduler's
 	// fire path consults the very same tier resolution the session gate does
 	// — the clock and the voice can never disagree about what is permitted.
@@ -596,6 +604,12 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// life, like the memory book: the runner, the verbs, and the check-in
 	// clockwork must always agree on what the threads are.
 	focusSvc := newFocusService(paths, compositor, bus, logger)
+	// The reminder service (#141, ADR 0046) is built beside it for the same
+	// reason — the engine's intent runner carries it — and bound to the
+	// daemon after (bindReminders). One instance for the daemon's life: the
+	// runner, the tools, the verbs, and the clockwork must always agree on
+	// what is owed.
+	remindersSvc := newRemindersService(paths, bus, logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, logger)
 	engOpts.Capture = capture
 	// Injected clock for the confirmation timeout; nil — production — keeps
@@ -604,7 +618,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// The nickname collision check consults the same router the engine
 	// routes with; a reload stores the rebuilt one (settings.go).
 	router.set(engOpts.Intents)
-	engOpts.IntentRunner = &focus.IntentRunner{Service: focusSvc, Log: logger}
+	// One injected runner, chained: reminders wrap focus, focus wraps the
+	// real ExecRunner — each family answers its own dispatch and delegates
+	// the rest untouched.
+	engOpts.IntentRunner = &reminders.IntentRunner{
+		Service:  remindersSvc,
+		Fallback: &focus.IntentRunner{Service: focusSvc, Log: logger},
+		Log:      logger,
+	}
 	engine := session.NewEngine(deps.Provider, deps.Transcriber, deps.Synthesizer,
 		deps.Recorder, deps.Player, registry, store, bus, logger, engOpts)
 	// Every search — the IPC method and the model's tool alike — goes through
@@ -651,6 +672,18 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			"tools", strings.Join(voc.Names(), ","))
 	}
 
+	// The reminder tools (#141, ADR 0046): the model's path for natural
+	// phrasings the deterministic grammar cannot claim. Always registered —
+	// the service is always present — and allow-tier by built-in default
+	// (see builtinToolDefaults): "remind me at three" is the user's explicit
+	// word, memory.remember's argument.
+	rem := tools.NewReminders(tools.RemindersOptions{Service: remindersSvc, Log: logger})
+	for _, t := range rem.Tools() {
+		registry.Register(t)
+	}
+	logger.Info("tool enabled", "component", "tools",
+		"tools", strings.Join(rem.Names(), ","))
+
 	// The knowledge.get tool (ADR 0031), registered only when feeds exist:
 	// a tool with an empty enum would spend every turn's context describing
 	// a feature that cannot be used. Its description and schema read the
@@ -676,6 +709,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		engine: engine, server: server, bus: bus, log: logger,
 		registry: registry, policy: cfg.Tools.Policy, toolsPolicy: policy,
 		memory: book, vocabulary: vocab, knowledge: feeds, focus: focusSvc,
+		reminders:     remindersSvc,
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
 		compositor: compositor, windows: windows, router: router,
@@ -698,6 +732,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	}
 	capture.committed = d.captureCommitted
 	d.bindFocus()
+	d.bindReminders()
 	// The automation scheduler (ADR 0032), built after the daemon exists
 	// because its fire path is the daemon's: policy pre-check, refusal
 	// notification, session entry. Nothing fires before Run starts it.
@@ -804,6 +839,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 	overlayEvents, unsubscribeOverlays := d.bus.Subscribe()
 	d.post.Go(func() { d.watchOverlays(ctx, overlayEvents, unsubscribeOverlays) })
 	d.overlays.Start(ctx)
+	// The reminder clockwork (ADR 0046) on the same terms — with the one
+	// deliberate difference in its boot stance: a reminder that came due
+	// while no daemon was up is OWED, so this Start fires it once, marked
+	// late ("While I was off: …"), never silently dropped and never a
+	// backlog storm. The boundary watcher below is the deferral's other
+	// half: a delivery refused behind a live session is released at that
+	// session's end.
+	boundaryEvents, unsubscribeBoundary := d.bus.Subscribe()
+	d.post.Go(func() { d.watchReminderBoundaries(ctx, boundaryEvents, unsubscribeBoundary) })
+	d.reminders.Start(ctx)
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -867,6 +912,11 @@ func (d *Daemon) shutdown() {
 		// nothing session-shaped to wait on — so this drain is one loop
 		// unwinding a cancelled context (#127).
 		{"overlays", d.overlaysDrain, d.overlaysInFlight},
+		// The reminder clockwork on identical terms (ADR 0046): a delivery
+		// attempt blocks until its spoken session ends, already ended by the
+		// sessions stage. Anything still owed simply stays pending on disk —
+		// which is exactly what makes the next boot's late fire inevitable.
+		{"reminders", d.remindersDrain, d.remindersInFlight},
 		// The feed scheduler last of the drains: a draining session may be
 		// mid-Get, and its sync fetch finishes (or is killed by its own
 		// timeout) before this stage is reached. The drain kills any fetch
@@ -1158,6 +1208,7 @@ func (d *Daemon) registerMethods() {
 	d.registerAutomationAdminMethods()
 	d.registerFocusMethods()
 	d.registerOverlayMethods()
+	d.registerReminderMethods()
 	d.registerEntryAdminMethods()
 }
 

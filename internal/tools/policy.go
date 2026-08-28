@@ -216,6 +216,16 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // anywhere, and the opposite assignment undoes it exactly. The user also
 // just said the name out loud — "call this window builds" IS the
 // authorisation — so a question would confirm their own sentence.
+// The three reminder verbs (#141, ADR 0046) are allow on memory.remember's
+// exact argument. reminder.list is a read. reminder.set writes one line
+// into the user's own 0600 reminder store, the confirmation speaks exactly
+// when it will fire, and a wrong one is undone with "cancel the …
+// reminder"; "remind me at three" IS the authorisation, and a card here
+// would rebuild the config-write ceremony the feature exists to remove
+// (the deterministic phrase creates without one, pinned by test).
+// reminder.cancel is allow — unlike memory.forget — because cancelling
+// destroys nothing: the entry moves to the retained fired history, and
+// re-setting it is one sentence.
 var builtinToolDefaults = map[string]PolicyDecision{
 	"artifact.create":           PolicyAllow,
 	ListWindowsToolName:         PolicyAllow,
@@ -230,6 +240,9 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	ConfigListEntriesToolName:   PolicyAllow,
 	ConfigGetEntryToolName:      PolicyAllow,
 	ConfigReadSettingsToolName:  PolicyAllow,
+	ReminderSetToolName:         PolicyAllow,
+	ReminderListToolName:        PolicyAllow,
+	ReminderCancelToolName:      PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.

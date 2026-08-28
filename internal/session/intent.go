@@ -152,6 +152,12 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		if !alive {
 			return // cancelled or superseded; that path owns the events
 		}
+	case m.Reminder != intent.ReminderNone:
+		var alive bool
+		ack, runErr, alive = e.runReminder(s, m)
+		if !alive {
+			return // cancelled or superseded; that path owns the events
+		}
 	case m.VocabPhrase != "":
 		ack, runErr = e.runVocabTeach(s, m)
 	case m.VocabListen != "":
@@ -482,6 +488,8 @@ func (e *Engine) publishIntent(s *sess, m intent.Match, ack string, runErr error
 		source = "script"
 	case m.Focus != intent.FocusNone:
 		source = "focus"
+	case m.Reminder != intent.ReminderNone:
+		source = "reminder"
 	}
 	elapsed := time.Since(started)
 	data := map[string]any{

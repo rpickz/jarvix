@@ -77,6 +77,12 @@ func (p Paths) AutomationsFile() string { return filepath.Join(p.State, "automat
 // it sits beside.
 func (p Paths) FocusFile() string { return filepath.Join(p.State, "focus.toml") }
 
+// RemindersFile is the one-shot reminder store (#141, ADR 0046): pending
+// reminders and the capped fired history, hand-editable like the focus
+// store it sits beside — deliberately state, never config.toml, so creating
+// one by voice needs no config-write ceremony.
+func (p Paths) RemindersFile() string { return filepath.Join(p.State, "reminders.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

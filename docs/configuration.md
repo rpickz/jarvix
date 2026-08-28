@@ -1425,6 +1425,64 @@ enabled = true             # the one global off switch (live class, so
                            # is drawn
 ```
 
+## Reminders (no configuration)
+
+Say "remind me at three to call the pharmacy" and Jarvix speaks it back with
+the time it actually understood — then says it at three (issue #141,
+[ADR 0046](adr/0046-one-shot-reminders.md)). One-shot reminders are the
+throwaway half of the clock: no config entry, no confirmation card, no
+restart. "Remind me in twenty minutes to stretch", "what reminders do I
+have?", "cancel the pharmacy reminder" — that is the whole vocabulary, and
+none of it reaches the model.
+
+```text
+you:    remind me at three to call the pharmacy
+jarvix: Reminding you at three this afternoon: call the pharmacy.
+        …at three…
+jarvix: Reminder: call the pharmacy.
+```
+
+The time is parsed by code, never guessed by a model: 24-hour ("at 15:00"),
+12-hour with or without am/pm ("at three", "at three pm", "at nine oh five"),
+"at noon" / "at midnight", "tomorrow at nine", and delays ("in twenty
+minutes", "in an hour and a half"). Anything the table cannot read is
+refused out loud with a hint rather than turned into a time you did not say —
+and natural phrasings the phrase table cannot claim ("could you nudge me
+about the oven around six?") land through the model's `reminder.set` tool,
+which uses the same parser and the same store.
+
+What the design guarantees:
+
+- **Which three?** A bare hour resolves to the **next** one — said at one
+  o'clock, "at three" is this afternoon; said at four, it is tonight — and
+  the confirmation always names the reading it chose, while you can still
+  correct it.
+- **No ceremony.** A reminder is state, not configuration: it never touches
+  `config.toml`, so creating one by voice raises no confirmation card and
+  needs no reload. Saying it *is* the authorisation, and one "cancel the …
+  reminder" undoes it.
+- **Never nagged.** A reminder that comes due while you are mid-conversation
+  or Jarvix is speaking is held, not spoken over — and delivered the moment
+  that exchange ends.
+- **Never lost.** A held reminder is *owed*, not dropped: it survives a
+  restart, and one that came due while the daemon was off fires once at the
+  next boot — "While I was off: you asked me to remind you to call the
+  pharmacy at three." However many were missed, they arrive as one
+  announcement, never a backlog storm. Anything delivered more than two
+  minutes late says so.
+- **Never doubled.** However many things race for the floor, exactly one
+  delivery claims a reminder — it is spoken once or not yet.
+- **You own the store.** Pending reminders and a small capped history of what
+  fired live in one hand-editable TOML file,
+  `~/.local/state/jarvix/reminders.toml` (0600), documented in its own
+  header. Hand-edits land on the next operation; an unparseable file degrades
+  to a warning and an empty store and is moved aside
+  (`reminders.toml.corrupt`), never overwritten.
+
+The Automations tab lists the pending reminders with a Cancel button on each,
+under the routines and scripts; "what fired today?" answers from the retained
+history. There are no `[reminders]` settings — there is no policy to carry.
+
 ## Vocabulary (`[vocabulary]`)
 
 Say "when I say quid I mean pounds", and from then on Jarvix understands
@@ -2070,6 +2128,7 @@ jarvix config set 'tts.lexicon=Kubernetes=koo ber net eez,k9s=kay nine ess'
 | State | `~/.local/state/jarvix/` |
 | Memory (remembered facts, hand-editable) | `~/.local/state/jarvix/memory.toml` |
 | Focus threads (threads, parked thoughts, the live timebox — hand-editable) | `~/.local/state/jarvix/focus.toml` |
+| One-shot reminders (pending reminders and the capped fired history — hand-editable) | `~/.local/state/jarvix/reminders.toml` |
 | Socket | `$XDG_RUNTIME_DIR/jarvix.sock` |
 | Recordings (transient) | `$XDG_RUNTIME_DIR/jarvix/` (tmpfs, deleted after use) |
 | Artifacts (diagrams, documents, spreadsheets, sketches) | `~/Documents/Jarvix/` (configurable: `[artifacts] dir`) |
