@@ -290,6 +290,23 @@ func (s *Service) End(ref string) (string, error) {
 // capture per operation, outside the store lock — a compositor call must
 // never hold it.
 func (s *Service) goneAnchors(ctx context.Context) map[string]bool {
+	live := s.liveWindows(ctx)
+	if live == nil {
+		return nil
+	}
+	alive := make(map[string]bool, len(live))
+	for address := range live {
+		alive[address] = true
+	}
+	return alive
+}
+
+// liveWindows reads the inventory once and indexes it by address, nil when
+// the desktop cannot be read. The whole window travels — not just its
+// existence — because the session classification (#137) needs the owning
+// process and the class to decide whether and where to look for a
+// transcript.
+func (s *Service) liveWindows(ctx context.Context) map[string]desktop.Window {
 	if s.windows == nil {
 		return nil
 	}
@@ -297,9 +314,9 @@ func (s *Service) goneAnchors(ctx context.Context) map[string]bool {
 	if err != nil {
 		return nil
 	}
-	alive := make(map[string]bool, len(inventory))
+	live := make(map[string]desktop.Window, len(inventory))
 	for _, w := range inventory {
-		alive[w.Address] = true
+		live[w.Address] = w
 	}
-	return alive
+	return live
 }

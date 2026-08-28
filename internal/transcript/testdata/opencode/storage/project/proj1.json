@@ -1,0 +1,10 @@
+{
+  "id": "proj1",
+  "worktree": "/home/user/work/billing",
+  "vcs": "git",
+  "sandboxes": [],
+  "time": {
+    "created": 1787220000000,
+    "updated": 1787229000000
+  }
+}

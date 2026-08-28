@@ -1,0 +1,16 @@
+{
+  "id": "ses_old",
+  "version": "1.1.6",
+  "projectID": "proj1",
+  "directory": "/home/user/work/billing",
+  "title": "Earlier exploration",
+  "time": {
+    "created": 1787130000000,
+    "updated": 1787130500000
+  },
+  "summary": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0
+  }
+}

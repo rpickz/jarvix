@@ -19,6 +19,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -33,11 +34,18 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/tools"
+	"github.com/rpickz/jarvix/internal/transcript"
 )
 
 // focusWindowsTimeout bounds one inventory read for anchors: a wedged
 // compositor must degrade an anchor, never hang a recap.
 const focusWindowsTimeout = 3 * time.Second
+
+// focusClassifyTimeout bounds one session-state read for focus.list (#137).
+// Tighter than the recap budget because a list is served per thread and the
+// read is local disk — a stall must degrade one thread's dot to unknown,
+// never make the Focus tab wait on it.
+const focusClassifyTimeout = time.Second
 
 // newFocusService builds the thread store over the shared compositor seam.
 // Built before the daemon exists because the engine's intent runner carries
@@ -58,14 +66,14 @@ func newFocusService(paths config.Paths, compositor desktop.Compositor, bus *ses
 }
 
 // bindFocus completes the service once the daemon exists: the firing path,
-// the midpoint switch, and the AI-session recap's capture and summarise
-// halves (#124, ADR 0043) — all of which read the running config at call
-// time so a reload lands without a restart.
+// the midpoint switch, and the AI-session recap's capture, summarise and
+// classify halves (#124, #137; ADR 0043, 0047) — all of which read the
+// running config at call time so a reload lands without a restart.
 func (d *Daemon) bindFocus() {
 	d.focus.Bind(d.fireFocus, func() bool {
 		return d.runningConfig().Focus.MidpointCheckin
 	})
-	d.focus.BindRecap(d.recapCapture, d.recapSummarise)
+	d.focus.BindRecap(d.recapCapture, d.recapSummarise, d.classifySession)
 }
 
 // The AI-session recap's model call (#124). The token cap and temperature
@@ -76,14 +84,16 @@ const (
 	recapTemperature = 0.2
 )
 
-// recapCapture reads what is visible in one anchored window for the
-// AI-session recap, through the same consent, bound, and redaction rules as
-// desktop context (ADR 0019): the window source's opt-in gates it entirely,
-// the [context] char cap bounds it, and anything that looks like a secret is
-// replaced wholesale before it can reach a prompt. What is readable today is
-// the window's identity line — app and live title, which AI CLIs keep
-// updated with their state — from the shared compositor seam; a richer
-// gatherer slots in here without the focus package changing.
+// recapCapture reads one anchored window for the AI-session recap, through
+// the same consent, bound, and redaction rules as desktop context (ADR
+// 0019): the window source's opt-in gates it entirely, the [context] char
+// cap bounds it, and anything that looks like a secret is replaced wholesale
+// before it can reach a prompt. The richest layer that can be read answers
+// (#137, ADR 0047): the session's own transcript tail when the window's
+// process tree hosts a Claude Code or opencode session, the window's
+// identity line — app and live title — otherwise. This is exactly the
+// richer-gatherer slot ADR 0043 left open: the seam and the focus package
+// did not change shape, only what flows through them.
 func (d *Daemon) recapCapture(ctx context.Context, a focus.Anchor) (focus.Capture, error) {
 	cfg := d.runningConfig()
 	if !cfg.Context.Window {
@@ -96,9 +106,30 @@ func (d *Daemon) recapCapture(ctx context.Context, a focus.Anchor) (focus.Captur
 	if err != nil {
 		return focus.Capture{}, fmt.Errorf("the desktop could not be read: %w", err)
 	}
+	maxChars := cfg.Context.MaxChars
+	if maxChars <= 0 {
+		maxChars = desktop.DefaultMaxChars
+	}
 	for _, w := range inventory {
 		if w.Address != a.Address {
 			continue
+		}
+		capture := focus.Capture{Terminal: terminalClass(cfg, w)}
+		if tail, err := d.sessionTail(ctx, w.PID); err == nil {
+			// The transcript layer. Redact per line before the clamp — the
+			// collector's own ordering, applied line-wise because one keyed
+			// line must not silence the whole exchange — and clamp from the
+			// TAIL: the newest exchange is the reason this capture exists.
+			capture.Text = clampTailCaptureRunes(redactLines(tail.Text), maxChars)
+			capture.Transcript = true
+			capture.State = string(tail.State)
+			return capture, nil
+		} else if !errors.Is(err, transcript.ErrNoSession) {
+			// A session provably exists and could not be read: fall through
+			// to the title layer, flagged so the recap admits the downgrade.
+			// Mere absence stays silent — most terminals host no AI session,
+			// and #124's behaviour is unchanged for them.
+			capture.TranscriptLost = true
 		}
 		text := desktop.AppName(w.Class)
 		if title := strings.TrimSpace(w.Title); title != "" && title != text {
@@ -112,16 +143,60 @@ func (d *Daemon) recapCapture(ctx context.Context, a focus.Anchor) (focus.Captur
 		if redacted, ok := desktop.Redact(text); ok {
 			text = redacted
 		}
-		maxChars := cfg.Context.MaxChars
-		if maxChars <= 0 {
-			maxChars = desktop.DefaultMaxChars
-		}
-		return focus.Capture{
-			Text:     clampCaptureRunes(text, maxChars),
-			Terminal: terminalClass(cfg, w),
-		}, nil
+		capture.Text = clampCaptureRunes(text, maxChars)
+		return capture, nil
 	}
 	return focus.Capture{}, fmt.Errorf("the anchored window is gone")
+}
+
+// sessionTail reads the newest AI-session transcript hosted by a window's
+// process tree. It only exists when the daemon has a transcript reader; a
+// daemon without one (an unresolvable home at start-up) reports absence and
+// every recap stays on the title layer.
+func (d *Daemon) sessionTail(ctx context.Context, pid int) (transcript.Tail, error) {
+	if d.sessions == nil {
+		return transcript.Tail{}, transcript.ErrNoSession
+	}
+	return d.sessions.ReadWindow(ctx, pid)
+}
+
+// classifySession is the focus Snapshot's session-state read (#137): the
+// deterministic working / needs_you / done classification for one anchored
+// window, exposed on focus.list for the overlay dot (#127). The same gates
+// as the recap hold — the window-source consent switches it off wholesale,
+// and in auto mode only a terminal is looked at — and every failure is the
+// honest empty string: unknown, which the wire omits and no dot renders.
+// Content never travels here; the transcript is read for its structure and
+// dropped.
+func (d *Daemon) classifySession(ctx context.Context, _ focus.Anchor, w desktop.Window, trigger string) (string, error) {
+	cfg := d.runningConfig()
+	if !cfg.Context.Window {
+		return "", nil
+	}
+	if trigger != focus.RecapAlways && !terminalClass(cfg, w) {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, focusClassifyTimeout)
+	defer cancel()
+	tail, err := d.sessionTail(ctx, w.PID)
+	if err != nil {
+		return "", nil
+	}
+	return string(tail.State), nil
+}
+
+// redactLines runs the secret redactor over each line of a transcript
+// render. Line-wise on purpose: Redact replaces its input wholesale, and a
+// transcript is many exchanges — one line that looks like a credential must
+// cost that line, not the whole capture.
+func redactLines(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if redacted, ok := desktop.Redact(line); ok {
+			lines[i] = redacted
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // terminalClass reports whether a window's contents are a command line — the
@@ -157,6 +232,24 @@ func clampCaptureRunes(text string, n int) string {
 			return text[:i]
 		}
 		kept++
+	}
+	return text
+}
+
+// clampTailCaptureRunes bounds captured text at its LAST n runes — the
+// transcript variant (#137): a transcript's newest exchange is at its end,
+// and a head-biased clamp would keep the stale half.
+func clampTailCaptureRunes(text string, n int) string {
+	total := utf8.RuneCountInString(text)
+	if total <= n {
+		return text
+	}
+	drop := total - n
+	for i := range text {
+		if drop == 0 {
+			return text[i:]
+		}
+		drop--
 	}
 	return text
 }
@@ -435,6 +528,12 @@ func focusViewReport(v focus.View) map[string]any {
 		}
 		if tv.Recap != "" {
 			entry["recap"] = tv.Recap
+		}
+		if tv.SessionState != "" {
+			// The deterministic AI-session classification (#137): "working",
+			// "needs_you", or "done". Absent when unknown — the overlay dot
+			// (#127) renders absence as no dot, so unknown never guesses.
+			entry["session_state"] = tv.SessionState
 		}
 		if len(tv.Anchors) > 0 {
 			anchors := make([]map[string]any, 0, len(tv.Anchors))

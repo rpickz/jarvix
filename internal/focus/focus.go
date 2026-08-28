@@ -194,6 +194,15 @@ type Options struct {
 	// prompt is composed here (RecapPrompt) so every provider answers the
 	// same contract. Nil disables the model-composed recap (with Capture).
 	Summarise func(ctx context.Context, prompt string) (string, error)
+	// Classify reads one anchored window's deterministic session state
+	// (#137) for the Snapshot — working / needs_you / done, "" when unknown.
+	// No model call is ever involved: the daemon reads the session's
+	// transcript structure, under the same consent gate as Capture. The
+	// window rides along because the daemon needs its process and class, and
+	// trigger is the thread's recap mode so an opted-in ("always")
+	// non-terminal is classified and an opted-out thread never is. Nil
+	// disables classification; focus.list then simply omits the field.
+	Classify func(ctx context.Context, a Anchor, w desktop.Window, trigger string) (string, error)
 	// RecapBudget bounds one capture-plus-summary attempt; zero means
 	// DefaultRecapBudget. Tests shrink it so a deadline fires without a
 	// sleep.
@@ -214,10 +223,13 @@ type Service struct {
 	publish  func(string, map[string]any)
 	midpoint func() bool
 	// capture and summarise are the AI-session recap's two halves (#124);
-	// both nil means every recap is the templated base. Bound once, before
-	// Start, like fire — never mutated after.
+	// both nil means every recap is the templated base. classify is the
+	// Snapshot's session-state read (#137), nil when the daemon has no
+	// transcript reader. Bound once, before Start, like fire — never mutated
+	// after.
 	capture     func(ctx context.Context, a Anchor) (Capture, error)
 	summarise   func(ctx context.Context, prompt string) (string, error)
+	classify    func(ctx context.Context, a Anchor, w desktop.Window, trigger string) (string, error)
 	recapBudget time.Duration
 	now         func() time.Time
 	timer       func(d time.Duration) (<-chan time.Time, func())
@@ -273,6 +285,7 @@ func NewService(path string, opts Options, log *slog.Logger) *Service {
 		midpoint:    opts.Midpoint,
 		capture:     opts.Capture,
 		summarise:   opts.Summarise,
+		classify:    opts.Classify,
 		recapBudget: opts.RecapBudget,
 		now:         opts.Now,
 		timer:       opts.Timer,
@@ -308,15 +321,18 @@ func (s *Service) Bind(fire func(ctx context.Context, f Firing), midpoint func()
 	s.midpoint = midpoint
 }
 
-// BindRecap installs the AI-session recap's two halves (#124) after
+// BindRecap installs the AI-session recap's three daemon halves after
 // construction, the same late-bind pattern as Bind: wired once,
 // single-threaded, before Start ever runs. The capture half reaches the
-// desktop and the summarise half reaches the provider, and both belong to
-// the daemon.
+// desktop and the transcript store (#124, #137), the summarise half reaches
+// the provider, and the classify half reads session state for focus.list —
+// all of which belong to the daemon.
 func (s *Service) BindRecap(capture func(ctx context.Context, a Anchor) (Capture, error),
-	summarise func(ctx context.Context, prompt string) (string, error)) {
+	summarise func(ctx context.Context, prompt string) (string, error),
+	classify func(ctx context.Context, a Anchor, w desktop.Window, trigger string) (string, error)) {
 	s.capture = capture
 	s.summarise = summarise
+	s.classify = classify
 }
 
 // ---------------------------------------------------------------- storage
