@@ -169,7 +169,7 @@ func (d *Desktop) WindowListings(ctx context.Context) ([]WindowListing, error) {
 	if err != nil {
 		return nil, err
 	}
-	nicknames := d.nicknamesByAddress(windows)
+	nicknames := d.NicknamesByAddress(windows)
 	out := make([]WindowListing, 0, len(windows))
 	for _, w := range windows {
 		out = append(out, WindowListing{
@@ -183,10 +183,19 @@ func (d *Desktop) WindowListings(ctx context.Context) ([]WindowListing, error) {
 	return out, nil
 }
 
-// nicknamesByAddress indexes the live nicknames by window address for the
-// renderers that walk an inventory. The address is a lookup key only; it
-// never enters anything rendered.
-func (d *Desktop) nicknamesByAddress(windows []desktop.Window) map[string]string {
+// NicknameCount reports how many nicknames are held, without consulting the
+// compositor — the overlay feed's enrolment gate (#127). See
+// desktop.Nicknames.Count for why the un-pruned answer is the right trade.
+func (d *Desktop) NicknameCount() int {
+	return d.names.Count()
+}
+
+// NicknamesByAddress indexes the live nicknames by window address for the
+// renderers that walk an inventory — windows.list above, and the window
+// overlays' feed (#127), which needs "which window wears which tag" against
+// the same inventory it read the geometry from. The address is a lookup key
+// only; it never enters anything rendered or anything on the wire (ADR 0022).
+func (d *Desktop) NicknamesByAddress(windows []desktop.Window) map[string]string {
 	named := d.names.List(windows)
 	if len(named) == 0 {
 		return nil

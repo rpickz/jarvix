@@ -73,7 +73,12 @@ type Config struct {
 	Audio       Audio              `toml:"audio"`
 	Performance Performance        `toml:"performance"`
 	UI          UI                 `toml:"ui"`
-	Log         Log                `toml:"log"`
+	// Overlays are the tiny top-right window overlays (#127): the
+	// focus-thread badge, AI-state dot, and nickname tag on enrolled
+	// windows. Its own table rather than a [ui] key because it is a whole
+	// surface with one global off switch, not a knob on an existing one.
+	Overlays Overlays `toml:"overlays"`
+	Log      Log      `toml:"log"`
 
 	// Voices enumerates the voices the machine actually has installed, for
 	// the configured TTS engine. It is not configuration — it is the state of
@@ -520,6 +525,18 @@ type UI struct {
 	LetterSpacing float64 `toml:"letter_spacing"`
 }
 
+// Overlays configures the per-window overlays (#127).
+type Overlays struct {
+	// Enabled is the one global off switch the issue requires: false renders
+	// no overlay anywhere, whatever is enrolled. On by default because the
+	// surface is clean by default anyway — a user with no anchored or named
+	// windows sees nothing either way, so the default costs nobody anything,
+	// while defaulting off would make the feature invisible to the people it
+	// was built for. Live-class, and voice-toggleable through the settings
+	// tool like any registry switch.
+	Enabled bool `toml:"enabled"`
+}
+
 // Log configures daemon logging.
 type Log struct {
 	Level string `toml:"level"` // debug, info, warn, error
@@ -629,7 +646,8 @@ func Default() Config {
 			// hard-coded rendering (issue #121): a config that never touches
 			// them renders pixel-identically to before the settings existed.
 			LineSpacing: 1.0, TextSize: 1.0, LetterSpacing: 0.0},
-		Log: Log{Level: "info"},
+		Overlays: Overlays{Enabled: true},
+		Log:      Log{Level: "info"},
 	}
 }
 

@@ -500,7 +500,7 @@ func (d *Desktop) list(ctx context.Context) (string, error) {
 		shown = shown[:maxListedWindows]
 	}
 	summary := fmt.Sprintf("%s open: %s.", plural(len(windows), "window is", "windows are"),
-		summariseWindows(shown, d.nicknamesByAddress(windows)))
+		summariseWindows(shown, d.NicknamesByAddress(windows)))
 	if extra > 0 {
 		summary += fmt.Sprintf(" (%d more not listed.)", extra)
 	}

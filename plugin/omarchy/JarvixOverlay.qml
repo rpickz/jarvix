@@ -220,6 +220,13 @@ Item {
     onTriggered: { if (!daemon.connected) daemon.connected = true }
   }
 
+  // The tiny per-window overlays (#127): thread badge, AI-state glyph, and
+  // nickname tag on enrolled windows. A sibling surface with its own daemon
+  // connection (ADR 0013), hosted here because this file is the plugin's
+  // panel entry point — it touches neither the conversation window's
+  // LazyLoader below (#106) nor the confirmation controls above (#119).
+  JarvixWindowOverlays {}
+
   // The conversation window: the click-through target for notifications and
   // `jarvix window`. It manages its own daemon connection (ADR 0013).
   //

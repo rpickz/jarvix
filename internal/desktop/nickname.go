@@ -177,6 +177,24 @@ func (n *Nicknames) List(windows []Window) []NamedWindow {
 	return out
 }
 
+// Count reports how many nicknames are held right now, deliberately without
+// pruning — no inventory is consulted. It exists as the window-overlay feed's
+// cheap enrolment gate (#127): "is there anything a poll could possibly
+// overlay?" must be answerable without a compositor call, or the gate would
+// cost exactly what it exists to save. The price is honesty at the margin: a
+// name whose window has closed still counts until the next pruning operation
+// (any Assign/Resolve/List against a live inventory) drops it — which the
+// overlay poll itself does, so an over-count converges to zero rather than
+// polling forever.
+func (n *Nicknames) Count() int {
+	if n == nil {
+		return 0
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.byName)
+}
+
 // pruneLocked is the release mechanism: any name whose window is not in the
 // inventory is dropped and remembered as released. Must be called with n.mu
 // held, with the inventory the answer will be judged against.

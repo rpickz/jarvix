@@ -421,6 +421,16 @@ func settingRows() []Setting {
 			Get: func(c Config) any { return c.UI.LetterSpacing },
 			set: func(c *Config, v any) { c.UI.LetterSpacing = v.(float64) }},
 
+		// The window overlays' one global off switch (#127). Live class like
+		// the rest of the display settings: the overlay feed reads it per
+		// computation, so "turn the window overlays off" spoken through the
+		// settings tool clears every chip within a moment — no restart, no
+		// idle wait, which is the whole point of an off switch for something
+		// drawn over your windows.
+		{Key: "overlays.enabled", Label: "Tiny per-window overlays (thread badge, AI state, nickname)", Type: TypeBool, Reload: ReloadLive,
+			Get: func(c Config) any { return c.Overlays.Enabled },
+			set: func(c *Config, v any) { c.Overlays.Enabled = v.(bool) }},
+
 		{Key: "tools.shell", Label: "Assistant may run shell commands", Type: TypeBool, Reload: ReloadRestart,
 			Get: func(c Config) any { return c.Tools.Shell },
 			set: func(c *Config, v any) { c.Tools.Shell = v.(bool) }},
