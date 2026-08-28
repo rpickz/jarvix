@@ -125,10 +125,23 @@ func TestActivityRowVocabulary(t *testing.T) {
 			"workspace": 2, "launched": false, "status": "placed"},
 			ActivityRow{Kind: ActivityKindRoutine, Label: "Step 1: slack",
 				Detail: "placed on workspace 2 · already open"}},
+		// Not installed is SKIPPED, not failed (#175): the run decided it
+		// before starting or waiting for anything, and a row saying "failed"
+		// would imply an attempt that never happened.
 		{"routine.step", map[string]any{"routine": "morning", "step": 3, "app": "spotify",
-			"workspace": 4, "launched": false, "status": "failed", "detail": "spotify is not installed"},
+			"workspace": 4, "launched": true, "status": "failed",
+			"failure": "not_installed", "detail": "spotify is not installed"},
 			ActivityRow{Kind: ActivityKindRoutine, Failed: true,
-				Label: "Step 3 failed: spotify", Detail: "spotify is not installed"}},
+				Label: "Step 3 skipped: spotify", Detail: "spotify is not installed"}},
+		// A step that DID start something and produced the wrong window — or
+		// none — reads as a failure, and the detail says which of the two it
+		// was, because the fixes are different.
+		{"routine.step", map[string]any{"routine": "morning", "step": 4, "app": "chromium",
+			"workspace": 1, "launched": true, "status": "failed", "failure": "no_match",
+			"detail": `chromium opened a window, but nothing matched "facebook"`},
+			ActivityRow{Kind: ActivityKindRoutine, Failed: true,
+				Label:  "Step 4 failed: chromium",
+				Detail: `chromium opened a window, but nothing matched "facebook"`}},
 		{"routine.finished", map[string]any{"routine": "morning", "placed": 2, "failed": 1,
 			"summary": "Morning is up; spotify did not start."},
 			ActivityRow{Kind: ActivityKindRoutine, Label: "Routine finished: morning",

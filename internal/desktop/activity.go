@@ -660,8 +660,17 @@ func routineStepRow(data map[string]any) ActivityRow {
 	step, _ := activityInt(data, "step")
 	app := activityString(data, "app")
 	if activityString(data, "status") == "failed" {
+		// "Failed" for everything was the old vocabulary, and it implied an
+		// attempt (#175). A step whose application is not installed was never
+		// started and never waited for — the run decided that before touching
+		// anything — so the row says skipped and the detail says why. Every
+		// other kind did attempt something and reads as a failure.
+		verb := "failed"
+		if activityString(data, "failure") == "not_installed" {
+			verb = "skipped"
+		}
 		return ActivityRow{Kind: ActivityKindRoutine, Failed: true,
-			Label:  fmt.Sprintf("Step %d failed: %s", step, app),
+			Label:  fmt.Sprintf("Step %d %s: %s", step, verb, app),
 			Detail: activityString(data, "detail")}
 	}
 	workspace, _ := activityInt(data, "workspace")

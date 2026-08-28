@@ -13,6 +13,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/placement"
+	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
@@ -366,5 +367,60 @@ func repoRoot(t *testing.T) string {
 			t.Fatal("no go.mod above the working directory")
 		}
 		dir = parent
+	}
+}
+
+// TestTheStepSchemaIsExactlyItsTwoHalves is #175's half of the same contract,
+// and it is the interface the routine editor (#181) builds its form from: a
+// [[routines.steps]] table is the LAUNCHING half (routine.LaunchFields) plus
+// the PLACEMENT half (placement.Fields) plus `workspace`, and nothing else
+// except the three superseded spellings kept for files already in the field.
+//
+// Written as an exact set rather than a subset check on purpose. A key added
+// to the TOML struct and to nothing else is invisible to the form and to the
+// daemon's field-keyed validation, which is how a field ends up editable in a
+// text editor and absent from the window.
+func TestTheStepSchemaIsExactlyItsTwoHalves(t *testing.T) {
+	want := map[string]bool{}
+	for _, field := range routine.LaunchFields() {
+		want[field] = true
+	}
+	for _, field := range placement.Fields() {
+		want[field] = true
+	}
+	// The superseded placement spellings (ADR 0056), still accepted so a file
+	// written against them keeps working. They are not vocabulary fields and
+	// nothing new may join them.
+	for _, superseded := range []string{"float", "size", "tile"} {
+		want[superseded] = true
+	}
+
+	got := tomlKeys(t, config.RoutineStep{})
+	for key := range got {
+		if !want[key] {
+			t.Errorf("[[routines.steps]] carries %q, which neither half of the step schema owns; "+
+				"add it to routine.LaunchFields or placement.Fields, or take it out", key)
+		}
+	}
+	for key := range want {
+		if !got[key] {
+			t.Errorf("the step schema owns %q but config.RoutineStep has no such key", key)
+		}
+	}
+}
+
+// TestTheLaunchingHalfIsRefusedIdenticallyByFileAndForm: a launching key the
+// vocabulary refuses is refused by a real config load with a message keyed on
+// the field, which is what makes the form able to pin it to a control.
+func TestTheLaunchingHalfIsRefusedIdenticallyByFileAndForm(t *testing.T) {
+	for _, tc := range []struct{ keys, want string }{
+		{`launch = "sometimes"`, "is not a launch policy"},
+		{`desktop_entry = "Nope"`, "both say what to launch"},
+		{`args = ["--ok"]` + "\n" + `identity = "nope!"`, "must be a window class"},
+	} {
+		problems := loadStepProblems(t, tc.keys)
+		if !strings.Contains(strings.Join(problems, "\n"), tc.want) {
+			t.Errorf("loading %q gave %v, want a problem saying %q", tc.keys, problems, tc.want)
+		}
 	}
 }

@@ -63,14 +63,39 @@ type Routine struct {
 // broken every routine in the field to make a schema tidier, which is not a
 // trade worth making.
 type RoutineStep struct {
-	// App is the program to launch when no matching window exists: one bare
-	// executable name or absolute path, launched through the compositor —
-	// never a command line, never a shell.
+	// App is the program to launch: one bare executable name or absolute
+	// path, started directly — never a command line, never a shell. Exactly
+	// one of App and DesktopEntry says what a step opens.
 	App string `toml:"app"`
+	// DesktopEntry names an XDG desktop entry instead — "ChatGPT" or
+	// "ChatGPT.desktop", as it appears in the applications menu (#175). Its
+	// own Exec is what runs, which is the only way to launch the web apps and
+	// the several applications on this desktop that have no binary on PATH.
+	// A name this machine has no entry for is refused when the routine is
+	// loaded or saved, not discovered as an eight-second silence at run time.
+	DesktopEntry string `toml:"desktop_entry"`
+	// Args are handed to the program as a literal argv: no shell, no word
+	// splitting, no expansion, no globbing. `args = ["--profile-directory=Profile 3"]`
+	// is one argument containing a space, and a value containing `;`, `&&` or
+	// `$(` is one argument containing those characters. They are the user's
+	// own configuration — the model cannot write here (ADR 0022).
+	Args []string `toml:"args"`
+	// Identity gives the launched window a class of the routine's own
+	// choosing, for programs that accept such a flag (Chromium's `--class=`).
+	// It is how two steps launching one binary with different arguments are
+	// told apart: Chromium runs every profile in a single process, so two
+	// profile windows are identical in class, PID and cmdline, and only an
+	// identity chosen before the launch can distinguish them.
+	Identity string `toml:"identity"`
 	// Match optionally overrides how an already-running window is recognised
 	// (for apps whose window class differs from their binary name). Empty
-	// matches on App.
+	// matches on Identity when there is one, and on App otherwise.
 	Match string `toml:"match"`
+	// Launch says what to do when a matching window is already open:
+	// "if_missing" (the default — adopt it) or "always" (start a fresh one
+	// every run). Per step, because both answers are right for different
+	// steps of the same routine.
+	Launch string `toml:"launch"`
 	// Workspace is where the window goes, 1–99.
 	Workspace int `toml:"workspace"`
 	// Monitor is which screen the workspace belongs on: a connector name
@@ -118,8 +143,17 @@ func (c Config) RoutineDefinitions() []routine.Definition {
 			Steps:   make([]routine.Step, 0, len(r.Steps)),
 		}
 		for _, s := range r.Steps {
+			// Launch is parsed leniently here for the same reason the
+			// placement keys are: this conversion feeds the RUNNER, and a
+			// value the parser refuses must reach it as "not said" rather
+			// than as a wrong value. stepLaunchProblems refuses the document
+			// outright, so no bad value ever reaches a run.
+			policy, _ := routine.ParseLaunchPolicy(s.Launch)
 			def.Steps = append(def.Steps, routine.Step{
-				App: s.App, Match: s.Match, Placement: s.placement(),
+				App: s.App, DesktopEntry: s.DesktopEntry,
+				Args:     append([]string(nil), s.Args...),
+				Identity: s.Identity, Match: s.Match, Launch: policy,
+				Placement: s.placement(),
 			})
 		}
 		defs = append(defs, def)
@@ -138,8 +172,16 @@ func RoutineFromDefinition(d routine.Definition) Routine {
 	}
 	for _, s := range d.Steps {
 		step := RoutineStep{
-			App: s.App, Match: s.Match, Workspace: s.Workspace,
-			Monitor: string(s.Monitor), Mode: string(s.Mode),
+			App: s.App, DesktopEntry: s.DesktopEntry,
+			Args:     append([]string(nil), s.Args...),
+			Identity: s.Identity, Match: s.Match,
+			// The default policy is written as absence, not as the word: a
+			// step that never asked for anything must come back out of a
+			// round trip looking exactly as it went in, or the window would
+			// add a `launch = "if_missing"` line to every step it touched.
+			Launch:    launchWord(s.Launch),
+			Workspace: s.Workspace,
+			Monitor:   string(s.Monitor), Mode: string(s.Mode),
 			Width: s.Width.String(), Height: s.Height.String(),
 			PlaceNext: string(s.PlaceNext), Master: s.Master, Focus: string(s.Focus),
 		}
@@ -149,6 +191,15 @@ func RoutineFromDefinition(d routine.Definition) Routine {
 		r.Steps = append(r.Steps, step)
 	}
 	return r
+}
+
+// launchWord renders a launch policy back into its TOML value, writing
+// nothing for the default.
+func launchWord(p routine.LaunchPolicy) string {
+	if p == routine.LaunchAlways {
+		return string(routine.LaunchAlways)
+	}
+	return ""
 }
 
 // placement reads one step's placement out of its TOML keys, translating the
@@ -249,6 +300,19 @@ func stepPlacementProblems(label string, s RoutineStep) []string {
 	return problems
 }
 
+// stepLaunchProblems reports what is wrong with the launching keys as TOML —
+// the values whose parsers this file reads leniently, so a refusal is not
+// swallowed by the conversion that feeds the runner. Everything about the
+// resulting step (what it launches, whether this machine has it, whether two
+// steps could be confused for one another) is routine.Problems'.
+func stepLaunchProblems(label string, s RoutineStep) []string {
+	var problems []string
+	if _, err := routine.ParseLaunchPolicy(s.Launch); err != nil {
+		problems = append(problems, fmt.Sprintf("%s: %s %s", label, routine.FieldLaunch, err.Error()))
+	}
+	return problems
+}
+
 // boolWord renders a superseded boolean for a message, or "" when it is not
 // set — absent and false are the same thing in TOML, and a message
 // complaining about `float = false` would name a key nobody wrote.
@@ -291,8 +355,9 @@ func (c Config) routineProblems() []string {
 		problems = append(problems,
 			scheduleProblems(fmt.Sprintf("routines[%d] (%q)", i, r.Name), r.Schedule, r.Announce)...)
 		for j, s := range r.Steps {
-			problems = append(problems, stepPlacementProblems(
-				fmt.Sprintf("routines[%d] (%q) steps[%d]", i, r.Name, j), s)...)
+			label := fmt.Sprintf("routines[%d] (%q) steps[%d]", i, r.Name, j)
+			problems = append(problems, stepPlacementProblems(label, s)...)
+			problems = append(problems, stepLaunchProblems(label, s)...)
 		}
 	}
 	problems = append(problems, routine.Problems(c.RoutineDefinitions())...)

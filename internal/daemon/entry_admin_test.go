@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -46,6 +47,31 @@ func entryProblemList(t *testing.T, container map[string]any) []map[string]any {
 		out = append(out, m)
 	}
 	return out
+}
+
+// entryNoteList decodes the {field, message} notes from a reply. Notes are
+// the "true, but not a refusal" channel (#163), so — unlike problemOn — the
+// absence of one is an ordinary outcome and never a fatal.
+func entryNoteList(container map[string]any) []map[string]any {
+	raw, _ := container["notes"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, n := range raw {
+		if m, ok := n.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// noteForField finds the first note keyed to field.
+func noteForField(notes []map[string]any, field string) (string, bool) {
+	for _, n := range notes {
+		if n["field"] == field {
+			msg, _ := n["message"].(string)
+			return msg, true
+		}
+	}
+	return "", false
 }
 
 // problemOn finds the first problem keyed to field.
@@ -607,5 +633,158 @@ func TestConfigDeleteEntryRefusals(t *testing.T) {
 	}
 	if string(raw) != string(original) {
 		t.Error("a refused delete still changed the file")
+	}
+}
+
+// TestSavingARoutineForAProgramYouHaveNotInstalledYetIsANote is the shape
+// this had to be corrected into, and the correction is the interesting part.
+//
+// "Is that program installed here?" was briefly a hard refusal at save. That
+// is environment-dependent validation on a WRITE path, and it is wrong twice
+// over: it made this repo's own CI unable to save a routine naming firefox,
+// and — the reason that matters — it would make config.toml unwritable
+// exactly where it most needs editing. A new laptop, a machine being set up,
+// an application you are about to install: authoring the routine first and
+// installing the program second is ordinary, and a routine written on a
+// desktop must stay editable from a machine that has none of it.
+//
+// So the save succeeds and the answer travels the notes channel (#163): true,
+// stated against the field, and saveable through. The enforcement point is
+// the run — see TestARoutineForAnUninstalledProgramSavesAndReportsAtRunTime,
+// which drives the other half of exactly this claim.
+func TestSavingARoutineForAProgramYouHaveNotInstalledYetIsANote(t *testing.T) {
+	client, configFile, _ := startAutomationsDaemon(t, false)
+
+	entry := map[string]any{
+		"name": "evening", "phrases": []string{"evening mode"},
+		"steps": []map[string]any{
+			{"app": "definitely-not-installed-anywhere", "workspace": 5},
+		},
+	}
+	out := entryCall(t, client, "config.validate_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	})
+	if out["valid"] != true {
+		t.Fatalf("validate = %v, want the draft saveable", out)
+	}
+	if problems := entryProblemList(t, out); len(problems) != 0 {
+		t.Errorf("problems = %+v, want none — not installed is not a refusal", problems)
+	}
+	note, ok := noteForField(entryNoteList(out), "steps[0].app")
+	if !ok {
+		t.Fatalf("notes = %v, want one on steps[0].app", out["notes"])
+	}
+	for _, want := range []string{"is not installed", "this computer right now", "saves either way"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note = %q, want it to say %q — the caution is about this machine, now", note, want)
+		}
+	}
+
+	// And the save goes through, writing the step as asked.
+	if err := client.Call("config.upsert_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	}, nil); err != nil {
+		t.Fatalf("upsert refused a routine for a program that is not installed: %v", err)
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `app = "definitely-not-installed-anywhere"`) {
+		t.Errorf("the saved document does not carry the step:\n%s", raw)
+	}
+
+	// A step naming something that IS here carries no note at all, so the
+	// caution cannot be background noise on every form.
+	entry["steps"] = []map[string]any{{"app": installedProgram(t), "workspace": 5}}
+	out = entryCall(t, client, "config.validate_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	})
+	if notes := entryNoteList(out); len(notes) != 0 {
+		t.Errorf("notes = %+v for a program that is installed, want none", notes)
+	}
+}
+
+// TestSavingARoutineStillRefusesADesktopEntryThatDoesNotExist is the other
+// side of the same line, and why the two are treated differently. An entry id
+// is resolved out of the machine's own applications index: nothing will ever
+// install one under a name the user invented, so there is no "not yet"
+// reading of it — it is a typo, and it stays a refusal.
+func TestSavingARoutineStillRefusesADesktopEntryThatDoesNotExist(t *testing.T) {
+	client, _, _ := startAutomationsDaemon(t, false)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_DIRS", t.TempDir())
+
+	out := entryCall(t, client, "config.validate_entry", map[string]any{
+		"family": "routines", "name": "evening",
+		"entry": map[string]any{"name": "evening", "phrases": []string{"evening mode"},
+			"steps": []map[string]any{{"desktop_entry": "NoSuchThing", "workspace": 5}}},
+	})
+	if out["valid"] != false {
+		t.Fatalf("validate = %v, want the invented entry refused", out)
+	}
+	msg, ok := problemOn(entryProblemList(t, out), "steps[0].desktop_entry")
+	if !ok || !strings.Contains(msg, "there is no NoSuchThing desktop entry") {
+		t.Errorf("problem = %q (%v), want it on steps[0].desktop_entry naming the entry", msg, ok)
+	}
+}
+
+// installedProgram names something certainly present wherever these tests
+// run: the test binary itself, with its directory put on PATH.
+func installedProgram(t *testing.T) string {
+	t.Helper()
+	t.Setenv("PATH", filepath.Dir(os.Args[0])+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return filepath.Base(os.Args[0])
+}
+
+// TestSavingARoutineAcceptsArgumentsAndADesktopEntryStep: the other side of
+// the same surface. The new launching keys travel the generic pipeline with
+// no routine-specific code in the form — args as a string list, exactly as
+// phrases already do — and come back out of the file unchanged.
+func TestSavingARoutineAcceptsArgumentsAndADesktopEntryStep(t *testing.T) {
+	client, configFile, _ := startAutomationsDaemon(t, false)
+
+	// A program that certainly exists on any machine running these tests, so
+	// the test is about the SCHEMA rather than about what is installed.
+	program := filepath.Base(os.Args[0])
+	dir := filepath.Dir(os.Args[0])
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	entry := map[string]any{
+		"name": "evening", "phrases": []string{"evening mode"},
+		"steps": []map[string]any{{
+			"app":       program,
+			"args":      []string{"--profile-directory=Profile 3", "; rm -rf ~"},
+			"launch":    "always",
+			"match":     "evening",
+			"workspace": 5,
+		}},
+	}
+	out := entryCall(t, client, "config.validate_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	})
+	if out["valid"] != true {
+		t.Fatalf("validate = %v, want the launching keys accepted", out)
+	}
+
+	if err := client.Call("config.upsert_entry", map[string]any{
+		"family": "routines", "name": "evening", "entry": entry,
+	}, nil); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The argument containing shell metacharacters is written as data and
+	// read back as data. Nothing on this path ever renders it into a command
+	// line, so the semicolon is a character in an argv element.
+	for _, want := range []string{
+		`args = ["--profile-directory=Profile 3", "; rm -rf ~"]`,
+		`launch = "always"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("saved document does not carry %s:\n%s", want, raw)
+		}
 	}
 }

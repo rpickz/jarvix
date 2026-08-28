@@ -74,6 +74,7 @@ import (
 	"github.com/rpickz/jarvix/internal/automation"
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/routine"
 	"github.com/rpickz/jarvix/internal/session"
 )
 
@@ -260,17 +261,22 @@ var entryAdminFamilies = map[string]entryFamilySpec{
 		// renderer writes only the current vocabulary, so an entry the window
 		// touches comes back migrated.
 		subKeys: map[string]map[string]entryKeyKind{"steps": {
-			"app": entryKeyString, "match": entryKeyString, "workspace": entryKeyInt,
-			"monitor": entryKeyString, "mode": entryKeyString,
+			"app": entryKeyString, "desktop_entry": entryKeyString,
+			"args": entryKeyStringList, "identity": entryKeyString,
+			"match": entryKeyString, "launch": entryKeyString,
+			"workspace": entryKeyInt,
+			"monitor":   entryKeyString, "mode": entryKeyString,
 			"width": entryKeyString, "height": entryKeyString,
 			"position": entryKeyIntPair, "place_next": entryKeyString,
 			"master": entryKeyBool, "focus": entryKeyString,
 			"float": entryKeyBool, "size": entryKeyIntPair, "tile": entryKeyString,
 		}},
 		subOrder: map[string][]string{"steps": {
-			"app", "match", "workspace", "monitor", "mode", "width", "height",
+			"app", "desktop_entry", "args", "identity", "match", "launch",
+			"workspace", "monitor", "mode", "width", "height",
 			"position", "place_next", "master", "focus", "float", "size", "tile",
 		}},
+		notes: routineInstallNotes,
 	},
 	"scripts": {
 		family: "scripts", kind: "script",
@@ -1143,6 +1149,90 @@ func (d *Daemon) entryDocProblems(newRaw []byte, spec entryFamilySpec, draft map
 	return out
 }
 
+// routineInstallNotes says which of a routine's steps this machine cannot
+// launch RIGHT NOW — and says it as a note rather than a problem (#175).
+//
+// The distinction is the whole of this function. "Is this step well formed?"
+// is a fact about the entry and is a refusal; "is that program installed
+// here?" is a fact about the machine at this moment, and refusing the save
+// over it would make config.toml unwritable exactly where it most needs
+// editing: a new laptop, a machine being set up, an application the user is
+// about to install. A person must be able to author the routine first and
+// install the program afterwards, and one authored on a desktop must remain
+// editable from a machine that has none of it.
+//
+// So the save succeeds and the form shows a caution the user can save
+// through. The enforcement point is the RUN, which resolves the same way from
+// the same code and reports "discord is not installed" by name, skipping the
+// step rather than waiting eight seconds for a window — which is where the
+// acceptance criterion this ticket was written for actually bites.
+//
+// A missing DESKTOP ENTRY stays a refusal, and stays in whole-document
+// validation rather than here: an entry id is resolved out of the machine's
+// own applications index, nothing installs one under a name the user invented,
+// and there is no "not yet" reading of it — it is a typo.
+func routineInstallNotes(name string, draft map[string]any) []entryNote {
+	steps := entryDraftTables(draft, "steps")
+	if len(steps) == 0 {
+		return nil
+	}
+	def := routine.Definition{Name: name}
+	for _, raw := range steps {
+		def.Steps = append(def.Steps, routine.Step{
+			App:          entryDraftString(raw, "app"),
+			DesktopEntry: entryDraftString(raw, "desktop_entry"),
+			Args:         entryDraftStrings(raw, "args"),
+			Identity:     entryDraftString(raw, "identity"),
+		})
+	}
+	var out []entryNote
+	for _, p := range routine.InstallProblems(def, routine.MachineResolver([]routine.Definition{def})) {
+		out = append(out, entryNote{
+			Field: fmt.Sprintf("steps[%d].%s", p.Step, p.Field),
+			Message: fmt.Sprintf("%s on this computer right now. The routine saves either way; "+
+				"until it is installed, this step is skipped when the routine runs and the "+
+				"summary says so.", p.Message),
+		})
+	}
+	return out
+}
+
+// entryDraftTables reads a list of sub-tables out of a loosely-typed draft.
+// Both shapes the pipeline produces are accepted: the sanitiser's own
+// []map[string]any, and the []any a decoded JSON entry arrives as.
+func entryDraftTables(draft map[string]any, key string) []map[string]any {
+	switch value := draft[key].(type) {
+	case []map[string]any:
+		return value
+	case []any:
+		out := make([]map[string]any, 0, len(value))
+		for _, item := range value {
+			if table, ok := item.(map[string]any); ok {
+				out = append(out, table)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// entryDraftStrings reads a string list out of a loosely-typed draft.
+func entryDraftStrings(draft map[string]any, key string) []string {
+	switch value := draft[key].(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if text, ok := item.(string); ok {
+				out = append(out, text)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
 // entryIndexByName finds the draft's position in the rewritten document, for
 // building the label prefix the validators use.
 func entryIndexByName(doc []byte, spec entryFamilySpec, name string) int {
@@ -1239,7 +1329,16 @@ func classifyEntryProblem(spec entryFamilySpec, index int, name string,
 		field := "steps[" + m[1] + "]"
 		if sub, ok := spec.subKeys["steps"]; ok {
 			token := strings.TrimSuffix(strings.SplitN(rest, " ", 2)[0], ":")
-			if _, ok := sub[token]; ok {
+			// A step key may be a LIST, and a problem may name one element of
+			// it — `args[1] contains a null byte`. The key is the token with
+			// its subscript removed; the field keeps the subscript, so the
+			// form pins the message to the row it means, exactly as a
+			// `phrases[1]` problem already lands on the phrase it means.
+			key := token
+			if open := strings.IndexByte(token, '['); open > 0 && strings.HasSuffix(token, "]") {
+				key = token[:open]
+			}
+			if _, ok := sub[key]; ok {
 				field += "." + token
 			}
 		}

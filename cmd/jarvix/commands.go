@@ -941,7 +941,21 @@ func cmdRoutines(cfg config.Config, asJSON bool) error {
 // (`float = true`) prints as what it now means (`floating`) — the listing and
 // the run must agree, and the run reads the derived value.
 func describeRoutineStep(s config.RoutineStep) string {
-	desc := fmt.Sprintf("%s → workspace %d", s.App, s.Workspace)
+	// What it launches, in the user's own words: the program, or the desktop
+	// entry when that is what the step names (#175). Its arguments come with
+	// it, because "chromium → workspace 1" twice in a listing is a listing
+	// that cannot be read — the profile IS the difference between them.
+	launches := strings.TrimSpace(s.App)
+	if launches == "" {
+		launches = strings.TrimSpace(s.DesktopEntry)
+	}
+	if len(s.Args) > 0 {
+		launches += " " + strings.Join(s.Args, " ")
+	}
+	if s.Identity != "" {
+		launches += " (as " + s.Identity + ")"
+	}
+	desc := fmt.Sprintf("%s → workspace %d", launches, s.Workspace)
 	if s.App == routine.PlaceholderApp {
 		desc = fmt.Sprintf("%s → workspace %d (set the app that launches this window)", s.App, s.Workspace)
 	}
@@ -976,6 +990,9 @@ func describeRoutineStep(s config.RoutineStep) string {
 	}
 	if p.Focus != "" {
 		notes = append(notes, string(p.Focus))
+	}
+	if !def[0].Steps[0].Launch.Adopts() {
+		notes = append(notes, "always a new window")
 	}
 	if len(notes) > 0 {
 		desc += " (" + strings.Join(notes, ", ") + ")"
