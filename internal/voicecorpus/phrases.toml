@@ -1,0 +1,244 @@
+# The voice corpus: what to say, and what must happen when you say it.
+#
+# One recording per phrase, named after its id — 10-workspace-four.wav — in
+# testdata/voicecorpus. Natural pace, real microphone, quiet room. Phrases
+# with noisy_take = true are worth recording a second time in a noisy room,
+# as 10-workspace-four-noisy.wav; those takes are scored and tracked
+# separately, because "does it still work with the kitchen on" is a different
+# question from "does it work".
+#
+# `say` is the script and the yardstick a score is measured against. It is
+# never asserted: nothing in this repository compares a transcript to it for
+# equality, because a test that did would fail on a full stop. `expect` is the
+# assertion, and it is always about what the pipeline DID — the intent that
+# matched, the summons that came off, the word that survived, the confirmation
+# that was understood.
+#
+# Adding or changing a phrase: docs/voice-corpus.md.
+
+# --- Wake word and the assistant's name (issues #83, #107) ------------------
+
+[[phrase]]
+id = "01-jarvix"
+say = "Jarvix"
+note = "Just the name, nothing after it. Whisper has to write a spelling the strip accepts."
+expect = { wake = "name" }
+
+[[phrase]]
+id = "02-jarvix-what-time-is-it"
+say = "Jarvix, what time is it?"
+note = "The summons must come off and leave a question the model can answer."
+noisy_take = true
+expect = { wake = "strip", no_intent = true, words = ["time"] }
+
+[[phrase]]
+id = "03-hey-jarvix-open-the-window"
+say = "Hey Jarvix, open the window"
+note = "The filler before the name is the normal way people say this; the strip has to see past it."
+expect = { wake = "strip", no_intent = true, words = ["window"] }
+
+[[phrase]]
+id = "04-jarvix-drifted"
+say = "Jarvix"
+note = """Say it the way you drift to when you are not being careful — the \
+mispronunciation you would actually use. If this one fails, the fix is a new \
+spelling in assistant.aliases, and this recording is how you know which."""
+expect = { wake = "name" }
+
+# --- One recording per intent family (ADR 0017) -----------------------------
+
+[[phrase]]
+id = "05-open-the-window"
+say = "open the window"
+note = "No router pattern claims this: it goes to the model and the window tools. That is the assertion."
+expect = { no_intent = true, words = ["window"] }
+
+[[phrase]]
+id = "06-close-the-window"
+say = "close the window"
+expect = { no_intent = true, words = ["close", "window"] }
+
+[[phrase]]
+id = "07-whats-on-my-screen"
+say = "what's on my screen?"
+expect = { no_intent = true, words = ["screen"] }
+
+[[phrase]]
+id = "08-volume-up"
+say = "volume up"
+expect = { intent = "volume.up" }
+
+[[phrase]]
+id = "09-mute"
+say = "mute"
+note = "One short word with nothing around it — the hardest thing to recognise in the whole list."
+expect = { intent = "volume.mute" }
+
+[[phrase]]
+id = "10-workspace-four"
+say = "workspace four"
+note = "The number word must survive as a slot: workspace.switch with slot 4, not the digit 4 in prose."
+noisy_take = true
+expect = { intent = "workspace.switch", slot = 4 }
+
+[[phrase]]
+id = "11-focus-the-terminal"
+say = "focus the terminal"
+expect = { no_intent = true, words = ["terminal"] }
+
+[[phrase]]
+id = "12-type-hello-world"
+say = "type hello world"
+note = """Typing is a tool the model reaches for, not a router intent, so what \
+this recording proves is that the words arrive at the gate intact. Whether the \
+gate then refuses is settled by tools.typing's own tests, in every case, not \
+just the ones anybody recorded."""
+expect = { no_intent = true, words = ["type", "hello", "world"] }
+
+[[phrase]]
+id = "13-stop"
+say = "stop"
+note = "The mid-speech stop word. Silence is its acknowledgement, so a miss here is invisible in use."
+expect = { intent = "speech.stop" }
+
+[[phrase]]
+id = "14-cancel"
+say = "cancel"
+note = "Not a router intent — but the confirmation gate must read it as a refusal."
+expect = { no_intent = true, affirmative = false }
+
+# --- Confirmations: the highest-consequence thing to mishear ----------------
+
+[[phrase]]
+id = "15-yes"
+say = "yes"
+expect = { affirmative = true }
+
+[[phrase]]
+id = "16-no"
+say = "no"
+note = "A misheard \"no\" runs something nobody approved. This is the one to record most carefully."
+expect = { affirmative = false }
+
+[[phrase]]
+id = "17-yes-do-it"
+say = "yes do it"
+expect = { affirmative = true }
+
+[[phrase]]
+id = "18-no-dont"
+say = "no don't"
+note = "The apostrophe is whisper's business; the decision must still be a refusal."
+expect = { affirmative = false }
+
+# --- Conversation control ---------------------------------------------------
+
+[[phrase]]
+id = "19-start-a-new-conversation"
+say = "start a new conversation"
+expect = { intent = "conversation.new" }
+
+[[phrase]]
+id = "20-what-did-we-talk-about-yesterday"
+say = "what did we talk about yesterday?"
+note = "Must NOT be claimed by the router — conversation search is the model's job."
+expect = { no_intent = true, words = ["yesterday"] }
+
+[[phrase]]
+id = "21-say-that-again"
+say = "say that again"
+expect = { no_intent = true, words = ["again"] }
+
+# --- Focus threads and reminders (#123, #141) -------------------------------
+
+[[phrase]]
+id = "22-new-thread-called-deploy"
+say = "new thread called deploy"
+note = "The thread name is free text: it has to come out of whisper as the word you said."
+expect = { intent = "focus.new", words = ["deploy"] }
+
+[[phrase]]
+id = "23-switch-to-the-deploy-thread"
+say = "switch to the deploy thread"
+note = "The router's phrasing is \"switch to the X thread\"; a bare \"switch to deploy\" goes to the model."
+expect = { intent = "focus.switch", words = ["deploy"] }
+
+[[phrase]]
+id = "24-later-reply-to-dan"
+say = "later, reply to Dan"
+note = "A name in the parked thought — the words that are hardest to recognise and most annoying to lose."
+noisy_take = true
+expect = { intent = "focus.park", words = ["dan"] }
+
+[[phrase]]
+id = "25-where-am-i-on-everything"
+say = "where am I on everything?"
+expect = { intent = "focus.status" }
+
+[[phrase]]
+id = "26-focus-on-deploy-for-twenty-five-minutes"
+say = "focus on deploy for twenty five minutes"
+note = "Two things at once: the thread name as free text and the number word as a slot."
+expect = { intent = "focus.timebox", slot = 25, words = ["deploy"] }
+
+[[phrase]]
+id = "27-remind-me-at-three-to-call-the-pharmacy"
+say = "remind me at three to call the pharmacy"
+noisy_take = true
+expect = { intent = "reminder.set", words = ["pharmacy"] }
+
+# --- Numbers and normalisation ----------------------------------------------
+
+[[phrase]]
+id = "28-nine-point-two-million-divided-by-three"
+say = "what's nine point two million divided by three?"
+note = """Whisper may write this as digits or as words and either is fine — the \
+scale word is what must not be dropped, because \"9.2 divided by three\" is a \
+different question with a plausible answer."""
+expect = { no_intent = true, words = ["million"] }
+
+[[phrase]]
+id = "29-remind-me-in-twenty-minutes"
+say = "remind me in twenty minutes to stretch"
+note = "A relative time plus a task; the router needs both to claim it."
+noisy_take = true
+expect = { intent = "reminder.set", words = ["stretch"] }
+
+# --- Taught vocabulary and colloquial speech (#129) -------------------------
+
+[[phrase]]
+id = "30-when-i-say-quid-i-mean-pounds"
+say = "when I say quid I mean pounds"
+note = "The teaching utterance itself. Both halves are free text and both must survive."
+expect = { intent = "vocabulary.teach", words = ["quid", "pounds"] }
+
+[[phrase]]
+id = "31-how-many-quid-did-i-spend"
+say = "how many quid did I spend?"
+note = """Record this AFTER teaching \"quid\" as hard-to-hear, so the taught word \
+is in the live bias prompt. That is what this phrase measures: a word whisper \
+would otherwise round off surviving because the bias carried it."""
+expect = { no_intent = true, words = ["quid"] }
+
+[[phrase]]
+id = "32-fastest-register"
+say = "just chuck it on the other screen when you get a sec"
+note = """The honest worst case: your fastest, most slurred register, the way you \
+talk when you have stopped performing for the microphone. Change `say` to \
+whatever you actually said and update the baseline — this line is a suggestion, \
+not a script."""
+noisy_take = true
+expect = { no_intent = true, words = ["screen"] }
+
+# --- Window nicknames (#126) ------------------------------------------------
+
+[[phrase]]
+id = "33-call-this-window-builds"
+say = "call this window builds"
+expect = { intent = "window.name", words = ["builds"] }
+
+[[phrase]]
+id = "34-focus-builds"
+say = "focus builds"
+note = "Using the nickname afterwards. The router does not claim it; the nickname has to reach the model."
+expect = { no_intent = true, words = ["builds"] }

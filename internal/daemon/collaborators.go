@@ -96,10 +96,16 @@ func fillDeps(cfg config.Config, paths config.Paths, deps Deps, vocab *vocabular
 		// phrases (issue #129) live in a store, not in config: "listen for
 		// the word X" must bias the very next utterance, and the store read
 		// behind this closure is one stat(2) of a file in the page cache.
-		biasPrompt := func() string { return cfg.STTBiasPrompt() }
+		//
+		// Composed by config rather than here (issue #143) so that the voice
+		// corpus harness, which must bias whisper with the prompt this daemon
+		// would send, reads it from the same function instead of rebuilding
+		// the decision beside it.
+		var taught func() []string
 		if vocab != nil {
-			biasPrompt = func() string { return cfg.STTBiasPromptWith(vocab.HardToHear()) }
+			taught = vocab.HardToHear
 		}
+		biasPrompt := cfg.STTBiasPromptFunc(taught)
 		cold := &whispercpp.Transcriber{
 			Binary:     cfg.STT.Whisper.Binary,
 			ModelPath:  whispercpp.ResolveModelPath(cfg.STT.Whisper.Model, paths.WhisperModelDir()),

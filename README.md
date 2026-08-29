@@ -555,6 +555,7 @@ make lint              # go vet (+ staticcheck when installed)
 make ci                # exactly what the CI gate runs
 make coverage-ratchet  # total coverage vs the floor in coverage.floor
 make soak              # the high-count, constrained runs that catch ordering faults
+make voice-corpus      # real recordings through the real whisper (needs the tag and a corpus)
 ```
 
 The entire session lifecycle is testable with fakes — `internal/session`'s
@@ -568,12 +569,22 @@ parallelism, to show up at all. Those are soaked nightly instead —
 coverage floor is (and is not), and the two guards that catch the ordering traps
 this repo has already fallen into.
 
+Every test above uses fakes, and there is one thing fakes cannot prove: that
+whisper, biased the way this daemon biases it, turns *real speech* into the
+transcripts those tests assume. That is what the voice corpus is for — the
+user's own recordings run through the real engine and asserted on the intent
+that matched and the word that survived, never on the transcript itself. It is
+behind a build tag (recordings are personal data; whisper is heavy) and skips
+gracefully while the corpus is empty. `jarvix doctor` prints where it stands.
+See [docs/voice-corpus.md](docs/voice-corpus.md).
+
 Architecture, protocol, and design decisions:
 
 - [docs/architecture.md](docs/architecture.md) — components and session lifecycle
 - [docs/ipc.md](docs/ipc.md) — the JSON-RPC protocol
 - [docs/providers.md](docs/providers.md) — provider abstractions
 - [docs/soak.md](docs/soak.md) — soaking, the coverage floor, and the test guards
+- [docs/voice-corpus.md](docs/voice-corpus.md) — the real-voice test corpus and its harness
 - [docs/adr/](docs/adr/) — architecture decision records
 - [docs/CHECKLIST.md](docs/CHECKLIST.md) — development checklist
 

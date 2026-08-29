@@ -67,6 +67,30 @@ func (c Config) STTBiasPromptWith(taught []string) string {
 	return strings.Join(parts, " ")
 }
 
+// STTBiasPromptFunc returns the closure a transcription path reads its bias
+// prompt through: the composition above, evaluated per call, over whatever
+// hard-to-hear phrases taught reports at that moment.
+//
+// It exists so there is ONE answer to "what prompt would the daemon actually
+// send?", reachable from outside the daemon. The daemon builds its
+// transcribers here (daemon.fillDeps); the voice-corpus harness (issue #143)
+// has to bias its whisper runs identically or it would be measuring a
+// pipeline nobody uses — and a harness that hard-codes "The assistant is
+// called Jarvix." would keep passing after the user renames the assistant or
+// teaches a word, which is exactly the regression the corpus is for.
+//
+// taught is nil when there is no vocabulary store to consult (the feature is
+// off, or the caller has none). That is a legitimate state, not an error, and
+// it must be expressed as a nil func rather than as a nil store: a typed-nil
+// *vocabulary.Store behind an interface reads as present and panics on first
+// use, which is the kind of mistake this signature makes impossible.
+func (c Config) STTBiasPromptFunc(taught func() []string) func() string {
+	if taught == nil {
+		return c.STTBiasPrompt
+	}
+	return func() string { return c.STTBiasPromptWith(taught()) }
+}
+
 // capitalise upper-cases the first rune. The bias prompt presents the
 // assistant's name as the proper noun it is, and the capitalised token is the
 // one whisper renders a sentence-leading proper noun with — see STTBiasPrompt
