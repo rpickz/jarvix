@@ -146,6 +146,115 @@ JarvixWindowCase {
     }
   }
 
+  // Every control the card offers, captured while it is still pending —
+  // captured, because the point of the two tests below is what these objects
+  // look like *after* something has happened to the card, and by then a
+  // control that left the tab chain can no longer be found by searching it.
+  function cardControls(win) {
+    var names = ["Permission question:", "Approve — run the command",
+      "Decline — do not run the command", "Approve and do not ask again",
+      "Approve for this conversation only"]
+    var found = []
+    for (var i = 0; i < names.length; i++) {
+      var control = Probe.control(win, names[i])
+      verify(control !== null, "the pending card has no reachable " + JSON.stringify(names[i])
+        + "; reachable controls were: " + JSON.stringify(Probe.names(win)))
+      found.push(control)
+    }
+    return found
+  }
+
+  // `activeFocusOnTab` is a constant on this card, and it has to be (#203).
+  //
+  // Qt refuses to clear it on the item that currently holds focus — it logs
+  // "Cannot set activeFocusOnTab to false once item is the active focus item"
+  // and leaves the property alone — so a card that drove tab-reachability
+  // from its own state changed reachability underneath whoever was answering
+  // it, and changed it differently depending on where their keyboard happened
+  // to be. This card is how a permission decision gets made; the tab order
+  // shifting mid-decision is the worst possible moment for it.
+  //
+  // What is allowed to change is `enabled`, which Qt handles properly: it
+  // moves focus off the item instead of refusing, and its focus chain already
+  // skips whatever is disabled or invisible.
+  function test_the_cards_tab_reachability_never_changes_underneath_the_keyboard() {
+    var win = ask()
+    var controls = cardControls(win)
+
+    for (var i = 0; i < controls.length; i++) {
+      verify(controls[i].activeFocusOnTab,
+        "a pending card control is not in the tab chain: "
+        + JSON.stringify(Probe.accessibleName(controls[i])))
+    }
+
+    // Sit on the card the way somebody deciding does, and then let everything
+    // that can happen to it while they sit there, happen: the daemon starts
+    // the clock, and then the daemon answers.
+    controls[0].forceActiveFocus()
+    verify(controls[0].activeFocus, "the card would not take focus")
+
+    FakeDaemon.event("tool.confirmation_deadline", { deadline_ms: Date.now() + 12000 })
+    settle()
+    FakeDaemon.event("tool.confirmed", { tool: "shell" })
+    settle()
+
+    for (var j = 0; j < controls.length; j++) {
+      verify(controls[j].activeFocusOnTab,
+        "answering the card changed activeFocusOnTab on "
+        + JSON.stringify(Probe.accessibleName(controls[j]))
+        + " — the tab chain must be described by what the card *is*, "
+        + "not edited while somebody is standing on it")
+    }
+
+    // And the answered card is out of the tab chain all the same, because
+    // that is `enabled`'s job now: a transcript of old questions must not
+    // collect a dead tab stop per question.
+    verify(Probe.control(win, "Permission question:") === null,
+      "the answered card is still reachable by Tab; reachable controls were: "
+      + JSON.stringify(Probe.names(win)))
+  }
+
+  // The consequence, stated as the thing a user would notice: what Tab can
+  // reach after the question is answered must not depend on where the
+  // keyboard was when it was answered.
+  //
+  // This is the assertion the unfixed window fails. Qt's refusal to clear
+  // `activeFocusOnTab` on the focused item left the answered card in the tab
+  // chain forever — but only the card the user happened to be sitting on. The
+  // identical card beside it, answered while the keyboard was elsewhere, left
+  // as intended. Two cards in the same state, two different tab orders.
+  function test_answering_leaves_the_same_tab_chain_wherever_the_keyboard_was() {
+    var withKeyboardOnTheCard = reachableAfterAnswering(true)
+    var withKeyboardElsewhere = reachableAfterAnswering(false)
+
+    compare(JSON.stringify(withKeyboardOnTheCard), JSON.stringify(withKeyboardElsewhere),
+      "the answered card's tab chain depends on where the keyboard was when the "
+      + "daemon answered it")
+  }
+
+  // Asks, optionally puts the keyboard on the card, has the daemon answer,
+  // and reports what Tab can still reach.
+  function reachableAfterAnswering(focusTheCard) {
+    var win = ask()
+    if (focusTheCard) {
+      var card = Probe.control(win, "Permission question:")
+      verify(card !== null, "the card itself is not in the focus chain")
+      card.forceActiveFocus()
+      verify(card.activeFocus, "the card would not take focus")
+    }
+
+    FakeDaemon.event("tool.confirmed", { tool: "shell" })
+    settle()
+    var reachable = Probe.names(win)
+
+    // Its own window and its own bus each time: the fixture's cleanup runs
+    // between test functions, not between two windows inside one.
+    win.visible = false
+    tc.win = null
+    FakeDaemon.reset()
+    return reachable
+  }
+
   // The countdown is the card's only moving part, and it is words. A card that
   // conveyed "you are running out of time" by turning red would say nothing at
   // all to a reader who cannot see the colour.

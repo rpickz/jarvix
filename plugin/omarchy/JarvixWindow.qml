@@ -7818,9 +7818,36 @@ FloatingWindow {
           text: model.text
           width: parent.width
           wrapMode: Text.Wrap
+
+          // The rendered size, held once so that both font bindings can read
+          // it without either depending on the other.
+          //
+          // Deriving letter spacing from `font.pixelSize` instead — which is
+          // what this delegate did until issue #203 — is a binding loop.
+          // `font` is one grouped value, not a bag of independent
+          // properties: reading any member subscribes to the whole group and
+          // writing any member notifies it, so a letterSpacing binding that
+          // reads pixelSize depends on a property that same binding
+          // participates in. Qt says so at runtime ("Binding loop detected
+          // for property font.letterSpacing") and then breaks the cycle the
+          // only way it can, by dropping a binding. Which one it drops is an
+          // evaluation-order detail, so `ui.text_size` and
+          // `ui.letter_spacing` could quietly stop applying, or apply to some
+          // messages and not others. Those are the reading-comfort settings
+          // (#121) — set deliberately, for readability — and a setting that
+          // silently stops working is worse than one that was never offered.
+          //
+          // Reading a plain property breaks the cycle without moving a single
+          // number: this is the same expression the pixelSize binding always
+          // had, so at the defaults (text size ×1.0, letter spacing 0.0) both
+          // lines below still reduce to the pre-#121 hard-coded rendering
+          // that TestReadingComfortDefaultsPinTheHardCodedRendering pins.
+          readonly property int bodyPixelSize:
+            Math.max(1, Math.round(Style.font.subtitle * win.chatTextScale))
+
           font.family: Style.font.family
-          font.pixelSize: Math.max(1, Math.round(Style.font.subtitle * win.chatTextScale))
-          font.letterSpacing: messageBody.font.pixelSize * win.chatLetterSpacing
+          font.pixelSize: messageBody.bodyPixelSize
+          font.letterSpacing: messageBody.bodyPixelSize * win.chatLetterSpacing
           lineHeight: win.chatLineSpacing
           lineHeightMode: Text.ProportionalHeight
           // The pending turn (issue #158) reads a shade quieter than an
@@ -7956,7 +7983,35 @@ FloatingWindow {
           // The focus ring: a colour *and* a thicker border, like the composer.
           border.color: confirmCard.activeFocus ? Color.accent : Util.alpha(Color.accent, 0.5)
           border.width: confirmCard.activeFocus ? 2 : 1
-          activeFocusOnTab: visible && model.outcome === ""
+
+          // An unanswered card is live equipment; an answered one is a record
+          // of what was asked. That difference is carried by `enabled` and
+          // never by `activeFocusOnTab`, which stays true for the whole life
+          // of the delegate (issue #203).
+          //
+          // The two are not interchangeable. Qt refuses to clear
+          // `activeFocusOnTab` on the item that currently holds focus — it
+          // logs "Cannot set activeFocusOnTab to false once item is the
+          // active focus item" and leaves the property as it was — so the old
+          // binding, `visible && model.outcome === ""`, made tab-reachability
+          // depend on focus history rather than on state: a card the user was
+          // sitting on when the daemon answered stayed in the tab chain
+          // forever, while the identical card beside it left as intended.
+          // Tab order shifting underneath somebody mid-decision is exactly
+          // the moment keyboard access matters most, since this card is how a
+          // permission decision is made.
+          //
+          // Clearing `enabled` is the transition Qt does support: it moves
+          // focus off the item rather than refusing, and its focus chain
+          // already skips items that are disabled or not visible, so an
+          // answered card leaves the tab order and an invisible one (this
+          // Rectangle exists on every transcript row) was never in it. The
+          // buttons below follow the same rule for the same reason, and every
+          // one of them is already gated on `model.outcome === ""` too, so
+          // nothing about what is reachable — or how any of it looks — has
+          // changed; only the property that expresses it.
+          enabled: model.outcome === ""
+          activeFocusOnTab: true
           Accessible.role: Accessible.Grouping
           Accessible.name: "Permission question: " + model.text
             + " Command: " + model.command
@@ -8048,7 +8103,7 @@ FloatingWindow {
                 color: Util.alpha(Color.accent, approveButton.activeFocus ? 0.35 : 0.18)
                 border.color: Color.accent
                 border.width: approveButton.activeFocus ? 2 : 1
-                activeFocusOnTab: enabled
+                activeFocusOnTab: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Approve — run the command"
                 Keys.onReturnPressed: win.answerConfirmation(true)
@@ -8078,7 +8133,7 @@ FloatingWindow {
                 color: Util.alpha(Color.popups.text, declineButton.activeFocus ? 0.18 : 0.08)
                 border.color: Util.alpha(Color.popups.text, 0.5)
                 border.width: declineButton.activeFocus ? 2 : 1
-                activeFocusOnTab: enabled
+                activeFocusOnTab: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Decline — do not run the command"
                 Keys.onReturnPressed: win.answerConfirmation(false)
@@ -8120,7 +8175,7 @@ FloatingWindow {
                   rememberAlwaysButton.activeFocus ? 0.18 : 0.06)
                 border.color: Util.alpha(Color.popups.text, 0.4)
                 border.width: rememberAlwaysButton.activeFocus ? 2 : 1
-                activeFocusOnTab: enabled
+                activeFocusOnTab: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Approve and do not ask again — adds the rule "
                   + win.confirmRememberPattern + " permanently"
@@ -8152,7 +8207,7 @@ FloatingWindow {
                   rememberConversationButton.activeFocus ? 0.18 : 0.06)
                 border.color: Util.alpha(Color.popups.text, 0.4)
                 border.width: rememberConversationButton.activeFocus ? 2 : 1
-                activeFocusOnTab: enabled
+                activeFocusOnTab: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Approve for this conversation only — allows "
                   + win.confirmRememberPattern
