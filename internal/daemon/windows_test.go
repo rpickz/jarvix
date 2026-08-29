@@ -43,7 +43,7 @@ func TestWindowToolsAreRegisteredWhenEnabled(t *testing.T) {
 	names := strings.Join(d.registry.Names(), ",")
 	for _, want := range []string{
 		tools.ListWindowsToolName, tools.FocusWindowToolName, tools.MoveWindowToolName,
-		tools.CloseWindowToolName, tools.LaunchAppToolName,
+		tools.CloseWindowToolName, tools.LaunchAppToolName, tools.ListAppsToolName,
 	} {
 		if !strings.Contains(names, want) {
 			t.Errorf("registered tools = %q, missing %q", names, want)

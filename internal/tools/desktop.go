@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/launchkind"
 	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/placement"
 )
@@ -35,10 +37,13 @@ import (
 //     words are matched against that inventory here, in Go; nothing it says
 //     reaches argv.
 //   - Workspace numbers are range-checked integers.
-//   - An application launch resolves to a binary through the configured
-//     allow list or exec.LookPath, and is executed directly. No shell is
-//     involved at any point, so a name containing `;` is a name that does not
-//     resolve, never a command.
+//   - An application launch resolves to a program through the configured
+//     allow list and the launch catalogue, and is executed as an argv. No
+//     shell is involved at any point, so a name containing `;` is a name that
+//     does not resolve, never a command. The extra elements a terminal-hosted
+//     launch carries (#194) come from a curated per-terminal table and from
+//     the program's own desktop entry — never from the model, which still
+//     sends one name and nothing else (ADR 0022).
 //
 // The other property worth stating is that a resolved window stays resolved.
 // Everything after resolution — the spoken confirmation, the wait for the
@@ -57,6 +62,7 @@ const (
 	MoveWindowToolName  = "desktop.move_window"
 	CloseWindowToolName = "desktop.close_window"
 	LaunchAppToolName   = "desktop.launch_app"
+	ListAppsToolName    = "desktop.list_apps"
 	NameWindowToolName  = "desktop.name_window"
 )
 
@@ -84,12 +90,16 @@ const (
 	maxSpokenTitle = 60
 	// maxListedWindows bounds how much of a busy desktop reaches the model.
 	maxListedWindows = 20
+	// maxListedApps bounds how much of the launch catalogue reaches the model
+	// in one answer. A catalogue read is a step towards a spoken sentence, so
+	// it is bounded by what a person can be told, not by what is installed.
+	maxListedApps = 12
 )
 
-// Desktop is the shared state behind the five window tools: the compositor
-// seam, the short-lived inventory cache, and the resolutions made for pending
-// confirmations. The tools themselves are thin — Tools() hands out one per
-// verb, all pointing here.
+// Desktop is the shared state behind the desktop tools: the compositor seam,
+// the short-lived inventory cache, the launch catalogue, and the resolutions
+// made for pending confirmations. The tools themselves are thin — Tools()
+// hands out one per verb, all pointing here.
 type Desktop struct {
 	comp     desktop.Compositor
 	launcher appLauncher
@@ -100,10 +110,19 @@ type Desktop struct {
 	// PATH", which is the sensible default for a machine whose owner is
 	// talking to it: launching an installed application is not an escalation,
 	// and the launch verb asks first anyway.
-	apps    []string
-	ttl     time.Duration
-	timeout time.Duration
-	log     *slog.Logger
+	apps []string
+	// catalogue is what this machine can launch and how each one starts
+	// (#194). It is the answer to "is claude a window or a command?", and it
+	// is held rather than rebuilt per launch because the scan behind it is
+	// the expensive-per-launch thing the ticket forbids.
+	catalogue *launchkind.Catalogue
+	// terminal is the program a terminal-kind launch opens inside — the same
+	// [intents] terminal that "open a terminal" already uses, so the user
+	// names their terminal once and both features obey it.
+	terminal string
+	ttl      time.Duration
+	timeout  time.Duration
+	log      *slog.Logger
 	// onAction is told about each completed action so the overlay can show
 	// what Jarvix did. Nil in tests.
 	onAction func(verb, target string)
@@ -147,6 +166,14 @@ type DesktopOptions struct {
 	// Apps is the launch allow list: bare binary names or absolute paths.
 	// Empty allows anything resolvable on PATH.
 	Apps []string
+	// Catalogue classifies what this machine can launch (#194). Nil builds
+	// one over this machine's desktop entries and PATH.
+	Catalogue *launchkind.Catalogue
+	// Terminal is the program a command-line application is opened inside —
+	// [intents] terminal. Empty uses intent.DefaultTerminal, so a daemon
+	// configured before this option existed behaves as its "open a terminal"
+	// intent already does.
+	Terminal string
 	// ScrubEnv names extra environment variables to withhold from launched
 	// applications, on top of the built-in secret-name patterns.
 	ScrubEnv []string
@@ -186,6 +213,8 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 		launcher:  opts.launcher,
 		lookPath:  opts.lookPath,
 		apps:      append([]string(nil), opts.Apps...),
+		catalogue: opts.Catalogue,
+		terminal:  strings.TrimSpace(opts.Terminal),
 		ttl:       opts.InventoryTTL,
 		timeout:   opts.Timeout,
 		log:       opts.Log,
@@ -203,6 +232,15 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 	}
 	if d.lookPath == nil {
 		d.lookPath = exec.LookPath
+	}
+	if d.terminal == "" {
+		d.terminal = intent.DefaultTerminal
+	}
+	if d.catalogue == nil {
+		// Built over the same PATH seam the allow list resolves through, so a
+		// test that says what is installed says it once and both halves of the
+		// launch agree about the machine.
+		d.catalogue = launchkind.New(launchkind.Options{LookPath: d.lookPath})
 	}
 	if d.ttl <= 0 {
 		d.ttl = DefaultInventoryTTL
@@ -225,14 +263,16 @@ const (
 	verbMove
 	verbClose
 	verbLaunch
+	verbListApps
 	verbName
 )
 
-// Tools returns the six window tools, in the order they are registered and
+// Tools returns the seven window tools, in the order they are registered and
 // therefore offered to the model: read first, then act.
 func (d *Desktop) Tools() []Tool {
 	return []Tool{
 		&windowTool{d: d, verb: verbList},
+		&windowTool{d: d, verb: verbListApps},
 		&windowTool{d: d, verb: verbFocus},
 		&windowTool{d: d, verb: verbMove},
 		&windowTool{d: d, verb: verbClose},
@@ -269,6 +309,8 @@ func (t *windowTool) Name() string {
 		return MoveWindowToolName
 	case verbClose:
 		return CloseWindowToolName
+	case verbListApps:
+		return ListAppsToolName
 	case verbName:
 		return NameWindowToolName
 	default:
@@ -300,15 +342,23 @@ func (t *windowTool) Description() string {
 		return "Close one of the user's open windows, exactly as clicking its close button would: " +
 			"the application may still ask them to save. Describe the window as the user did. Use " +
 			"this only when they asked to close something, and never to tidy up on your own."
+	case verbListApps:
+		return "List what can be started on this computer and how each one starts — in a window of " +
+			"its own, or inside a terminal. Give \"match\" to narrow it to names containing that " +
+			"word. Use it when the user names something you are not sure this computer has, or " +
+			"asks what you can open, rather than guessing from what is usually installed on Linux."
 	case verbName:
 		return "Give one of the user's open windows a short spoken nickname, when they ask to call " +
 			"or name a window something (\"call this window builds\"). The name must be a single " +
 			"word; afterwards the user can say it anywhere they would describe a window. Use it " +
 			"only when the user chose the name — never invent nicknames on your own."
 	default:
-		return "Start an application on the user's computer by name (\"firefox\", \"spotify\"). Use " +
-			"it when they ask you to open or launch something. It starts the program and returns " +
-			"immediately; the window appears on its own."
+		return "Start a program on the user's computer by name (\"firefox\", \"spotify\", " +
+			"\"claude\"). Use it when they ask you to open or launch something. It works out how " +
+			"that program is started on this machine — a graphical application opens a window of " +
+			"its own, a command-line tool opens inside the user's terminal — and the result says " +
+			"which happened. Say what the result says, never that a window is appearing unless it " +
+			"says so."
 	}
 }
 
@@ -325,6 +375,14 @@ func (t *windowTool) Schema() json.RawMessage {
 	switch t.verb {
 	case verbList:
 		return json.RawMessage(`{"type": "object", "properties": {}}`)
+	case verbListApps:
+		return json.RawMessage(`{
+		"type": "object",
+		"properties": {"match": {
+			"type": "string",
+			"description": "Narrow the list to programs whose name contains this, as the user said it (\"claude\", \"chat\"). Leave it out to list the applications this computer has."
+		}}
+	}`)
 	case verbFocus, verbClose:
 		return json.RawMessage(`{
 		"type": "object",
@@ -477,6 +535,7 @@ type windowArgs struct {
 	Window    string `json:"window"`
 	Workspace int    `json:"workspace"`
 	App       string `json:"app"`
+	Match     string `json:"match"`
 	Name      string `json:"name"`
 	Monitor   string `json:"monitor"`
 	Mode      string `json:"mode"`
@@ -537,6 +596,9 @@ func (t *windowTool) Execute(ctx context.Context, input json.RawMessage) (string
 	}
 	if t.verb == verbList {
 		return t.d.list(ctx)
+	}
+	if t.verb == verbListApps {
+		return t.d.listApps(args.Match), nil
 	}
 	if t.verb == verbName {
 		return t.d.nameWindow(ctx, args.Window, args.Name)
@@ -772,17 +834,32 @@ func (d *Desktop) list(ctx context.Context) (string, error) {
 		"application — say what is open, not every title, and never read out identifiers or raw data.", nil
 }
 
-// launch starts an application.
+// launch starts a program, the way this machine starts that program.
+//
+// The shape of this function is the ticket (#194). It used to resolve a name
+// to a binary and exec it, which is right for an application and wrong for a
+// command: `claude` resolved, started with no terminal and no stdin, exited
+// immediately, and the user was told its window would appear. So the middle
+// step is now a classification — the catalogue says what this program is and
+// how it starts — and every branch out of here says what actually happened,
+// including the two that say we do not know.
 func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 	name := strings.TrimSpace(app)
 	if name == "" {
 		return "", fmt.Errorf("%s: empty application name", LaunchAppToolName)
 	}
-	binary, candidates, err := d.resolveApp(name)
+	candidates, err := d.resolveApp(name)
 	switch {
 	case len(candidates) > 1:
+		// Two things answering to one name is not a tie to break: a `claude`
+		// command and a Claude Desktop application are different programs
+		// that open different things, and picking one would be right half the
+		// time and confidently wrong the other half. The kinds are named in
+		// the question because they are what distinguishes the two answers.
+		d.log.Info("launch ambiguous", "component", "tools", "tool", LaunchAppToolName,
+			"app", name, "candidates", strings.Join(programNames(candidates), ","))
 		return fmt.Sprintf("Several applications match %q: %s. Ask the user which one they meant "+
-			"and call again with that name. Do not guess.", name, strings.Join(candidates, ", ")), nil
+			"and call again with that name. Do not guess.", name, describePrograms(candidates)), nil
 	case err != nil:
 		// A dead-end refusal when a near-match is installed costs the user
 		// the feature: told "use chrome" on a chromium machine, the model had
@@ -813,38 +890,176 @@ func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 			"sentence, and do not retry.", name, err), nil
 	}
 
-	if err := d.launcher.Launch(ctx, binary); err != nil {
+	program := candidates[0]
+	started := program.Name
+
+	// Nothing on this machine says which kind it is, so nothing here may act
+	// as though it did. Saying what is not known and asking is the whole of
+	// the answer — the alternative is a coin toss dressed as expertise.
+	if program.Kind == launchkind.KindUnknown {
+		d.log.Info("launch unclassified", "component", "tools", "tool", LaunchAppToolName,
+			"app", name, "reason", program.Reason.Because())
+		d.publishRefusal("launch", started, "I cannot tell how it starts")
+		return fmt.Sprintf("%s is installed, but I cannot tell whether it opens a window of its own "+
+			"or runs inside a terminal: %s. Ask the user which it is, in one short sentence, and "+
+			"tell them they can settle it for good in the settings under the launch overrides. Do "+
+			"not launch it and do not describe anything as opened.", started,
+			program.Reason.Because()), nil
+	}
+
+	argv, identity, err := d.catalogue.Command(program, d.terminal)
+	if err != nil {
+		// An unknown or missing terminal is a fact about the configuration,
+		// not about the program, and the sentence says which — a guessed `-e`
+		// would be the same failure with an extra step (ADR 0061).
+		d.log.Info("launch refused", "component", "tools", "tool", LaunchAppToolName,
+			"app", name, "kind", program.Kind.String(), "terminal", d.terminal,
+			"reason", err.Error())
+		d.publishRefusal("launch", started, err.Error())
+		return fmt.Sprintf("%s runs in a terminal, and %v. Tell the user that in one short sentence, "+
+			"and do not retry.", started, err), nil
+	}
+
+	if err := d.launcher.Launch(ctx, argv); err != nil {
 		d.log.Warn("launch failed", "component", "tools", "tool", LaunchAppToolName,
-			"app", name, "binary", binary, "error", err.Error())
+			"app", name, "argv", strings.Join(argv, " "), "error", err.Error())
 		// The launcher's error can carry paths and exec detail — operator
 		// material, already in the journal above. The bus gets the fact.
-		d.publishRefusal("launch", name, "it would not start")
+		d.publishRefusal("launch", started, "it would not start")
 		return fmt.Sprintf("%s would not start. Tell the user in one short sentence that it failed, "+
-			"and do not retry.", filepath.Base(binary)), nil
+			"and do not retry.", started), nil
 	}
-	started := filepath.Base(binary)
 	d.log.Info("application launched", "component", "tools", "tool", LaunchAppToolName,
-		"app", name, "binary", binary)
+		"app", name, "program", started, "kind", program.Kind.String(),
+		"identity", identity, "argv", strings.Join(argv, " "))
 	d.publish("launch", started)
+	if program.InTerminal() {
+		// The wording is the criterion. A command started in a terminal has a
+		// terminal window, and saying "its window will appear on its own"
+		// about it is the sentence that made this ticket exist.
+		return fmt.Sprintf("Started %s inside %s. Tell the user in one short sentence that it is "+
+			"running in a terminal — for example \"%s is running in a terminal\". Do not say a "+
+			"window will appear on its own.", started, launchkind.TerminalName(d.terminal),
+			started), nil
+	}
 	return fmt.Sprintf("Started %s. Tell the user in one short sentence that it is opening; its "+
 		"window will appear on its own.", started), nil
 }
 
-// resolveApp turns a spoken application name into a binary to execute.
+// programNames is the candidate names for a log line.
+func programNames(programs []launchkind.Program) []string {
+	names := make([]string, 0, len(programs))
+	for _, p := range programs {
+		names = append(names, p.Name)
+	}
+	return names
+}
+
+// describePrograms renders the candidates for the question the user is asked,
+// each with what starting it would do. Without the kinds the question is
+// "claude or claude-desktop?", which asks the user to know what this code was
+// supposed to work out; with them it is a choice between two outcomes.
+func describePrograms(programs []launchkind.Program) string {
+	parts := make([]string, 0, len(programs))
+	for _, p := range programs {
+		name := p.Name
+		if p.Display != "" && !strings.EqualFold(p.Display, p.Name) {
+			name += " (" + p.Display + ")"
+		}
+		parts = append(parts, name+", which "+startsWith(p))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// startsWith is the clause describing what starting one program does.
+func startsWith(p launchkind.Program) string {
+	switch p.Kind {
+	case launchkind.KindTerminal:
+		return "runs in a terminal"
+	case launchkind.KindGraphical:
+		return "opens a window"
+	default:
+		return "I cannot classify"
+	}
+}
+
+// listApps is the catalogue the model consults (#194): what can be started
+// here, and how each one starts.
 //
-// Three gates, in order, and the order is the security argument: the name must
-// look like a program name (never a path, an argument, or shell syntax), it
-// must be on the allow list when one is configured, and it must resolve
-// through exec.LookPath. Only then does anything run — and it runs directly,
-// with that one argument and no shell.
-func (d *Desktop) resolveApp(name string) (binary string, candidates []string, err error) {
+// It exists so that "launch Claude" does not rest on the model's idea of what
+// a Linux machine usually has. The model can look, and what it finds is this
+// machine — including, crucially, whether the thing it is about to name opens
+// a window or needs a terminal.
+func (d *Desktop) listApps(match string) string {
+	query := strings.ToLower(strings.TrimSpace(match))
+	found, total := d.catalogue.List(query, maxListedApps)
+	if len(d.apps) > 0 {
+		// With an allow list configured, the allow list IS the catalogue.
+		// Filtering the machine's would give a total for programs the user
+		// never permitted, and offering the model a name the launcher then
+		// refuses is inviting a call that cannot work.
+		found, total = nil, 0
+		for _, entry := range d.apps {
+			name := strings.ToLower(filepath.Base(entry))
+			if query != "" && !strings.Contains(name, query) {
+				continue
+			}
+			programs := d.classify(entry)
+			if len(programs) == 0 {
+				continue
+			}
+			total++
+			if len(found) < maxListedApps {
+				found = append(found, programs[0])
+			}
+		}
+	}
+	subject := "programs on this computer"
+	if query != "" {
+		subject = fmt.Sprintf("programs matching %q", query)
+	}
+	if total == 0 {
+		return fmt.Sprintf("There are no %s. Tell the user in one short sentence that nothing here "+
+			"is called that, and do not retry with the same word.", subject)
+	}
+	lines := make([]string, 0, len(found))
+	for _, p := range found {
+		name := p.Name
+		if p.Display != "" && !strings.EqualFold(p.Display, p.Name) {
+			name += " (" + p.Display + ")"
+		}
+		lines = append(lines, name+" — "+startsWith(p))
+	}
+	summary := fmt.Sprintf("%d %s: %s.", total, subject, strings.Join(lines, "; "))
+	if total > len(found) {
+		summary += fmt.Sprintf(" (%d more not listed.)", total-len(found))
+	}
+	return summary + " Use these names with " + LaunchAppToolName + ". Summarise for the user in " +
+		"one or two spoken sentences — never read the list out in full."
+}
+
+// resolveApp turns a spoken application name into the classified programs it
+// could mean.
+//
+// Three gates, in order, and the order is still the security argument: the
+// name must look like a program name (never a path, an argument, or shell
+// syntax), it must be on the allow list when one is configured, and it must
+// resolve to something this machine actually has. Only then does anything run
+// — and it runs from an argv, with no shell anywhere in the sequence.
+//
+// What changed for #194 is the answer's shape. It used to be one binary, on
+// the assumption that a resolved name is a startable window; it is now the
+// candidates the catalogue found, each carrying how it starts. Several of
+// them is a question rather than a choice, exactly as a category matching
+// several installed applications always was.
+func (d *Desktop) resolveApp(name string) ([]launchkind.Program, error) {
 	if !validAppName(name) {
-		return "", nil, fmt.Errorf("%q is not a program name", name)
+		return nil, fmt.Errorf("%q is not a program name", name)
 	}
 	entry, permitted := d.allowedApp(name)
 	if permitted {
-		if path, lookErr := d.lookupBinary(entry); lookErr == nil {
-			return path, nil, nil
+		if found := d.classify(entry); len(found) > 0 {
+			return found, nil
 		}
 	}
 	// Not something installed under that name: it may be a category ("open a
@@ -855,16 +1070,45 @@ func (d *Desktop) resolveApp(name string) (binary string, candidates []string, e
 	case 0:
 	case 1:
 		allowed, _ := d.allowedApp(installed[0])
-		if path, lookErr := d.lookupBinary(allowed); lookErr == nil {
-			return path, nil, nil
+		if found := d.classify(allowed); len(found) > 0 {
+			return found, nil
 		}
 	default:
-		return "", installed, nil
+		var found []launchkind.Program
+		for _, member := range installed {
+			allowed, _ := d.allowedApp(member)
+			if programs := d.classify(allowed); len(programs) > 0 {
+				found = append(found, programs[0])
+			}
+		}
+		// One survivor is an answer, not a question: the others named
+		// something the catalogue could not actually launch.
+		if len(found) > 0 {
+			return found, nil
+		}
 	}
 	if !permitted {
-		return "", nil, fmt.Errorf("it is not on the allowed list (%s)", strings.Join(d.apps, ", "))
+		return nil, fmt.Errorf("it is not on the allowed list (%s)", strings.Join(d.apps, ", "))
 	}
-	return "", nil, errNotInstalled
+	return nil, errNotInstalled
+}
+
+// classify asks the catalogue what an allow-list entry is and how it starts.
+//
+// An entry may be an absolute path the user wrote, which is not a name the
+// catalogue can search for — so that case resolves the path first and asks
+// the catalogue to describe what it found. Either way the classification
+// comes from one place, so an application launched by name and the same
+// application launched by path cannot disagree about being an application.
+func (d *Desktop) classify(entry string) []launchkind.Program {
+	if !filepath.IsAbs(entry) {
+		return d.catalogue.Lookup(entry)
+	}
+	path, err := d.lookupBinary(entry)
+	if err != nil {
+		return nil
+	}
+	return []launchkind.Program{d.catalogue.Describe(path, path)}
 }
 
 // errNotInstalled is the refusal that may carry a near-match suggestion: only
@@ -1173,7 +1417,7 @@ func (d *Desktop) publishRefusal(verb, target, reason string) {
 // sentence is kept, so approving *this* window cannot close another one that
 // happens to match the same words a moment later.
 func (t *windowTool) Confirmation(input json.RawMessage) (command, summary string, ok bool) {
-	if t.verb == verbList || t.verb == verbFocus || t.verb == verbName {
+	if t.verb == verbList || t.verb == verbListApps || t.verb == verbFocus || t.verb == verbName {
 		// Allow-tier verbs; never asked about. Naming belongs here because it
 		// changes nothing on screen and the opposite assignment undoes it.
 		return "", "", false
@@ -1184,12 +1428,23 @@ func (t *windowTool) Confirmation(input json.RawMessage) (command, summary strin
 	}
 	if t.verb == verbLaunch {
 		name := strings.TrimSpace(args.App)
-		binary, candidates, err := t.d.resolveApp(name)
-		if err != nil || len(candidates) > 0 {
+		candidates, err := t.d.resolveApp(name)
+		if err != nil || len(candidates) != 1 {
 			return "", "", false // Execute will explain; there is nothing to confirm
 		}
-		app := filepath.Base(binary)
-		return "launch " + app, fmt.Sprintf("I want to open %s. Should I go ahead?", app), true
+		program := candidates[0]
+		if program.Kind == launchkind.KindUnknown {
+			return "", "", false // nothing to approve until we know what it would do
+		}
+		// The kind belongs in the question for the ADR 0014 reason: the user
+		// approves what will happen, and "open Claude" and "open Claude in a
+		// terminal" are two different things to say yes to.
+		if program.InTerminal() {
+			return "launch " + program.Name + " in a terminal",
+				fmt.Sprintf("I want to open %s in a terminal. Should I go ahead?", program.Name), true
+		}
+		return "launch " + program.Name,
+			fmt.Sprintf("I want to open %s. Should I go ahead?", program.Name), true
 	}
 	if t.verb == verbMove {
 		if !args.placed() {
@@ -1282,8 +1537,14 @@ func (d *Desktop) takePending(tool string, args windowArgs) (desktop.Window, boo
 
 // appLauncher starts an application. An interface so tests can prove what
 // would have been executed without starting anything.
+//
+// It takes an argv rather than a binary because a terminal-hosted program is
+// its terminal plus flags plus the command (#194), and there is no honest way
+// to say that as one string: rendering it into a command line would mean
+// quoting for a shell, and "we quote correctly" is a far weaker promise than
+// "there is no shell". The elements go to execve as they are.
 type appLauncher interface {
-	Launch(ctx context.Context, binary string) error
+	Launch(ctx context.Context, argv []string) error
 }
 
 // execLauncher starts an application as a detached child.
@@ -1302,11 +1563,15 @@ type execLauncher struct {
 }
 
 // Launch implements appLauncher.
-func (e *execLauncher) Launch(ctx context.Context, binary string) error {
+func (e *execLauncher) Launch(ctx context.Context, argv []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cmd := exec.Command(binary) //nolint:gosec // binary came from the allow list or exec.LookPath; the model never supplies a path
+	if len(argv) == 0 {
+		return errors.New("nothing to launch")
+	}
+	//nolint:gosec // argv[0] came from the allow list, exec.LookPath or a desktop entry's own Exec; every later element is from the curated terminal table or that entry, never from the model
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = scrubbedEnv(os.Environ(), e.scrubEnv)
 	cmd.Dir, _ = os.UserHomeDir()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil

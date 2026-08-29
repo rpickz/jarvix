@@ -227,6 +227,11 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 // registry (ADR 0015) and the [ai] space is pruned from the settings view
 // before the tool sees it, so there is nothing here a read could leak that
 // the prompt does not already carry.
+// desktop.list_apps (#194) is a read of what is installed and how each thing
+// starts. It runs nothing, and asking before it would be worse than a toll
+// booth: the tool exists so the model can check the machine instead of
+// guessing at it, and a question in front of that check is an incentive to
+// skip the check and guess.
 // desktop.name_window (#126) sits with the window reads for the focus
 // reason: assigning a nickname changes nothing on screen, enters nothing
 // anywhere, and the opposite assignment undoes it exactly. The user also
@@ -245,6 +250,7 @@ func compileWordPatterns(key string, patterns []string) ([][]string, error) {
 var builtinToolDefaults = map[string]PolicyDecision{
 	"artifact.create":           PolicyAllow,
 	ListWindowsToolName:         PolicyAllow,
+	ListAppsToolName:            PolicyAllow,
 	FocusWindowToolName:         PolicyAllow,
 	NameWindowToolName:          PolicyAllow,
 	MemoryRememberToolName:      PolicyAllow,

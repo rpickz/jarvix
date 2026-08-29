@@ -199,6 +199,10 @@ func routineRunner(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		Compositor:  compositor,
 		Definitions: defs,
 		Log:         logger,
+		// The terminal a `Terminal=true` desktop entry opens inside (#194):
+		// the same one "open a terminal" and desktop.launch_app use, because
+		// the user named their terminal once.
+		Terminal: cfg.Intents.Terminal,
 		// The screen names a step may use (#180). Handed over as the store's
 		// live lookup rather than a snapshot, so a nickname assigned by voice
 		// is in force on the very next run — and so a runner rebuilt by a

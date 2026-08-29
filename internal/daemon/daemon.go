@@ -25,6 +25,7 @@ import (
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/knowledge"
+	"github.com/rpickz/jarvix/internal/launchkind"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/overlay"
@@ -446,8 +447,20 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	var windows *tools.Desktop
 	if cfg.Tools.Desktop || cfg.Tools.Typing.Enable {
 		windows = tools.NewDesktop(tools.DesktopOptions{
-			Compositor:  compositor,
-			Apps:        cfg.Tools.DesktopApps,
+			Compositor: compositor,
+			Apps:       cfg.Tools.DesktopApps,
+			// How each program on this machine starts (#194). Nothing is read
+			// here: the catalogue is built on the first question and rebuilt
+			// when the directories behind it change, so a daemon that is never
+			// asked to launch anything never scans an applications directory.
+			Catalogue: launchkind.New(launchkind.Options{
+				TerminalPrograms:  cfg.Tools.Launch.TerminalPrograms,
+				GraphicalPrograms: cfg.Tools.Launch.GraphicalPrograms,
+			}),
+			// One terminal setting, two features: "open a terminal" and
+			// "launch Claude" open the same program, because the user named
+			// their terminal once.
+			Terminal:    cfg.Intents.Terminal,
 			ScrubEnv:    providerKeyEnvNames(cfg),
 			PhraseOwner: router.owner,
 			Screens:     screens,
