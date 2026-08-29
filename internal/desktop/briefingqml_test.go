@@ -10,6 +10,11 @@ import (
 // This is a text scan because that is all a Go test can do to QML (see
 // composer_test.go and windowkill_test.go), and it watches the pieces that
 // are load-bearing rather than the layout, which is allowed to change.
+//
+// Kept after the QML suite landed (#174), for the same reason as the
+// situation tab's guard: a running test can show that the payload it sends is
+// rendered, never that the tab has no sentence of its own for the payloads it
+// does not send. The banned headings are internal/briefing's.
 func TestFocusTabRendersTheBriefingWithoutComposingIt(t *testing.T) {
 	source, err := os.ReadFile(pluginFilePath(t, "JarvixFocusTab.qml"))
 	if err != nil {

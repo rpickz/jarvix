@@ -17,6 +17,13 @@ import (
 //
 // A text scan, like every other QML guard in this package: QML cannot be parsed
 // by anything in this module, so a text scan is all a Go test can do to it.
+//
+// Kept after the QML suite landed (#174). tst_provenance.qml demonstrates the
+// general form of this rule by feeding a panel one source and requiring
+// nothing unbidden on the screen — but that only covers the payloads a test
+// happens to send. A tab that composed "I couldn't check" for a case no test
+// drives would still be inventing, and would still be wrong. The banned list
+// is keyed off the Go constants, so it covers every case at once.
 func TestTheSituationTabWordsNothingItself(t *testing.T) {
 	qml := situationTabSource(t)
 

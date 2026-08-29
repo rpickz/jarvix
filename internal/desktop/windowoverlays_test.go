@@ -12,6 +12,12 @@ import (
 // text scans because that is all a Go test can do to QML (the composer_test
 // precedent) — deliberately narrow, watching for the specific regressions
 // that would break the issue's anti-goals.
+//
+// Kept after the QML suite landed (#174). "No animation type appears anywhere
+// in this file" cannot be asked of a running window: the headless suite
+// renders in software with no frame clock a test can inspect, and a Behavior
+// that only fires on a property no test touches would be invisible either
+// way. The window-type ban is the same shape as the Quickshell.Wayland one.
 func TestWindowOverlaysAreStaticAndClickThrough(t *testing.T) {
 	source, err := os.ReadFile(pluginFilePath(t, "JarvixWindowOverlays.qml"))
 	if err != nil {

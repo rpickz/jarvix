@@ -101,6 +101,11 @@ func TestTheLexiconSectionUsesTheGenericEntryVerbs(t *testing.T) {
 // TestTheReminderFormPreviewsBeforeItSaves pins the one thing the form adds
 // over the spoken path, and pins that it adds nothing else: no clock
 // arithmetic, no time parsing, no wording of a moment.
+//
+// Kept after the QML suite landed (#174). "No clock arithmetic anywhere in
+// this file" is invisible at runtime: a window that resolved "tomorrow at 9"
+// itself would agree with the daemon on every input a test thinks to try, and
+// disagree on the one across a daylight-saving boundary that nobody does.
 func TestTheReminderFormPreviewsBeforeItSaves(t *testing.T) {
 	qml := readPlugin(t, "JarvixWindow.qml")
 	for _, want := range []string{
@@ -154,6 +159,12 @@ func TestTheFocusFormSendsOneWholeDraft(t *testing.T) {
 // that asked for it. The two new ones on the window's socket reuse the ranges
 // their features already own (reminders 850–899, approvals 900–949) rather than
 // inventing a third, and the focus tab's new id sits inside its own 500–599.
+//
+// Kept after the QML suite landed (#174). Request-id ranges are private
+// arithmetic between surfaces that never meet in one test: a collision shows
+// up as one surface silently handling another's reply, in a running window,
+// on a machine that happened to have both tabs open. The numbers are the only
+// place the separation is visible.
 func TestTheNewSurfacesKeepTheirRequestIdRanges(t *testing.T) {
 	window := readPlugin(t, "JarvixWindow.qml")
 	for _, want := range []string{

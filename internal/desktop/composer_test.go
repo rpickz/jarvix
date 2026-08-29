@@ -17,6 +17,12 @@ import (
 // is deliberately narrow: it watches for the window growing its own session
 // sequencing back, which is the specific regression that would put a second,
 // untested reading of "yes" in front of the permission gate.
+//
+// Kept after the QML suite landed (#174). tst_keyboard.qml types a question,
+// presses Enter and reads the session.text frame, which proves the happy
+// path. It cannot prove the absence of a *second* yes/no vocabulary in this
+// file: a window that interpreted "yes" itself would answer identically for
+// every phrasing a test tries, and differently for the one it does not.
 func TestConversationWindowLeavesTypedTurnDecisionsToTheDaemon(t *testing.T) {
 	source, err := os.ReadFile(pluginFilePath(t, "JarvixWindow.qml"))
 	if err != nil {

@@ -92,6 +92,12 @@ func TestTheStepFormShowsACautionItCanSaveThrough(t *testing.T) {
 // The window must not spell a class flag, a launch-policy list it composed
 // itself, or any rule about what an argument may contain — those are the
 // daemon's, and a copy here would be the one that goes stale.
+//
+// Kept after the QML suite landed (#174). The banned strings are the
+// daemon's launching policy — --class, --app-id, a .desktop lookup, splitting
+// an argument on spaces. A window that re-derived them would send an argv the
+// daemon accepts, so every executed test would pass while the two
+// implementations quietly diverged.
 func TestTheStepFormDecidesNothingAboutLaunching(t *testing.T) {
 	section := stepFormSection(t)
 	for _, banned := range []string{"--class", "--app-id", "LookPath", ".desktop\"", "if_missing"} {
