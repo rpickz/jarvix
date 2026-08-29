@@ -222,6 +222,24 @@ func (i *Index) IDs() []string {
 	return append([]string(nil), i.order...)
 }
 
+// All returns every entry the index holds, in id order.
+//
+// Separate from Lookup because Lookup is the *step's* question — it trims a
+// `.desktop` suffix, so an id that genuinely ends in ".desktop"
+// (`org.telegram.desktop`, and every other reverse-DNS id) cannot be fetched
+// through it by its own id. A caller walking the index has already got the
+// ids and must not be made to guess which of them that rule mangles.
+func (i *Index) All() []Entry {
+	if i == nil {
+		return nil
+	}
+	out := make([]Entry, 0, len(i.order))
+	for _, id := range i.order {
+		out = append(out, i.entries[id])
+	}
+	return out
+}
+
 // Lookup finds the entry a step named.
 //
 // The id is matched exactly first and case-insensitively second. The

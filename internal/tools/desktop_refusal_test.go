@@ -51,6 +51,7 @@ func TestLaunchNearMatchRefusalPublishesTheSuggestion(t *testing.T) {
 func TestLaunchFailurePublishesAGenericReason(t *testing.T) {
 	stubApp(t, "firefox")
 	h := newHarness(t)
+	h.install(t, "firefox", "Exec=firefox")
 	// The launcher's error may carry paths and exec detail — operator
 	// material for the journal, not the bus.
 	h.launcher.err = errors.New("fork/exec /usr/bin/firefox: permission denied")

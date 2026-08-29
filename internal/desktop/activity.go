@@ -852,7 +852,9 @@ func SummariseToolArgs(tool, arguments string) string {
 	case "desktop.move_window":
 		workspace, _ := activityInt(args, "workspace")
 		return joinActivity(str("window"), fmt.Sprintf("workspace %d", workspace))
-	case "desktop.list_windows":
+	case "desktop.list_windows", "desktop.list_apps":
+		// Reads: the row says the verb happened, and there is nothing about
+		// the machine worth repeating into a feed the user is glancing at.
 		return ""
 	case "typing.type_text":
 		// Length only, never the characters (ADR 0023): the payload may be a

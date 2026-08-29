@@ -470,6 +470,19 @@ func settingRows() []Setting {
 			Get: func(c Config) any { return append([]string(nil), c.Tools.DesktopApps...) },
 			set: func(c *Config, v any) { c.Tools.DesktopApps = v.([]string) }},
 
+		// The launch overrides (#194). Lists, for the same reason
+		// desktop_apps is one: each entry is one program name, and the CLI's
+		// comma form ("claude,opencode") is how that is spelled from a shell.
+		// They are here rather than in a file the user has to find because a
+		// correction about their own machine is exactly the kind of thing the
+		// settings screen exists for (ADR 0054).
+		{Key: "tools.launch.terminal_programs", Label: "Programs to open inside a terminal", Type: TypeStringList, Reload: ReloadRestart,
+			Get: func(c Config) any { return append([]string(nil), c.Tools.Launch.TerminalPrograms...) },
+			set: func(c *Config, v any) { c.Tools.Launch.TerminalPrograms = v.([]string) }},
+		{Key: "tools.launch.graphical_programs", Label: "Programs that open their own window", Type: TypeStringList, Reload: ReloadRestart,
+			Get: func(c Config) any { return append([]string(nil), c.Tools.Launch.GraphicalPrograms...) },
+			set: func(c *Config, v any) { c.Tools.Launch.GraphicalPrograms = v.([]string) }},
+
 		// Typing (ADR 0023). Editable from the settings screen so the switch is
 		// where a user would look for it — and so turning it *off* is one
 		// click, which is the direction that has to be easy.

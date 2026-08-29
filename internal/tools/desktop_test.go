@@ -12,6 +12,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/launchkind"
 )
 
 // Every test here runs against a fake compositor and a fake launcher: nothing
@@ -25,10 +26,13 @@ type fakeLauncher struct {
 	err      error
 }
 
-func (f *fakeLauncher) Launch(_ context.Context, binary string) error {
+// Launch records the whole argv, joined for readability. Joined here and
+// nowhere else: what a test asserts on is the elements it was handed, and
+// nothing in the daemon ever turns an argv back into a command line.
+func (f *fakeLauncher) Launch(_ context.Context, argv []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.launched = append(f.launched, binary)
+	f.launched = append(f.launched, strings.Join(argv, " "))
 	return f.err
 }
 
@@ -57,6 +61,11 @@ type harness struct {
 	d        *Desktop
 	comp     *desktop.FakeCompositor
 	launcher *fakeLauncher
+	// appsDir is this test's applications directory. Every harness gets one,
+	// empty, so a launch test sees the machine it wrote and never the one it
+	// is running on — the desktop entries a launch classifies from are as
+	// much a fixture as the window list is.
+	appsDir  string
 	events   []string
 	refusals []string
 	mu       sync.Mutex
@@ -70,10 +79,13 @@ func newHarness(t *testing.T, windows ...desktop.Window) *harness {
 	h := &harness{
 		comp:     desktop.NewFakeCompositor(windows...),
 		launcher: &fakeLauncher{},
+		appsDir:  t.TempDir(),
 	}
 	h.d = NewDesktop(DesktopOptions{
 		Compositor: h.comp,
 		launcher:   h.launcher,
+		Catalogue:  h.catalogue(nil),
+		Terminal:   "ghostty",
 		OnAction: func(verb, target string) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -86,6 +98,64 @@ func newHarness(t *testing.T, windows ...desktop.Window) *harness {
 		},
 	})
 	return h
+}
+
+// catalogue builds the launch catalogue over this harness's own machine: the
+// applications directory it owns, and whatever PATH the test set up.
+func (h *harness) catalogue(lookPath func(string) (string, error)) *launchkind.Catalogue {
+	dir := h.appsDir
+	return launchkind.New(launchkind.Options{
+		EntryDirs: func() []string { return []string{dir} },
+		PathDirs:  func() []string { return filepath.SplitList(os.Getenv("PATH")) },
+		LookPath:  lookPath,
+	})
+}
+
+// launchkindCatalogue builds a catalogue over one applications directory and
+// the live PATH, with the user's overrides applied — the shape a config
+// reload produces.
+func launchkindCatalogue(appsDir string, windowed, terminal []string) *launchkind.Catalogue {
+	return launchkind.New(launchkind.Options{
+		EntryDirs:         func() []string { return []string{appsDir} },
+		PathDirs:          func() []string { return filepath.SplitList(os.Getenv("PATH")) },
+		TerminalPrograms:  terminal,
+		GraphicalPrograms: windowed,
+	})
+}
+
+// newHarnessWith builds the window tools with extra options, over the same
+// hermetic machine every harness gets: its own fake compositor, its own fake
+// launcher, its own applications directory, and a terminal that is a fixture
+// rather than whatever this computer happens to have configured.
+func newHarnessWith(t *testing.T, opts DesktopOptions) *harness {
+	t.Helper()
+	h := &harness{
+		comp:     desktop.NewFakeCompositor(testWindows()...),
+		launcher: &fakeLauncher{},
+		appsDir:  t.TempDir(),
+	}
+	opts.Compositor, opts.launcher = h.comp, h.launcher
+	if opts.Catalogue == nil {
+		opts.Catalogue = h.catalogue(opts.lookPath)
+	}
+	if opts.Terminal == "" {
+		opts.Terminal = "ghostty"
+	}
+	h.d = NewDesktop(opts)
+	return h
+}
+
+// install writes one desktop entry into the harness's applications directory.
+// A real file read by the real parser, which is hermetic in the way that
+// matters: nothing is launched, and the index under test is the one the
+// daemon runs.
+func (h *harness) install(t *testing.T, id string, keys ...string) {
+	t.Helper()
+	body := "[Desktop Entry]\nType=Application\nName=" + id + "\n" +
+		strings.Join(keys, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(h.appsDir, id+".desktop"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (h *harness) firedRefusals() []string {
@@ -442,6 +512,9 @@ func stubApp(t *testing.T, names ...string) string {
 func TestLaunchResolvesThroughPath(t *testing.T) {
 	dir := stubApp(t, "jarvix-test-app")
 	h := newHarness(t)
+	// An application: it ships a desktop entry, so it opens a window of its
+	// own and is started directly.
+	h.install(t, "jarvix-test-app", "Exec=jarvix-test-app")
 	out := h.run(t, LaunchAppToolName, map[string]any{"app": "jarvix-test-app"})
 	if !strings.Contains(out, "Started jarvix-test-app") {
 		t.Errorf("launch = %q", out)
@@ -473,10 +546,9 @@ func TestLaunchRefusesAnythingThatIsNotAProgramName(t *testing.T) {
 
 func TestLaunchHonoursTheAllowList(t *testing.T) {
 	dir := stubApp(t, "jarvix-allowed", "jarvix-forbidden")
-	h := &harness{comp: desktop.NewFakeCompositor(testWindows()...), launcher: &fakeLauncher{}}
-	h.d = NewDesktop(DesktopOptions{
-		Compositor: h.comp, launcher: h.launcher, Apps: []string{"jarvix-allowed"},
-	})
+	h := newHarnessWith(t, DesktopOptions{Apps: []string{"jarvix-allowed"}})
+	h.install(t, "jarvix-allowed", "Exec=jarvix-allowed")
+	h.install(t, "jarvix-forbidden", "Exec=jarvix-forbidden")
 	if out := h.run(t, LaunchAppToolName, map[string]any{"app": "jarvix-forbidden"}); !strings.Contains(out, "not on the allowed list") {
 		t.Errorf("forbidden = %q", out)
 	}
@@ -491,6 +563,8 @@ func TestLaunchHonoursTheAllowList(t *testing.T) {
 func TestLaunchAsksWhenACategoryMatchesSeveralInstalledApps(t *testing.T) {
 	stubApp(t, "firefox", "chromium")
 	h := newHarness(t)
+	h.install(t, "firefox", "Exec=firefox")
+	h.install(t, "chromium", "Exec=chromium")
 	out := h.run(t, LaunchAppToolName, map[string]any{"app": "browser"})
 	if !strings.Contains(out, "Several applications match") || !strings.Contains(out, "firefox") {
 		t.Errorf("launch = %q", out)
@@ -503,6 +577,7 @@ func TestLaunchAsksWhenACategoryMatchesSeveralInstalledApps(t *testing.T) {
 func TestLaunchResolvesACategoryWithOneInstalledApp(t *testing.T) {
 	stubApp(t, "jarvix-test-app", "logseq")
 	h := newHarness(t)
+	h.install(t, "logseq", "Exec=logseq")
 	if out := h.run(t, LaunchAppToolName, map[string]any{"app": "notes"}); !strings.Contains(out, "Started logseq") {
 		t.Errorf("launch = %q", out)
 	}
@@ -518,14 +593,14 @@ func TestLaunchNeedsAnApplication(t *testing.T) {
 // nearMatchHarness builds the window tools over a canned PATH, through the
 // injectable lookPath — the same seam routine capture uses — so what is
 // installed on the machine running the tests decides nothing.
-func nearMatchHarness(installed []string, apps ...string) *harness {
+func nearMatchHarness(t *testing.T, installed []string, apps ...string) *harness {
+	t.Helper()
 	onPath := make(map[string]bool, len(installed))
 	for _, name := range installed {
 		onPath[name] = true
 	}
-	h := &harness{comp: desktop.NewFakeCompositor(testWindows()...), launcher: &fakeLauncher{}}
-	h.d = NewDesktop(DesktopOptions{
-		Compositor: h.comp, launcher: h.launcher, Apps: apps,
+	return newHarnessWith(t, DesktopOptions{
+		Apps: apps,
 		lookPath: func(name string) (string, error) {
 			if onPath[name] {
 				return "/usr/bin/" + name, nil
@@ -533,7 +608,6 @@ func nearMatchHarness(installed []string, apps ...string) *harness {
 			return "", errors.New(name + ": executable file not found in $PATH")
 		},
 	})
-	return h
 }
 
 // TestLaunchRefusalNamesAnInstalledNearMatch pins issue #71's recovery: a
@@ -584,7 +658,7 @@ func TestLaunchRefusalNamesAnInstalledNearMatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := nearMatchHarness(tt.installed, tt.apps...)
+			h := nearMatchHarness(t, tt.installed, tt.apps...)
 			out := h.run(t, LaunchAppToolName, map[string]any{"app": tt.app})
 			if tt.quiet {
 				if !strings.Contains(out, "cannot be started") || strings.Contains(out, "instead") {
@@ -610,7 +684,7 @@ func TestLaunchRefusalNamesAnInstalledNearMatch(t *testing.T) {
 // TestInstalledNearMatchesAreBoundedAndDeduplicated: the refusal is one
 // spoken sentence, so the suggestions are capped and never repeat.
 func TestInstalledNearMatchesAreBoundedAndDeduplicated(t *testing.T) {
-	h := nearMatchHarness([]string{"chromium", "google-chrome-stable", "google-chrome",
+	h := nearMatchHarness(t, []string{"chromium", "google-chrome-stable", "google-chrome",
 		"firefox", "brave", "vivaldi"})
 	got := h.d.installedNearMatches("chrome")
 	// Pinned at three, not at the constant: the bound is the spoken-sentence
@@ -708,7 +782,7 @@ func TestToolSchemasAreValidJSON(t *testing.T) {
 			t.Errorf("%s has no description", tool.Name())
 		}
 	}
-	if got := len(h.d.Names()); got != 6 {
+	if got := len(h.d.Names()); got != 7 {
 		t.Errorf("Names() = %v", h.d.Names())
 	}
 }

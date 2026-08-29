@@ -58,6 +58,11 @@ type Options struct {
 	// search path. Lazily rather than at construction because a runner is
 	// rebuilt on every config reload and the entry index is a directory walk.
 	Resolver *Resolver
+	// Terminal is the program a `Terminal=true` desktop entry is opened
+	// inside — [intents] terminal (#194). Empty uses intent's default. It is
+	// on the runner rather than baked into the resolver because the resolver
+	// is built lazily and this is configuration, which the caller has.
+	Terminal string
 	// Launcher starts a resolved target — an argv, never a command line. Nil
 	// uses ExecLauncher, which starts a detached child the way
 	// desktop.launch_app does. Tests supply a recorder, so no test in this
@@ -105,6 +110,8 @@ type Runner struct {
 	// nothing else writes it after the first.
 	resolverMu sync.Mutex
 	resolver   *Resolver
+	// terminal is the configured terminal a Terminal=true entry opens inside.
+	terminal string
 
 	// now and timer are the run's clock, injectable so the appear-wait is
 	// deterministic in tests — the same shape the session engine uses, because
@@ -128,6 +135,7 @@ func New(opts Options) *Runner {
 		monitorNames:  opts.MonitorNicknames,
 		launcher:      opts.Launcher,
 		resolver:      opts.Resolver,
+		terminal:      strings.TrimSpace(opts.Terminal),
 		now:           time.Now,
 		timer: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTimer(d)
@@ -157,6 +165,9 @@ func (r *Runner) resolve() Resolver {
 	defer r.resolverMu.Unlock()
 	if r.resolver == nil {
 		built := DefaultResolver()
+		if r.terminal != "" {
+			built.Terminal = r.terminal
+		}
 		r.resolver = &built
 	}
 	return *r.resolver

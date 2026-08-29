@@ -146,6 +146,10 @@ type Tools struct {
 	// escalation, and the launch verb confirms first. Set it to pin the
 	// assistant to a shortlist.
 	DesktopApps []string `toml:"desktop_apps"`
+	// Launch is the user's override of how a program starts — see Launch.
+	// Empty on almost every machine, because the classification is right
+	// almost everywhere.
+	Launch Launch `toml:"launch"`
 	// Typing enables the typing.* tools. Off by default, the same way
 	// shell.run is — see Typing.
 	Typing Typing      `toml:"typing"`
@@ -1060,6 +1064,7 @@ func (c Config) Validate() error {
 				"tools.desktop_apps entry %q must be a program name or an absolute path (\"~\" is not expanded)", app))
 		}
 	}
+	problems = append(problems, c.launchProblems()...)
 	problems = append(problems, c.typingProblems()...)
 	problems = append(problems, c.validateAdvisors()...)
 	problems = append(problems, c.intentProblems()...)

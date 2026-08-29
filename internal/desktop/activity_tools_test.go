@@ -29,6 +29,7 @@ func TestActivityToolSummariesMatchRealToolNames(t *testing.T) {
 		{tools.CloseWindowToolName, `{"window":"kitty"}`, "kitty"},
 		{tools.MoveWindowToolName, `{"window":"slack","workspace":3}`, "slack · workspace 3"},
 		{tools.ListWindowsToolName, `{}`, ""},
+		{tools.ListAppsToolName, `{"match":"claude"}`, ""},
 		{tools.TypeTextToolName, `{"text":"ab"}`, "2 characters (text not shown)"},
 		{tools.PressKeyToolName, `{"key":"enter"}`, "enter"},
 		{tools.MemoryRememberToolName, `{"content":"abc"}`, "a fact of 3 characters (content not shown)"},
