@@ -150,6 +150,42 @@ func (u *Undoer) Last(ctx context.Context) (Outcome, error) {
 	return u.Apply(ctx, reversible.ID)
 }
 
+// Offer answers the question a surface listing the account has to ask before
+// it draws a control: **would a reversal of this record be attempted at all,
+// and if not, in what words?** (#210.)
+//
+// It lives here, beside Apply, rather than in whichever surface draws the
+// button, because it has to answer with Apply's own reasons. The two checks
+// below are the two Apply makes before it touches anything — the record's own
+// reversibility, and the gate under the identity of the action being reversed
+// — so a listing built on this cannot offer a control that refuses when
+// pressed, nor withhold one that would have worked. "The button did nothing"
+// is the shrug ADR 0064 exists to replace, and a second implementation of
+// eligibility in a client is how a feature grows one.
+//
+// What it deliberately does NOT predict is the clobber guard. Whether the file
+// still hashes to what the action left behind is a fact about the disk *at the
+// moment of the press*, and a listing that had checked it a minute ago would be
+// making a promise it had no way to keep. That refusal belongs at Apply, in
+// words, and the account is left unchanged by it so the offer still stands once
+// the person has looked.
+func (u *Undoer) Offer(rec Record) (bool, string) {
+	if !rec.Reversible() {
+		return false, rec.Why()
+	}
+	if u != nil && u.gate != nil && u.gate.Judge(rec.Tool) == DecisionDeny {
+		return false, gateRefusal(rec.Tool)
+	}
+	return true, ""
+}
+
+// gateRefusal is the clause a denied tool identity earns. Worded once so the
+// listing that withholds a control and the reversal that declines to run
+// cannot describe the same standing instruction in two different ways.
+func gateRefusal(tool string) string {
+	return "putting it back means another " + tool + ", and you have that turned off"
+}
+
 // Apply reverses one recorded action by id.
 func (u *Undoer) Apply(ctx context.Context, id string) (Outcome, error) {
 	if u == nil || u.store == nil {
@@ -172,8 +208,7 @@ func (u *Undoer) Apply(ctx context.Context, id string) (Outcome, error) {
 	if u.gate != nil && u.gate.Judge(rec.Tool) == DecisionDeny {
 		return Outcome{
 			Record: rec, Refused: true,
-			Spoken: fmt.Sprintf("I can't undo %s: putting it back means another %s, "+
-				"and you have that turned off.", rec.Summary, rec.Tool),
+			Spoken: fmt.Sprintf("I can't undo %s: %s.", rec.Summary, gateRefusal(rec.Tool)),
 		}, nil
 	}
 
