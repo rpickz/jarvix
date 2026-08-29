@@ -77,6 +77,14 @@ func TestWakeWordInterruptsSpeech(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
 	h.provider.Response = "Here is a long answer."
 	h.tts.Chunks = [][]byte{make([]byte, 1024)}
+	// The synthesizer is parked, so speech cannot finish and the turn cannot
+	// end until this test lets go of it (#215). Without it the whole turn is a
+	// microsecond long — the fake provider streams with no delay and the fake
+	// player does not sleep — and a runner that deschedules the test goroutine
+	// for a millisecond after the wake below has nothing left to interrupt.
+	hold := make(chan struct{})
+	h.tts.SetHold(hold)
+	defer close(hold)
 
 	if _, err := h.engine.StartSession(); err != nil {
 		t.Fatal(err)
@@ -84,7 +92,11 @@ func TestWakeWordInterruptsSpeech(t *testing.T) {
 	if err := h.engine.Submit("tell me a story"); err != nil {
 		t.Fatal(err)
 	}
-	h.waitFor(t, "assistant.started")
+	// tts.started, not assistant.started: the latter is published before the
+	// provider request is even opened and proves only that think() began, while
+	// this one is published as the session enters Speaking — which is the claim
+	// this test is about. Held speech makes it a barrier rather than a window.
+	h.waitFor(t, "tts.started")
 
 	if _, err := h.engine.StartWake(); err != nil {
 		t.Fatal(err)

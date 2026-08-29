@@ -111,9 +111,18 @@ func TestInterruptedExchangeSurvivesIntoTheNextSession(t *testing.T) {
 // think() can still be draining when the next session's Chat opens, and
 // mutating a shared Fake between the two is exactly the data race the
 // -race run exists to catch.
+//
+// parked is closed when the parked branch is entered, which is the only
+// barrier that says the *first* session claimed it. Waiting for an event
+// instead cannot: assistant.started is published before think() opens the
+// provider request, so a first session descheduled between the two lets the
+// second session take the parked branch and answer nothing (#215). A channel
+// field on a fake is the sanctioned pattern for this — a send is not a data
+// race, which is why testdiscipline's fake-field rule exempts them.
 type parkedFirstCall struct {
 	ai.Fake
-	calls atomic.Int32
+	calls  atomic.Int32
+	parked chan struct{}
 }
 
 func (p *parkedFirstCall) Chat(ctx context.Context, req ai.ChatRequest) (<-chan ai.Event, error) {
@@ -121,6 +130,8 @@ func (p *parkedFirstCall) Chat(ctx context.Context, req ai.ChatRequest) (<-chan 
 		return p.Fake.Chat(ctx, req)
 	}
 	ch := make(chan ai.Event, 1)
+	// Exactly one caller can see Add return 1, so this closes exactly once.
+	close(p.parked)
 	go func() {
 		defer close(ch)
 		<-ctx.Done()
@@ -135,17 +146,30 @@ func (p *parkedFirstCall) Chat(ctx context.Context, req ai.ChatRequest) (<-chan 
 // messages.
 func TestInterruptBeforeAnyAnswerCommitsTheQuestion(t *testing.T) {
 	h := newHarness(t, Options{})
-	provider := &parkedFirstCall{Fake: ai.Fake{Response: "Tomorrow looks clear."}}
+	provider := &parkedFirstCall{
+		Fake:   ai.Fake{Response: "Tomorrow looks clear."},
+		parked: make(chan struct{}),
+	}
 	// Rebuild the engine around the parked provider (the TestToolCallLoop
-	// pattern for a harness with a non-default collaborator).
+	// pattern for a harness with a non-default collaborator). The harness
+	// registered its cleanup against the subscription it made, so release that
+	// one here and register this one, or the replacement outlives the test.
+	h.cancel()
 	bus := NewBus(nil)
 	h.events, h.cancel = bus.Subscribe()
+	t.Cleanup(h.cancel)
 	h.engine = NewEngine(provider, h.stt, h.tts, h.recorder, h.player, nil, nil, bus, nil,
 		Options{Model: "test-model", HistoryTurns: 8})
 
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("what's the weather like?")
-	h.waitFor(t, "assistant.started")
+	// The barrier is the park itself, not an event: this says the first
+	// session's request reached the provider and is the call holding the parked
+	// branch. assistant.started would only say think() got as far as publishing
+	// it, which is before the request is opened — and a first session
+	// descheduled there hands the parked branch to the second session, which
+	// then answers nothing and the wait below times out (#215).
+	<-provider.parked
 
 	if _, err := h.engine.StartSession(); err != nil {
 		t.Fatal(err)

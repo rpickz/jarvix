@@ -110,7 +110,13 @@ func TestReplayIsRefusedWhileConversationSpeaks(t *testing.T) {
 
 func TestReplayIsRefusedWhileConversationThinks(t *testing.T) {
 	h := replayHarness(t)
-	h.provider.Delay = 50 * time.Millisecond
+	// The provider is stalled outright rather than merely slowed: a 50ms delay
+	// is a window a starved runner can close between the wait below and the
+	// replay, leaving the turn finished and the replay accepted — the #215
+	// family exactly, with two orders of magnitude more headroom than the
+	// sightings had. time.Hour is a barrier instead, and the turn is unwound by
+	// the cancel at the end rather than by running to completion.
+	h.provider.Delay = time.Hour
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("a slow one")
 	h.waitFor(t, "assistant.started")
@@ -118,7 +124,8 @@ func TestReplayIsRefusedWhileConversationThinks(t *testing.T) {
 	if _, _, err := h.engine.ReplaySpeech(2, "assistant"); !errors.Is(err, ErrReplayBusy) {
 		t.Fatalf("replay during a live turn: err = %v, want ErrReplayBusy", err)
 	}
-	h.collectUntil(t, "session.finished")
+	_ = h.engine.Cancel()
+	h.waitFor(t, "session.cancelled")
 	h.waitIdle(t)
 }
 

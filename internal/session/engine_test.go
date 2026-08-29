@@ -700,7 +700,12 @@ func TestConversationReturnsCommittedTurns(t *testing.T) {
 
 func TestConversationIncludesInFlightQuestion(t *testing.T) {
 	h := newHarness(t, Options{HistoryTurns: 8})
-	h.provider.Delay = 30 * time.Millisecond
+	// Stalled, not slowed. A 30ms delay is a window a loaded runner can close
+	// before the read below, and then the turn is over and the conversation
+	// holds two turns rather than the in-flight one — the #215 family, one
+	// scheduling hiccup away. time.Hour cannot close, whatever the runner does,
+	// and the cancel at the end unwinds the still-open turn.
+	h.provider.Delay = time.Hour
 
 	_, _ = h.engine.StartSession()
 	_ = h.engine.Submit("what is streaming?")
@@ -711,7 +716,8 @@ func TestConversationIncludesInFlightQuestion(t *testing.T) {
 	if len(turns) != 1 || turns[0].Role != "user" || turns[0].Text != "what is streaming?" {
 		t.Errorf("mid-session turns = %+v, want just the in-flight question", turns)
 	}
-	h.collectUntil(t, "session.finished")
+	_ = h.engine.Cancel()
+	h.waitFor(t, "session.cancelled")
 	h.waitIdle(t)
 }
 
