@@ -7,6 +7,8 @@
 // It lives under testdata so the go tool never builds it.
 package derivedgood
 
+import "time"
+
 type client struct{}
 
 func (c *client) Call(method string, args, out any) error { return nil }
@@ -139,4 +141,116 @@ func TestOptOutWithAReason(t any) {
 	var feed map[string]any
 	_ = c.Call("activity.get", nil, &feed)
 	_ = drainEvents(c)
+}
+
+// The #215 half: every legitimate way the tree orders an action against a turn
+// that is genuinely still in flight. None of these may be reported.
+
+type tts struct{}
+
+func (s *tts) SetHold(hold chan struct{}) {}
+
+type provider struct {
+	Delay  time.Duration
+	parked chan struct{}
+}
+
+func (h *harness) waitFor(t any, event string) map[string]any             { return nil }
+func (h *harness) collectUntil(t any, event string) map[string]any        { return nil }
+func (e *engine) StartWake() (string, error)                              { return "", nil }
+func (e *engine) StartSession() (string, error)                           { return "", nil }
+func (e *engine) Submit(text string) error                                { return nil }
+func (e *engine) Cancel() error                                           { return nil }
+func (e *engine) CancelSpeech() bool                                      { return false }
+func (e *engine) ReplaySpeech(n int, role string) (string, string, error) { return "", "", nil }
+func (e *engine) Conversation() []map[string]any                          { return nil }
+
+// The corrected sighting-A shape: the synthesizer is parked, so the turn
+// cannot end however the runner schedules it, and the wait is for the event
+// that says speech has actually begun.
+func TestWakeInterruptsHeldSpeech(t any) {
+	h := &harness{engine: &engine{}}
+	s := &tts{}
+	hold := make(chan struct{})
+	s.SetHold(hold)
+	defer close(hold)
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("tell me a story")
+	h.waitFor(t, "tts.started")
+	_, _ = h.engine.StartWake()
+}
+
+// The corrected sighting-C shape: the fake says when it has parked, and that
+// channel — not an event — is the barrier. There is no cause here at all, so
+// the rule has nothing to fire on, which is the point.
+func TestSupersessionOrderedByTheParkedCall(t any) {
+	h := &harness{engine: &engine{}}
+	p := &provider{parked: make(chan struct{})}
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what's the weather like?")
+	<-p.parked
+	_, _ = h.engine.StartSession()
+	h.waitFor(t, "session.cancelled")
+}
+
+// A provider stalled for an hour cannot produce a chunk, so the turn cannot
+// end: the assignment is the barrier, and the wait after it is free to be the
+// cheap one. interrupted_test.go takes this route twice.
+func TestCancelAfterStallingTheProvider(t any) {
+	h := &harness{engine: &engine{}}
+	p := &provider{}
+	p.Delay = time.Hour
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("summarise my inbox")
+	h.waitFor(t, "assistant.started")
+	_ = h.engine.Cancel()
+	h.waitFor(t, "session.cancelled")
+}
+
+// The same barrier, guarding a mid-turn read rather than an action.
+func TestInFlightConversationBehindAStall(t any) {
+	h := &harness{engine: &engine{}}
+	p := &provider{}
+	p.Delay = time.Hour
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what is streaming?")
+	h.waitFor(t, "assistant.started")
+	_ = h.engine.Conversation()
+	_ = h.engine.Cancel()
+}
+
+// A delta is proof the provider call is open and streaming, which is what the
+// tree already writes down at session/text_test.go:88. It is weaker than a
+// park and stronger than the event it replaces, and it is accepted.
+func TestInterruptOrderedByTheFirstDelta(t any) {
+	h := &harness{engine: &engine{}}
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("first question")
+	h.waitFor(t, "assistant.delta")
+	_, _ = h.engine.StartSession()
+}
+
+// No turn was ever observed to start: the actions are ordered by nothing
+// asynchronous, so there is no cause to have mistaken for an effect. Most
+// StartSession calls in the tree look like this, and a rule that fired on them
+// would be deleted the same week.
+func TestPlainSessionNeedsNoBarrier(t any) {
+	h := &harness{engine: &engine{}}
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("explain recursion")
+	h.collectUntil(t, "session.finished")
+	_ = h.engine.Conversation()
+}
+
+// Waiting for assistant.started to assert something *about that event* is not
+// this shape: nothing is acted on, and the read is of the event itself.
+func TestAssistantStartedCarriesItsTier(t any) {
+	h := &harness{engine: &engine{}}
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what is streaming?")
+	started := h.waitFor(t, "assistant.started")
+	if started["tier"] != "instant" {
+		panic(started)
+	}
+	h.collectUntil(t, "session.finished")
 }

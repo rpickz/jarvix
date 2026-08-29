@@ -8,6 +8,8 @@
 // below do anything, and several of the calls would not type-check.
 package derivedbad
 
+import "time"
+
 type client struct{}
 
 func (c *client) Call(method string, args, out any) error { return nil }
@@ -62,4 +64,54 @@ func TestOptOutWithoutAReason(t any) {
 	waitForEvent(c, "tool.pre_approved")
 	var feed map[string]any
 	_ = c.Call("activity.get", nil, &feed)
+}
+
+// The #215 half of the fixture: an *action* taken on the belief that a turn is
+// still in flight, ordered by an event published before the provider request is
+// even opened. The engine methods below stand in for the real ones; what
+// matters is the shape.
+
+type provider struct{ Delay time.Duration }
+
+func (h *harness) waitFor(t any, event string) map[string]any { return nil }
+
+func (e *engine) StartWake() (string, error)     { return "", nil }
+func (e *engine) StartSession() (string, error)  { return "", nil }
+func (e *engine) Submit(text string) error       { return nil }
+func (e *engine) Conversation() []map[string]any { return nil }
+
+// #215, sighting A: with nothing holding the turn open it can be over before
+// the wake word arrives, and then there is no session to cancel and the
+// session.cancelled this would wait for is never owed.
+func TestWakeActedOnAssistantStarted(t any) {
+	h := &harness{engine: &engine{}}
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("tell me a story")
+	h.waitFor(t, "assistant.started")
+	_, _ = h.engine.StartWake()
+}
+
+// #215, sighting C: the same belief, this time that the provider call the
+// fake parks is the first session's. assistant.started is published before
+// that call is made.
+func TestSupersessionActedOnAssistantStarted(t any) {
+	h := &harness{engine: &engine{}}
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what's the weather like?")
+	h.waitFor(t, "assistant.started")
+	_, _ = h.engine.StartSession()
+}
+
+// The same shape with a read rather than an action: the mid-turn conversation
+// holds one turn only while the turn is still running. A bounded delay is not
+// a barrier — it is the window the whole family is made of — so the rule must
+// still fire here.
+func TestInFlightConversationReadAfterTheStart(t any) {
+	h := &harness{engine: &engine{}}
+	p := &provider{}
+	p.Delay = 30 * time.Millisecond
+	_, _ = h.engine.StartSession()
+	_ = h.engine.Submit("what is streaming?")
+	h.waitFor(t, "assistant.started")
+	_ = h.engine.Conversation()
 }

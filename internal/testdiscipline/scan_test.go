@@ -19,42 +19,40 @@ import (
 func TestDerivedStateScanFiresOnTheHistoricalShapes(t *testing.T) {
 	findings := scan(t, testdiscipline.ScanDerivedState, "derived_bad")
 
-	// Every function in the fixture is a violation, named for what it is.
-	want := map[string]string{
-		"TestFeedRowSampledAfterOnlyItsEvent":  `Call("activity.get")`,
-		"TestArchivedIDReadAfterOnlyTheAppend": "ActiveConversationID",
-		"TestOptOutWithoutAReason":             "carries no reason",
+	// Every function in the fixture is a violation, named for what it is and
+	// for the issue whose cost paid for the rule. The citation is checked
+	// because the author reading the report in CI has none of this context, and
+	// every minute spent working out what the rule means is a minute spent
+	// arguing for deleting it.
+	want := map[string]struct{ fragment, issue string }{
+		"TestFeedRowSampledAfterOnlyItsEvent":       {`Call("activity.get")`, "#167"},
+		"TestArchivedIDReadAfterOnlyTheAppend":      {"ActiveConversationID", "#170"},
+		"TestWakeActedOnAssistantStarted":           {"StartWake", "#215"},
+		"TestSupersessionActedOnAssistantStarted":   {"StartSession", "#215"},
+		"TestInFlightConversationReadAfterTheStart": {"Conversation", "#215"},
+		"TestOptOutWithoutAReason":                  {"carries no reason", ""},
 	}
 	got := map[string]string{}
 	for _, f := range findings {
 		got[f.Func] = f.Message
 	}
-	for fn, fragment := range want {
+	for fn, expect := range want {
 		msg, ok := got[fn]
 		if !ok {
 			t.Errorf("%s was not reported; the rule has stopped watching for it", fn)
 			continue
 		}
-		if !strings.Contains(msg, fragment) {
-			t.Errorf("%s reported as %q, want it to mention %q", fn, msg, fragment)
+		if !strings.Contains(msg, expect.fragment) {
+			t.Errorf("%s reported as %q, want it to mention %q", fn, msg, expect.fragment)
+		}
+		// The marker report is about the marker, not about a shape, so it
+		// cites nothing.
+		if expect.issue != "" && !strings.Contains(msg, expect.issue) {
+			t.Errorf("%s does not cite %s: %s", fn, expect.issue, msg)
 		}
 	}
 	if len(findings) != len(want) {
 		t.Errorf("%d findings, want %d: %v", len(findings), len(want), findings)
-	}
-
-	// The message has to carry the evidence, because the author reading it in
-	// CI has none of this context and every minute spent working out what the
-	// rule means is a minute spent arguing for deleting it.
-	for _, f := range findings {
-		if f.Func == "TestOptOutWithoutAReason" {
-			continue // the marker report is about the marker, not the shape
-		}
-		for _, cite := range []string{"#167", "#170"} {
-			if !strings.Contains(f.Message, cite) {
-				t.Errorf("%s does not cite %s: %s", f.Func, cite, f.Message)
-			}
-		}
 	}
 }
 

@@ -180,7 +180,7 @@ tail of a flush — is what lands it. The test passes on an idle laptop and fail
 on a loaded runner, which is the worst failure mode there is: it teaches the
 author that the gate is flaky rather than that the test is wrong.
 
-Two rules, both from real failures:
+Three rules, all from real failures:
 
 - **activity feed rows** (#167). Rows are derived by the daemon's own subscriber
   from the events it watches, so an event proves the daemon spoke, never that
@@ -193,6 +193,17 @@ Two rules, both from real failures:
   read barrier, `SyncArchive`, before reading `ActiveConversationID`. (A helper
   that calls `SyncArchive` on your behalf counts, which is why `awaitAppend`
   satisfies the rule today.)
+- **a turn believed to be in flight** (#215). `assistant.started` is published
+  before the provider request is opened and before a word reaches the voice, so
+  it proves `think()` began and nothing else. Waking, superseding, cancelling or
+  reading the mid-turn conversation on the strength of it is a race with the
+  whole turn: three CI timeouts came from tests that did exactly that, one where
+  the turn had already finished and one where a fake's "first provider call" was
+  claimed by the wrong session. Park the collaborator — `tts.Fake.SetHold`,
+  `Delay = time.Hour`, a provider that closes a channel when it has parked — or
+  wait for `tts.started` / `assistant.delta`. A *bounded* delay is not a
+  barrier: `Delay = 50 * time.Millisecond` is a window, and the window is what
+  this family is made of.
 
 **`conversation.get` is deliberately not a rule.** It reads the engine directly,
 and an exchange is committed before `session.finished` publishes, so a client
