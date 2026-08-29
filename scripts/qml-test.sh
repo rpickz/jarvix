@@ -159,19 +159,66 @@ echo "qml-test: runner $RUNNER"
 #
 # qmllint exits 0 for warnings, so the check is on the output, the same shape
 # as the gofmt check next door.
+#
+# The lint is version-gated, and this is the one compromise in the file, so it
+# is worth the paragraph. Qt 6.4's qmllint — what the Ubuntu runners carry —
+# types a JavaScript array literal as `void*` and then reports `push` as
+# missing on it; 6.5 and later infer the type and say nothing. The finding is
+# an artefact of the linter's age, not of the harness.
+#
+# Neither obvious escape works. Suppressing the category with
+# `--missing-property disable` is rejected by 6.4, which does not know the
+# flag, so the fix for the old linter needs the new one. Rewriting the harness
+# to index-assign instead of `push` is worse than it looks: these are QML
+# `property var` arrays, and reading one hands back a copy, so `a[a.length] = x`
+# appends to something that is then thrown away — it turned eight passing tests
+# red before the cause was obvious.
+#
+# So the lint runs where its answer can be believed, and says out loud when it
+# did not run. The alternative — a check that fails on the runner and passes on
+# every developer machine — is worse than no check, because it teaches people
+# to scroll past a red step. The tests are what CI must run, and they run
+# everywhere.
+qmllint_version() {
+  "$1" --version 2>&1 | head -1 | sed -nE 's/.*[^0-9.]([0-9]+)\.([0-9]+).*/\1 \2/p'
+}
+
+QMLLINT_MIN_MAJOR=6
+QMLLINT_MIN_MINOR=5
 QMLLINT="$(dirname "$RUNNER")/qmllint"
-if [ -x "$QMLLINT" ]; then
+
+if [ ! -x "$QMLLINT" ]; then
+  # A missing linter is a broken installation rather than an old one: qmllint
+  # ships in the same package as the runner we just used, so its absence means
+  # something is wrong with the environment and not with the linter's age.
+  echo "qml-test: no qmllint beside $RUNNER; the installation is incomplete" >&2
+  exit 1
+fi
+
+# `|| true` because read returns non-zero on an empty herestring, and under
+# `set -e` that would abort before the message below could explain why.
+lint_major=""
+lint_minor=""
+read -r lint_major lint_minor <<< "$(qmllint_version "$QMLLINT")" || true
+if [ -z "${lint_major:-}" ]; then
+  echo "qml-test: could not read a version from $QMLLINT" >&2
+  exit 1
+fi
+
+if [ "$lint_major" -gt "$QMLLINT_MIN_MAJOR" ] ||
+   { [ "$lint_major" -eq "$QMLLINT_MIN_MAJOR" ] && [ "$lint_minor" -ge "$QMLLINT_MIN_MINOR" ]; }; then
   lint_targets=("$TESTS_DIR"/*.qml "$STUBS_DIR"/*/*.qml "$STUBS_DIR"/*/*/*.qml)
   if findings="$("$QMLLINT" -I "$STUBS_DIR" "${lint_targets[@]}" 2>&1)" && [ -z "$findings" ]; then
-    echo "qml-test: qmllint clean"
+    echo "qml-test: qmllint ${lint_major}.${lint_minor} clean"
   else
     echo "qml-test: qmllint findings in the harness:" >&2
     printf '%s\n' "$findings" >&2
     exit 1
   fi
 else
-  echo "qml-test: no qmllint beside $RUNNER; the harness was not linted" >&2
-  exit 1
+  echo "qml-test: SKIPPED the harness lint — qmllint is ${lint_major}.${lint_minor}," \
+       "older than ${QMLLINT_MIN_MAJOR}.${QMLLINT_MIN_MINOR}, and reports a false" \
+       "'push not found' on every JavaScript array literal. The tests below still run."
 fi
 
 # --- run --------------------------------------------------------------------

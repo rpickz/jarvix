@@ -114,6 +114,12 @@ jobs:
       # exactly the machine the criterion names. The suite runs on the
       # offscreen platform with the software scene graph (both set by the
       # script), so nothing here installs a window manager or an X server.
+      #
+      # The QtQml/QtQuick modules go in by glob rather than by name. Ubuntu
+      # splits every QML submodule into its own package, and naming them one at
+      # a time was whack-a-mole: WorkerScript was missing, then QtQuick.Window.
+      # Each gap failed the job loudly — which is the availability check working
+      # — but the fix belongs in one line, not in a growing list.
       - name: Install the Qt 6 QML test runner
         run: |
           sudo apt-get update
