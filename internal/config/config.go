@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/voice"
@@ -372,6 +373,14 @@ type AI struct {
 	// any additional table under [ai.<name>] defines a new endpoint without
 	// code changes.
 	Endpoints map[string]Endpoint `toml:"-"`
+
+	// Tiers is the [ai.tiers] section (issue #159, ADR 0063): the instant,
+	// medium and deep models, each pointing at one of the endpoints above or
+	// at an advisor. Absent — the shipped state — means one brain and the
+	// behaviour this file has always had. Decoded by hand for the same reason
+	// Endpoints is: its children are sub-tables of [ai], which struct
+	// decoding cannot reach. See tiers.go.
+	Tiers AITiers `toml:"-"`
 }
 
 // Endpoint describes one OpenAI-compatible API endpoint.
@@ -623,6 +632,11 @@ func Default() Config {
 				"ollama":     {BaseURL: "http://127.0.0.1:11434/v1"},
 				"lmstudio":   {BaseURL: "http://127.0.0.1:1234/v1"},
 			},
+			// No tier tables ship: tiering is off until somebody configures a
+			// tier, and the default names the tier that is always serviceable
+			// so the setting reads sensibly on a machine that has never
+			// touched it (issue #159).
+			Tiers: AITiers{Default: string(ai.TierMedium)},
 		},
 		STT: STT{
 			Provider: "whisper",
@@ -869,6 +883,16 @@ func parse(data []byte, cfg Config) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
+	// [ai.tiers] is a table of sub-tables rather than an endpoint, so it is
+	// harvested by its own reader (tiers.go) before the endpoint loop — which
+	// skips it, because ReservedAIKeys names it. Without that it would decode
+	// as an endpoint with no base_url and be rejected as one, which is a
+	// confusing way to tell somebody their tiers are fine (issue #159).
+	if prim, ok := loose.AI[tiersTableKey]; ok {
+		if err := parseAITiers(looseMD, prim, &cfg); err != nil {
+			return cfg, fmt.Errorf("parse config: %w", err)
+		}
+	}
 	reserved := ReservedAIKeys()
 	for name, prim := range loose.AI {
 		if reserved[name] {
@@ -932,6 +956,11 @@ func (c Config) Validate() error {
 	// half-typed base URL on an endpoint nobody is using yet is still refused
 	// at the form that typed it rather than discovered when it is chosen.
 	problems = append(problems, c.validateEndpoints()...)
+	// And every [ai.tiers.<name>] table (issue #159), on the same terms: the
+	// window edits one tier at a time and validates the whole document, so a
+	// tier naming an endpoint that does not exist is refused at the form
+	// rather than discovered when somebody says "think hard about this".
+	problems = append(problems, c.validateTiers()...)
 	if c.STT.Provider != "whisper" {
 		problems = append(problems, fmt.Sprintf(
 			"stt.provider %q is not supported; use \"whisper\"", c.STT.Provider))

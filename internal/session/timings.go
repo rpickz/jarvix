@@ -84,6 +84,23 @@ type timings struct {
 	// the report even though the turn ends the moment it is set.
 	nothingHeard string
 
+	// tier, tierModel, tierReason, tierWanted and tierContextDropped are which
+	// model answered this turn, and why (issue #159). Strings and a count
+	// rather than durations, like nothingHeard above and for the same reason:
+	// the question "why did that answer feel like that" is not answered by a
+	// number of milliseconds, it is answered by naming the model.
+	//
+	// They sit under mu with the marks because they are written on the think
+	// goroutine and read by report() from whichever path ends the session.
+	// First write wins, like every mark: a turn is served by one tier, and a
+	// failover rewrites the record through noteTier before the turn ends
+	// rather than adding a second one.
+	tier               string
+	tierModel          string
+	tierReason         string
+	tierWanted         string
+	tierContextDropped int
+
 	// excluded accumulates the completed excluded spans by stage name
 	// (StageToolRuns, StageConfirmWait). Presence means the span happened,
 	// even when it rounded to zero milliseconds.
@@ -135,6 +152,19 @@ func (t *timings) noteNothingHeard(reason string) {
 	if t.nothingHeard == "" {
 		t.nothingHeard = reason
 	}
+	t.mu.Unlock()
+}
+
+// noteTier records which tier answered and what actually served it (issue
+// #159). Unlike the marks it is last-write-wins, and deliberately: a turn that
+// failed over calls this again with the tier that really answered, and a
+// record still naming the tier that could not be reached would be exactly the
+// false claim this feature exists to prevent.
+func (t *timings) noteTier(tier, model, reason, wanted string, contextDropped int) {
+	t.mu.Lock()
+	t.tier, t.tierModel = tier, model
+	t.tierReason, t.tierWanted = reason, wanted
+	t.tierContextDropped = contextDropped
 	t.mu.Unlock()
 }
 
@@ -240,6 +270,28 @@ const (
 	// Absent from every turn that produced a transcript, so its presence is
 	// the whole message and its text is the detail.
 	StageNothingHeard = "nothing_heard"
+	// StageTier is the model tier that answered (issue #159): "instant",
+	// "medium" or "deep". Absent on every turn of a configuration with no
+	// tiers, which is how a reader tells "medium answered" from "there is no
+	// routing here at all" — a key that said "medium" on every turn would be
+	// claiming a decision nobody made.
+	StageTier = "tier"
+	// StageTierModel is what actually served it — the model name, or
+	// "advisor <name>" for an advisor-backed tier. The thing that answered,
+	// never the thing that was asked for.
+	StageTierModel = "tier_model"
+	// StageTierReason is why that tier: default, pinned, asked, unavailable,
+	// or tools (the never-instant-with-tools rule firing). It is what makes
+	// the routing auditable after the fact — two turns on medium for
+	// completely different reasons are not the same turn.
+	StageTierReason = "tier_reason"
+	// StageTierWanted is the tier that was asked for and not served, absent
+	// when nothing was refused.
+	StageTierWanted = "tier_wanted"
+	// StageTierContextDropped is how many prior exchanges the serving tier's
+	// tighter context budget left out of the prompt (ADR 0037's stance: a
+	// budget that trims discloses it). Absent when nothing was dropped.
+	StageTierContextDropped = "tier_context_dropped"
 )
 
 // StageOrder is the order stages are reported in, so every surface prints the
@@ -263,6 +315,14 @@ var StageOrder = []string{
 	// spans above it hardest, because when it is present there was no
 	// question and the pipeline stopped at the microphone.
 	StageNothingHeard,
+	// The tier keys sit after it, together, because they qualify the numbers
+	// above from a different direction: not how long each stage took, but
+	// which model the model-time belongs to (issue #159).
+	StageTier,
+	StageTierModel,
+	StageTierReason,
+	StageTierWanted,
+	StageTierContextDropped,
 }
 
 // report renders the marks as the session.timings payload. Stages that did not
@@ -318,6 +378,21 @@ func (t *timings) report() map[string]any {
 	// and the record shows that a capture happened.
 	if t.nothingHeard != "" {
 		out[StageNothingHeard] = t.nothingHeard
+	}
+
+	// Which model answered (issue #159), present exactly when a tier decided
+	// it. A turn from a configuration with no tiers reports nothing here, so
+	// the key's presence is itself the statement that routing happened.
+	if t.tier != "" {
+		out[StageTier] = t.tier
+		out[StageTierModel] = t.tierModel
+		out[StageTierReason] = t.tierReason
+		if t.tierWanted != "" {
+			out[StageTierWanted] = t.tierWanted
+		}
+		if t.tierContextDropped > 0 {
+			out[StageTierContextDropped] = t.tierContextDropped
+		}
 	}
 
 	// The excluded spans, published whenever they happened — a tool that ran

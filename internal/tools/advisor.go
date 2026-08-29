@@ -169,19 +169,106 @@ func (a *Advisor) Activity(input json.RawMessage) (label, waiting string, ok boo
 // slow, noisy, failing — comes back as text for the model, because the
 // session should end with one spoken sentence about it, not an error. Only
 // malformed tool arguments are an err.
+//
+// The consultation itself is Consult; this method is the *model-facing*
+// wording of its outcome, which is a different thing from the outcome. Model
+// tiers (#159) reach the same bridge through Consult and word it for a person
+// instead — one process-execution path, two audiences, and no chance of a
+// second copy of the kill-the-process-group discipline below.
 func (a *Advisor) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args advisorArgs
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", fmt.Errorf("invalid advisor.ask arguments: %w", err)
 	}
-	question := strings.TrimSpace(args.Question)
-	if question == "" {
-		return "", fmt.Errorf("advisor.ask: empty question")
+	answer, err := a.Consult(ctx, args.Advisor, args.Question)
+	if err != nil {
+		return "", err
 	}
-	spec, found := a.spec(args.Advisor)
+	name := answer.Advisor
+	switch answer.Outcome {
+	case AdvisorMissing:
+		return fmt.Sprintf("The %s assistant is not installed on this computer, so nothing was "+
+			"asked. Tell the user in one short sentence that you could not reach %s because it "+
+			"is not installed, and do not retry.", name, name), nil
+	case AdvisorInterrupted:
+		return "The consultation was interrupted.", nil
+	case AdvisorTimedOut:
+		return fmt.Sprintf("The %s assistant did not answer within %s and was stopped. Tell the "+
+			"user in one short sentence that %s took too long, and do not retry.",
+			name, answer.Timeout, name), nil
+	case AdvisorFailed:
+		return fmt.Sprintf("The %s assistant failed to answer. Tell the user in one short "+
+			"sentence that you could not get an answer from %s. Do not read out any technical "+
+			"detail and do not retry.", name, name), nil
+	case AdvisorEmpty:
+		return fmt.Sprintf("The %s assistant returned nothing. Tell the user in one short "+
+			"sentence that %s had no answer, and do not retry.", name, name), nil
+	}
+	text := answer.Text
+	if answer.Truncated {
+		text += "\n\n[answer truncated at " + fmt.Sprint(answer.MaxOutput) + " bytes]"
+	}
+	return fmt.Sprintf("%s answered:\n\n%s\n\nGive the user this answer. Stay faithful to it, "+
+		"shorten it if it is long, and say it as speech: no markdown, no lists, and no file "+
+		"paths, URLs, or code read out verbatim.", name, text), nil
+}
+
+// AdvisorOutcome classifies one consultation. It exists so the *result* of
+// running an advisor can be described once and worded twice — for the model
+// (Execute) and for a person (a deep tier answering a turn directly, #159).
+type AdvisorOutcome int
+
+// What a consultation did.
+const (
+	// AdvisorAnswered: the CLI ran and produced text.
+	AdvisorAnswered AdvisorOutcome = iota
+	// AdvisorMissing: the binary is not on this machine.
+	AdvisorMissing
+	// AdvisorInterrupted: the session was cancelled or superseded.
+	AdvisorInterrupted
+	// AdvisorTimedOut: the CLI outlasted its configured budget and was killed.
+	AdvisorTimedOut
+	// AdvisorFailed: it exited non-zero, or could not be run.
+	AdvisorFailed
+	// AdvisorEmpty: it exited cleanly and said nothing.
+	AdvisorEmpty
+)
+
+// AdvisorAnswer is one consultation's result. It carries no stderr and no
+// command line: the advisor's own diagnostics stay in the daemon log, because
+// anything in here may be read aloud (ADR 0016).
+type AdvisorAnswer struct {
+	Outcome AdvisorOutcome
+	// Advisor is the configured name, for whatever wording the caller uses.
+	Advisor string
+	// Text is the answer, exactly as the CLI wrote it. Empty unless
+	// Outcome is AdvisorAnswered.
+	Text string
+	// Timeout is the budget that was applied, for the timed-out wording.
+	Timeout time.Duration
+	// Truncated says the answer hit MaxOutput and was cut.
+	Truncated bool
+	MaxOutput int
+}
+
+// Consult runs one advisor and returns what happened. It is the whole of the
+// process discipline of ADR 0016 — resolved at call time, no shell, own
+// process group killed as a group, scrubbed environment, capped output — and
+// the only way anything in this codebase runs an advisor.
+//
+// An err is returned only for a request that could never be served: an empty
+// question, or a name that is not a configured advisor. Everything the CLI
+// itself can do wrong is an Outcome, because it is a thing to *say*, not a
+// thing to fail on.
+func (a *Advisor) Consult(ctx context.Context, name, rawQuestion string) (AdvisorAnswer, error) {
+	question := strings.TrimSpace(rawQuestion)
+	if question == "" {
+		return AdvisorAnswer{}, fmt.Errorf("advisor.ask: empty question")
+	}
+	spec, found := a.spec(name)
 	if !found {
-		return "", fmt.Errorf("advisor.ask: unknown advisor %q; configured advisors: %s",
-			args.Advisor, strings.Join(a.names(), ", "))
+		return AdvisorAnswer{}, fmt.Errorf("advisor.ask: unknown advisor %q; configured advisors: %s",
+			name, strings.Join(a.names(), ", "))
 	}
 
 	logger := a.Log
@@ -200,9 +287,7 @@ func (a *Advisor) Execute(ctx context.Context, input json.RawMessage) (string, e
 	if err != nil {
 		logger.Warn("advisor unavailable", "component", "tools", "tool", a.Name(),
 			"advisor", spec.Name, "binary", spec.Binary, "error", err.Error())
-		return fmt.Sprintf("The %s assistant is not installed on this computer, so nothing was "+
-			"asked. Tell the user in one short sentence that you could not reach %s because it "+
-			"is not installed, and do not retry.", spec.Name, spec.Name), nil
+		return AdvisorAnswer{Outcome: AdvisorMissing, Advisor: spec.Name}, nil
 	}
 
 	argv, stdin := buildAdvisorInput(spec, advisorPreamble+question)
@@ -230,37 +315,34 @@ func (a *Advisor) Execute(ctx context.Context, input json.RawMessage) (string, e
 		"exit_code", result.exitCode, "output_bytes", len(result.stdout),
 		"timed_out", result.timedOut)
 
+	out := AdvisorAnswer{Advisor: spec.Name, Timeout: timeout, MaxOutput: maxOutput}
 	switch {
 	case ctx.Err() != nil:
 		// The session was cancelled or superseded: the child is already dead
 		// and nobody is listening for this result.
-		return "The consultation was interrupted.", nil
+		out.Outcome = AdvisorInterrupted
+		return out, nil
 	case result.timedOut:
-		return fmt.Sprintf("The %s assistant did not answer within %s and was stopped. Tell the "+
-			"user in one short sentence that %s took too long, and do not retry.",
-			spec.Name, timeout, spec.Name), nil
+		out.Outcome = AdvisorTimedOut
+		return out, nil
 	case result.err != nil || result.exitCode != 0:
 		// The advisor's own diagnostics stay daemon-side: they are the
-		// operator's material, and anything returned here may be read aloud.
+		// operator's material, and anything returned to a caller may be read
+		// aloud.
 		logger.Warn("advisor failed", "component", "tools", "tool", a.Name(),
 			"advisor", spec.Name, "exit_code", result.exitCode,
 			"error", errText(result.err), "stderr", firstLine(result.stderr))
-		return fmt.Sprintf("The %s assistant failed to answer. Tell the user in one short "+
-			"sentence that you could not get an answer from %s. Do not read out any technical "+
-			"detail and do not retry.", spec.Name, spec.Name), nil
+		out.Outcome = AdvisorFailed
+		return out, nil
 	}
 
 	answer := strings.TrimSpace(result.stdout)
 	if answer == "" {
-		return fmt.Sprintf("The %s assistant returned nothing. Tell the user in one short "+
-			"sentence that %s had no answer, and do not retry.", spec.Name, spec.Name), nil
+		out.Outcome = AdvisorEmpty
+		return out, nil
 	}
-	if result.truncated {
-		answer += "\n\n[answer truncated at " + fmt.Sprint(maxOutput) + " bytes]"
-	}
-	return fmt.Sprintf("%s answered:\n\n%s\n\nGive the user this answer. Stay faithful to it, "+
-		"shorten it if it is long, and say it as speech: no markdown, no lists, and no file "+
-		"paths, URLs, or code read out verbatim.", spec.Name, answer), nil
+	out.Outcome, out.Text, out.Truncated = AdvisorAnswered, answer, result.truncated
+	return out, nil
 }
 
 // spec resolves a model-named advisor.

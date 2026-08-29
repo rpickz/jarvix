@@ -141,6 +141,7 @@ var toolDoing = {
   "routine.run": "Running one of your routines",
   "script.run": "Running one of your scripts",
   "shell.run": "Running a shell command",
+  "thinking.ask_deep": "Thinking deeply",
   "typing.press_key": "Typing on your keyboard",
   "typing.type_text": "Typing on your keyboard"
 }
@@ -184,6 +185,22 @@ function pendingTurnLine(state, tool, toolDetail, elapsedSec) {
   var sec = Math.floor(elapsedSec || 0)
   if (sec >= pendingElapsedThresholdSec) return label + " · " + formatElapsed(sec)
   return label
+}
+
+// pendingTurnTierNote mirrors desktop.PendingTurnTierNote: the model tier
+// appended to a pending line, separator included, "" when there is no tier.
+// The labels are the Go table's, so the window cannot invent a fourth word for
+// a level (issue #159).
+var tierLabels = {
+  "instant": "Quick",
+  "medium": "Balanced",
+  "deep": "Deep",
+}
+
+function pendingTurnTierNote(tier) {
+  var label = tierLabels[String(tier || "")]
+  if (!label) return ""
+  return " · " + label
 }
 
 // How a pending turn resolves when the user cancelled. Mirrors

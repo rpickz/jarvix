@@ -157,6 +157,13 @@ systemctl --user set-environment OPENAI_API_KEY=sk-...
 systemctl --user restart jarvixd
 ```
 
+One model has to be both quick and good, and none is. Configure two or three
+under `[ai.tiers]` and pick between them per conversation — **Quick /
+Balanced / Deep**, beside the composer or by saying "switch to deep" — and
+Jarvix tells you which one answered. Nothing changes until you configure a
+tier: see
+[Thinking levels](docs/configuration.md#thinking-levels-aitiers).
+
 All options: [docs/configuration.md](docs/configuration.md).
 
 ## Using Jarvix
@@ -169,6 +176,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Cancel / stop speech | `Super+Alt+Escape` (or `jarvix cancel`) |
 | Interrupt mid-speech | Hold the chord again — it stops talking and listens |
 | Type instead of speaking | **Type in the conversation window and press Enter** — same conversation, same tools, same spoken answer |
+| Trade speed for quality | **Quick / Balanced / Deep beside the composer**, or say "switch to deep" / "think hard about this, …" — needs `[ai.tiers]` configured |
 | Ask from a terminal | `jarvix ask "explain recursion in one sentence"` |
 | Voice from a terminal | `jarvix listen` |
 | Review the conversation | **Click the Jarvix icon in the bar**, click the notification when Jarvix answers, or `Super+Alt+C` / `jarvix window` |

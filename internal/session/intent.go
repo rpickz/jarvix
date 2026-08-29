@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/tools"
 )
@@ -180,6 +181,8 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runVocabListen(s, m)
 	case m.VocabList:
 		ack, runErr = e.runVocabList(s)
+	case m.Thinking != ai.TierNone:
+		ack, runErr = e.runThinking(m.Thinking)
 	case m.ApprovalsList:
 		ack, runErr = e.runApprovalsList()
 	case m.ProvenanceList:

@@ -3,6 +3,8 @@ package desktop
 import (
 	"sort"
 	"strings"
+
+	"github.com/rpickz/jarvix/internal/ai"
 )
 
 // This file words *waiting* (issue #158).
@@ -78,6 +80,7 @@ var toolPhrases = map[string]toolPhrase{
 	"script.run":           {ask: "run one of your scripts", doing: "Running one of your scripts"},
 	"routine.run":          {ask: "run one of your routines", doing: "Running one of your routines"},
 	"advisor.ask":          {ask: "consult another assistant", doing: "Consulting another assistant"},
+	"thinking.ask_deep":    {ask: "ask the stronger model", doing: "Thinking deeply"},
 	"knowledge.refresh":    {ask: "refresh one of your feeds", doing: "Refreshing one of your feeds"},
 	"typing.type_text":     {ask: "type on your keyboard", doing: "Typing on your keyboard"},
 	"typing.press_key":     {ask: "type on your keyboard", doing: "Typing on your keyboard"},
@@ -234,4 +237,24 @@ func BarChipLabel(s BarState, elapsedSec int) string {
 		return s.Short + " " + formatActivityElapsed(elapsedSec)
 	}
 	return s.Short
+}
+
+// PendingTurnTierNote is the model tier's part of a pending turn's line
+// (issue #159, on #158's surface): " · Deep" beside "Thinking · 6s", so the
+// speed/quality trade the user just made is visible while they are paying for
+// it rather than only afterwards in the record.
+//
+// It returns "" for an unknown or absent tier, which is every turn of a
+// configuration with no tiers — the pending line is then exactly the line it
+// has always been.
+//
+// The separator lives here rather than in QML for the reason the rest of this
+// file does (ADR 0013): the window renders strings and decides nothing, and
+// "decide whether a separator is needed" is a decision.
+func PendingTurnTierNote(tier string) string {
+	label := ai.TierLabel(ai.Tier(tier))
+	if label == "" {
+		return ""
+	}
+	return " · " + label
 }

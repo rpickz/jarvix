@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/rpickz/jarvix/internal/ai"
 )
 
 //go:generate go run genbarstate.go
@@ -620,6 +622,23 @@ function pendingTurnLine(state, tool, toolDetail, elapsedSec) {
   var sec = Math.floor(elapsedSec || 0)
   if (sec >= pendingElapsedThresholdSec) return label + " · " + formatElapsed(sec)
   return label
+}
+
+// pendingTurnTierNote mirrors desktop.PendingTurnTierNote: the model tier
+// appended to a pending line, separator included, "" when there is no tier.
+// The labels are the Go table's, so the window cannot invent a fourth word for
+// a level (issue #159).
+var tierLabels = {`)
+	for _, tier := range ai.TierOrder() {
+		fmt.Fprintf(&b, "\n  %s: %s,", jsString(string(tier)), jsString(ai.TierLabel(tier)))
+	}
+	b.WriteString(`
+}
+
+function pendingTurnTierNote(tier) {
+  var label = tierLabels[String(tier || "")]
+  if (!label) return ""
+  return " · " + label
 }
 
 // How a pending turn resolves when the user cancelled. Mirrors

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/rpickz/jarvix/internal/ai"
 )
 
 // Reload classifies when a changed setting takes effect. The daemon enforces
@@ -159,6 +161,22 @@ func settingRows() []Setting {
 		{Key: "ai.temperature", Label: "Temperature", Type: TypeFloat, Reload: ReloadIdle,
 			Get: func(c Config) any { return c.AI.Temperature },
 			set: func(c *Config, v any) { c.AI.Temperature = v.(float64) }},
+		// Which tier a *new* conversation starts on (issue #159). The
+		// conversation's own level — the window's Quick / Balanced / Deep
+		// control and its spoken equivalents — is runtime state rather than
+		// configuration, and moving it never writes this file; this is where
+		// the next conversation comes back to. Idle class because it reaches
+		// the engine through session.Options like the rest of [ai].
+		//
+		// The tier tables themselves ([ai.tiers.<name>]) are deliberately not
+		// rows here, for the same reason [ai.<name>] endpoints are not: they
+		// are keyed tables with their own form, not scalars. Like everything
+		// under [ai], both are out of the assistant's reach — Jarvix does not
+		// re-point its own brains (AssistantExcludedSettingReason).
+		{Key: "ai.tiers.default", Label: "Default thinking level", Type: TypeString, Reload: ReloadIdle,
+			Enum: []string{string(ai.TierInstant), string(ai.TierMedium), string(ai.TierDeep)},
+			Get:  func(c Config) any { return c.AI.Tiers.Default },
+			set:  func(c *Config, v any) { c.AI.Tiers.Default = v.(string) }},
 
 		{Key: "tts.provider", Label: "Voice engine", Type: TypeString, Reload: ReloadIdle,
 			Enum: []string{"piper", "kokoro"},
