@@ -30,4 +30,13 @@
 #
 #   make coverage-ratchet          # measure and compare
 #   make coverage-ratchet-raise    # print the line to paste here, if it is time
-82.2
+#
+# 2026-08-29, issue #173 (the store fault-injection suite): 82.2 → 82.7.
+# Measured as a delta rather than read off a runner, because the increase was
+# earned locally and the local:CI gap is a constant of the missing engines,
+# which this change does not touch: the same commands read 83.3% on this
+# machine before the change and 83.8% after, so the runner's number moves by
+# the same half a point. The tolerance covers the estimate — a CI reading
+# anywhere at or above the old 82.2 still passes — and the whole half point
+# comes from internal/conversations going 66.4% → 91.0%.
+82.7
