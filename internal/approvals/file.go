@@ -2,9 +2,7 @@ package approvals
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -97,10 +95,6 @@ func readLedger(path string) (map[string]*record, error) {
 	}
 	return out, nil
 }
-
-// isNotExist reports whether err is the ordinary "no ledger yet". A first run
-// is not a warning.
-func isNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }
 
 // writeLedger persists the ledger atomically: temp file in the same
 // directory, fsync, rename, fsync the directory — a crash mid-write leaves

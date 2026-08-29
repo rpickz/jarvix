@@ -1,6 +1,7 @@
 package approvals
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -202,5 +203,124 @@ func TestConcurrentUseIsSafe(t *testing.T) {
 		if e.Pattern == "docker stats" && e.Uses != 10 {
 			t.Errorf("uses = %d, want 10", e.Uses)
 		}
+	}
+}
+
+// The three defects issue #173's fault suite found in this store, pinned one
+// at a time so a regression names which promise it broke. Each of them was a
+// discipline every sibling store kept (the memory book, the vocabulary, the
+// focus threads, the reminders, the monitor nicknames) and this one did not,
+// which is exactly what a shared suite is for.
+
+// TestAFailedWriteLeavesTheHistoryAsItWas: the ledger used to mutate itself
+// and then write, so a disk that refused left the store reporting a card
+// grant — with a date, in the Approvals view — that no file held. Reopening
+// the daemon would then show the same rule as hand-added with no date, and
+// the two answers could not both be true.
+func TestAFailedWriteLeavesTheHistoryAsItWas(t *testing.T) {
+	s, _ := storeAt(t)
+	now := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	s.Added("docker stats", now)
+
+	s.write = func(string, map[string]*record) error { return errors.New("no space left on device") }
+	s.Added("kubectl get pods", now)
+	s.Used("docker stats", now.Add(time.Hour))
+	s.write = writeLedger
+
+	for _, e := range s.List([]string{"docker stats", "kubectl get pods"}) {
+		switch e.Pattern {
+		case "docker stats":
+			if e.Uses != 0 || !e.LastUsed.IsZero() {
+				t.Errorf("a refused write left a use recorded: %+v", e)
+			}
+		case "kubectl get pods":
+			if e.Source != SourceHand || !e.Added.IsZero() {
+				t.Errorf("a refused write left a card grant on the record: %+v", e)
+			}
+		}
+	}
+}
+
+// TestAnUnreadableLedgerIsMovedAsideNotOverwritten: the bytes are the user's
+// own approval history — very often a hand edit halfway through being fixed —
+// and the ledger used to write straight over them on the next firing, which
+// destroyed the only copy. Every sibling store moves the file aside first.
+func TestAnUnreadableLedgerIsMovedAsideNotOverwritten(t *testing.T) {
+	s, path := storeAt(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	damaged := []byte("version = 1\n\n[[approval]]\npattern = \"docker st")
+	if err := os.WriteFile(path, damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s.Added("docker stats", time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC))
+
+	aside, err := os.ReadFile(path + ".corrupt")
+	if err != nil {
+		t.Fatalf("the unreadable ledger was not preserved: %v", err)
+	}
+	if string(aside) != string(damaged) {
+		t.Errorf("the preserved file is not the damaged one:\n%s", aside)
+	}
+	// And the store kept working: the new grant is on disk in a readable file.
+	entries := s.List([]string{"docker stats"})
+	if len(entries) != 1 || entries[0].Source != SourceCard {
+		t.Errorf("entries after the damage = %+v, want the fresh card grant", entries)
+	}
+}
+
+// TestAHandEditIsPickedUpWithoutARestart: the ledger loaded once per process
+// and the daemon runs for days, so a user who corrected a count or deleted a
+// row in an editor had the edit silently reverted by the next write from the
+// cached copy. The file's own header says Jarvix rewrites it — it must at
+// least read what is there first.
+func TestAHandEditIsPickedUpWithoutARestart(t *testing.T) {
+	s, path := storeAt(t)
+	now := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	s.Added("docker stats", now)
+	if entries := s.List([]string{"docker stats"}); len(entries) != 1 || entries[0].Uses != 0 {
+		t.Fatalf("entries before the edit = %+v", entries)
+	}
+
+	edit := `version = 1
+
+[[approval]]
+pattern = "docker stats"
+source = "card"
+added = 2026-08-20T09:30:00Z
+uses = 12
+last_used = 2026-08-28T08:00:00Z
+`
+	if err := os.WriteFile(path, []byte(edit), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := s.List([]string{"docker stats"})
+	if len(entries) != 1 || entries[0].Uses != 12 {
+		t.Fatalf("entries after the edit = %+v, want the hand-written count", entries)
+	}
+	// And the next write starts from the edit rather than from the stale
+	// cache, which is the half that actually cost data.
+	s.Used("docker stats", now.Add(2*time.Hour))
+	if entries := s.List([]string{"docker stats"}); entries[0].Uses != 13 {
+		t.Errorf("uses after the next firing = %d, want the edit plus one", entries[0].Uses)
+	}
+}
+
+// A ledger the user deleted stays deleted: the store starts empty rather than
+// writing its cached copy back. Deletion is deletion, and the header promises
+// that losing this file costs the history and nothing else.
+func TestADeletedLedgerIsNotResurrected(t *testing.T) {
+	s, path := storeAt(t)
+	now := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	s.Added("docker stats", now)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	entries := s.List([]string{"docker stats"})
+	if len(entries) != 1 || entries[0].Source != SourceHand || !entries[0].Added.IsZero() {
+		t.Errorf("entries after the deletion = %+v, want the configured pattern with no history", entries)
 	}
 }
