@@ -73,7 +73,14 @@ TestCase {
     // exception raised inside a signal handler is swallowed by the engine and
     // would turn a broken test green. Checking here means every test in every
     // file inherits the vocabulary guard without having to remember it.
-    compare(FakeDaemon.failure, "", "the fake daemon recorded a contract breach")
+    //
+    // verify() rather than compare(), so the breach *is* the summary line. This
+    // fired in anger for the first time when #204 added windows.managed, and
+    // compare() put "a contract breach" on the summary and the verb that caused
+    // it on the Actual line below — which is the wrong way round for a log
+    // somebody skims. A failure message that does not name its subject makes
+    // the reader go and reproduce it.
+    verify(FakeDaemon.failure === "", FakeDaemon.failure)
   }
 
   // settle gives the engine the one polish-and-render pass that turns a model

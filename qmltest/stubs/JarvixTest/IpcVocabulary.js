@@ -86,6 +86,8 @@ var methods = {
   "state.hold": true,
   "state.release": true,
   "status.get": true,
+  "thinking.get": true,
+  "thinking.set": true,
   "vocabulary.forget_gated": true,
   "vocabulary.last": true,
   "vocabulary.list": true,
@@ -96,7 +98,9 @@ var methods = {
   "wake.mute": true,
   "wake.status": true,
   "windows.list": true,
-  "windows.name": true
+  "windows.managed": true,
+  "windows.name": true,
+  "windows.release": true
 }
 
 var events = {
@@ -143,6 +147,7 @@ var events = {
   "situation.given": true,
   "speech.replayed": true,
   "state.changed": true,
+  "thinking.changed": true,
   "tool.confirmation_deadline": true,
   "tool.confirmation_required": true,
   "tool.confirmed": true,

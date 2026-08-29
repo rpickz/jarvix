@@ -103,6 +103,8 @@ var daemonMethods = []string{
 	"situation.get",
 	"speech.cancel",
 	"speech.replay",
+	"thinking.get",
+	"thinking.set",
 	"state.hold",
 	"state.release",
 	"status.get",
@@ -116,7 +118,9 @@ var daemonMethods = []string{
 	"wake.mute",
 	"wake.status",
 	"windows.list",
+	"windows.managed",
 	"windows.name",
+	"windows.release",
 }
 
 // daemonEvents is every bus event type the daemon pushes to its clients as a
@@ -172,6 +176,7 @@ var daemonEvents = []string{
 	"situation.given",
 	"speech.replayed",
 	"state.changed",
+	"thinking.changed",
 	"tool.confirmation_deadline",
 	"tool.confirmation_required",
 	"tool.confirmed",

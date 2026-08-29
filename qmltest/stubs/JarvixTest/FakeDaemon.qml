@@ -75,12 +75,18 @@ QtObject {
 
   // noteWrite is the outbound half of the vocabulary check, called by the stub
   // Socket for every frame a surface writes.
+  // Breach messages are plain ASCII. They are the summary line of a red test
+  // now, and QTest writes its log in the local 8-bit encoding — an em dash
+  // came out as "?" the first time one of these fired in CI, in the middle of
+  // the sentence that was supposed to explain the failure.
   function noteWrite(socket, frame) {
     if (frame.method !== undefined && !Vocabulary.knowsMethod(frame.method)) {
-      root.fail("a surface sent " + JSON.stringify(frame.method)
-        + ", which no daemon handler is registered for — the real server would "
-        + "answer -32601. Add the verb to internal/desktop/ipcvocab.go and "
-        + "regenerate, or fix the caller.")
+      root.fail("a surface sent \"" + frame.method + "\", which the fake daemon's "
+        + "vocabulary does not contain, so the real server would answer -32601. "
+        + "If the daemon really does register it, add it to daemonMethods in "
+        + "internal/desktop/ipcvocab.go by hand and then run "
+        + "`go generate ./internal/desktop` - generate only re-renders the Go "
+        + "table, it does not discover new verbs. Otherwise fix the caller.")
     }
     root.writes.push(frame)
   }
@@ -107,9 +113,11 @@ QtObject {
   // is what the real bus does — it fans out to all clients rather than to one.
   function event(method, params) {
     if (!Vocabulary.knowsEvent(method)) {
-      root.fail("the test sent event " + JSON.stringify(method)
-        + ", which the daemon never publishes. The vocabulary is generated "
-        + "from internal/desktop/ipcvocab.go; a test may not invent one.")
+      root.fail("the test sent event \"" + method + "\", which the fake daemon's "
+        + "vocabulary does not contain, so the daemon never publishes it. If it "
+        + "really does, add it to daemonEvents in internal/desktop/ipcvocab.go "
+        + "by hand and then run `go generate ./internal/desktop`. Otherwise the "
+        + "test is driving a message that does not exist.")
       return
     }
     root.deliver({ jsonrpc: "2.0", method: method, params: params || {} })
