@@ -3,6 +3,7 @@ package session
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // stripSpace removes every ASCII whitespace byte and preserves all other
@@ -45,25 +46,38 @@ func FuzzSentencer(f *testing.F) {
 	// crasher itself is committed under testdata/fuzz/FuzzSentencer.
 	f.Add("café €9 \U0001f389 straddles. every boundary", uint8(0))
 	f.Add("\xc2\n \xa0", uint8(0))
+	// Run-on flushes with a partial rune pending: the buffer crosses
+	// maxSentenceRunon on a chunk that ends inside a two-, three- and
+	// four-byte encoding. incompleteTail is the only thing standing between
+	// these and half a rune going to the speech engine.
+	f.Add(strings.Repeat("a", 245)+"é and on it goes", uint8(1))
+	f.Add(strings.Repeat("a", 245)+"\u3000 and on it goes", uint8(1))
+	f.Add(strings.Repeat("a", 245)+"\U0001f389 and on it goes", uint8(1))
+	f.Add(strings.Repeat("a", 239)+"\U0001f389 and on it goes", uint8(3))
 	f.Fuzz(func(t *testing.T, text string, chunk uint8) {
 		size := int(chunk%16) + 1
-		var sc sentencer
-		var out []string
-		rest := text
-		for len(rest) > 0 {
-			n := size
-			if n > len(rest) {
-				n = len(rest)
-			}
-			out = append(out, sc.push(rest[:n])...)
-			rest = rest[n:]
-		}
-		out = append(out, sc.flush()...)
+		out := sentences(t, text, size)
 
 		got := stripSpace(strings.Join(out, ""))
 		want := stripSpace(text)
 		if got != want {
 			t.Fatalf("sentencer lost/duplicated content:\n got %q\nwant %q\n(sentences %q)", got, want, out)
+		}
+		// A rune that arrived whole must leave whole. The sentencer buffers a
+		// truncated trailing encoding until the rest of it arrives (issue
+		// #28), and the place that promise is easiest to lose is the run-on
+		// flush, which cuts on length rather than on a boundary — the mutation
+		// report had three surviving mutants inside incompleteTail, all of
+		// them "hold back nothing" (issue #172). Stated over valid input,
+		// where "whole" needs no interpretation: a stray continuation byte in
+		// the INPUT is content and is passed through, so this law says nothing
+		// about it.
+		if utf8.ValidString(text) {
+			for _, s := range out {
+				if !utf8.ValidString(s) {
+					t.Fatalf("valid input was cut mid-rune: %q from %q", s, text)
+				}
+			}
 		}
 		for _, s := range out {
 			// Blank and trimmed are judged by the sentencer's own definition
@@ -77,10 +91,79 @@ func FuzzSentencer(f *testing.F) {
 				t.Fatalf("sentence not trimmed: %q", s)
 			}
 		}
-		if extra := sc.flush(); len(extra) != 0 {
-			t.Fatalf("flush was not terminal: %q", extra)
+		// Where the chunk boundaries fell is an accident of the model's
+		// streaming, and the split must not depend on it: the same text
+		// arriving byte by byte, in this run's chunk size, or all at once has
+		// to produce the same sentences. Without this law "loses no content"
+		// is satisfied by a sentencer that breaks in a different place every
+		// time — and the place is what the listener hears (issue #172).
+		//
+		// The law is stated for buffers that cannot reach maxSentenceRunon,
+		// and that scope is a real exemption rather than a convenience. The
+		// run-on rule exists so a wall of unpunctuated text does not hold
+		// speech hostage, and it necessarily cuts wherever the buffer happened
+		// to cross the cap — which is a chunk boundary. A streaming cutter with
+		// a length safeguard cannot be chunk-independent past that safeguard,
+		// so the honest law is the one below plus the content law above, which
+		// holds at every length. FuzzSentencer found the boundary immediately;
+		// the seeds that cross it are in the corpus.
+		if len(text) <= maxSentenceRunon {
+			for _, other := range []int{1, 2, 16, len(text) + 1} {
+				if again := sentences(t, text, other); !equalSentences(again, out) {
+					t.Fatalf("chunking changed the split: size %d gave %q, size %d gave %q",
+						size, out, other, again)
+				}
+			}
+			return
+		}
+		// Past the cap, the content still cannot depend on chunking — only
+		// where the run-on safeguard chose to breathe.
+		for _, other := range []int{1, 2, 16, len(text) + 1} {
+			again := stripSpace(strings.Join(sentences(t, text, other), ""))
+			if again != got {
+				t.Fatalf("chunking changed the content: size %d gave %q, size %d gave %q",
+					size, got, other, again)
+			}
 		}
 	})
+}
+
+// sentences runs text through the sentencer in fixed-size chunks and returns
+// everything it emitted, flush included — and proves the flush was terminal,
+// which is a property of every run and therefore belongs with the run.
+func sentences(t *testing.T, text string, size int) []string {
+	t.Helper()
+	var sc sentencer
+	var out []string
+	rest := text
+	for len(rest) > 0 {
+		n := size
+		if n > len(rest) {
+			n = len(rest)
+		}
+		out = append(out, sc.push(rest[:n])...)
+		rest = rest[n:]
+	}
+	out = append(out, sc.flush()...)
+	if extra := sc.flush(); len(extra) != 0 {
+		t.Fatalf("flush was not terminal at chunk size %d: %q", size, extra)
+	}
+	return out
+}
+
+// equalSentences compares two splits element by element. A nil and an empty
+// slice are the same split — the sentencer returns whichever the code path
+// happened to build, and the listener cannot tell them apart.
+func equalSentences(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // FuzzSpeechText asserts the spoken-text contract on arbitrary markdown: no

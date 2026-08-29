@@ -838,6 +838,28 @@ func splitShellCommand(command string) []string {
 	return segs
 }
 
+// sp and nonSp are "one space" and "one non-space" for the deny rules, and
+// they are Unicode-aware on purpose.
+//
+// Go's `\s` is ASCII only — [\t\n\f\r ], not even \v — while everything else
+// in this file reads words with strings.Fields and trims with
+// strings.TrimSpace, both of which use unicode.IsSpace. Two different ideas of
+// where a word ends, inside one classifier, is a hole: the property test in
+// classifier_property_test.go generated `rm -rf /` with a U+2028 line
+// separator directly after the slash and the shipped deny rule did not fire,
+// because `(\s|$)` had nothing to match. The command dropped to ask, which is
+// a question a user can answer yes to. Deny exists precisely so that question
+// is never put (issue #172).
+//
+// Widening the class can only ever make these rules match MORE, so this
+// tightens the gate and cannot loosen it. harmlessRedirect keeps its ASCII
+// `\s` for the mirror-image reason: widening what counts as blank there would
+// silence more commands, not fewer.
+const (
+	sp    = `[\s\v\p{Z}]`
+	nonSp = `[^\s\v\p{Z}]`
+)
+
 // Shipped deny rules: commands whose blast radius is the machine itself and
 // which have no plausible voice-assistant use. Everything else destructive
 // is ask-tier — the user can approve it out loud. Compiled once.
@@ -845,10 +867,13 @@ var denyRules = []struct {
 	re   *regexp.Regexp
 	rule string
 }{
-	{regexp.MustCompile(`(^|\s)rm\s+(-\S+\s+)*(/|/\*)(\s|$)`), `deny pattern "rm targeting /"`},
-	{regexp.MustCompile(`(^|\s)dd\s[^;|&]*\bof=/dev/`), `deny pattern "dd writing to a device"`},
-	{regexp.MustCompile(`>\s*/dev/(sd|hd|vd|nvme|mmcblk|loop|dm-)`), `deny pattern "redirection onto a block device"`},
-	{regexp.MustCompile(`:\(\)\s*\{`), `deny pattern "fork bomb"`},
+	{regexp.MustCompile(`(^|` + sp + `)rm` + sp + `+(-` + nonSp + `+` + sp + `+)*(/|/\*)(` + sp + `|$)`),
+		`deny pattern "rm targeting /"`},
+	{regexp.MustCompile(`(^|` + sp + `)dd` + sp + `[^;|&]*\bof=/dev/`),
+		`deny pattern "dd writing to a device"`},
+	{regexp.MustCompile(`>` + sp + `*/dev/(sd|hd|vd|nvme|mmcblk|loop|dm-)`),
+		`deny pattern "redirection onto a block device"`},
+	{regexp.MustCompile(`:\(\)` + sp + `*\{`), `deny pattern "fork bomb"`},
 }
 
 func matchDeny(text string, extra [][]string) (string, bool) {
