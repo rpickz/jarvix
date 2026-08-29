@@ -82,6 +82,36 @@ func TestBriefingGetSaysThereIsNoAbsenceYet(t *testing.T) {
 	}
 }
 
+// reportedGap is the gap from #188, to the second: the last user exchange at
+// 16:16:56 and the button pressed at 07:57 the next morning. It is carried as
+// a duration rather than two wall-clock instants because the daemon under test
+// runs on the real clock — the arithmetic is what was reported, and the
+// arithmetic is what is reproduced.
+const reportedGap = 15*time.Hour + 40*time.Minute + 4*time.Second
+
+// TestBriefingGetReportsAnAbsenceNobodyWitnessed is the reported bug at the
+// wire (#188). One sighting yesterday afternoon and nothing since — the state
+// the seed leaves a daemon that restarted overnight — and the window's button
+// is pressed. There is deliberately no second Arrive here, which is what makes
+// this different from every other test in this file: pressing the button
+// involves no exchange, so nothing witnesses the night, and the daemon has to
+// read it off the watermark it already holds.
+func TestBriefingGetReportsAnAbsenceNobodyWitnessed(t *testing.T) {
+	h := startFocusDaemon(t)
+	client := dialDaemon(t, h.socket)
+
+	h.d.briefing.Arrive(time.Now().Add(-reportedGap))
+
+	view := getBriefing(t, client)
+	if view.NoAbsence {
+		t.Fatalf("briefing.get %v after the last exchange = %+v, want the absence reported",
+			reportedGap, view)
+	}
+	if view.Since == "" || view.AwaySpoken == "" {
+		t.Errorf("the absence is not disclosed: %+v", view)
+	}
+}
+
 // TestBriefingGetSaysNothingHappened is the honesty criterion at the wire:
 // an absence with nothing in it is reported as nothing, never manufactured
 // into a report.

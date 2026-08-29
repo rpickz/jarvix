@@ -54,8 +54,23 @@ type event struct {
 // declaration order, and several tests turn on that.
 func newHarness(t *testing.T, sources ...string) *harness {
 	t.Helper()
+	return buildHarness(t, fixedNow, nil, sources...)
+}
+
+// newSeededHarness builds the state a restart leaves behind: a watermark that
+// came from the conversation archive rather than from an arrival this process
+// witnessed, and a clock wherever the test needs it. It is the only way to
+// reach the state #188 was reported in, because that state contains no
+// arrival at all — which was exactly the bug.
+func newSeededHarness(t *testing.T, seed, now time.Time, sources ...string) *harness {
+	t.Helper()
+	return buildHarness(t, now, func() (time.Time, bool) { return seed, true }, sources...)
+}
+
+func buildHarness(t *testing.T, now time.Time, seed func() (time.Time, bool), sources ...string) *harness {
+	t.Helper()
 	h := &harness{
-		now:   fixedNow,
+		now:   now,
 		set:   Settings{Enabled: true, AfterHours: 8},
 		lines: map[string][]Line{},
 		errs:  map[string]error{},
@@ -63,6 +78,7 @@ func newHarness(t *testing.T, sources ...string) *harness {
 	}
 	opts := Options{
 		Now:      func() time.Time { return h.clock() },
+		Seed:     seed,
 		Settings: func() Settings { return h.settings() },
 		Publish: func(name string, data map[string]any) {
 			h.mu.Lock()
@@ -127,6 +143,16 @@ func (h *harness) away(d time.Duration) {
 	now := h.now
 	h.mu.Unlock()
 	h.svc.Arrive(now)
+}
+
+// pass moves the clock with nobody here: no arrival, no sighting, just time
+// going by. That is what an absence actually is, and the harness needs its own
+// verb for it because `away` conflates the time passing with the user coming
+// back — which is the conflation #188 was about.
+func (h *harness) pass(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.now = h.now.Add(d)
 }
 
 // seen is the first arrival: it seeds the watermark without any absence.
@@ -266,6 +292,295 @@ func TestTheNextAbsenceSupersedesTheStandingOffer(t *testing.T) {
 	h.away(10 * time.Hour)
 	if got := offerOf(h.svc); got != offerSentence {
 		t.Errorf("second night's offer = %q, want the offer sentence", got)
+	}
+}
+
+// ------------------------------------------- an absence nobody witnessed
+
+// The reported case (#188), in the numbers it was reported in. Taken off the
+// user's machine on the morning of the 29th:
+//
+//   - last user exchange 2026-08-28 16:16:56 — the archive's newest
+//     LastActive, and so the value the seed puts in the watermark;
+//   - daemon started 20:51:12 that evening and still running;
+//   - sessions started since that start-up: zero;
+//   - the button pressed at 07:57 the next morning, with after_hours at 8.
+//
+// Fifteen hours and forty minutes, and briefing.get answered no_absence. The
+// zone is UTC here only because the arithmetic is a difference and a test that
+// depends on the reader's zone is a worse test; the gap is the reported one to
+// the second.
+var (
+	reportedLastSeen = time.Date(2026, 8, 28, 16, 16, 56, 0, time.UTC)
+	reportedNow      = time.Date(2026, 8, 29, 7, 57, 0, 0, time.UTC)
+)
+
+// TestAnAbsenceNobodyWitnessedIsStillAnAbsence is the regression test for the
+// report. Nothing has arrived since the daemon started, so under the old
+// event-shaped model there was nothing stored and every reader said "you
+// haven't been away long enough" — to a user who had been away all night. The
+// daemon knew the whole time: the seed had put 16:16:56 in the watermark.
+func TestAnAbsenceNobodyWitnessedIsStillAnAbsence(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions)
+	h.set1(SourceSessions,
+		Line{Category: Awaiting, Text: "The session on the ci refactor is waiting on you."})
+
+	// No Arrive anywhere in this test. That is the reproduction.
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.NoAbsence {
+		t.Fatalf("the window's button reported no absence %v after the last exchange: %+v",
+			reportedNow.Sub(reportedLastSeen), view)
+	}
+	if !view.Since.Equal(reportedLastSeen) {
+		t.Errorf("Since = %v, want the last exchange at %v", view.Since, reportedLastSeen)
+	}
+	if view.AwaySpoken == "" {
+		t.Error("the absence was reported without saying how long it was")
+	}
+	if !strings.Contains(view.Spoken, "waiting on you") {
+		t.Errorf("the briefing was not composed: %q", view.Spoken)
+	}
+
+	// The voice ask reaches the same absence through the same door. It arrives
+	// first in production — the engine's own ordering — but the service must
+	// not depend on that, which is the whole point.
+	spoken, err := h.svc.Briefing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spoken == NoAbsenceSentence {
+		t.Errorf("the spoken ask still denied the absence: %q", spoken)
+	}
+}
+
+// TestTheButtonAndTheVoiceAskAgreeAtEveryMoment. The two surfaces are the
+// same question asked twice, and the bug was precisely that they disagreed:
+// one of them happened to follow an arrival and the other could not. They are
+// driven here through one state, in one order, and compared at every step.
+func TestTheButtonAndTheVoiceAskAgreeAtEveryMoment(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedLastSeen, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+
+	steps := []struct {
+		name   string
+		do     func()
+		absent bool
+	}{
+		{"the moment the user left", func() {}, false},
+		{"four hours later", func() { h.pass(4 * time.Hour) }, false},
+		{"exactly at the threshold", func() { h.pass(4 * time.Hour) }, true},
+		{"still nobody here, hours on", func() { h.pass(7 * time.Hour) }, true},
+		{"they come back", func() { h.seen() }, true},
+		{"and stay a while", func() { h.pass(time.Hour); h.seen() }, true},
+	}
+	for _, step := range steps {
+		step.do()
+		view, err := h.svc.View(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		spoken, err := h.svc.Briefing(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		byVoice := spoken != NoAbsenceSentence
+		if view.NoAbsence == byVoice {
+			t.Errorf("%s: the button says absence=%v and the voice says absence=%v",
+				step.name, !view.NoAbsence, byVoice)
+		}
+		if byVoice != step.absent {
+			t.Errorf("%s: absence reported = %v, want %v", step.name, byVoice, step.absent)
+		}
+	}
+}
+
+// TestAnAbsenceIsReportedOncePerAbsenceHoweverItWasObserved. Reading an
+// absence must not create a second one, and it must not spend or re-arm the
+// offer: a read is a read. The absence the arrival stores is the same absence
+// the earlier read described — same start — so the user is never told about
+// one night twice, and the offer that rides the answer is still made exactly
+// once.
+func TestAnAbsenceIsReportedOncePerAbsenceHoweverItWasObserved(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+
+	first, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.NoAbsence {
+		t.Fatalf("the read did not find the absence: %+v", first)
+	}
+
+	// The user now speaks. The arrival ends the absence, keeps it askable, and
+	// owes the one offer.
+	h.seen()
+	if got := offerOf(h.svc); got != offerSentence {
+		t.Errorf("the arrival after a read made no offer: %q", got)
+	}
+	if got := offerOf(h.svc); got != "" {
+		t.Errorf("the same absence was offered twice: %q", got)
+	}
+
+	// An hour of being here. The ended absence is still the subject, and it is
+	// the SAME one — a read must not resurrect it as a fresh night.
+	h.pass(time.Hour)
+	h.seen()
+	later, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.NoAbsence || !later.Since.Equal(first.Since) {
+		t.Errorf("a later read reported %+v, want the same absence since %v",
+			later.Since, first.Since)
+	}
+	if got := offerOf(h.svc); got != "" {
+		t.Errorf("a read re-armed the offer: %q", got)
+	}
+}
+
+// TestSpeakThenAskAndAskThenSpeakReachTheSameAbsence. The feature's behaviour
+// used to depend on the order of the user's first two actions after a night:
+// speaking first worked, asking first did not. Both orders are driven from one
+// state and must land on the same absence and the same single offer.
+func TestSpeakThenAskAndAskThenSpeakReachTheSameAbsence(t *testing.T) {
+	line := Line{Category: Completed, Text: "A session finished."}
+
+	speakThenAsk := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions)
+	speakThenAsk.set1(SourceSessions, line)
+	speakThenAsk.seen()
+	spokeFirst := offerOf(speakThenAsk.svc)
+	viewA, err := speakThenAsk.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	askThenSpeak := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions)
+	askThenSpeak.set1(SourceSessions, line)
+	viewB, err := askThenSpeak.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	askThenSpeak.seen()
+	askedFirst := offerOf(askThenSpeak.svc)
+
+	if viewA.NoAbsence || viewB.NoAbsence || !viewA.Since.Equal(viewB.Since) {
+		t.Errorf("speak-then-ask saw %+v and ask-then-speak saw %+v", viewA.Since, viewB.Since)
+	}
+	if spokeFirst != offerSentence || askedFirst != offerSentence {
+		t.Errorf("offers differed by order: speak-first %q, ask-first %q", spokeFirst, askedFirst)
+	}
+	for _, h := range []*harness{speakThenAsk, askThenSpeak} {
+		if got := offerOf(h.svc); got != "" {
+			t.Errorf("a second offer for the same absence: %q", got)
+		}
+	}
+}
+
+// TestASecondNightWithNobodyHereSupersedesTheFirst. Deriving must supersede
+// the same way arriving does: after the user has been and gone again, the
+// absence the button reports is the current one, not the one the last arrival
+// happened to store.
+func TestASecondNightWithNobodyHereSupersedesTheFirst(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+	h.seen() // the arrival that ends and stores the first night
+	back := h.clock()
+
+	h.pass(9 * time.Hour)
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.NoAbsence || !view.Since.Equal(back) {
+		t.Errorf("Since = %v, want the second absence starting at %v", view.Since, back)
+	}
+}
+
+// TestAReadShortOfTheThresholdSaysSoExactlyAsBefore. The derivation applies
+// the same boundary an arrival does, so the answer below it is unchanged: a
+// briefing after lunch is the thing the threshold exists to prevent.
+func TestAReadShortOfTheThresholdSaysSoExactlyAsBefore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gap  time.Duration
+		want bool
+	}{
+		{"a second short of the threshold", 8*time.Hour - time.Second, false},
+		{"exactly the threshold", 8 * time.Hour, true},
+		{"a lunch break", 90 * time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSeededHarness(t, reportedLastSeen, reportedLastSeen.Add(tc.gap), SourceSessions)
+			h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+			view, err := h.svc.View(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.NoAbsence == tc.want {
+				t.Errorf("absence reported = %v, want %v", !view.NoAbsence, tc.want)
+			}
+			if !tc.want && view.Headline != NoAbsenceSentence {
+				t.Errorf("headline = %q, want the no-absence sentence", view.Headline)
+			}
+		})
+	}
+}
+
+// TestAnUnknownWatermarkInventsNoAbsence. With no archive to seed from and
+// nobody ever here, there is nothing to measure against — and the derivation
+// must not turn "I don't know" into "you've been away for ages". A fresh
+// install must not greet its first user with a briefing about a machine that
+// was not running, however long ago its clock thinks the epoch was.
+func TestAnUnknownWatermarkInventsNoAbsence(t *testing.T) {
+	h := newHarness(t, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+	h.pass(30 * 24 * time.Hour)
+
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.NoAbsence {
+		t.Errorf("an absence was invented from an unknown watermark: %+v", view)
+	}
+	spoken, err := h.svc.Briefing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spoken != NoAbsenceSentence {
+		t.Errorf("spoken = %q, want the no-absence sentence", spoken)
+	}
+	if n := h.readCount(SourceSessions); n != 0 {
+		t.Errorf("sources were read %d times with no absence to report on", n)
+	}
+}
+
+// TestReadingAnAbsenceNeverMovesTheWatermark. The derivation is arithmetic on
+// state it does not own: only an arrival ends an absence. If a read moved
+// lastSeen, asking about a night would erase it — and the second ask, or the
+// user's own first word, would be told there had been no night.
+func TestReadingAnAbsenceNeverMovesTheWatermark(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+
+	for i := range 3 {
+		view, err := h.svc.View(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.NoAbsence || !view.Since.Equal(reportedLastSeen) {
+			t.Fatalf("read %d = %+v; asking must not consume the absence", i, view.Since)
+		}
+	}
+	// And the arrival that follows still measures the whole night, because the
+	// reads left the watermark where the seed put it.
+	h.seen()
+	if got := offerOf(h.svc); got != offerSentence {
+		t.Errorf("offer after three reads = %q, want the offer sentence", got)
 	}
 }
 
