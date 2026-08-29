@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -60,6 +61,9 @@ type Transcriber struct {
 	// through a function changes when the words are *decided*, not when they
 	// are applied.
 	PromptFunc func() string
+	// Log receives the two lines a discarded capture produces (issue #191).
+	// Nil uses the default logger.
+	Log *slog.Logger
 }
 
 // biasPrompt resolves the prompt for one transcription: PromptFunc when
@@ -69,6 +73,13 @@ func (t *Transcriber) biasPrompt() string {
 		return t.PromptFunc()
 	}
 	return t.Prompt
+}
+
+func (t *Transcriber) logger() *slog.Logger {
+	if t.Log != nil {
+		return t.Log
+	}
+	return slog.Default()
 }
 
 // ResolveModelPath turns a configured model value into a file path. Absolute
@@ -99,6 +110,18 @@ func (t *Transcriber) Transcribe(ctx context.Context, input stt.AudioInput) (<-c
 		return nil, fmt.Errorf("whisper-cli not found (%q); install whisper.cpp (pacman -S whisper.cpp)", t.Binary)
 	}
 
+	// The cheapest transcription is the one that never runs (issue #191).
+	// Checked after the model and binary checks so a misconfigured install
+	// still reports itself as misconfigured rather than as silence, and
+	// before the process is built so a dead microphone costs one file read.
+	if reason := noVoiceReason(input, t.logger()); reason != "" {
+		ch := make(chan stt.TranscriptEvent, 1)
+		ch <- nothing(reason)
+		close(ch)
+		return ch, nil
+	}
+
+	prompt := t.biasPrompt()
 	args := []string{
 		"--model", t.ModelPath,
 		"--file", input.WAVPath,
@@ -108,7 +131,7 @@ func (t *Transcriber) Transcribe(ctx context.Context, input stt.AudioInput) (<-c
 	if t.Language != "" {
 		args = append(args, "--language", t.Language)
 	}
-	if prompt := t.biasPrompt(); prompt != "" {
+	if prompt != "" {
 		args = append(args, "--prompt", prompt)
 	}
 	cmd := exec.CommandContext(ctx, t.Binary, args...)
@@ -136,6 +159,14 @@ func (t *Transcriber) Transcribe(ctx context.Context, input stt.AudioInput) (<-c
 			return
 		}
 		text := strings.TrimSpace(stdout.String())
+		// The prompt compared against is the one resolved above and passed to
+		// this very process — not a fresh PromptFunc call, which could have
+		// picked up a phrase taught while whisper was decoding and then
+		// judged this transcript against words it was never biased with.
+		if reason := promptEchoReason(text, prompt, t.logger()); reason != "" {
+			ch <- nothing(reason)
+			return
+		}
 		ch <- stt.TranscriptEvent{Type: stt.EventFinal, Text: text}
 	}()
 	return ch, nil
