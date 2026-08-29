@@ -58,6 +58,9 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 		checkSTTProbe,
 		checkNameRecognition,
 		checkVocabularyBias,
+		// The other end of the same subject: the two lines above say the bias
+		// is configured, this one says whether it has ever been heard (#143).
+		checkVoiceCorpus,
 		checkTTS,
 		checkTTSProbe,
 		checkVoiceLanguage,

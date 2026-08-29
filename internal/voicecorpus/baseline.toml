@@ -1,0 +1,22 @@
+# The voice corpus baseline: what the speech pipeline manages today.
+#
+# GENERATED. Written only by an explicit
+#
+#     go test -tags voicecorpus ./internal/voicecorpus -voicecorpus.update-baseline
+#
+# and never by an ordinary run — a baseline that updated itself would agree
+# with every regression it was supposed to catch.
+#
+# pass = false is not a defect in the file. Some phrases in this corpus are
+# meant to be hard, and recording that they do not work today is what keeps the
+# run honest about the ones that do.
+#
+# See docs/voice-corpus.md.
+#
+# EMPTY, and truthfully so: nothing has been recorded yet. Until it has, every
+# claim this repository makes about speech recognition rests on faked
+# transcripts. Record the phrases in phrases.toml, run the harness, and commit
+# what it writes here.
+updated = ""
+model = ""
+prompt_hash = ""

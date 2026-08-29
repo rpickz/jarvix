@@ -119,7 +119,7 @@ clean:
 # --- Test-depth targets (issue #8) -----------------------------------------
 # Local and CI invocations are identical: CI calls these same targets.
 
-.PHONY: fuzz bench bench-engines mutate soak soak-repeat soak-constrained soak-unraced
+.PHONY: fuzz bench bench-engines mutate soak soak-repeat soak-constrained soak-unraced voice-corpus voice-corpus-baseline
 
 # Fuzz every parser that eats external input. Each target runs briefly; the
 # committed seed corpora under testdata/fuzz regression-check known inputs on
@@ -149,6 +149,23 @@ bench:
 bench-engines:
 	$(GO) test -tags=engines -run='^$$' -bench='Engines' -benchtime=5x \
 		-count=$(BENCHCOUNT) -v ./internal/session
+
+# The real-voice corpus (issue #143): the user's own recordings through the
+# real whisper, asserted on the intent that matched and the word that survived.
+# Behind a build tag, so it is out of CI by construction — the recordings are
+# personal audio and whisper is heavy. -v because an empty corpus SKIPS, and a
+# skip nobody sees is indistinguishable from a pass.
+#
+# Recordings live in testdata/voicecorpus; JARVIX_VOICE_CORPUS points elsewhere.
+# docs/voice-corpus.md explains recording, adding phrases, and the baseline.
+voice-corpus:
+	$(GO) test -tags voicecorpus -count=1 -v ./internal/voicecorpus
+
+# Rewrite the committed baseline from a run. Deliberately a separate target
+# with the flag spelled out: the baseline's only value is that a person agreed
+# to it, so read the diff before committing it.
+voice-corpus-baseline:
+	$(GO) test -tags voicecorpus -count=1 -v ./internal/voicecorpus -voicecorpus.update-baseline
 
 # Mutation testing over the session engine (the core state machine).
 # GOFLAGS=-count=1 keeps gremlins' baseline honest: a cached test run makes
