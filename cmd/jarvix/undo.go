@@ -40,7 +40,12 @@ type accountView struct {
 	// promise, and a promise the CLI phrased its own way would be a second
 	// promise (ADR 0013).
 	Disclosure string `json:"disclosure"`
-	Path       string `json:"path"`
+	// Empty is the daemon's sentence for an account with nothing in it, on the
+	// same argument as Disclosure: "nothing has been changed in your name" is
+	// a claim about the machine, and the CLI and the window saying it in two
+	// different ways would be two claims (#210).
+	Empty string `json:"empty"`
+	Path  string `json:"path"`
 }
 
 // cmdActions prints the account, newest first.
@@ -56,7 +61,7 @@ func cmdActions(paths config.Paths) error {
 		return err
 	}
 	if len(view.Actions) == 0 {
-		fmt.Println("Jarvix has not changed anything on this machine.")
+		fmt.Println(view.Empty)
 		fmt.Println(view.Disclosure)
 		return nil
 	}

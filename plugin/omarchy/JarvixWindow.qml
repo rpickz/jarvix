@@ -84,6 +84,15 @@ FloatingWindow {
     // is a live chronological ring of one row per event, and this is the
     // summary of the machine that ring is a record of.
     { id: "situation", label: "Situation" },
+    // account — what Jarvix has CHANGED in the user's name, and putting it
+    // back (#210, ADR 0064/0066). Beside Activity and Situation because the
+    // three answer three different questions about the same machine: Activity
+    // is every event as it happened, Situation is where things stand now, and
+    // this is the subset that altered something, with a handle on each one.
+    // Its own tab rather than a corner of Activity for the Approvals tab's
+    // reason, restated: an action you cannot find is an action you cannot
+    // reverse.
+    { id: "account", label: "Account" },
     // focus — the focus threads (#123, ADR 0041): threads with anchors,
     // parked thoughts and the live timeboxed session, self-contained in
     // JarvixFocusTab.qml (own socket, request ids 500–599, focus.list /
@@ -128,6 +137,14 @@ FloatingWindow {
       requestReminders()
       requestMonitors()
       requestPlacementVocabulary()
+    }
+    else if (id === "account") {
+      // The notice is about a reversal the user asked for while they were
+      // last here. Leaving it on screen for a return visit would go on
+      // reporting an outcome from some earlier minute as though it had just
+      // happened.
+      accountNotice = ""
+      requestAccount()
     }
     else if (id === "knowledge") requestKnowledge()
     else if (id === "providers") requestProviders()
@@ -2611,7 +2628,15 @@ FloatingWindow {
   // against the live stores at the moment of the press (ADR 0013). That is
   // why a forgotten fact can say it was forgotten instead of offering a
   // button that would do nothing.
-  property int provenancePos: -1
+  // Which panel is unfolded, as one window-level key rather than a turn
+  // position (#210). Two surfaces now carry sources — an answer in the
+  // transcript and an action in the Account tab — and they must share this
+  // pointer rather than each keeping their own: `provenanceItems` is a single
+  // resolved list, so two independent "which one is open" flags would let both
+  // panels claim the same list and show one row's sources under another's.
+  // The key is namespaced ("turn:3", "action:a17") so the two surfaces cannot
+  // collide on a number that means something different in each.
+  property string provenanceOpen: ""
   property var provenanceItems: []
   property bool provenanceLoading: false
   property string provenanceError: ""
@@ -2620,29 +2645,62 @@ FloatingWindow {
   // toggleProvenance opens the panel on a turn, or closes it if it is already
   // open. The second press must not re-ask: a fold is a fold.
   function toggleProvenance(pos, provJson) {
-    if (provenancePos === pos) {
-      provenancePos = -1
-      provenanceItems = []
-      provenanceError = ""
+    var key = "turn:" + pos
+    if (provenanceOpen === key) {
+      closeProvenance()
       return
     }
-    provenancePos = pos
+    var sources = []
+    var unreadable = false
+    if (provJson !== "") {
+      try {
+        sources = JSON.parse(provJson).sources || []
+      } catch (e) {
+        unreadable = true
+      }
+    }
+    openProvenance(key, sources)
+    // Opened first, then marked: a turn whose record cannot be parsed still
+    // gets an unfolded panel, because the sentence saying so has to be
+    // somewhere a person can read it.
+    if (unreadable) provenanceError = "This turn's sources could not be read."
+  }
+
+  // toggleActionProvenance is the same affordance on a row of the account
+  // (#210). The daemon has already split the record's stored references into
+  // the shape provenance.resolve takes, so this hands them straight over — the
+  // window learns nothing about how a reference is encoded.
+  function toggleActionProvenance(id, sources) {
+    var key = "action:" + id
+    if (provenanceOpen === key) {
+      closeProvenance()
+      return
+    }
+    openProvenance(key, sources || [])
+  }
+
+  function closeProvenance() {
+    provenanceOpen = ""
     provenanceItems = []
     provenanceError = ""
-    if (!daemon.connected || provJson === "") return
-    var record = {}
-    try {
-      record = JSON.parse(provJson)
-    } catch (e) {
-      provenanceError = "This turn's sources could not be read."
-      return
-    }
+    provenanceLoading = false
+  }
+
+  // openProvenance is the single place this window asks the daemon to resolve
+  // sources. One call site on purpose: a second would be a second chance for a
+  // panel to end up showing a list nobody re-checked.
+  function openProvenance(key, sources) {
+    provenanceOpen = key
+    provenanceItems = []
+    provenanceError = ""
+    provenanceLoading = false
+    if (!daemon.connected || sources.length === 0) return
     provenanceLoading = true
     provenanceRequestId = nextRequestId
     nextRequestId++
     daemon.write(JSON.stringify({ jsonrpc: "2.0", id: provenanceRequestId,
       method: "provenance.resolve",
-      params: { sources: record.sources || [] } }) + "\n")
+      params: { sources: sources } }) + "\n")
   }
 
   // provenanceCount is the number the collapsed control shows, read from the
@@ -3187,6 +3245,122 @@ FloatingWindow {
     return parts.join(" \u00b7 ")
   }
 
+  // --- the account of work (#210, ADR 0064/0066) ---------------------------
+  // What Jarvix has changed on this machine, and putting it back. The thinnest
+  // surface in this file, and deliberately so: the account is the record of
+  // unsupervised action, so every claim it makes — when something happened,
+  // whether it can be reversed, why it cannot, what a job is called, whether
+  // the whole job may go back — is a sentence or a boolean the daemon computed
+  // and this file places (ADR 0013).
+  //
+  // Nothing here decides eligibility. `can_undo` comes back from the same
+  // Undoer.Offer the reversal itself consults, so a row that would refuse when
+  // pressed has no button to press, and a row that will work has one — which
+  // is the whole of "an irreversible or already-undone record is visibly
+  // non-offerable rather than failing when clicked".
+  //
+  // Driven by undo.changed rather than polled: an action recorded anywhere —
+  // this window, the CLI, a job running unattended — re-reads the account for
+  // every open window.
+  property var accountGroups: []
+  property int accountCount: 0
+  property string accountDisclosure: ""
+  property string accountEmpty: ""
+  property string accountPath: ""
+  // The daemon's own sentence about the last reversal asked for from here.
+  // Held verbatim and never inspected: `undo.apply` answers a refusal with a
+  // sentence and NOT with an error, because Jarvix declining is not a fault,
+  // and a window that re-worded either would be claiming an outcome it did not
+  // verify. Nothing else in this tab reads it, so there is no path by which a
+  // refusal could be shown as a success.
+  property string accountNotice: ""
+  // JSON-RPC ids from this feature's own private range (1000–1049, the
+  // approvals and managed-window discipline) so its replies are recognisable
+  // by construction.
+  property int accountListRequestId: 0
+  property int accountApplyRequestId: 0
+  property int nextAccountRequestId: 1000
+
+  function takeAccountRequestId() {
+    var id = nextAccountRequestId
+    nextAccountRequestId = nextAccountRequestId >= 1049 ? 1000 : nextAccountRequestId + 1
+    return id
+  }
+
+  function requestAccount() {
+    if (!daemon.connected) return
+    accountListRequestId = takeAccountRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: accountListRequestId,
+      method: "undo.list" }) + "\n")
+  }
+
+  // loadAccount takes the daemon's arrangement as given. `groups` is the
+  // account already ordered — one group per job, everything else standing
+  // alone, newest first throughout — because "grouped by job where a job
+  // exists, chronological otherwise" is a decision, and decisions are not made
+  // in QML. `actions` is the same rows flat, and is read here only for the
+  // count that answers "is there anything at all".
+  function loadAccount(result) {
+    accountGroups = result.groups || []
+    accountCount = (result.actions || []).length
+    accountDisclosure = String(result.disclosure || "")
+    accountEmpty = String(result.empty || "")
+    accountPath = String(result.path || "")
+  }
+
+  // undoAction puts one recorded action back. No confirmation card in front of
+  // it: this IS the manager's own instruction, given by hand, on a row that
+  // names what it will do — and the gate still applies underneath, under the
+  // identity of the action being reversed (ADR 0064).
+  function undoAction(id) {
+    if (!daemon.connected || String(id || "") === "") return
+    accountNotice = ""
+    accountApplyRequestId = takeAccountRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: accountApplyRequestId,
+      method: "undo.apply", params: { id: String(id) } }) + "\n")
+  }
+
+  // undoJob puts a whole piece of work back, newest step first. One press for
+  // the job rather than one per step, which is the decision ADR 0065 made and
+  // this surface inherits.
+  function undoJob(job) {
+    if (!daemon.connected || String(job || "") === "") return
+    accountNotice = ""
+    accountApplyRequestId = takeAccountRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: accountApplyRequestId,
+      method: "undo.apply", params: { job: String(job) } }) + "\n")
+  }
+
+  // handleUndoApplyReply shows what the daemon said and then re-reads.
+  //
+  // Re-read rather than patched, and that is the load-bearing half: whether a
+  // row is now reversed, and by what, is the account's answer, and a window
+  // that marked its own rows would be asserting an outcome it had not been
+  // told. It re-reads on the reply as well as on undo.changed because the
+  // event is published when the reversal's own row is written, an instant
+  // before the row it reversed is marked — so the reply is the moment both
+  // halves are certainly on disk.
+  function handleUndoApplyReply(frame) {
+    if (frame.error) {
+      accountNotice = String(frame.error.message || "")
+      requestAccount()
+      return
+    }
+    accountNotice = String((frame.result || {}).spoken || "")
+    requestAccount()
+  }
+
+  // accountMeta places a row in time and names what it touched. Both phrases
+  // are the daemon's — `when` in particular, because this window reads an
+  // account over a socket and has no business measuring another machine's
+  // clock with its own.
+  function accountMeta(a) {
+    var parts = []
+    if (String(a.when || "") !== "") parts.push(String(a.when))
+    if (String(a.target || "") !== "") parts.push(String(a.target))
+    return parts.join(" · ")
+  }
+
   // approvalSubtitle says what the grant IS — how long it lasts — because
   // that is the fact a person revoking needs first.
   function approvalSubtitle(a) {
@@ -3717,6 +3891,17 @@ FloatingWindow {
       // the history travels.
       requestApprovals()
       break
+    case "undo.changed":
+      // Something was recorded or put back — by a tool in this conversation,
+      // by `jarvix undo`, or by a job running unattended. The event carries a
+      // summary only; the listing reply is where the rest travels, including
+      // the restore payload's deliberate absence. Re-read rather than patch
+      // (ADR 0013), and unconditionally rather than only while the tab is
+      // open: the account is small, the read is cheap, and a tab that
+      // refreshed only when looked at would show the state of some earlier
+      // minute for as long as it took to notice.
+      requestAccount()
+      break
     case "desktop.action":
       // A window was handed over or let go (#197) — by voice, by the button
       // below, or by a launch Jarvix made. The event names the verb and the
@@ -3961,6 +4146,10 @@ FloatingWindow {
             win.errorMessage = String(frame.error.message || "the window could not be released")
           }
           win.requestManagedWindows()
+        } else if (frame.id !== undefined && frame.id === win.accountListRequestId) {
+          if (frame.result) win.loadAccount(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.accountApplyRequestId) {
+          win.handleUndoApplyReply(frame)
         } else if (frame.id !== undefined && frame.id === win.approvalsRequestId) {
           if (frame.result) win.loadApprovals(frame.result)
         } else if (frame.id !== undefined && frame.id === win.approvalsForgetRequestId) {
@@ -7186,6 +7375,248 @@ FloatingWindow {
       }
     }
 
+    // The Account tab (#210, ADR 0066): what Jarvix has changed in the user's
+    // name, arranged as work, with a control on each row that can go back.
+    //
+    // Every string on this screen except its section title and its button
+    // labels arrived already worded. The rows say what changed (`summary`),
+    // what their standing is (`state`), when it happened (`when`) and why a
+    // reversal is not on offer (`why`) — four fields the daemon composed
+    // against the account and the permission gate, because each one is a claim
+    // about the machine that this window cannot check. The bound's disclosure
+    // and the empty-account sentence are the same promise at the two ends of
+    // the range.
+    //
+    // The arrangement is the daemon's too. `groups` arrives ordered — a job's
+    // steps under one heading, everything else standing alone, newest first
+    // throughout — so this file has no idea what a job is or when grouping
+    // applies.
+    Item {
+      id: accountScreen
+      visible: win.socketReady && win.currentTab === "account"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      Flickable {
+        id: accountScroll
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: accountFooter.top
+        anchors.bottomMargin: Style.space(8)
+        contentHeight: accountColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: accountColumn
+          width: accountScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            text: "What Jarvix has changed"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          // The outcome of the last reversal asked for here, in the daemon's
+          // own sentence and nowhere else's. A refusal comes back as a normal
+          // reply carrying its reason — Jarvix declining is not a fault — so
+          // this line is the whole of what the window claims happened, and it
+          // claims exactly what it was told and nothing more.
+          Text {
+            visible: win.accountNotice !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: win.accountNotice
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.accountCount === 0
+            width: parent.width
+            text: win.accountEmpty
+          }
+
+          Repeater {
+            model: win.accountGroups
+
+            delegate: Column {
+              id: accountGroup
+              required property var modelData
+              width: accountColumn.width
+              spacing: Style.space(6)
+
+              readonly property string job: String(accountGroup.modelData.job || "")
+              readonly property string heading: String(accountGroup.modelData.heading || "")
+
+              Text {
+                visible: accountGroup.heading !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: accountGroup.heading
+                font.family: Style.font.family
+                font.bold: true
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+
+              // What putting the whole job back will also do, said before the
+              // press rather than discovered after it — a parked job is
+              // stopped by its own reversal, and a manager learning that
+              // afterwards has learned something useless.
+              Text {
+                visible: String(accountGroup.modelData.note || "") !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: String(accountGroup.modelData.note || "")
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Util.alpha(Color.popups.text, 0.7)
+              }
+
+              JarvixFormButton {
+                visible: accountGroup.job !== "" && accountGroup.modelData.can_undo === true
+                label: "Put the whole job back"
+                name: "Put back everything in " + accountGroup.heading
+                onClicked: win.undoJob(accountGroup.job)
+              }
+
+              // A job that cannot go back says so in words instead of showing
+              // a button that would refuse — still working, or nothing left in
+              // it that can be reversed, in the daemon's phrasing either way.
+              Text {
+                visible: accountGroup.job !== "" && accountGroup.modelData.can_undo !== true
+                  && String(accountGroup.modelData.why || "") !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: String(accountGroup.modelData.why || "")
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Util.alpha(Color.popups.text, 0.7)
+              }
+
+              Repeater {
+                model: accountGroup.modelData.actions || []
+
+                delegate: Column {
+                  id: accountEntry
+                  required property var modelData
+                  width: accountGroup.width
+                  spacing: Style.space(4)
+
+                  readonly property string actionId: String(accountEntry.modelData.id || "")
+                  readonly property var sources: accountEntry.modelData.sources || []
+                  readonly property bool sourcesOpen:
+                    win.provenanceOpen === "action:" + accountEntry.actionId
+
+                  JarvixCollectionRow {
+                    width: accountEntry.width
+                    title: String(accountEntry.modelData.summary || "")
+                    // The row's standing, verbatim: already put back and by
+                    // what, reversible, or not and why. One sentence rather
+                    // than a colour, so a reader who cannot see the difference
+                    // between two greys still gets the answer.
+                    subtitle: String(accountEntry.modelData.state || "")
+                    meta: win.accountMeta(accountEntry.modelData)
+                    // No label, no button. A record that is irreversible, that
+                    // has already been put back, or whose tool identity the
+                    // policy denies simply has nothing to press.
+                    actionLabel: accountEntry.modelData.can_undo === true ? "Put it back" : ""
+                    actionName: "Put back: " + String(accountEntry.modelData.summary || "")
+                    onActionTriggered: win.undoAction(accountEntry.actionId)
+                    action2Label: accountEntry.sources.length > 0 ? "What this touched" : ""
+                    action2Name: "Show what this action touched — "
+                      + String(accountEntry.modelData.summary || "")
+                    onAction2Triggered: win.toggleActionProvenance(
+                      accountEntry.actionId, accountEntry.sources)
+                  }
+
+                  // The sources behind one action, on the same two verbs the
+                  // answer panel uses and rendered by the same shared row.
+                  // The delegate is written out again rather than shared with
+                  // the transcript's panel because the two live in different
+                  // trees; what is NOT duplicated is the asking, which happens
+                  // in win.openProvenance and nowhere else, so neither surface
+                  // can end up showing a list the daemon did not just compose.
+                  Column {
+                    visible: accountEntry.sourcesOpen
+                    width: parent.width
+                    spacing: Style.space(4)
+
+                    Text {
+                      visible: win.provenanceLoading
+                      width: parent.width
+                      wrapMode: Text.Wrap
+                      text: "Looking these up…"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.subtitle
+                      color: Util.alpha(Color.popups.text, 0.6)
+                    }
+
+                    Text {
+                      visible: win.provenanceError !== ""
+                      width: parent.width
+                      wrapMode: Text.Wrap
+                      text: win.provenanceError
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.subtitle
+                      color: Color.popups.text
+                    }
+
+                    Repeater {
+                      model: accountEntry.sourcesOpen ? win.provenanceItems : []
+
+                      delegate: JarvixCollectionRow {
+                        required property var modelData
+                        width: accountEntry.width
+                        title: String(modelData.name || "")
+                        subtitle: String(modelData.strength_phrase || "")
+                        meta: String(modelData.note || "")
+                        flagged: Boolean(modelData.gone)
+                        actionLabel: (modelData.actions || []).length > 0
+                          ? String(modelData.actions[0].label) : ""
+                        actionName: actionLabel + " for " + title
+                        onActionTriggered: win.runProvenanceAction(modelData, modelData.actions[0])
+                        action2Label: (modelData.actions || []).length > 1
+                          ? String(modelData.actions[1].label) : ""
+                        action2Name: action2Label + " for " + title
+                        onAction2Triggered: win.runProvenanceAction(modelData, modelData.actions[1])
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // The bound, disclosed on every listing, in the sentence the daemon
+      // composed from the two numbers rather than in one this file derived
+      // from them — and the file itself, because it is where a person goes
+      // looking for an action that is no longer here.
+      Text {
+        id: accountFooter
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        wrapMode: Text.Wrap
+        text: win.accountDisclosure === "" ? ""
+          : win.accountDisclosure + (win.accountPath === "" ? "" : "  " + win.accountPath)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+    }
+
     // The add form's body, built per open. The hint under the field says what
     // a rule means, in the same vocabulary the card uses, because the whole
     // risk of typing one is thinking it is narrower than it is.
@@ -7881,7 +8312,7 @@ FloatingWindow {
           width: parent.width
           spacing: Style.space(4)
 
-          readonly property bool open: win.provenancePos === model.pos && model.pos > 0
+          readonly property bool open: win.provenanceOpen === "turn:" + model.pos && model.pos > 0
           readonly property int count: win.provenanceCount(model.provJson)
           readonly property int hidden: win.provenanceTruncated(model.provJson)
 

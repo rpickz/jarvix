@@ -147,7 +147,8 @@ func (s *Store) List() View {
 	s.refreshLocked()
 	out := append([]Record(nil), s.st.records...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
-	return View{Records: out, Bound: s.max, Forgotten: s.st.forgotten, Path: s.path}
+	return View{Records: out, Bound: s.max, Forgotten: s.st.forgotten, Path: s.path,
+		Now: s.now().UTC()}
 }
 
 // View is the account as a reader sees it.
@@ -160,6 +161,15 @@ type View struct {
 	Forgotten int
 	// Path is where the file is, so a surface can point at it.
 	Path string
+	// Now is the store's own clock at the moment the view was taken (#210).
+	//
+	// It travels with the rows for the same reason the bound does: a surface
+	// that says "4 minutes ago" has to measure that against the clock the
+	// records were written with, not against its own. A window reads the
+	// account over a socket and has no business subtracting one machine's idea
+	// of the time from another's — and a test that injects a clock gets a
+	// hermetic answer out of both halves rather than out of one.
+	Now time.Time
 }
 
 // Disclosure is the bound as a sentence, for every surface that lists the

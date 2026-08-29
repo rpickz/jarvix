@@ -498,6 +498,19 @@ a stanza removes that record, which is the right thing to do with a command
 you would rather not keep a copy of. See
 [ADR 0064](docs/adr/0064-review-and-undo.md).
 
+The same account is the conversation window's **Account** tab, so reviewing
+what was done in your name and reversing it are the same place rather than a
+terminal. Each row says what changed, when, and where it stands — "I can put
+this back", "I can't put this back — a command that has run has run", "I put
+this back 4 minutes ago — that reversal is a19" — and a row that cannot go
+back has no button to press rather than one that refuses. A job's steps sit
+under one heading with a single control that puts the whole piece of work
+back, newest step first; a job that is still working says so instead of
+offering one, and a parked job's control says out loud that using it will also
+stop the job. Every source an action touched clicks through to the thing
+itself, the same way an answer's do. See
+[ADR 0066](docs/adr/0066-the-account-in-the-window.md).
+
 ### Backing up the assistant's memory of you
 
 Jarvix's whole knowledge of you — remembered facts, taught vocabulary, focus
