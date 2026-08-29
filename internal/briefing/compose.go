@@ -52,6 +52,12 @@ type Composed struct {
 	Since      time.Time
 	AwaySpoken string
 	Headline   string
+	// Caveat is the up-front admission that part of the window predates this
+	// process, or "" when it does not (#190). It sits between the headline and
+	// the lines — spoken second, rendered second — because a shortfall
+	// disclosed after the content has already been read out is a shortfall the
+	// listener has already acted on.
+	Caveat string
 	// Sections is the full version: every line, in category order, nothing
 	// trimmed. The window renders this.
 	Sections []Section
@@ -60,14 +66,17 @@ type Composed struct {
 	Spoken    string
 	Truncated bool
 	// Empty means nothing happened and every source could be read — the one
-	// case that earns "nothing while you were away".
+	// case that earns "nothing since you were last here". It describes the
+	// LINES, so it can be true beside a Caveat: read the two together, which
+	// is how both renderings present them.
 	Empty bool
 	// Unavailable names the sources that could not be read, in source order.
 	Unavailable []string
-	// Disabled and NoAbsence are the two non-briefings the window asks about:
-	// the feature is off, or there is no absence to report yet.
-	Disabled  bool
-	NoAbsence bool
+	// Disabled and NoRecord are the two non-briefings the window asks about:
+	// the feature is off, or nobody has ever been seen here, so there is no
+	// window to measure. A gap being short is no longer one of them (#190).
+	Disabled bool
+	NoRecord bool
 	// ModelOutcome is "off", "used", or "refused" — why the headline reads
 	// the way it does. It travels in the event, never a word of the briefing.
 	ModelOutcome string
@@ -85,6 +94,7 @@ func (s *Service) compose(ctx context.Context, since time.Time, budget time.Dura
 	c := Composed{
 		Since:       since,
 		AwaySpoken:  knowledge.SpokenAge(now, since),
+		Caveat:      s.coverage(since),
 		Unavailable: unavailable,
 	}
 
@@ -94,7 +104,7 @@ func (s *Service) compose(ctx context.Context, since time.Time, budget time.Dura
 	c.Sections = sections(sorted)
 
 	c.Headline, c.ModelOutcome = s.headline(ctx, c.AwaySpoken, sorted, counts)
-	c.Spoken, c.Truncated = speak(c.Headline, sorted)
+	c.Spoken, c.Truncated = speak(c.Headline, c.Caveat, sorted)
 
 	s.publishGiven(c, reason)
 	return c, nil
@@ -188,22 +198,24 @@ func sections(lines []Line) []Section {
 // second one is the point: the pointer sentence only costs words when it is
 // actually going to be spoken, so a briefing that fits is never trimmed to
 // make room for an announcement that it was trimmed.
-func speak(headline string, lines []Line) (string, bool) {
-	kept, dropped := fit(headline, lines, 0)
+func speak(headline, caveat string, lines []Line) (string, bool) {
+	kept, dropped := fit(headline, caveat, lines, 0)
 	if dropped == 0 {
-		return join(headline, kept, false), false
+		return join(headline, caveat, kept, false), false
 	}
-	kept, dropped = fit(headline, lines, words(windowPointer))
-	return join(headline, kept, true), dropped > 0
+	kept, dropped = fit(headline, caveat, lines, words(windowPointer))
+	return join(headline, caveat, kept, true), dropped > 0
 }
 
 // fit selects the lines that fit the budget, taking them in speaking order
 // and stopping at the first that does not. Unavailable lines are never
 // dropped: "I couldn't check the reminders" is the one thing a shortened
 // briefing must still say, because its absence is indistinguishable from
-// having nothing to report.
-func fit(headline string, lines []Line, reserve int) ([]Line, int) {
-	spent := words(headline) + reserve
+// having nothing to report. The restart caveat is charged for on the same
+// terms and for the same reason — it is an admission, and the trim takes the
+// tail, which is where an admission would otherwise be lost.
+func fit(headline, caveat string, lines []Line, reserve int) ([]Line, int) {
+	spent := words(headline) + words(caveat) + reserve
 	for _, line := range lines {
 		if line.Category == Unavailable {
 			spent += words(line.Text)
@@ -229,10 +241,13 @@ func fit(headline string, lines []Line, reserve int) ([]Line, int) {
 
 // join assembles the spoken briefing. Lines arrive already punctuated, so
 // this only spaces them.
-func join(headline string, lines []Line, truncated bool) string {
-	parts := make([]string, 0, len(lines)+2)
+func join(headline, caveat string, lines []Line, truncated bool) string {
+	parts := make([]string, 0, len(lines)+3)
 	if headline != "" {
 		parts = append(parts, headline)
+	}
+	if caveat != "" {
+		parts = append(parts, caveat)
 	}
 	for _, line := range lines {
 		parts = append(parts, line.Text)
@@ -253,14 +268,23 @@ func words(text string) int {
 // when there is no model, when the model failed, when its sentence was
 // refused, and when there is nothing to word. Every other path in this
 // package can fall back to it, so it has to work for every shape — including
-// the empty night, which is the one the honesty rule cares most about.
+// the empty window, which is the one the honesty rule cares most about.
+//
+// Both empty forms name the interval, in the shared spoken scale, because
+// since #190 the interval is no longer known to be long: "nothing" over a
+// stretch the listener cannot size is a claim they have no way to weigh, and
+// the same sentence has to serve a minute and a fortnight. That scale is also
+// the only floor anywhere on this path — knowledge.SpokenAge bottoms out at
+// "just now" — and it is a floor on the WORDING, never on whether an answer is
+// given. "You haven't been away long enough" is not a sentence this package
+// says any more.
 func plainHeadline(away string, counts lineCounts) string {
 	if counts.substantive == 0 {
 		if counts.byCategory[Unavailable] > 0 {
-			return "Nothing I could find while you were away, and I couldn't check everything — " +
-				"you were last here " + away + "."
+			return "Nothing I could find since you were last here, " + away +
+				" — and I couldn't check everything."
 		}
-		return "Nothing while you were away — you were last here " + away + "."
+		return "Nothing since you were last here, " + away + "."
 	}
 	var parts []string
 	if n := counts.byCategory[Awaiting]; n > 0 {
@@ -392,8 +416,13 @@ func (s *Service) publishGiven(c Composed, reason string) {
 		"sections":  len(c.Sections),
 		"truncated": c.Truncated,
 		"empty":     c.Empty,
-		"model":     c.ModelOutcome,
-		"away":      c.AwaySpoken,
+		// partial is the caveat as an outcome rather than as its sentence: a
+		// briefing that could not cover its own window is exactly the kind of
+		// thing a row should be able to say, and a bool says it without
+		// carrying a word of the account.
+		"partial": c.Caveat != "",
+		"model":   c.ModelOutcome,
+		"away":    c.AwaySpoken,
 	}
 	if len(c.Unavailable) > 0 {
 		data["unavailable"] = strings.Join(c.Unavailable, ",")

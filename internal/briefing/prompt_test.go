@@ -99,6 +99,12 @@ func TestTheHeadlineContractRefusesInventionAndAcceptsTruth(t *testing.T) {
 // TestThePlainHeadlineCoversEveryShape. It is the fallback for every failure
 // in the chain, so it has to be a sentence for every set of counts — most of
 // all the empty one, which is the honesty rule's own sentence.
+//
+// Both empty forms name the interval since #190, because the interval is no
+// longer known to be long: the same sentence now has to serve a minute and a
+// fortnight, and "nothing" over a stretch the listener cannot size is a claim
+// they have no way to weigh. The wording matches the non-empty forms below,
+// which have always said "since you were last here".
 func TestThePlainHeadlineCoversEveryShape(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -106,10 +112,10 @@ func TestThePlainHeadlineCoversEveryShape(t *testing.T) {
 		want   string
 	}{
 		{"an empty night", lineCounts{},
-			"Nothing while you were away — you were last here nine hours ago."},
+			"Nothing since you were last here, nine hours ago."},
 		{"nothing found and something unreadable", counts(map[Category]int{Unavailable: 1}),
-			"Nothing I could find while you were away, and I couldn't check everything — " +
-				"you were last here nine hours ago."},
+			"Nothing I could find since you were last here, nine hours ago — " +
+				"and I couldn't check everything."},
 		{"one of each", counts(map[Category]int{Awaiting: 1, Completed: 1, InProgress: 1, Housekeeping: 1}),
 			"Since you were last here nine hours ago: one waiting on you, one finished, " +
 				"one still going and one bit of housekeeping."},

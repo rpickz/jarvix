@@ -75,7 +75,7 @@ user chose, from a store built to be read back. That is the honest version of
 "topic" this daemon can offer, and inventing a better one would mean reading
 something it should not.
 
-### Offered, not ambushed
+### Offered, not ambushed — and the threshold gates only the offer
 
 After an absence of at least `briefing.after_hours` (default 8), and **only
 when at least one source actually has something**, exactly one sentence is
@@ -100,6 +100,51 @@ subject stands.
 same moment instead. "Unprompted" there means *without you asking for the
 briefing*; Jarvix still waits until the user is demonstrably back, because
 nothing in this feature runs on a clock.
+
+**This section originally described the threshold as if it decided when a
+briefing exists, and the implementation read it that way.** `Briefing()` and
+`View()` both consulted the standing absence, found none under eight hours, and
+answered *"You haven't been away long enough for a briefing"* — **without
+reading a single source**. Come back from a two-hour lunch during which a
+scheduled routine ran, a reminder fired and an agent session finished, press
+the button, and Jarvix declined to say so while holding all of it (#190).
+
+The corrected rule:
+
+> **`briefing.after_hours` decides when Jarvix VOLUNTEERS. Asking always
+> answers.** An explicit ask — the voice phrase, the model's tool, the window's
+> button — reads the sources over the stretch since the user was last here,
+> whatever its length, and says plainly when there was nothing in it.
+
+Everything in the offer path above is unchanged by that: the threshold, the
+once-per-absence question, `OfferLine`'s ownership of the one sentence, and the
+mutex an ordinary exchange pays. The two paths now differ in exactly one place,
+which is where they should have differed all along.
+
+**No floor applies to whether an answer is given**, and none applies to which
+sources are read. The only floor anywhere on this path is on the *wording*, and
+it is one this daemon already had: `knowledge.SpokenAge` bottoms out at "just
+now", so an ask twice inside a minute is answered *"Nothing since you were last
+here, just now."* The empty account names its interval in that shared scale
+whatever the interval is — a minute or a fortnight — because "nothing" over a
+stretch the listener cannot size is a claim they have no way to weigh.
+
+An ask is about the most recent stretch the user was not here, resolved in this
+order: a running absence past the threshold; then the absence an arrival
+preserved, which outlives the offer on purpose so that *"yes, go on"* to the
+offer is answered with the night rather than with the ten seconds since it was
+spoken; then the plain window, taking the longer of the stretch still open
+(nothing has arrived since the last sighting) and the stretch the last arrival
+closed. That last comparison is what makes the *voice* ask work at all: the
+engine records the sighting before it runs the briefing intent, so by the time
+the ask reaches the service the watermark is already `now`, and reading it
+alone would compose over a window of microseconds.
+
+One state is left in which an ask does not compose: **the daemon has never seen
+the user** — no archive to seed from and no exchange yet — so there is no
+window to measure and none is invented. It says so, in those terms
+(`no_record` on the wire). The sentence *"You haven't been away long enough for
+a briefing"* no longer exists anywhere in the code.
 
 ### Absence is measured from the last user-started exchange
 
@@ -142,9 +187,18 @@ superseded, so it began and ended before the running one started. And "the
 absence ended" cannot be true while nothing has arrived to end it — when the
 user is asking, the honest reading is that they are standing in it.
 
+This section is about the *absence* — the thing the threshold has an opinion
+about, and so the thing the offer rides. Since #190 it is no longer the whole
+of what an ask composes over: an ask that finds no absence here still gets the
+plain window since the last sighting. See the offer section above.
+
 Reading is a read. It moves no watermark, arms no offer, and spends none: an
 absence is still reported once per absence however it was first observed, and
-the "asked once per absence" rule on the offer is untouched. The conservative
+the "asked once per absence" rule on the offer is untouched. That rule now
+covers strictly more reads, since an ask over any gap composes — and it holds
+for the same structural reason: the derivation is a free function over
+`(lastSeen, now, threshold)` that cannot reach the service, and the one field
+an ask consults beyond it is written only by `Arrive`. The conservative
 stance is untouched too — an unknown watermark (no archive, nobody ever here)
 yields no absence rather than an enormous one, and a clock that went backwards
 gives a negative gap, which is below any threshold and so reads as no absence,
@@ -233,6 +287,36 @@ A source that cannot be read becomes a **named** line — "I couldn't check
 your reminders just now" — never a silent omission, because the listener has
 to be able to tell "nothing happened there" from "I did not look".
 
+### A window that predates the daemon says so up front
+
+Four of the five sources are durable: the reminder store, the focus threads,
+the conversation archive, the session transcripts. The fifth — Jarvix's own
+activity record — is an in-memory ring that dies with the process (#70). So a
+briefing whose window opens **before this process started** is composed from
+four sources answering confidently for the whole stretch and one that could not
+have seen the start of it.
+
+That was admitted, but in the wrong place: the admission was appended to the
+*activity line*, which only exists when the ring had something to say. A window
+that lies entirely before the restart is exactly the case where the ring has
+nothing — so the admission vanished and the result read as a composed,
+confident *"nothing happened"* (#190).
+
+So the briefing says it about **itself**, in its own field, spoken second and
+rendered directly under the headline, exempt from the trim on the same terms as
+the "I couldn't check…" lines. It names both halves, because a listener told
+only that "some of this is missing" has been handed a doubt rather than a fact
+and cannot tell which half of the briefing to trust:
+
+> I restarted partway through this stretch, so my own record of what I ran only
+> goes back to then; your reminders, focus threads, conversations and AI
+> sessions are kept on disk, so those are complete.
+
+The daemon owns the fact (it is the only thing that knows when it started) and
+`internal/briefing` owns the sentence, beside the source names it has to spell
+out. **Persisting the ring is out of scope and stays a separate decision** —
+it has a real cost, and the honest disclosure is worth having either way.
+
 ### Nothing is prepared until someone is back, and nothing is kept
 
 There is no scheduler and no goroutine in `internal/briefing`. Everything is
@@ -292,8 +376,14 @@ Speaking without being asked is not, so it is opt-in.
 - The activity ring is in-memory, bounded and lossy, and it dies with the
   daemon; the schedule trail and the feed statuses do not. So the activity
   line's counts are true across a restart and its *failure* count is
-  best-effort — which is why that line appends "My own record only goes back
-  to when I restarted" whenever this process began after the absence did.
+  best-effort — which is why the briefing carries an up-front caveat whenever
+  this process began after the window did. It used to be a clause on the
+  activity line, and moved because that is the one line a restart is likely to
+  delete.
+- Asking is now cheap-but-not-free on every gap: a short-gap ask reads the same
+  five sources a long one does, and may spend the same bounded model call. That
+  is the cost of an honest answer, it is paid only when the user asked, and the
+  offer path — the one that runs on an ordinary exchange — still costs a mutex.
 - Two sources read the same focus snapshot, and read it exactly once per
   briefing. That is not only a saving: two snapshots a second apart could
   disagree about the same thread, and a briefing that contradicts itself

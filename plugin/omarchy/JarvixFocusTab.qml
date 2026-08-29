@@ -595,6 +595,22 @@ Item {
           color: Color.popups.text
         }
 
+        // The daemon's admission that part of the window predates its own
+        // start-up (#190). Directly under the headline and above every
+        // section, which is the whole point of it: read after the sections it
+        // would be qualifying an account the reader has already believed.
+        // Worded daemon-side like everything else here.
+        Text {
+          width: parent.width
+          visible: text !== ""
+          text: focusTab.briefing ? String(focusTab.briefing.caveat || "") : ""
+          wrapMode: Text.Wrap
+          font.family: Style.font.family
+          font.italic: true
+          font.pixelSize: Style.font.subtitle
+          color: Util.alpha(Color.popups.text, 0.7)
+        }
+
         Repeater {
           model: focusTab.briefing && focusTab.briefing.sections
             ? focusTab.briefing.sections : []
