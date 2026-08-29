@@ -377,27 +377,6 @@ func TestSTTFailureProducesError(t *testing.T) {
 	}
 }
 
-func TestEmptyTranscriptIsFriendlyError(t *testing.T) {
-	h := newHarness(t, Options{SpeakResponses: true})
-	h.stt.Text = "  "
-	_, _ = h.engine.StartSession()
-	_ = h.engine.StartVoice()
-	_, _ = h.engine.StopVoice()
-	_ = h.engine.Submit("")
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case ev := <-h.events:
-			if ev.Type == "error" {
-				h.waitIdle(t)
-				return
-			}
-		case <-deadline:
-			t.Fatal("no error event for empty transcript")
-		}
-	}
-}
-
 func TestCancelSpeechStopsOnlySpeech(t *testing.T) {
 	h := newHarness(t, Options{SpeakResponses: true})
 	// Deterministic: speech cannot complete before the cancel — no chunk is

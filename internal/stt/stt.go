@@ -35,6 +35,14 @@ type TranscriptEvent struct {
 	Type EventType
 	Text string
 	Err  error
+	// Reason explains a final event that deliberately carries no text: the
+	// capture held no voiced audio, or the transcript was nothing but the
+	// bias prompt echoed back (issue #191). It is the phrase a user debugging
+	// a microphone reads, so it says what was measured rather than what was
+	// concluded. Empty on every other event, including an engine that simply
+	// returned nothing — that is a no-speech result, not a discard, and the
+	// two must not be reported as the same thing.
+	Reason string
 }
 
 // Transcriber converts audio to text.

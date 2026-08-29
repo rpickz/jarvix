@@ -14,13 +14,16 @@ import (
 // whisper.cpp is never required: whisper-cli is a stub script that records
 // its argv and prints a scripted transcript.
 
+// WHISPER_STUB_TEXT lets a test choose what the engine "hears" — needed by
+// the issue #191 tests, where the transcript under examination is whisper's
+// own bias prompt handed back rather than anything a user said.
 const whisperStub = `#!/bin/sh
 printf '%s\n' "$@" > "$WHISPER_STUB_DIR/whisper.args"
 if [ -n "$WHISPER_STUB_FAIL" ]; then
   echo "ggml backend blew up" >&2
   exit 1
 fi
-printf '  scripted transcript  \n'
+printf '%s\n' "${WHISPER_STUB_TEXT-  scripted transcript  }"
 `
 
 func installWhisperStub(t *testing.T) (*Transcriber, string) {

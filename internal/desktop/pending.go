@@ -42,6 +42,19 @@ const PendingElapsedThresholdSec = 2
 // as a hang, which is the failure this whole feature exists to remove.
 const PendingTurnCancelled = "Cancelled"
 
+// PendingTurnNothingHeard is how a pending turn resolves when the capture
+// produced no words at all (issue #191) — the microphone was muted, the room
+// was silent, or the only thing whisper offered was Jarvix's own bias prompt
+// handed back.
+//
+// It is deliberately the ordinary sentence a person says when they did not
+// hear you, and deliberately *not* PendingTurnFailed's wording: nothing broke.
+// The reason — "the capture had no voiced audio (peak -inf dBFS…)" — is on the
+// wire and lands in the activity feed, which is where a user debugging a
+// microphone is looking. The conversation is not that place; a turn there is
+// worth one honest line.
+const PendingTurnNothingHeard = "I didn't catch that"
+
 // toolPhrase is one tool's action in the two grammatical forms Jarvix needs:
 // the infinitive clause the permission gate asks with ("May I run a shell
 // command?"), and the present participle the pending turn shows while it is

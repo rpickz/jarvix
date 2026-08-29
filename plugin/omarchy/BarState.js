@@ -190,6 +190,11 @@ function pendingTurnLine(state, tool, toolDetail, elapsedSec) {
 // desktop.PendingTurnCancelled.
 var pendingTurnCancelled = "Cancelled"
 
+// How a pending turn resolves when the capture produced no words (issue #191).
+// Mirrors desktop.PendingTurnNothingHeard — an honest nothing, worded like a
+// person and styled like nothing, never like the failure it is not.
+var pendingTurnNothingHeard = "I didn't catch that"
+
 // pendingTurnFailed mirrors desktop.PendingTurnFailed: the activity feed's own
 // sentence for the same failure, so one error is never worded twice.
 function pendingTurnFailed(stage, message) {

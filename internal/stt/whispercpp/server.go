@@ -170,6 +170,17 @@ func (s *ServerTranscriber) Close() error {
 // Transcribe implements stt.Transcriber. It answers from the warm server when
 // there is one and silently runs whisper-cli when there is not.
 func (s *ServerTranscriber) Transcribe(ctx context.Context, input stt.AudioInput) (<-chan stt.TranscriptEvent, error) {
+	// A capture with nothing in it is answered here rather than by either
+	// engine (issue #191). Before the supervisor, deliberately: a dead
+	// microphone must not be the thing that wakes a whisper-server, spends
+	// thirty seconds loading a model and then decodes nothing.
+	if reason := noVoiceReason(input, s.logger()); reason != "" {
+		ch := make(chan stt.TranscriptEvent, 1)
+		ch <- nothing(reason)
+		close(ch)
+		return ch, nil
+	}
+
 	child, err := s.supervisor().Get(ctx)
 	if err != nil {
 		s.logger().Debug("warm whisper unavailable; using whisper-cli",
@@ -195,6 +206,15 @@ func (s *ServerTranscriber) Transcribe(ctx context.Context, input stt.AudioInput
 		text, err := s.infer(ctx, child, body, contentType)
 		if err == nil {
 			s.supervisor().Release()
+			// The bias travels differently here — a `prompt` form field
+			// rather than an argv flag — but it is the same sentence and it
+			// comes back the same way, so the same rule applies. Compared
+			// against the prompt built into *this* request body above, for
+			// the reason the cold path gives.
+			if reason := promptEchoReason(text, prompt, s.logger()); reason != "" {
+				ch <- nothing(reason)
+				return
+			}
 			ch <- stt.TranscriptEvent{Type: stt.EventFinal, Text: text}
 			return
 		}

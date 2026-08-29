@@ -3575,6 +3575,18 @@ FloatingWindow {
       // the words are the activity feed's own sentence for the same failure.
       resolvePendingTurn(BarState.pendingTurnFailed(errorStage, errorMessage))
       break
+    case "session.nothing_heard":
+      // The capture produced no words (issue #191) — a muted microphone, a
+      // silent room, or a transcript that was only Jarvix's own bias prompt
+      // handed back. Resolved with a sentence rather than dropped, because a
+      // pending row that simply vanishes reads as the question having been
+      // lost. Deliberately *not* errorMessage: nothing failed, and setting it
+      // would light the urgent banner and hold it until the next session. The
+      // measurement behind the reason is in the activity feed, where a user
+      // debugging a microphone is looking.
+      assistantStreaming = false
+      resolvePendingTurn(BarState.pendingTurnNothingHeard)
+      // fall through to the shared turn-boundary handling
     case "session.cancelled":
       // Cancelled is an outcome, not an absence. Usually the transition to
       // idle has already closed the pending row by the time this arrives, and

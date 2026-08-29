@@ -326,6 +326,22 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 	case "session.cancelled":
 		return one(ActivityRow{Kind: ActivityKindCancelled,
 			Label: "Cancelled", Detail: activityString(data, "reason")})
+	case "session.nothing_heard":
+		// A capture that produced no words (issue #191). This row is the
+		// whole reason the discard is allowed to be quiet everywhere else:
+		// the transcript whisper offered was Jarvix's own bias prompt handed
+		// back, or the microphone delivered digital silence, and neither is
+		// something to put in the conversation — but a user whose microphone
+		// is muted has to be able to *see* that a press produced nothing,
+		// which is exactly what an invented transcript denied them. The
+		// reason carries the measurement, so the feed is where the debugging
+		// happens.
+		//
+		// The microphone kind rather than error or cancelled: nothing failed
+		// and nobody cancelled, and the glyph should point at the thing the
+		// user needs to look at.
+		return one(clipActivityRow(ActivityRow{Kind: ActivityKindWake,
+			Label: PendingTurnNothingHeard, Detail: activityString(data, "reason")}))
 	}
 	return nil
 }

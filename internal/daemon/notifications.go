@@ -26,6 +26,13 @@ const notificationPreviewLimit = 80
 func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event, unsubscribe func()) {
 	defer unsubscribe()
 	var answer, errStage, errMessage string
+	// nothingHeard marks a session whose capture produced no words at all
+	// (issue #191). It suppresses the finish notification, for the reason
+	// cancellations are already silent: the user is standing at the keyboard
+	// having just pressed a key, the overlay has already said "I didn't catch
+	// that", and a desktop notification per accidental tap or quiet room
+	// would be the noisiest thing Jarvix does.
+	var nothingHeard bool
 	for {
 		select {
 		case <-ctx.Done():
@@ -54,6 +61,8 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 			case "error":
 				errStage, _ = ev.Data["stage"].(string)
 				errMessage, _ = ev.Data["message"].(string)
+			case "session.nothing_heard":
+				nothingHeard = true
 			case "session.timings":
 				// Retained past the session so `jarvix status --last` can
 				// print the budget of the interaction that just happened.
@@ -72,7 +81,10 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 				d.setLastError(errStage, errMessage)
 				// ui.notifications is a live setting: checked per session so
 				// the switch acts immediately, no restart (settings.go).
-				if d.notificationsEnabled() {
+				// "Jarvix answered" is a claim, and a turn that heard
+				// nothing has nothing to claim. Silence here is the honest
+				// report; the activity feed carries the reason.
+				if d.notificationsEnabled() && !nothingHeard {
 					n := d.buildNotification(answer, errStage, errMessage)
 					// Send blocks until the notification is clicked, dismissed,
 					// or expires; dispatch from its own goroutine so back-to-back
@@ -88,9 +100,9 @@ func (d *Daemon) watchSessions(ctx context.Context, events <-chan session.Event,
 				if d.consumeCaptureReload() {
 					d.post.Go(d.applyCapturedRoutines)
 				}
-				answer, errStage, errMessage = "", "", ""
+				answer, errStage, errMessage, nothingHeard = "", "", "", false
 			case "session.cancelled":
-				answer, errStage, errMessage = "", "", ""
+				answer, errStage, errMessage, nothingHeard = "", "", "", false
 			}
 		}
 	}

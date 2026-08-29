@@ -6,6 +6,11 @@ import "context"
 type Fake struct {
 	// Text is the final transcript to return.
 	Text string
+	// Reason scripts the explanation a real adapter attaches to a
+	// deliberately empty transcript (issue #191) — a capture with no voiced
+	// audio, or a transcript that was only the bias prompt. Set it with an
+	// empty Text; it is ignored otherwise, exactly as the engine ignores it.
+	Reason string
 	// Partials are emitted before the final transcript.
 	Partials []string
 	// Fail, when set, makes the stream end with an error event.
@@ -36,7 +41,7 @@ func (f *Fake) Transcribe(ctx context.Context, input AudioInput) (<-chan Transcr
 			}
 		}
 		select {
-		case ch <- TranscriptEvent{Type: EventFinal, Text: f.Text}:
+		case ch <- TranscriptEvent{Type: EventFinal, Text: f.Text, Reason: f.Reason}:
 		case <-ctx.Done():
 			ch <- TranscriptEvent{Type: EventError, Err: ctx.Err()}
 		}

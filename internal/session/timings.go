@@ -75,6 +75,15 @@ type timings struct {
 	// own tts.superseded event could be published.
 	supersededSentences int
 
+	// nothingHeard, when set, is why the capture produced no words at all
+	// (issue #191): no voiced audio in the clip, or a transcript that was
+	// only the bias prompt handed back. A string, and the record's only one,
+	// because the number a user needs after pressing the key and getting
+	// nothing is not a duration — it is the reason. It sits under mu beside
+	// the marks for the same reason the superseded count does: it must reach
+	// the report even though the turn ends the moment it is set.
+	nothingHeard string
+
 	// excluded accumulates the completed excluded spans by stage name
 	// (StageToolRuns, StageConfirmWait). Presence means the span happened,
 	// even when it rounded to zero milliseconds.
@@ -116,6 +125,16 @@ func (t *timings) set(field *mark) {
 func (t *timings) noteSupersededDrop() {
 	t.mu.Lock()
 	t.supersededSentences++
+	t.mu.Unlock()
+}
+
+// noteNothingHeard records why a capture produced no transcript (issue #191).
+// First write wins, like every mark: a turn hears nothing once.
+func (t *timings) noteNothingHeard(reason string) {
+	t.mu.Lock()
+	if t.nothingHeard == "" {
+		t.nothingHeard = reason
+	}
 	t.mu.Unlock()
 }
 
@@ -216,6 +235,11 @@ const (
 	// the name carries no _ms. Absent when nothing was dropped, like every
 	// stage that did not happen.
 	StageSupersededSentences = "superseded_sentences"
+	// StageNothingHeard is why the capture produced no words (issue #191) —
+	// the record's only string, which is why the name carries no _ms either.
+	// Absent from every turn that produced a transcript, so its presence is
+	// the whole message and its text is the detail.
+	StageNothingHeard = "nothing_heard"
 )
 
 // StageOrder is the order stages are reported in, so every surface prints the
@@ -235,6 +259,10 @@ var StageOrder = []string{
 	// qualifies everything above it — the audio the stages measure is the
 	// audio that survived.
 	StageSupersededSentences,
+	// And the reason a turn heard nothing sits last of all: it qualifies the
+	// spans above it hardest, because when it is present there was no
+	// question and the pipeline stopped at the microphone.
+	StageNothingHeard,
 }
 
 // report renders the marks as the session.timings payload. Stages that did not
@@ -282,6 +310,14 @@ func (t *timings) report() map[string]any {
 	// happened and rounded down, and no such event exists.
 	if t.supersededSentences > 0 {
 		out[StageSupersededSentences] = t.supersededSentences
+	}
+
+	// The reason a capture produced nothing (issue #191): present exactly
+	// when there was one. It is also what keeps this report non-empty on a
+	// turn that never reached the model, so publishTimings still publishes
+	// and the record shows that a capture happened.
+	if t.nothingHeard != "" {
+		out[StageNothingHeard] = t.nothingHeard
 	}
 
 	// The excluded spans, published whenever they happened — a tool that ran

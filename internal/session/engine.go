@@ -361,6 +361,12 @@ type sess struct {
 	transcript      string
 	transcriptReady bool
 	submitted       bool
+	// transcriptReason explains a transcript that arrived deliberately empty:
+	// the capture held no voiced audio, or whisper handed the bias prompt
+	// back instead of speech (issue #191). It is what the turn reports
+	// instead of inventing one, and it is the sentence a user debugging a
+	// microphone reads in the activity feed. Guarded by Engine.mu.
+	transcriptReason string
 
 	// userText is the transcript the turn actually processed — wake word
 	// stripped, snapshotted in maybeThinkLocked the moment the turn leaves
@@ -1126,6 +1132,79 @@ func (e *Engine) failLocked(s *sess, stage string, err error) {
 	}
 }
 
+// NothingHeardDefaultReason is what a turn reports when the engine returned no
+// words and did not say why — another transcriber, or whisper genuinely
+// finding nothing in audio that did carry signal.
+const NothingHeardDefaultReason = "no speech was recognised"
+
+// nothingHeardLocked ends a session whose capture produced no words.
+//
+// This is deliberately *not* failLocked (issue #191). A microphone that heard
+// nothing is the system working: it is the outcome for a chord tapped by
+// accident, for a room that stayed quiet, and — since the STT adapter learned
+// to discard whisper's hallucinations — for every capture that would once
+// have become a sentence the user never said. Reported as an error it lights
+// the urgent chip on the bar, the red banner in the conversation window and a
+// "Jarvix hit a problem" notification, and it holds them until the next
+// session; a user whose microphone is unplugged then sees a fault report per
+// press. It is a quiet nothing, and it ends like one.
+//
+// It is not silent, though. session.nothing_heard carries the reason —
+// "the capture had no voiced audio (peak -inf dBFS, floor -72 dBFS)" — so the
+// activity feed can show that a capture happened and produced nothing, which
+// is exactly what a user debugging their microphone needs and exactly what an
+// invented transcript denied them.
+func (e *Engine) nothingHeardLocked(s *sess, reason string) {
+	if e.current != s || s.ctx.Err() != nil {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = NothingHeardDefaultReason
+	}
+	// A confirmation cannot stand here — a voice reply to one resolves in the
+	// branch above and never reaches this check — but the invariant that no
+	// question outlives its session is worth keeping unconditionally rather
+	// than by argument.
+	e.clearPendingLocked("nothing_heard")
+	e.log.Info("capture produced no transcript", "component", "stt",
+		"session_id", s.id, "reason", reason)
+	// Published *before* the return to idle, unlike session.cancelled. The
+	// conversation window closes its pending row the moment the state goes
+	// idle, and a cancelled turn can afford that because the record it
+	// re-requests carries the interrupted exchange's own annotation. Here
+	// there is no record — that is the whole point — so a row closed first
+	// would simply vanish, and a question that disappears without a word is
+	// the failure this issue is about wearing different clothes.
+	e.publish(Event{Type: "session.nothing_heard", Data: map[string]any{
+		"session_id": s.id, "reason": reason,
+	}})
+	if e.state.Active() {
+		if err := e.setStateLocked(StateIdle); err != nil {
+			// The same fallback finishLocked takes (issue #55): every active
+			// state reaches Cancelling and Cancelling reaches Idle, so the
+			// engine can never be left active with no session.
+			e.log.Error("state transition refused", "component", "session",
+				"session_id", s.id, "from", string(e.state), "to", string(StateIdle))
+			e.forceStateLocked(StateCancelling)
+			e.forceStateLocked(StateIdle)
+		}
+	}
+	// The turn's latency story is published like any other, and it carries
+	// the reason too: `jarvix status --last` is where someone looks after
+	// pressing the key and getting nothing.
+	s.timings.noteNothingHeard(reason)
+	e.publishTimings(s)
+	e.publish(Event{Type: "session.finished", Data: map[string]any{"session_id": s.id}})
+	s.cancel()
+	e.current = nil
+	// No exchange is committed: there is no question to remember, and that
+	// is the whole point. A confirmation this session resolved still owes the
+	// archive its record, on failLocked's terms (issue #118).
+	if e.finalizeConfRecordsLocked() {
+		e.active.Go(e.persistArchive)
+	}
+}
+
 // maybeThinkLocked advances to Thinking once transcript and submission have
 // both arrived, whichever order they came in.
 func (e *Engine) maybeThinkLocked(s *sess) {
@@ -1155,7 +1234,7 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 		s.transcript = stripWakeWord(s.transcript, e.opts.WakeWord, e.opts.WakeAliases)
 	}
 	if strings.TrimSpace(s.transcript) == "" {
-		e.failLocked(s, "stt", fmt.Errorf("I didn't catch that — no speech was recognised"))
+		e.nothingHeardLocked(s, s.transcriptReason)
 		return
 	}
 	// Snapshot the processed transcript for the turn's whole life. Everything
@@ -1210,7 +1289,16 @@ func (e *Engine) transcribe(s *sess, rec audio.Recording) {
 			if e.current == s {
 				s.transcript = ev.Text
 				s.transcriptReady = true
-				e.publish(Event{Type: "transcript.final", Data: map[string]any{"session_id": s.id, "text": ev.Text}})
+				s.transcriptReason = ev.Reason
+				// No transcript event for a capture that produced no words.
+				// The old behaviour published an empty one, which every
+				// surface renders as the user having said nothing out loud —
+				// a blank speech bubble is still a claim about what happened
+				// (issue #191). The nothing-heard path below says it plainly
+				// instead.
+				if strings.TrimSpace(ev.Text) != "" {
+					e.publish(Event{Type: "transcript.final", Data: map[string]any{"session_id": s.id, "text": ev.Text}})
+				}
 				e.maybeThinkLocked(s)
 			}
 			e.mu.Unlock()

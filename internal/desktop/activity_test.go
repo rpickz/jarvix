@@ -237,6 +237,18 @@ func TestActivityRowVocabulary(t *testing.T) {
 				Label: "Failed at assistant", Detail: "model exploded"}},
 		{"session.cancelled", map[string]any{"reason": "interrupted"},
 			ActivityRow{Kind: ActivityKindCancelled, Label: "Cancelled", Detail: "interrupted"}},
+		// A capture that produced nothing (issue #191). The feed is where a
+		// user debugging a microphone looks, so the row carries the
+		// measurement — and it is a microphone row, not an error one, because
+		// nothing failed.
+		{"session.nothing_heard",
+			map[string]any{"reason": "the capture had no voiced audio (peak -inf dBFS, floor -72 dBFS)"},
+			ActivityRow{Kind: ActivityKindWake, Label: "I didn't catch that",
+				Detail: "the capture had no voiced audio (peak -inf dBFS, floor -72 dBFS)"}},
+		{"session.nothing_heard",
+			map[string]any{"reason": "the transcript was only the bias prompt echoed back"},
+			ActivityRow{Kind: ActivityKindWake, Label: "I didn't catch that",
+				Detail: "the transcript was only the bias prompt echoed back"}},
 	}
 	for _, c := range cases {
 		if got := oneActivityRow(t, c.event, c.data); got != c.want {
