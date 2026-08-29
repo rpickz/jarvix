@@ -101,6 +101,24 @@ type timings struct {
 	tierWanted         string
 	tierContextDropped int
 
+	// hostTier, hostModel and hostOutcome are what the host — the instant tier
+	// covering the wait — did on this turn (issue #161, ADR 0064). They sit
+	// beside the tier keys because they answer the same question from the other
+	// end: those name the model that produced the *answer*, these name the
+	// model that produced the *holding line*, and a record that could not tell
+	// them apart could not answer "why did it say that?".
+	//
+	// Written only when the host actually produced something (a line held, a
+	// clarification taken, or a line refused by the honesty guard). A host that
+	// stood down because the answer was quick did nothing, and a key on every
+	// fast turn saying so would be noise on the turns this feature is proudest
+	// of. Under mu with the marks, for the marks' reason: written from the
+	// host's own goroutine and read by report() from whichever path ends the
+	// session.
+	hostTier    string
+	hostModel   string
+	hostOutcome string
+
 	// excluded accumulates the completed excluded spans by stage name
 	// (StageToolRuns, StageConfirmWait). Presence means the span happened,
 	// even when it rounded to zero milliseconds.
@@ -166,6 +184,39 @@ func (t *timings) noteTier(tier, model, reason, wanted string, contextDropped in
 	t.tierReason, t.tierWanted = reason, wanted
 	t.tierContextDropped = contextDropped
 	t.mu.Unlock()
+}
+
+// noteHost records what the host did with this turn (issue #161). First write
+// wins: a host speaks at most once, and the one thing it did is the thing the
+// record has to keep.
+func (t *timings) noteHost(tier, model, outcome string) {
+	t.mu.Lock()
+	if t.hostOutcome == "" {
+		t.hostTier, t.hostModel, t.hostOutcome = tier, model, outcome
+	}
+	t.mu.Unlock()
+}
+
+// modelStart is the instant this turn's model clock starts — the same origin
+// transcript_to_first_delta_ms is measured from, which is why it is taken from
+// here rather than read off a wall clock at the call site (issue #161).
+//
+// The host's grace is measured from it deliberately: the number a user sets the
+// grace against is then exactly the number `jarvix status --last` already prints
+// for them, rather than a second, differently-anchored measurement of the same
+// wait.
+//
+// Zero when neither mark has been made — a typed question with no context
+// collector reaches the provider without either — and the caller substitutes
+// its own now, which for that turn is the same instant to within the cost of
+// assembling a prompt.
+func (t *timings) modelStart() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.contextDone.at.IsZero() {
+		return t.contextDone.at
+	}
+	return t.transcript.at
 }
 
 // clock reads the injected clock, defaulting to the real one.
@@ -292,6 +343,20 @@ const (
 	// tighter context budget left out of the prompt (ADR 0037's stance: a
 	// budget that trims discloses it). Absent when nothing was dropped.
 	StageTierContextDropped = "tier_context_dropped"
+	// StageHostTier is the tier that spoke while the answer was being worked
+	// out (issue #161) — always "instant", because the host *is* the instant
+	// tier, and named anyway so the record states it rather than implying it.
+	// Absent from every turn on which the host did not produce a line.
+	StageHostTier = "host_tier"
+	// StageHostModel is the model that produced that line, on StageTierModel's
+	// exact terms: the thing that spoke, never the thing that was asked for.
+	StageHostModel = "host_model"
+	// StageHostOutcome is what became of it: "held" (a holding line went to the
+	// voice), "clarified" (the host asked for a missing detail and took the
+	// turn), or "refused" (the honesty guard discarded it unspoken). Read
+	// "held" beside superseded_sentences, which is what says whether the answer
+	// overtook the line before it was heard.
+	StageHostOutcome = "host_outcome"
 )
 
 // StageOrder is the order stages are reported in, so every surface prints the
@@ -323,6 +388,12 @@ var StageOrder = []string{
 	StageTierReason,
 	StageTierWanted,
 	StageTierContextDropped,
+	// And the host's keys after those, in the order the turn happened: the
+	// host spoke first, but it is read last, because everything above it is
+	// about the answer and this is the qualifier on it (issue #161).
+	StageHostTier,
+	StageHostModel,
+	StageHostOutcome,
 }
 
 // report renders the marks as the session.timings payload. Stages that did not
@@ -393,6 +464,15 @@ func (t *timings) report() map[string]any {
 		if t.tierContextDropped > 0 {
 			out[StageTierContextDropped] = t.tierContextDropped
 		}
+	}
+
+	// What the host did (issue #161), present exactly when it did something.
+	// Its absence is the statement that the answer arrived inside the grace and
+	// nothing was said over it — which is the outcome this feature wants most.
+	if t.hostOutcome != "" {
+		out[StageHostTier] = t.hostTier
+		out[StageHostModel] = t.hostModel
+		out[StageHostOutcome] = t.hostOutcome
 	}
 
 	// The excluded spans, published whenever they happened — a tool that ran

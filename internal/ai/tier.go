@@ -143,6 +143,13 @@ const (
 	// ReasonToolsRefuseInstant: instant was in line to serve, and the turn
 	// carries tools. Route.Wanted is TierInstant. Not spoken — see Decide.
 	ReasonToolsRefuseInstant RouteReason = "tools"
+	// ReasonHost: the instant tier produced this turn's reply as the *host*,
+	// by asking the user a clarifying question, and the tier that was routed
+	// to was abandoned before it answered (issue #161, ADR 0064). Like
+	// ReasonUnreachable it is written by the engine rather than produced here:
+	// Decide chooses which model is asked, and no table can know that the small
+	// one came back with a question instead of a wait.
+	ReasonHost RouteReason = "host"
 	// ReasonUnreachable: the tier was configured and was *tried*, and did not
 	// answer — no key, nothing listening, an advisor that is not installed.
 	// Decide never produces it (reachability is not a question a table can

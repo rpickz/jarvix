@@ -636,7 +636,7 @@ func Default() Config {
 			// tier, and the default names the tier that is always serviceable
 			// so the setting reads sensibly on a machine that has never
 			// touched it (issue #159).
-			Tiers: AITiers{Default: string(ai.TierMedium)},
+			Tiers: AITiers{Default: string(ai.TierMedium), HostGraceMs: DefaultHostGraceMs},
 		},
 		STT: STT{
 			Provider: "whisper",

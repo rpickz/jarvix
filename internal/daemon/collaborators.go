@@ -300,6 +300,11 @@ func engineOptions(cfg config.Config, compositor desktop.Compositor, bus *sessio
 		WakeWord:    cfg.Assistant.Name,
 		WakeAliases: cfg.Assistant.EffectiveAliases(),
 		Lexicon:     cfg.TTS.Lexicon,
+		// The host's grace (#161, ADR 0064). Passed unconditionally, and it
+		// governs nothing on its own: the engine also needs a bound instant
+		// tier before there is a host to speak, so a configuration with no
+		// [ai.tiers.instant] carries the number and never reaches it.
+		HostGrace: cfg.AI.Tiers.HostGrace(),
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/audio"
@@ -237,4 +238,23 @@ func startDaemonWith(t *testing.T, cfg config.Config) (*ipc.Client, *ai.Fake) {
 	}
 	serveDaemon(t, d)
 	return dialDaemon(t, paths.Socket), provider
+}
+
+// The host's grace reaches the engine through the one translation both boot
+// and reload share (#161, ADR 0064). It matters that it goes through
+// engineOptions rather than being read anywhere else: a grace applied at boot
+// and not on reload would be a setting that appears to do nothing.
+func TestTheHostGraceReachesTheEngineOptions(t *testing.T) {
+	cfg := tieredConfig(t)
+	cfg.AI.Tiers.HostGraceMs = 400
+	opts := engineOptions(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if opts.HostGrace != 400*time.Millisecond {
+		t.Errorf("HostGrace = %v, want 400ms", opts.HostGrace)
+	}
+
+	cfg.AI.Tiers.HostGraceMs = 0
+	off := engineOptions(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	if off.HostGrace != 0 {
+		t.Errorf("HostGrace = %v with the host switched off, want zero", off.HostGrace)
+	}
 }

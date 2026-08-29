@@ -163,6 +163,20 @@ type utterance struct {
 	// the turn they were queued during for the same test; whether an aside may
 	// actually be dropped is keep's decision, not turn's.
 	turn int
+	// hold marks the host's holding line (issue #161, ADR 0064) — the sentence
+	// the instant tier says to cover a wait while a heavier model answers. It
+	// is an aside like any other, with one difference that lives entirely in
+	// the turn stamp: it is committed for holdTurn, *below* the answer's first
+	// turn, so the answer's first sentence supersedes it the moment that
+	// sentence is committed.
+	//
+	// That is the whole implementation of "an answer that beats the dequeue
+	// drops the holding line as stale". Nothing new decides it: the floor of
+	// issue #120 already means "the oldest turn still allowed to play", and a
+	// line spoken *before* the answer began belongs, truthfully, to the turn
+	// before it. A holding line already being synthesized is untouched, for
+	// the same reason every other utterance is — see superseded.
+	hold bool
 	// keep exempts an aside from supersession — it plays however far the
 	// answer has moved on. The policy (issue #120), pinned here because this
 	// flag is where it is enforced:
@@ -268,6 +282,11 @@ type streamingSpeaker struct {
 	// visible.
 	floor int
 }
+
+// holdTurn is the speech turn a host's holding line is committed for: one
+// below the first turn any answer sentence can carry, which is what makes the
+// answer's first sentence supersede it and nothing else (issue #161).
+const holdTurn = 0
 
 func newStreamingSpeaker(e *Engine, s *sess) *streamingSpeaker {
 	sp := &streamingSpeaker{e: e, s: s, in: make(chan utterance, 64), res: make(chan error, 1), turn: 1}
@@ -411,13 +430,31 @@ func (sp *streamingSpeaker) supersedingTurn() int {
 // releases this wait exactly as a cancelled one does: run() sees it once and
 // closes done.
 func (sp *streamingSpeaker) interject(ctx context.Context, text string, keep bool) {
-	done := make(chan struct{})
-	if !sp.enqueue(utterance{text: text, aside: true, keep: keep, ctx: ctx, done: done}) {
+	sp.queueAside(utterance{text: text, aside: true, keep: keep, ctx: ctx})
+}
+
+// holdFor queues the host's holding line (issue #161, ADR 0064) on the same
+// terms interject queues everything else: behind whatever is already waiting,
+// on the one playback stream, blocking until it has been handed to the player.
+//
+// It differs in exactly one thing, and that thing is the turn it is stamped
+// with (see utterance.hold): the answer's first sentence supersedes it, because
+// a line saying "let me think about that" is worse than nothing once the
+// thinking has produced words.
+func (sp *streamingSpeaker) holdFor(ctx context.Context, text string) {
+	sp.queueAside(utterance{text: text, aside: true, hold: true, ctx: ctx})
+}
+
+// queueAside is interject's body: commit the aside and wait until the speaker
+// has taken it, or until its own context releases the caller.
+func (sp *streamingSpeaker) queueAside(u utterance) {
+	u.done = make(chan struct{})
+	if !sp.enqueue(u) {
 		return
 	}
 	select {
-	case <-done:
-	case <-ctx.Done():
+	case <-u.done:
+	case <-u.ctx.Done():
 		// Cancelled while still queued (or mid synthesis): the caller's turn
 		// resumes now rather than waiting for the queue to reach an utterance
 		// that will only be skipped. run() still sees it and closes done —
@@ -455,6 +492,13 @@ func (sp *streamingSpeaker) enqueue(u utterance) bool {
 	sp.mu.Lock()
 	sp.accepted = true
 	u.turn = sp.turn
+	if u.hold {
+		// Stamped below every answer turn rather than with the turn it was
+		// queued during: a holding line is what Jarvix says *instead of* the
+		// answer's first sentence, so the moment that sentence exists this one
+		// is the older message (issue #161; see utterance.hold).
+		u.turn = holdTurn
+	}
 	if !u.aside && sp.floor < u.turn {
 		sp.floor = u.turn
 	}

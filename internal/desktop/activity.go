@@ -158,6 +158,8 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 	case "assistant.started":
 		return one(ActivityRow{Kind: ActivityKindModel,
 			Label: "Asking " + activityString(data, "provider")})
+	case "assistant.host":
+		return one(assistantHostRow(data))
 	case "assistant.finished":
 		return assistantFinishedRows(data)
 	case "tool.started":
@@ -367,6 +369,33 @@ func assistantFinishedRows(data map[string]any) []ActivityRow {
 				"anything it claims to have done on the machine, it did not do"}))
 	}
 	return rows
+}
+
+// assistantHostRow words a line the *host* said (issue #161, ADR 0064): the
+// small model covering the wait while a heavier one works out the answer.
+//
+// It is the assistant kind, because it was Jarvix's voice — but the label
+// names the tier that produced it rather than saying "Jarvix", because that is
+// the whole point of the row. A reader scrolling the feed has to be able to see
+// that the sentence they heard first came from a different model than the
+// answer that followed it, or "why did it say that?" has no answer.
+func assistantHostRow(data map[string]any) ActivityRow {
+	label := activityLabel(data, "tier_label") + " model, while the answer came"
+	if activityString(data, "kind") == "clarification" {
+		label = activityLabel(data, "tier_label") + " model asked instead of answering"
+	}
+	return ActivityRow{Kind: ActivityKindAssistant,
+		Label: label, Detail: activityString(data, "content")}
+}
+
+// activityLabel reads a tier label out of an event, falling back to a word that
+// is true of every host rather than to an empty one: a row beginning " model"
+// reads as a bug in the feed.
+func activityLabel(data map[string]any, key string) string {
+	if label := activityString(data, key); label != "" {
+		return label
+	}
+	return "Quick"
 }
 
 // supersededRow words the dropped-speech record (issue #120). The turn kind,

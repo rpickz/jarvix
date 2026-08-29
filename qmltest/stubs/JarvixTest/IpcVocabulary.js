@@ -111,6 +111,7 @@ var events = {
   "artifact.created": true,
   "assistant.delta": true,
   "assistant.finished": true,
+  "assistant.host": true,
   "assistant.started": true,
   "automation.fired": true,
   "automation.missed": true,

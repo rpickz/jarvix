@@ -629,3 +629,35 @@ func TestFocusRecapRowSaysARecapHappenedWithoutTheContent(t *testing.T) {
 		t.Errorf("model-failed row = %+v", late)
 	}
 }
+
+// A line the host said (#161, ADR 0064) is a row of its own, named for the
+// tier that produced it. Scrolling the feed, a reader has to be able to see
+// that the sentence they heard first came from a different model than the
+// answer that followed it — otherwise "why did it say that?" has no answer.
+func TestActivityNamesTheHostRatherThanJarvix(t *testing.T) {
+	holding := oneActivityRow(t, "assistant.host", map[string]any{
+		"tier": "instant", "tier_label": "Quick", "model": "qwen3-1.7b",
+		"kind": "holding", "content": "Let me think about that properly."})
+	if holding.Kind != ActivityKindAssistant {
+		t.Errorf("kind = %q, want the assistant kind — it was Jarvix's voice", holding.Kind)
+	}
+	if !strings.Contains(holding.Label, "Quick") {
+		t.Errorf("label %q must name the tier that spoke", holding.Label)
+	}
+	if holding.Detail != "Let me think about that properly." {
+		t.Errorf("detail = %q", holding.Detail)
+	}
+
+	asked := oneActivityRow(t, "assistant.host", map[string]any{
+		"tier": "instant", "tier_label": "Quick", "model": "qwen3-1.7b",
+		"kind": "clarification", "content": "Do you mean the script or the thread?"})
+	if !strings.Contains(asked.Label, "asked") {
+		t.Errorf("a clarification's label %q must say it asked rather than answered", asked.Label)
+	}
+
+	// An event from a daemon that names no tier still reads as a sentence.
+	bare := oneActivityRow(t, "assistant.host", map[string]any{"content": "One moment."})
+	if strings.HasPrefix(bare.Label, " ") || bare.Label == "" {
+		t.Errorf("label = %q with no tier label on the event", bare.Label)
+	}
+}

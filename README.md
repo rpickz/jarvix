@@ -160,8 +160,12 @@ systemctl --user restart jarvixd
 One model has to be both quick and good, and none is. Configure two or three
 under `[ai.tiers]` and pick between them per conversation — **Quick /
 Balanced / Deep**, beside the composer or by saying "switch to deep" — and
-Jarvix tells you which one answered. Nothing changes until you configure a
-tier: see
+Jarvix tells you which one answered. With an instant tier configured, the small
+model also **hosts** while a heavier one answers: if the answer has not started
+within 700ms it says one short line over the wait, or asks which of two things
+you meant. It never answers anything, holds no tools, and a line that states a
+fact or claims an action is thrown away rather than spoken. Nothing changes
+until you configure a tier: see
 [Thinking levels](docs/configuration.md#thinking-levels-aitiers).
 
 All options: [docs/configuration.md](docs/configuration.md).

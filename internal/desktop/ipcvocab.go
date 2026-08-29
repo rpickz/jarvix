@@ -140,6 +140,7 @@ var daemonEvents = []string{
 	"artifact.created",
 	"assistant.delta",
 	"assistant.finished",
+	"assistant.host",
 	"assistant.started",
 	"automation.fired",
 	"automation.missed",
