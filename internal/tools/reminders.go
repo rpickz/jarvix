@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rpickz/jarvix/internal/reminders"
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // This file is the model's hands on one-shot reminders (#141, ADR 0046):
@@ -105,7 +106,7 @@ func (t *reminderSet) Schema() json.RawMessage {
 // Execute implements Tool. A refusal is not an error: the reason comes back
 // as the result so the model relays the hint — the daemon detects, the user
 // hears exactly what could not be read.
-func (t *reminderSet) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *reminderSet) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		When string `json:"when"`
 		Text string `json:"text"`
@@ -113,11 +114,20 @@ func (t *reminderSet) Execute(_ context.Context, input json.RawMessage) (string,
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", fmt.Errorf("invalid reminder.set arguments: %w", err)
 	}
+	prevFile := undo.Snapshot(ctx, t.r.svc.Path())
 	spoken, err := t.r.svc.Create(args.When, args.Text)
 	if err != nil {
 		return fmt.Sprintf("error: %v — relay this to the user in one sentence.", err), nil
 	}
 	t.r.log.Info("reminder set via tool", "component", "reminders")
+	// Create answers with the spoken confirmation rather than an id, and the
+	// account says what the user would say rather than inventing one: the
+	// summary is the reminder's own words, which is what "undo that" has to
+	// name back to them.
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: fmt.Sprintf("set a reminder to %s", strings.TrimSpace(args.Text)),
+	})
 	return spoken + " Confirm to the user in one sentence exactly when the reminder will fire.", nil
 }
 
@@ -184,17 +194,22 @@ func (t *reminderCancel) Schema() json.RawMessage {
 
 // Execute implements Tool. Ambiguity is not an error: the candidates come
 // back as the result so the model can ask which — never guess.
-func (t *reminderCancel) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *reminderCancel) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Reminder string `json:"reminder"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", fmt.Errorf("invalid reminder.cancel arguments: %w", err)
 	}
+	prevFile := undo.Snapshot(ctx, t.r.svc.Path())
 	spoken, err := t.r.svc.Cancel(args.Reminder)
 	if err != nil {
 		return fmt.Sprintf("error: %v", err), nil
 	}
 	t.r.log.Info("reminder cancelled via tool", "component", "reminders")
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: fmt.Sprintf("cancelled the reminder %q", strings.TrimSpace(args.Reminder)),
+	})
 	return spoken + " Confirm to the user in one sentence.", nil
 }

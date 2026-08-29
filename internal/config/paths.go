@@ -120,6 +120,19 @@ func (p Paths) MonitorsFile() string { return filepath.Join(p.State, "monitors.t
 // reach.
 func (p Paths) ManagedFile() string { return filepath.Join(p.State, "managed.toml") }
 
+// UndoFile is the account of what Jarvix did in the user's name (#201, ADR
+// 0064): one row per change to the machine, with what would put it back.
+//
+// State rather than config.toml for a reason the other state stores do not
+// have. This file is not something the user configures — it is something
+// Jarvix writes about itself, continuously, without asking — and putting it
+// in configuration would mean every action Jarvix took also edited the file
+// the permission gate reads, which is exactly the boundary #109's exclusion
+// wall exists to keep. Hand-editable all the same: an account the user cannot
+// read is not an account, and deleting a stanza is how they drop a record of
+// a command they would rather not keep.
+func (p Paths) UndoFile() string { return filepath.Join(p.State, "undo.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

@@ -26,6 +26,7 @@ import (
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/undo"
 	"github.com/rpickz/jarvix/internal/vocabulary"
 )
 
@@ -67,6 +68,15 @@ type Options struct {
 	// are cleared with the conversation — they never survive `jarvix new`,
 	// the follow-up window, or a daemon restart.
 	RememberApprovals bool
+	// Undo is the account of what Jarvix changed on this machine (#201, ADR
+	// 0064). It is installed on every tool call's context, so a tool that
+	// changes something records it and every other tool pays nothing — the
+	// arrangement provenance already uses, for the same reason.
+	//
+	// Nil records nothing, which is what a test of a tool's wording wants and
+	// what a daemon built without a state directory gets: the tools behave
+	// exactly as they did before this feature existed.
+	Undo undo.Recorder
 	// Intents is the deterministic intent router consulted before every
 	// provider call (ADR 0017). Nil disables routing: every transcript goes
 	// to the model, exactly as it did before the router existed.

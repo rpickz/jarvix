@@ -36,7 +36,14 @@ type fakeConfigAdmin struct {
 	settingErr    error
 	receipt       ConfigWriteReceipt
 	settingRes    ConfigSettingReceipt
+	// path is the file the fake claims to write. Empty in most tests: the
+	// account snapshots it before every write, and a path nothing exists at
+	// records the honest "there was no file", which is all these tests need.
+	path string
 }
+
+// Path implements ConfigAdmin.
+func (f *fakeConfigAdmin) Path() string { return f.path }
 
 func newFakeConfigAdmin() *fakeConfigAdmin {
 	return &fakeConfigAdmin{

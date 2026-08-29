@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/rpickz/jarvix/internal/memory"
+	"github.com/rpickz/jarvix/internal/provenance"
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // This file is the model's hands on the knowledge base (ADR 0025): three
@@ -142,7 +144,7 @@ func (t *memoryRemember) Schema() json.RawMessage {
 // Execute implements Tool. A conflict is not an error: the candidates come
 // back as the result so the model can decide, which is the whole supersede
 // design — the daemon detects, the model chooses, the store keeps the trail.
-func (t *memoryRemember) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *memoryRemember) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Content  string `json:"content"`
 		UpdateID string `json:"update_id"`
@@ -156,10 +158,20 @@ func (t *memoryRemember) Execute(_ context.Context, input json.RawMessage) (stri
 	}
 
 	if args.UpdateID != "" {
+		// The memory book is one TOML document rewritten whole, so the file
+		// itself is a complete and exact answer to "what would put this
+		// back" — including the supersede trail, which a bespoke reversal
+		// would have had to reconstruct and could have got wrong (#201).
+		prevFile := undo.Snapshot(ctx, t.m.book.Path())
 		fact, err := t.m.book.Update(args.UpdateID, args.Content, t.m.sourceTurn())
 		if err != nil {
 			return fmt.Sprintf("error: %v — use memory.search to see what is stored", err), nil
 		}
+		prevFile.Note(ctx, undo.Action{
+			Tool:       t.Name(),
+			Summary:    "updated the remembered fact " + fact.ID,
+			Provenance: []string{provenance.KindFact + ":" + fact.ID},
+		})
 		return fmt.Sprintf("Updated the remembered fact. It now reads:\n%s\n"+
 			"Confirm to the user in one sentence what you now remember.", describeFact(fact)), nil
 	}
@@ -177,10 +189,16 @@ func (t *memoryRemember) Execute(_ context.Context, input json.RawMessage) (stri
 		}
 	}
 
+	prevFile := undo.Snapshot(ctx, t.m.book.Path())
 	fact, warning, err := t.m.book.Add(args.Content, t.m.sourceTurn())
 	if err != nil {
 		return fmt.Sprintf("error: the fact was not stored: %v", err), nil
 	}
+	prevFile.Note(ctx, undo.Action{
+		Tool:       t.Name(),
+		Summary:    "remembered a new fact (" + fact.ID + ")",
+		Provenance: []string{provenance.KindFact + ":" + fact.ID},
+	})
 	result := fmt.Sprintf("Remembered:\n%s\nConfirm to the user in one sentence what you stored.",
 		describeFact(fact))
 	if warning != "" {
@@ -349,15 +367,24 @@ func (t *memoryForget) Confirmation(input json.RawMessage) (command, summary str
 }
 
 // Execute implements Tool.
-func (t *memoryForget) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *memoryForget) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	fact, reason, ok := t.resolve(input)
 	if !ok {
 		return reason, nil
 	}
+	prevFile := undo.Snapshot(ctx, t.m.book.Path())
 	forgotten, err := t.m.book.Forget(fact.ID)
 	if err != nil {
 		return fmt.Sprintf("error: %v", err), nil
 	}
+	// A forgotten fact is recoverable from the account for as long as the
+	// account keeps the row — which is a fact the user should be able to
+	// find out, and is why the account is a file they can read. Deleting the
+	// row deletes the copy, exactly as deleting a conversation does.
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: "forgot the remembered fact " + forgotten.ID,
+	})
 	return fmt.Sprintf("Forgotten and deleted from disk: %q. "+
 		"Confirm to the user in one sentence.", forgotten.Content), nil
 }
