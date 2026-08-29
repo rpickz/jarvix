@@ -23,6 +23,11 @@ import (
 //     validated, and quoted in problems, and a secret must not be in
 //     something with that many destinations.
 
+// Kept after the QML suite landed (#174), and the most clearly irreplaceable
+// of the scans. It is a negative security property — no masking helper exists
+// anywhere in the file — and a behavioural test can only show that the paths
+// it drives do not render a key. The one that does would be the one nobody
+// wrote a test for.
 func TestProvidersFormNeverRendersACredential(t *testing.T) {
 	source, err := os.ReadFile(pluginFilePath(t, "JarvixWindow.qml"))
 	if err != nil {

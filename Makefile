@@ -5,7 +5,7 @@ BINDIR   = $(PREFIX)/bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X github.com/rpickz/jarvix/internal/build.Version=$(VERSION)"
 
-.PHONY: all build test ci coverage coverage-ratchet coverage-ratchet-raise vet gofmt-check lint generate install install-kokoro install-wake install-plugin install-systemd install-hyprland uninstall clean release-snapshot
+.PHONY: all build test ci coverage coverage-ratchet coverage-ratchet-raise qml-test vet gofmt-check lint generate install install-kokoro install-wake install-plugin install-systemd install-hyprland uninstall clean release-snapshot
 
 all: build
 
@@ -36,6 +36,21 @@ coverage-ratchet:
 
 coverage-ratchet-raise:
 	scripts/coverage-ratchet.sh --raise
+
+# The QML behaviour suite (issue #174). Same script CI runs, so the local
+# answer is the gate's answer. It is not part of `ci` above for the same reason
+# `coverage-ratchet` is not: both are their own CI job, running beside the Go
+# gate rather than lengthening it.
+#
+# It needs a Qt 6 qmltestrunner and the QtTest QML module, and it fails rather
+# than skips when they are missing — the script says how to install them.
+# Narrow a run while you chase something:
+#
+#   make qml-test QMLTEST=tst_pendingturn.qml
+#
+QMLTEST ?=
+qml-test:
+	scripts/qml-test.sh $(QMLTEST)
 
 vet:
 	$(GO) vet ./...

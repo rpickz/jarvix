@@ -89,6 +89,43 @@ jobs:
           name: coverage
           path: coverage.out
 
+  # The QML behaviour suite (issue #174): the real conversation window, run
+  # headless against a fake daemon. Its own job, beside the Go gate rather than
+  # after it, so it costs the gate no wall-clock — and because it needs Qt,
+  # which the Go jobs have no use for.
+  #
+  # Every push, not a schedule. The suite is about three seconds because it
+  # contains no sleeps: every test drives an event and asserts on the next
+  # line. The runner install is the only slow part, and it is what the apt
+  # cache is for. If this ever grows past the Go gate's own time, the fix is
+  # the test that started waiting.
+  #
+  # There is no `continue-on-error` and no skip. `scripts/qml-test.sh` exits
+  # non-zero when it cannot find a Qt 6 qmltestrunner, which is the whole point
+  # of the acceptance criterion: a gate that skips when its tool is missing
+  # reports green on the exact machine where it stopped running.
+  qml:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # No compositor, no display server, no GPU on this runner — which is
+      # exactly the machine the criterion names. The suite runs on the
+      # offscreen platform with the software scene graph (both set by the
+      # script), so nothing here installs a window manager or an X server.
+      - name: Install the Qt 6 QML test runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qt6-declarative-dev-tools \
+            qt6-qpa-plugins \
+            qml6-module-qtqml \
+            qml6-module-qtquick \
+            qml6-module-qttest
+      - name: QML behaviour suite
+        run: scripts/qml-test.sh
+
   lint:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest

@@ -362,6 +362,12 @@ console.log(JSON.stringify({
 // library rather than growing a switch of its own. A second copy in QML is
 // exactly what ADR 0013 forbids, and it would be untested — the drift would
 // only show up as the transcript and the bar disagreeing on screen.
+//
+// Kept after the QML suite landed (#174). tst_pendingturn.qml executes the
+// row's whole life and deliberately asserts only that it says *something* —
+// because who owns the words is this guard's question, not that one's. A
+// local switch that happened to produce the same sentences would pass every
+// behavioural test and drift the first time Go changed one.
 func TestConversationWindowRendersThePendingTurnFromTheGeneratedLibrary(t *testing.T) {
 	source, err := os.ReadFile(pluginFilePath(t, "JarvixWindow.qml"))
 	if err != nil {

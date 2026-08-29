@@ -1,0 +1,2 @@
+module JarvixTest
+singleton FakeDaemon 1.0 FakeDaemon.qml

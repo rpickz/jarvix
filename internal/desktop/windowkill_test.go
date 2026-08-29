@@ -26,6 +26,13 @@ import (
 // signal is handled (so a kill is detected), and the IPC entry points reach
 // the window through the reviving accessor rather than a fixed object id
 // (so no path can poke a dead instance).
+//
+// Kept after the QML suite landed (#174). This is the one guard the runner
+// could not approach even in principle: the wedge is a Quickshell
+// bWantsVisible state reached by a *compositor* closing a mapped toplevel,
+// and the headless suite has neither a compositor nor a real window. The
+// accessor's call sites are what survives the kill, and counting them is a
+// source-level question.
 func TestConversationWindowIsRecreatedAfterCompositorKill(t *testing.T) {
 	source, err := os.ReadFile(pluginFilePath(t, "JarvixOverlay.qml"))
 	if err != nil {

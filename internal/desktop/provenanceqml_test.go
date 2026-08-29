@@ -15,6 +15,13 @@ import (
 // vocabulary that would let it word one itself.
 //
 // A text scan, like every other QML guard in this package.
+//
+// Kept after the QML suite landed (#174). tst_provenance.qml executes this
+// panel and requires that nothing appears which the daemon did not supply,
+// which is the stronger check for the payloads it drives. It cannot enumerate
+// the payloads it does not drive, and these phrases are precisely the ones a
+// well-meaning refactor reaches for when the daemon sent nothing. The scan is
+// keyed off provenance.AvailablePhrase and friends, so it never goes stale.
 func TestTheProvenancePanelWordsNothingItself(t *testing.T) {
 	raw, err := os.ReadFile(pluginFilePath(t, "JarvixWindow.qml"))
 	if err != nil {

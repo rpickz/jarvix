@@ -425,6 +425,13 @@ func pluginFilePath(t *testing.T, name string) string {
 // scoped to the files that actually declare a window. Nothing else in the
 // suite can catch this: the failure is invisible to Go, to the QML parser,
 // and to `omarchy plugin validate` alike.
+//
+// Kept after the QML suite landed (#174), because the executed tests cannot
+// see this. They run the window under a stub FloatingWindow with no
+// compositor at all, so "the toplevel never maps" is not a state the runner
+// has: every behavioural test would pass on the exact file this guard
+// rejects. It is a claim about an import line, and an import line is the only
+// place it can be checked.
 func TestFloatingWindowFilesDoNotImportQuickshellWayland(t *testing.T) {
 	pluginDir := filepath.Dir(pluginFilePath(t, "placeholder"))
 	entries, err := os.ReadDir(pluginDir)

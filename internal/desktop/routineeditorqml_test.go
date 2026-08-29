@@ -80,6 +80,13 @@ func TestTheStepFormPinsEveryPlacementProblemToItsField(t *testing.T) {
 // `placement.vocabulary`, so a mode added to the vocabulary appears in this
 // form without anyone remembering — and a mode removed disappears, which a
 // hard-coded list cannot do.
+//
+// Kept after the QML suite landed (#174). The executed suite drives the
+// vocabulary the daemon sends and sees the editor render it, which is exactly
+// what a hard-coded copy of the same list would also do. The failure only
+// appears the day Go grows a mode this file has never heard of — by which
+// time the copy is shipped. Absence of the literals is the only check that
+// fires before that day.
 func TestTheEditorInventsNoPlacementVocabulary(t *testing.T) {
 	section := stepFormSection(t)
 	var banned []string
@@ -129,6 +136,13 @@ func TestTheEditorInventsNoPlacementVocabulary(t *testing.T) {
 // test the acceptance criteria name outright. The window may scale a fraction
 // it was handed to the width of a box; it may not work out a share, read a
 // monitor's geometry, or decide what fits.
+//
+// Kept after the QML suite landed (#174). A running test can only ask whether
+// the drawing is right for the numbers it was given, and it would be — the
+// duplicated arithmetic starts out agreeing with the daemon's. What this
+// guards against is the second implementation existing at all, so that it can
+// drift later against a placement rule nobody thought to re-test. "No
+// arithmetic here" is a property of the source and has no runtime form.
 func TestTheDiagramComputesNoPlacement(t *testing.T) {
 	component := previewComponent(t)
 	for _, banned := range []string{

@@ -13,6 +13,13 @@ import (
 //
 // A text scan, like every other QML guard in this package (ADR 0013 keeps the
 // decisions in Go; these tests keep the QML from growing any).
+//
+// Kept after the QML suite landed (#174). tst_confirmation.qml presses each
+// button and reads the frame, proving no pattern goes out on those four
+// paths. This proves it on every path, including the ones no test presses:
+// counting the session.confirm call sites is how "there is only one way to
+// answer" stays true, and a running test cannot count call sites — it can
+// only exercise the ones it knows about.
 func TestConfirmationSurfacesSendAScopeNeverAPattern(t *testing.T) {
 	for _, name := range []string{"JarvixWindow.qml", "JarvixOverlay.qml"} {
 		raw, err := os.ReadFile(pluginFilePath(t, name))
@@ -119,6 +126,11 @@ func TestTheCardShowsTheRuleItWouldAdd(t *testing.T) {
 // and never words a refusal. It types a rule, sends it, and shows what the
 // daemon says — which is what makes "the card's refusal matrix, verbatim" true
 // of the screen and not only of the Go code.
+//
+// Kept after the QML suite landed (#174). The banned literals are the
+// daemon's refusal matrix. A running test would have to know the matrix to
+// notice a copy of it, and would then be a second copy itself. Absence is the
+// only form this check can take.
 func TestApprovalsTabEditsBothListsAndJudgesNeither(t *testing.T) {
 	raw, err := os.ReadFile(pluginFilePath(t, "JarvixWindow.qml"))
 	if err != nil {
