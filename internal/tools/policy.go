@@ -76,6 +76,14 @@ type Verdict struct {
 	// from Command so a model cannot describe `rm -rf ~` as "tidying up".
 	// Set only when Decision is PolicyAsk.
 	Summary string
+	// Reason is the clause Summary was composed from — "uses the risky
+	// command \"rm\"", "is not on my read-only allow list" — carried as a
+	// field so a caller that needs the same finding inside a differently
+	// shaped sentence can have it without parsing prose. The typing tools
+	// are that caller (#197): text going into a terminal is confirmed as a
+	// command, in a sentence that also has to name the window. Set only
+	// alongside Summary.
+	Reason string
 	// PreApproved marks an allow that a *user-granted* pattern produced —
 	// a `[tools.policy] shell_allow` entry or a conversation-scoped grant
 	// (issue #162) — as opposed to a shipped read-only allow pattern or a
@@ -267,13 +275,22 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	ReminderCancelToolName:      PolicyAllow,
 	BriefingToolName:            PolicyAllow,
 	SituationToolName:           PolicyAllow,
+	// The two ungated halves of managed windows (#197, ADR 0062).
+	// desktop.list_managed is a read of the daemon's own state.
+	// desktop.release_window is allow for a stronger reason than any other
+	// entry here: giving up power needs no permission, and a release that
+	// could be refused — by a policy default, by a mistyped tier, by
+	// anything — would be a window the user asked for back and did not get.
+	// Its counterpart, desktop.manage_window, is in neverSilent below.
+	ListManagedToolName:   PolicyAllow,
+	ReleaseWindowToolName: PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.
 //
 // Everything else in the registry is judged by the gate-wide default, on the
 // argument that a user who wrote `default = "allow"` meant it. Synthetic
-// keystrokes are the exception, and the reason is that they are the one
+// keystrokes are the first exception, and the reason is that they are the one
 // capability whose target the model does not choose and cannot see: the keys
 // land wherever focus is at that instant, and a mistake is neither visible
 // before it happens nor undoable after. So a global "allow" does not reach
@@ -281,11 +298,26 @@ var builtinToolDefaults = map[string]PolicyDecision{
 // (`[tools.policy.tool]."typing.type_text" = "allow"`) does, which is a
 // sentence a user has to mean.
 //
+// desktop.manage_window is the second (#197, ADR 0062), on a different
+// argument that lands in the same place. Handing a window over is a GRANT:
+// afterwards Jarvix may read it, place it and type into it, and a job may run
+// there. A grant made silently is a grant the user cannot know they made, and
+// the whole point of the feature is that the answer to "can Jarvix act in
+// here?" is knowable. So the user hears the window named, every time, and —
+// because RememberableApproval keys on this same map — an approval for one
+// window is never spent on the next.
+//
+// What is NOT here is its counterpart. Releasing is allow-tier
+// (builtinToolDefaults) and stays there: tightening the acquisition and
+// tightening the release are opposite acts, and only one of them protects
+// anybody.
+//
 // The exception runs one way. A stricter default still wins: `default =
 // "deny"` denies these too, because tightening is never the thing to override.
 var neverSilent = map[string]bool{
-	TypeTextToolName: true,
-	PressKeyToolName: true,
+	TypeTextToolName:     true,
+	PressKeyToolName:     true,
+	ManageWindowToolName: true,
 }
 
 // ToolDecision returns the configured tier for a tool: its per-tool entry,
@@ -354,6 +386,10 @@ func (p *Policy) ToolDecision(name string) PolicyDecision {
 // focus at that moment, and the second half cannot be carried forward: the
 // user is at their keyboard, and by the next call they may be somewhere else
 // entirely. Asking again costs a sentence; not asking costs whatever has focus.
+//
+// It is false for desktop.manage_window on the same reading (#197): the
+// approval is about ONE window, named in the question, and carrying it
+// forward would hand over the next one unasked — a grant nobody made.
 func RememberableApproval(tool string) bool { return !neverSilent[tool] }
 
 const shellToolName = "shell.run"
@@ -756,6 +792,7 @@ func (p *Policy) decideShell(call ai.ToolCall, mode PolicyDecision, grants [][]s
 		v.Pattern = preApprovedPattern
 	}
 	if worst == PolicyAsk {
+		v.Reason = worstReason
 		v.Summary = fmt.Sprintf("I want to run %q, which %s. Should I go ahead?", spokenCommand(command), worstReason)
 	}
 	return v

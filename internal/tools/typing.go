@@ -47,6 +47,30 @@ import (
 //   - The typed text is never logged. The user may have dictated a password,
 //     and the journal outlives the conversation. The window, the length, and
 //     the outcome are audited; the characters are not.
+//
+// Since #197 (ADR 0062) there is one more, and it is the load-bearing one:
+//
+//   - Text typed into a TERMINAL is a command, and is classified and
+//     confirmed exactly as `shell.run` is. The same compound-command
+//     splitter, the same deny rules, the same risk words, the same verbatim
+//     card — reached through the same Policy, under the shell.run identity.
+//     The two gates compose the strict way round: a shell verdict of deny
+//     refuses whatever the typing tier says, a verdict of ask forces the
+//     question whatever the typing tier says, and a verdict of allow tightens
+//     nothing. The terminal escalation ADR 0023 already had stands over all
+//     of it, and the single thing that sets it aside is a standing approval
+//     the user personally granted (#162) for that exact command shape.
+//
+//     This exists because of what managed windows would otherwise be. Handing
+//     a terminal over gives Jarvix a live shell; if typing into it were
+//     merely "typing", acquisition would be a complete bypass of the
+//     permission gate — the same power with none of the review. So
+//     acquisition grants access to the WINDOW and no permission to execute,
+//     and the check below is what makes that true rather than merely stated.
+//     Note that it does not depend on management at all: an unmanaged
+//     terminal that happens to have focus is classified identically, which is
+//     what makes "acquire it first" impossible to use as a way around the
+//     gate.
 
 // Tool names. Two tools rather than one with a mode, because the permission
 // gate keys on the tool name: "typing may be allowed and submitting still
@@ -111,6 +135,19 @@ type TypingAudit struct {
 	Key string
 	// Terminal marks a target whose contents are a command line.
 	Terminal bool
+	// Command is the text verbatim, set ONLY when the target was a terminal
+	// and the text was therefore classified as a command (#197). It is the
+	// one place a typed payload travels, and it is deliberate: a command that
+	// ran must appear in the activity feed as a command, because a standing
+	// approval removes the question and must not also remove the evidence
+	// (the tool.pre_approved argument, applied to a keyboard). It reaches the
+	// feed and nothing else — the journal line beside it still records the
+	// length and never the characters.
+	Command string
+	// Rule names the gate rule that decided about Command, in the shell
+	// classifier's own words (`risky command "rm"`, `allow pattern "ls"`).
+	// Empty when nothing was classified.
+	Rule string
 	// Approved reports whether a human answered a confirmation for this exact
 	// action. False means the gate's configured tier let it through silently.
 	Approved bool
@@ -140,6 +177,13 @@ type Typing struct {
 	timeout   time.Duration
 	log       *slog.Logger
 	onAudit   func(TypingAudit)
+	// classify judges a command line through the permission gate under the
+	// shell.run identity (#197). The daemon wires it to the live policy;
+	// tests hand back literals. Nil is the pre-#197 behaviour — a terminal
+	// still escalates to ask, but the text is not classified — and it is the
+	// STRICT direction only by luck of the tier, so the daemon always
+	// installs one.
+	classify func(command string) Verdict
 
 	// now is the clock, injectable so the rate limiter is tested without
 	// sleeping.
@@ -184,8 +228,15 @@ type TypingOptions struct {
 	// Timeout bounds one injection. Zero means DefaultTypingTimeout.
 	Timeout time.Duration
 	// OnAudit is called for every typing decision, for the bus event and the
-	// retained audit trail. Never called with the payload.
+	// retained audit trail. Never called with the payload — except for the
+	// one case TypingAudit.Command documents: a command typed into a
+	// terminal, which is a command and belongs in the feed as one.
 	OnAudit func(TypingAudit)
+	// Classify judges one command line through the permission gate under the
+	// shell.run identity, so text typed into a terminal faces exactly the
+	// classification a shell command faces (#197, ADR 0062). Required in the
+	// daemon; nil in a test that is not exercising the gate.
+	Classify func(command string) Verdict
 	// Log records each decision. Nil uses slog.Default().
 	Log *slog.Logger
 
@@ -205,6 +256,7 @@ func NewTyping(opts TypingOptions) *Typing {
 		timeout:   opts.Timeout,
 		log:       opts.Log,
 		onAudit:   opts.OnAudit,
+		classify:  opts.Classify,
 		now:       opts.now,
 		captures:  make(map[string]focusCapture),
 	}
@@ -386,7 +438,35 @@ func (t *typingTool) Execute(ctx context.Context, input json.RawMessage) (string
 			"the focused window does not accept typed input"), nil
 	}
 
-	return t.t.inject(ctx, t.Name(), current, chars, payload, key, approved), nil
+	// The command classification, re-run against the window that has focus
+	// NOW rather than the one the gate saw. Two things ride on it, and the
+	// second is the reason it is here at all:
+	//
+	//   - a denied command is refused again, because Refusing's promise is
+	//     that nothing is written even if a refused call is somehow executed
+	//     — and "somehow" here includes a daemon built with no gate at all;
+	//   - the audit carries the command verbatim, so a typed command appears
+	//     in the activity feed as a command.
+	var mark commandMark
+	if verdict, classified := t.commandVerdict(args, current); classified {
+		mark = commandMark{Command: strings.TrimSpace(payload), Rule: verdict.Rule}
+		if verdict.Decision == PolicyDeny {
+			return t.t.refuseCommand(t.Name(), current, chars, key, approved, mark,
+				fmt.Sprintf("typing that into %s would run it, and it is refused by %s",
+					desktop.AppName(current.Class), verdict.Rule)), nil
+		}
+	}
+
+	return t.t.inject(ctx, t.Name(), current, chars, payload, key, approved, mark), nil
+}
+
+// commandMark is what the gate found in a payload headed for a terminal: the
+// text verbatim — because at that point it is a command line, not private
+// prose — and the rule that judged it. Zero for everything else, which is
+// what keeps the payload out of every other audit row.
+type commandMark struct {
+	Command string
+	Rule    string
 }
 
 // checkPayload validates what the model asked for, before anything is resolved
@@ -423,6 +503,84 @@ func (t *typingTool) checkPayload(args typingArgs) (payload, key, refusal string
 		return payload, "", fmt.Sprintf("the text is %d characters and the limit is %d", n, t.t.maxChars)
 	}
 	return payload, "", ""
+}
+
+// commandVerdict classifies this call's payload as a shell command when the
+// target's contents are a command line.
+//
+// ok is false whenever there is nothing to classify: a key press (which types
+// no characters — pressing enter is confirmed on its own terms), a target
+// that is not a terminal, a payload the ordinary checks already refuse, or a
+// daemon built without a gate.
+//
+// It never captures and never writes: the capture is made by the gate hooks
+// that need one, and this is a pure question asked of the same Policy
+// `shell.run` is asked. That matters for the audit story — the answer here
+// must be the answer there, and the only way to guarantee that is for it to
+// be literally the same call.
+func (t *typingTool) commandVerdict(args typingArgs, target desktop.Window) (Verdict, bool) {
+	if t.press || t.t.classify == nil {
+		return Verdict{}, false
+	}
+	if !t.t.isTerminal(target) {
+		return Verdict{}, false
+	}
+	payload, _, refusal := t.checkPayload(args)
+	if refusal != "" {
+		return Verdict{}, false
+	}
+	command := strings.TrimSpace(payload)
+	if command == "" {
+		return Verdict{}, false
+	}
+	return t.t.classify(command), true
+}
+
+// Refuse implements Refusing: a command the permission gate DENIES is not
+// typeable into a terminal, whatever the typing tier says.
+//
+// This is the one direction the tiering could not express. Escalate can turn
+// allow into ask; nothing else could turn an explicit
+// `[tools.policy.tool]."typing.type_text" = "allow"` into a refusal, and
+// without that, switching typing on would be a way to run `rm -rf /` by
+// spelling it into a shell. Refusing is consulted before any policy — before
+// the tiers, before a global allow, before the no-policy case — which is
+// exactly the strength this needs (issue #105's wall, borrowed for a
+// different reason).
+//
+// The reason is spoken-ready and names the rule, because "I can't do that"
+// without saying what is off limits is the failure mode the interface exists
+// to avoid.
+func (t *typingTool) Refuse(input json.RawMessage) (reason string, ok bool) {
+	// Nothing to classify, so nothing to look at: a key press types no
+	// characters, and a daemon with no gate has no verdict to honour. Checked
+	// before the compositor is consulted, because this hook runs on every
+	// call and a wasted round trip here is a pause before every question.
+	if t.press || t.t.classify == nil {
+		return "", false
+	}
+	var args typingArgs
+	if err := json.Unmarshal(coalesceArgs(input), &args); err != nil {
+		return "", false
+	}
+	if _, _, refusal := t.checkPayload(args); refusal != "" {
+		return "", false // Execute refuses it outright; refusing twice says nothing new
+	}
+	// A LOOK, not a capture. Refusing runs before any policy — including on a
+	// daemon with no gate installed at all — and a capture made here would be
+	// a capture the gate never made, which is precisely the thing the whole
+	// capture mechanism exists to make impossible: keystrokes only ever land
+	// in a window the gate itself resolved and the user was asked about.
+	target, found := t.t.peek()
+	if !found {
+		return "", false
+	}
+	verdict, classified := t.commandVerdict(args, target)
+	if !classified || verdict.Decision != PolicyDeny {
+		return "", false
+	}
+	return fmt.Sprintf("typing that into %s would run it, and it is refused by %s",
+		desktop.AppName(target.Class), verdict.Rule), true
 }
 
 // Confirmation implements Confirmable: the ask tier's question, built from the
@@ -462,10 +620,27 @@ func (t *typingTool) Confirmation(input json.RawMessage) (command, summary strin
 		return fmt.Sprintf("press %s in %s", key, where),
 			fmt.Sprintf("I want to press %s in %s%s. Should I go ahead?", key, where, terminal), true
 	}
-	// command is published on the bus and written to the daemon's journal, so
-	// it carries the length and never the characters. The summary — spoken, and
-	// shown by the overlay for exactly as long as the question stands — is
-	// where the literal text belongs.
+	// A terminal target makes this a command, so it is confirmed as one: the
+	// card names the command verbatim and says what the shell classifier
+	// found in it, exactly as `shell.run` would (ADR 0014). The verbatim
+	// display is the whole point — a model cannot describe `sudo rm -rf ~` as
+	// "a note to self" when the sentence the user hears is not written by the
+	// model at all.
+	if verdict, classified := t.commandVerdict(args, target); classified {
+		command := strings.TrimSpace(payload)
+		if verdict.Reason != "" {
+			return fmt.Sprintf("type %q into %s, where it would run", command, where),
+				fmt.Sprintf("I want to type %q into %s, which is a terminal, so it would run as a "+
+					"command — and it %s. Should I go ahead?", spokenCommand(command), where, verdict.Reason), true
+		}
+		return fmt.Sprintf("type %q into %s, where it would run", command, where),
+			fmt.Sprintf("I want to type %q into %s, which is a terminal, so it would run as a "+
+				"command. Should I go ahead?", spokenCommand(command), where), true
+	}
+	// Everywhere else, command is published on the bus and written to the
+	// daemon's journal, so it carries the length and never the characters.
+	// The summary — spoken, and shown by the overlay for exactly as long as
+	// the question stands — is where the literal text belongs.
 	return fmt.Sprintf("type %s into %s", plural(len([]rune(payload)), "character", "characters"), where),
 		fmt.Sprintf("I want to type %q into %s%s. Should I go ahead?",
 			spokenPayload(payload), where, terminal), true
@@ -499,6 +674,35 @@ func (t *typingTool) Escalate(input json.RawMessage) (rule string, ok bool) {
 	if !t.t.isTerminal(target) {
 		return "", false
 	}
+	// The command classification decides the wording, and — in one case —
+	// whether the question is asked at all.
+	//
+	//   - Ask names the classifier's own rule, so an escalated call reads in
+	//     the audit trail exactly as the same command through `shell.run`
+	//     would: `risky command "rm"`, not "it is a terminal". Deny is
+	//     Refuse's job, above.
+	//   - A *user-granted* allow — a `[tools.policy] shell_allow` pattern or
+	//     a conversation grant (#162) — is the ONE thing that stands down the
+	//     terminal escalation. The user has already said "yes, for good" to
+	//     this exact command shape, and asking again is the feature failing at
+	//     its one job. The run is not silent: it still earns its audit row,
+	//     naming the granted rule, so the evidence survives the question
+	//     going away.
+	//
+	// A shipped read-only allow pattern is deliberately NOT enough. `ls` runs
+	// unprompted through `shell.run` because nothing it can do is worth a
+	// question; typing into a shell is a different act with a different
+	// failure mode (ADR 0023 — the keys land wherever focus is, and a
+	// mistake is neither visible before nor undoable after), and that
+	// escalation stands until the user personally sets it aside.
+	verdict, classified := t.commandVerdict(args, target)
+	switch {
+	case classified && verdict.Decision == PolicyAsk:
+		return fmt.Sprintf("%s, and typing it into %s would run it",
+			verdict.Rule, desktop.AppName(target.Class)), true
+	case classified && verdict.Decision == PolicyAllow && verdict.PreApproved:
+		return "", false
+	}
 	return fmt.Sprintf("the focused window (%s) is a terminal", desktop.AppName(target.Class)), true
 }
 
@@ -525,6 +729,20 @@ func (t *Typing) capture(tool, payload string, asked bool) (desktop.Window, bool
 		}
 	}
 	t.captures[captureKey(tool, payload)] = focusCapture{window: found, at: now, asked: asked}
+	return found, true
+}
+
+// peek resolves the focused window without remembering it — the read-only
+// half of capture, for the gate hooks that must decide something about the
+// target without manufacturing an authorisation to act on it (Refuse).
+func (t *Typing) peek() (desktop.Window, bool) {
+	// The gate has no context of its own; bound it tightly, as capture does.
+	ctx, cancel := context.WithTimeout(context.Background(), t.windows.timeout)
+	defer cancel()
+	found, err := t.focused(ctx)
+	if err != nil || found.Address == "" {
+		return desktop.Window{}, false
+	}
 	return found, true
 }
 
@@ -579,9 +797,41 @@ func sameWindow(a, b desktop.Window) bool {
 
 // isTerminal reports whether a window's contents are a command line.
 func (t *Typing) isTerminal(w desktop.Window) bool {
+	return isTerminalClass(w, t.terminals)
+}
+
+// jarvixIdentityPrefix is launchkind's reverse-DNS namespace for the windows
+// Jarvix opens inside a terminal (#198). Restated rather than imported so this
+// file keeps its short dependency list; a guard test pins the two spellings
+// together.
+const jarvixIdentityPrefix = "dev.jarvix."
+
+// isTerminalClass is the ONE definition of "this window's contents are a
+// command line", shared by the typing gate and the managed-window surface.
+// Two definitions would drift, and this one drifting means a shell Jarvix
+// does not recognise as one — which is the exact hole #197 exists to close.
+//
+// configured is the [tools.typing] terminal_classes list; empty uses the
+// shipped one.
+//
+// The reverse-DNS clause is the part worth arguing. A window Jarvix opened
+// inside a terminal wears an identity of its own (#198), so its class is no
+// longer the terminal's — `ghostty -e claude` produces a window classed
+// `dev.jarvix.claude`, and a class-list match would miss it. Every such window
+// IS a terminal emulator window, and `ghostty -e bash` is one that is
+// literally a shell, so the whole namespace counts. The price is a
+// command-shaped confirmation for text dictated into a TUI Jarvix opened,
+// which is the safe direction to be wrong in.
+func isTerminalClass(w desktop.Window, configured []string) bool {
 	class := strings.ToLower(strings.TrimSpace(w.Class))
 	app := strings.ToLower(desktop.AppName(w.Class))
-	for _, entry := range t.terminals {
+	if strings.HasPrefix(class, jarvixIdentityPrefix) {
+		return true
+	}
+	if len(configured) == 0 {
+		configured = DefaultTerminalClasses
+	}
+	for _, entry := range configured {
 		e := strings.ToLower(strings.TrimSpace(entry))
 		if e == "" {
 			continue
@@ -630,7 +880,7 @@ func humanWindow(d time.Duration) string {
 
 // inject performs the action. Everything before this point decided *whether*;
 // this is the only place a keystroke is produced.
-func (t *Typing) inject(ctx context.Context, tool string, w desktop.Window, chars int, payload, key string, approved bool) string {
+func (t *Typing) inject(ctx context.Context, tool string, w desktop.Window, chars int, payload, key string, approved bool, mark commandMark) string {
 	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
@@ -648,6 +898,7 @@ func (t *Typing) inject(ctx context.Context, tool string, w desktop.Window, char
 			"class", w.Class, "chars", chars, "key", key, "error", err.Error())
 		t.audit(TypingAudit{Tool: tool, Window: w.Describe(), Class: w.Class, Chars: chars,
 			Key: key, Terminal: t.isTerminal(w), Approved: approved,
+			Command: mark.Command, Rule: mark.Rule,
 			Outcome: "unavailable", Reason: "the keyboard could not be reached"})
 		return "Nothing could be typed: this computer has no way to send keystrokes. Tell the user " +
 			"in one short sentence, and do not retry."
@@ -663,7 +914,8 @@ func (t *Typing) inject(ctx context.Context, tool string, w desktop.Window, char
 		outcome, done = "pressed", fmt.Sprintf("Pressed %s in %s.", key, w.Describe())
 	}
 	t.audit(TypingAudit{Tool: tool, Window: w.Describe(), Class: w.Class, Chars: chars,
-		Key: key, Terminal: t.isTerminal(w), Approved: approved, Outcome: outcome})
+		Key: key, Terminal: t.isTerminal(w), Approved: approved,
+		Command: mark.Command, Rule: mark.Rule, Outcome: outcome})
 	return done + " Confirm it to the user in one short sentence. Never repeat the text back — it " +
 		"is already on their screen, and it may be private."
 }
@@ -694,10 +946,20 @@ func describeOrNothing(w desktop.Window) string {
 
 // refuse records and explains a refusal by one of the caps or checks.
 func (t *Typing) refuse(tool string, w desktop.Window, chars int, key string, approved bool, reason string) string {
+	return t.refuseCommand(tool, w, chars, key, approved, commandMark{}, reason)
+}
+
+// refuseCommand is refuse for a payload the gate classified as a command: the
+// same row, with the command and the rule that refused it. A denied command
+// must be as findable afterwards as an allowed one — more so, because it is
+// the row that says the gate did its job.
+func (t *Typing) refuseCommand(tool string, w desktop.Window, chars int, key string, approved bool,
+	mark commandMark, reason string) string {
 	t.log.Info("typing refused", "component", "tools", "tool", tool,
-		"class", w.Class, "chars", chars, "key", key, "reason", reason)
+		"class", w.Class, "chars", chars, "key", key, "rule", mark.Rule, "reason", reason)
 	t.audit(TypingAudit{Tool: tool, Window: w.Describe(), Class: w.Class, Chars: chars,
-		Key: key, Terminal: t.isTerminal(w), Approved: approved, Outcome: "refused", Reason: reason})
+		Key: key, Terminal: t.isTerminal(w), Approved: approved,
+		Command: mark.Command, Rule: mark.Rule, Outcome: "refused", Reason: reason})
 	return fmt.Sprintf("Nothing was typed: %s. Tell the user in one short sentence why, and do not "+
 		"retry the same way.", reason)
 }
