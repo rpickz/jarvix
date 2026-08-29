@@ -21,10 +21,15 @@ import (
 // endpoint sub-tables. They are the section's own settings, never endpoints,
 // and both the loader (parse) and the window's entry editor read this one set
 // so the two can never disagree about what `[ai.model]` would mean.
+// "tiers" is here for a different reason than the rest: it is not a scalar
+// but the [ai.tiers] sub-table family (issue #159, tiers.go), which the loader
+// reads with its own decoder. It has to be reserved all the same, and for the
+// same purpose — an endpoint may not be called "tiers", because then
+// [ai.tiers.instant] would be ambiguous between an endpoint's key and a tier.
 func ReservedAIKeys() map[string]bool {
 	return map[string]bool{
 		"provider": true, "model": true, "system_prompt": true,
-		"max_tokens": true, "temperature": true,
+		"max_tokens": true, "temperature": true, tiersTableKey: true,
 	}
 }
 

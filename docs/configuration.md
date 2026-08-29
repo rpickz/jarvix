@@ -154,6 +154,26 @@ api_key_env = "OPENAI_API_KEY"   # environment variable holding the key
 base_url = "http://10.0.0.5:8080/v1"
 api_key_env = "MYSERVER_KEY"
 
+# Model tiers (see "Thinking levels" below). Absent — the shipped state — means
+# one brain and exactly the behaviour above. Each tier POINTS AT an endpoint
+# defined once, or at an advisor; it never carries a URL or a key of its own.
+[ai.tiers]
+default = "medium"               # which tier a NEW conversation starts on:
+                                 # "instant", "medium" or "deep". The
+                                 # conversation's own level is the window's
+                                 # Quick/Balanced/Deep control, not this.
+[ai.tiers.instant]               # small and immediate; never used for a turn
+provider = "lmstudio"            # that may call a tool (see below)
+model = "qwen3-1.7b"
+history_turns = 4                # optional tighter context budget, in
+                                 # exchanges. What it leaves out is disclosed
+                                 # to the model and recorded, never silent.
+[ai.tiers.medium]                # today's brain. Omit the whole table and
+provider = "myserver"            # medium IS [ai] provider + model.
+model = "qwen3p8-max"
+[ai.tiers.deep]                  # strongest available: an endpoint...
+advisor = "claude"               # ...or an advisor (xor provider/model)
+
 [stt]
 provider = "whisper"             # the only supported STT in V1
 vocabulary = []                  # extra terms speech recognition is biased
@@ -2427,6 +2447,77 @@ Turning it off again:
 ```bash
 jarvix config set tools.typing.enable=false
 ```
+
+## Thinking levels (`[ai.tiers]`)
+
+One model has to be both quick and good, and no model is. `[ai.tiers]` lets you
+configure up to three and choose between them per conversation:
+
+| Level | Tier | What it is for |
+| --- | --- | --- |
+| **Quick** | `instant` | a small, immediate model — you accept lower quality for the speed |
+| **Balanced** | `medium` | the usual model; this is what you have today |
+| **Deep** | `deep` | the strongest thing on this machine or off it; worth waiting for |
+
+Each tier names an endpoint you have already defined under `[ai.<name>]` and a
+model to ask it for, **or** an advisor CLI (`advisor = "claude"`, see below).
+The mix is yours: all local, all remote, or anything between.
+
+**Nothing changes until you configure a tier.** With no `[ai.tiers]` table
+Jarvix behaves exactly as it did before this existed — one brain, no control in
+the window, nothing extra in the record. And **`medium` with no table of its
+own is your `[ai]` model**, so adding just an instant tier leaves ordinary
+questions answering from the model they answered from yesterday.
+
+An absent `instant` or `deep` is not a level at all. Ask for one and Jarvix
+says it is not configured and answers from the level it has — it never quietly
+serves the same model under a stronger name.
+
+### Choosing a level
+
+- **In the window**, with the Quick / Balanced / Deep control beside the
+  composer. It applies from your next question, lasts for that conversation,
+  and a new conversation goes back to `default`.
+- **Out loud**, with a whole sentence: "switch to deep", "stay on the deep
+  model", "quick answers from now on", "back to normal answers". These change
+  the same setting the control shows, and the window follows.
+- **For one question**, by leading with it: "think hard about this, …", "take
+  your time and …", "quickly, …". That question goes to the named level and the
+  next one goes back.
+
+Whichever way it moved, the tier that actually answered is shown beside the
+pending turn ("Thinking · 6s · Deep") and recorded in `jarvix status --last`
+and the activity feed.
+
+### The one thing the instant tier never does
+
+**A question that may need a tool is never answered by the instant tier** —
+not even when it is your default, not even when you pinned it, not even when
+you said "quick answer". A small model holding tools is how an assistant comes
+to tell you it opened a file it never touched (issue #71), and a second of
+latency is not worth that sentence. Jarvix quietly uses the balanced tier
+instead and the record says why.
+
+There is also no automatic downgrade: nothing guesses that your question "looks
+easy". Quick is a choice you make, not one made for you.
+
+### When a level cannot answer
+
+If the tier you asked for is unreachable — no key, nothing listening, an
+advisor that is not installed — Jarvix says exactly that and offers the answer
+from the tier it *can* reach. It never silently downgrades, and it never claims
+deep thought that did not happen.
+
+`jarvix doctor` probes every configured tier for real, by name and endpoint, so
+a tier that cannot answer fails there rather than mid-conversation.
+
+### Letting the model reach up
+
+With a deep tier configured, the assistant gets a `thinking.ask_deep` tool: it
+can hand a genuinely hard question to the strongest model itself and speak the
+answer back. This is the `advisor.ask` pattern (below) generalised so the
+strong model can be an API rather than only a CLI. It answers; it cannot act on
+your computer.
 
 ## Advisors (asking a stronger assistant)
 

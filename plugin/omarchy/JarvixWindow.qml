@@ -202,6 +202,75 @@ FloatingWindow {
   property double stateSinceMs: 0
   property int pendingElapsedSec: 0
 
+  // --- the thinking level (issue #159, ADR 0063) --------------------------
+  // Quick / Balanced / Deep: the trade between how fast an answer arrives and
+  // how good it is, per conversation, without editing config.toml.
+  //
+  // The control below is a view of daemon state and nothing more. The level
+  // lives in the engine — one place, moved by this control, by the spoken
+  // phrases ("switch to deep"), and by nothing else — so a voice change and a
+  // click can never leave two surfaces disagreeing. `thinking.changed` is what
+  // keeps this window current when the change came from the microphone.
+  //
+  // The levels come from the daemon too, including the ones this machine
+  // cannot serve: a control that silently dropped "Deep" would leave the user
+  // wondering whether the feature exists, where one that shows it and says
+  // what is missing tells them what to configure. Clicking an unconfigured
+  // level is answered here, in the control, rather than at answer time — which
+  // is the whole point of asking before the turn instead of during it.
+  property string thinking: ""
+  property string thinkingLabel: ""
+  property var thinkingLevels: []
+  property string thinkingNote: ""
+  // The tier that is serving the turn in flight, for the pending line. Cleared
+  // when the session ends, exactly like currentTool and for the same reason.
+  property string pendingTier: ""
+
+  // JSON-RPC ids from this feature's own private range (950-999, the reminders
+  // and approvals discipline) so its replies are recognisable by construction.
+  property int thinkingGetRequestId: 0
+  property int thinkingSetRequestId: 0
+  property int nextThinkingRequestId: 950
+
+  function takeThinkingRequestId() {
+    var id = nextThinkingRequestId
+    nextThinkingRequestId = nextThinkingRequestId >= 999 ? 950 : nextThinkingRequestId + 1
+    return id
+  }
+
+  function requestThinking() {
+    if (!daemon.connected) return
+    thinkingGetRequestId = takeThinkingRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: thinkingGetRequestId,
+      method: "thinking.get" }) + "\n")
+  }
+
+  function setThinking(tier) {
+    if (!daemon.connected) return
+    thinkingNote = ""
+    thinkingSetRequestId = takeThinkingRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: thinkingSetRequestId,
+      method: "thinking.set", params: { thinking: tier } }) + "\n")
+  }
+
+  function loadThinking(result) {
+    thinking = String(result.thinking || "")
+    thinkingLabel = String(result.thinking_label || "")
+    thinkingLevels = result.levels || []
+  }
+
+  // A refusal is shown where the control stands, in words. The daemon's
+  // sentence is used verbatim: it is the same sentence the spoken path says,
+  // and re-wording it here would be a second copy of the vocabulary.
+  function handleThinkingSetReply(frame) {
+    if (frame.error) {
+      thinkingNote = String((frame.error && frame.error.message) || "That level is not available.")
+      return
+    }
+    thinkingNote = ""
+    if (frame.result) loadThinking(frame.result)
+  }
+
   ListModel { id: turns } // { role: "user"|"assistant"|"confirmation", text, command, outcome, pos, pending, provJson }
   // Activity rows, oldest first, exactly as the daemon rendered them.
   ListModel { id: activityRows } // { seq, time, kind, label, detail, failed }
@@ -3388,6 +3457,12 @@ FloatingWindow {
       takePendingTurn()
       return
     }
+
+    // The tier answering it, separator and all decided in Go (#159): the
+    // speed/quality trade is visible while it is being paid for, not only
+    // afterwards in the record.
+    line += BarState.pendingTurnTierNote(pendingTier)
+
     if (assistantStreaming) return
     if (pendingTurnIndex < 0) {
       turns.append({ role: "assistant", text: line, command: "", outcome: "",
@@ -3456,6 +3531,13 @@ FloatingWindow {
     stateSinceMs = Number(result.state_since_ms || 0)
     currentTool = String(result.tool || "")
     toolDetail = String(result.tool_detail || "")
+    // The thinking level and the tier serving the turn in flight (#159). Both
+    // absent when no tiers are configured, and then the control is not drawn
+    // at all — there is no trade to offer on a machine with one model.
+    thinking = String(result.thinking || "")
+    thinkingLabel = String(result.thinking_label || "")
+    thinkingLevels = result.thinking_levels || []
+    pendingTier = String(result.tier || "")
     refreshPendingElapsed()
     // A window opened by clicking an error notification connects after the
     // `error` event has already gone out, so the snapshot carries it.
@@ -3489,6 +3571,7 @@ FloatingWindow {
       if (next === "idle" || next === "error") {
         currentTool = ""
         toolDetail = ""
+        pendingTier = ""
       }
       sessionState = next
       // The phase's start on the daemon's own clock (issue #158). The elapsed
@@ -3498,6 +3581,21 @@ FloatingWindow {
       stateSinceMs = Number(params.since_ms || 0)
       refreshPendingElapsed()
       syncPendingTurn()
+      break
+    case "assistant.started":
+      // Which model is answering (#159), known the moment the turn reaches
+      // the provider — early enough for the pending line to name it for the
+      // whole of the wait rather than only in the record afterwards.
+      pendingTier = String(params.tier || "")
+      syncPendingTurn()
+      break
+    case "thinking.changed":
+      // The level moved somewhere else — a spoken "switch to deep", or
+      // another window. One place it lives, so this window follows rather
+      // than keeping its own idea of it.
+      thinking = String(params.thinking || "")
+      thinkingLabel = String(params.label || "")
+      thinkingNote = ""
       break
     case "tool.started":
       // The step the pending turn narrates. `detail` is the tool's own
@@ -3756,6 +3854,9 @@ FloatingWindow {
       // re-reading the settings snapshot here is what makes a change apply
       // to the open transcript live, whatever surface saved it.
       requestTypography()
+      // A saved [ai.tiers] table changes which levels exist (#159), so the
+      // control follows the file the same way the Providers lists do.
+      requestThinking()
       break
     }
   }
@@ -3786,6 +3887,10 @@ FloatingWindow {
           // moment late" would alarm without informing.
         } else if (frame.id !== undefined && frame.id === win.replayRequestId) {
           win.handleReplayReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.thinkingGetRequestId) {
+          if (frame.result) win.loadThinking(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.thinkingSetRequestId) {
+          win.handleThinkingSetReply(frame)
         } else if (frame.id !== undefined && frame.id === win.activityRequestId) {
           if (frame.result) win.loadActivity(frame.result)
         } else if (frame.id !== undefined && frame.id === win.knowledgeRequestId) {
@@ -3964,6 +4069,11 @@ FloatingWindow {
         // rest of the connect snapshot; until they arrive the property
         // defaults render the shipped look.
         win.requestTypography()
+        // Which levels this machine can serve, and which one this
+        // conversation is on (#159). The conversation snapshot carries both
+        // too; this is what keeps the control right when a reload changed the
+        // tiers without a turn happening.
+        win.requestThinking()
         if (win.currentTab === "library") win.requestHistory()
       } else {
         win.sessionState = "idle"
@@ -8192,6 +8302,67 @@ FloatingWindow {
           name: "New chat — archive this conversation and start a fresh one"
           onClicked: win.startNewChat()
         }
+      }
+
+      // The thinking level (issue #159, ADR 0063). Quick / Balanced / Deep,
+      // beside the composer because it is a decision about the question about
+      // to be asked, not a preference buried in a settings screen.
+      //
+      // Absent entirely when the daemon reports no levels: a machine with one
+      // model has no trade to offer, and a control that could not move would
+      // be furniture. The current level is stated as *text* to the left of the
+      // buttons as well as being marked on one of them — colour alone is not a
+      // legible setting.
+      Row {
+        id: thinkingControl
+        visible: win.thinkingLevels.length > 0
+        width: parent.width
+        spacing: Style.space(6)
+
+        Text {
+          id: thinkingCurrent
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Thinking: " + (win.thinkingLabel === "" ? "—" : win.thinkingLabel)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
+          color: Util.alpha(Color.popups.text, 0.7)
+          Accessible.role: Accessible.StaticText
+          Accessible.name: text
+        }
+
+        Repeater {
+          model: win.thinkingLevels
+
+          delegate: JarvixFormButton {
+            required property var modelData
+            label: String(modelData.label || "")
+            accent: String(modelData.tier || "") === win.thinking
+            // An unconfigured level is dimmed but still pressable: pressing it
+            // is how the user finds out *why* it is not there, in one sentence
+            // beneath the control, rather than by asking a question and
+            // waiting for a worse answer than they expected.
+            opacity: modelData.available ? 1.0 : 0.55
+            name: String(modelData.label || "") + " — " + String(modelData.description || "") +
+              (modelData.available ? "" : " (not configured on this computer)")
+            onClicked: win.setThinking(String(modelData.tier || ""))
+          }
+        }
+      }
+
+      // Why a level could not be taken, said where the control stands. The
+      // daemon's own sentence, so the click and the spoken phrase refuse in
+      // the same words.
+      Text {
+        id: thinkingNoteText
+        visible: win.thinkingNote !== ""
+        width: parent.width
+        wrapMode: Text.WordWrap
+        text: win.thinkingNote
+        font.family: Style.font.family
+        font.pixelSize: Style.font.small
+        color: Util.alpha(Color.popups.text, 0.75)
+        Accessible.role: Accessible.StaticText
+        Accessible.name: text
       }
 
       Rectangle {

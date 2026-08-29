@@ -88,6 +88,11 @@ func Run(cfg config.Config, paths config.Paths) []Result {
 	for _, check := range checks {
 		results = append(results, check(cfg, paths))
 	}
+	// One result per configured model tier (#159), directly after the
+	// provider checks it extends: the single-brain check above says whether
+	// [ai] can answer, and these say the same of every tier that can be
+	// routed to. Nothing at all when no tiers are configured.
+	results = append(results, tierChecks(cfg)...)
 	// One result per configured advisor, so a CLI that moved is visible
 	// before someone asks Jarvix to consult it (ADR 0016).
 	results = append(results, advisorChecks(cfg)...)

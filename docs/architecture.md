@@ -210,6 +210,23 @@ only ever make the gate stricter than configuration made it. The injector sits
 behind an interface with a fake, and no test in the tree synthesises a
 keystroke.
 
+### Choosing which model answers
+
+A turn that reaches the model reaches *a* model. `[ai.tiers]` configures up to
+three — instant, medium, deep — and one pure routing table
+([ADR 0063](adr/0063-model-tiers.md)) picks between them before the request is
+built: the configured default, overridden by the conversation's Quick /
+Balanced / Deep level, overridden by an explicit "think hard about this…".
+Routing costs a map lookup — no classifier, no pre-flight model call — and with
+no `[ai.tiers]` table there is no routing at all and the request is byte for
+byte the one this engine always sent.
+
+Two rules are absolute. **A turn that may call a tool is never served by the
+instant tier**: a small model holding tools is issue #71 with the safety catch
+off. And **a tier that cannot answer is named out loud** — the tier that
+answered is what the pending indicator shows and what `session.timings`
+records, never the tier that was asked for.
+
 ### Delegating to a stronger assistant
 
 A request beyond the local model is handed to an assistant CLI the user has

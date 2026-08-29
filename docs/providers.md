@@ -52,6 +52,28 @@ Endpoints are administered in the window's Providers section — base URL and
 credential, with `api_key_env` offered as the safer choice. A stored key is
 never displayed, returned, or quoted; see ADR 0052.
 
+### Model tiers
+
+`[ai.tiers]` (issue #159, ADR 0063) lets one Jarvix hold three brains at once —
+`instant`, `medium`, `deep` — each *pointing at* one of the endpoints above, or
+at an advisor CLI through the bridge of ADR 0016. A tier never carries a base
+URL or a credential of its own: there is one place an endpoint is described,
+and a tier selects it.
+
+Which tier serves a turn is decided by `ai.Decide`, a pure table in this
+package with no engine in it: the configured default, overridden by the
+conversation's level, overridden by an explicit ask, and then two corrections —
+a tier with no binding cannot serve (and the refusal is *said*), and a turn that
+may call a tool is never served by the instant tier. There is no classifier and
+no pre-flight model call; routing costs a map lookup.
+
+With no `[ai.tiers]` table nothing changes: one provider, one model, the same
+request bytes on the wire.
+
+`AdvisorProvider` (internal/tools) is the second implementation of `Provider`
+in the tree, and it is not an HTTP one: it presents a configured assistant CLI
+as a provider so a tier can be either without any call site knowing.
+
 ### Planned
 
 Native Anthropic and Gemini providers (different wire formats) are the

@@ -177,6 +177,13 @@ type Options struct {
 	// phrase an honest spoken refusal, the same disabled-means-absent rule
 	// every other collaborator here follows.
 	Operating Operating
+	// Tiers are the configured model tiers (issue #159, ADR 0063). The zero
+	// value — no bindings — switches tiering off entirely: the engine calls
+	// the provider it was constructed with, asks for Model above, and sends
+	// exactly the messages it always did. That is the disabled-means-absent
+	// rule again, and here it is also the byte-identity guarantee an existing
+	// configuration is owed.
+	Tiers TierSet
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -256,6 +263,23 @@ type Engine struct {
 	// screen. Guarded by mu.
 	runningTool       string
 	runningToolDetail string
+	// thinking is the conversation's pinned tier (issue #159): what the
+	// window's Quick / Balanced / Deep control and its spoken equivalents set.
+	// ai.TierNone — the state a fresh conversation is in — means "follow the
+	// configured default", so a change to [ai.tiers] default reaches an
+	// unpinned conversation without anything having to copy it here. Cleared
+	// with the conversation, exactly like the remembered approvals: a pin is a
+	// decision about the thread being had, not a setting. Guarded by mu.
+	thinking ai.Tier
+	// servingTier and servingModel are which tier answered, and what actually
+	// served it, for the turn in flight. They are the pending turn's tier
+	// (#158's surface) and they are set from the resolved binding rather than
+	// from what was asked for — the tier that answered, never the tier that
+	// was wanted, on the same terms the multi-provider ledger elsewhere
+	// insists on. Cleared when the session ends, like runningTool, so a
+	// finished turn's model cannot linger on screen. Guarded by mu.
+	servingTier  ai.Tier
+	servingModel string
 	// pending is the tool confirmation the session is waiting on, if any
 	// (ADR 0014). Guarded by mu.
 	pending *pendingConfirmation
@@ -420,6 +444,17 @@ type sess struct {
 	// wake marks a session a wake word started (ADR 0024). Its transcript
 	// begins with the wake word, which is stripped before anything reads it.
 	wake bool
+
+	// askedTier is the tier this one utterance asked for out loud — "think
+	// hard about this…", "quick answer" — ai.TierNone when it asked for
+	// nothing (issue #159). It is per-turn rather than a pin: asking once is
+	// a request about this question, and the next question goes back to the
+	// conversation's level.
+	//
+	// Set in maybeThinkLocked before the turn leaves the lock and immutable
+	// after, so think() reads it without the lock exactly as it reads wake,
+	// quiet and scheduled.
+	askedTier ai.Tier
 
 	// quiet marks a session whose turn must not be spoken aloud — a
 	// schedule's clockfire with announce off (ADR 0032). Every speech exit
@@ -600,6 +635,18 @@ type Phase struct {
 	// publish one.
 	Tool       string
 	ToolDetail string
+	// Tier is the model tier serving the turn in flight, "" when tiering is
+	// off or no turn has reached the model yet, and TierModel what is
+	// actually answering (issue #159). They ride Phase rather than a separate
+	// call for the reason Phase exists at all: a window rendering "Deep · 12s"
+	// from two reads could quote a tier from one moment and a clock from the
+	// next.
+	Tier      ai.Tier
+	TierModel string
+	// Thinking is the conversation's current thinking level — the setting the
+	// window's control shows. Unlike Tier it is always present when tiering
+	// is on, because it describes the *next* turn as much as this one.
+	Thinking ai.Tier
 }
 
 // Phase reports the current phase as one consistent read. It is one method
@@ -619,7 +666,64 @@ func (e *Engine) Phase() Phase {
 		Since:      e.stateSince,
 		Tool:       e.runningTool,
 		ToolDetail: e.runningToolDetail,
+		Tier:       e.servingTier,
+		TierModel:  e.servingModel,
+		Thinking:   e.thinkingLocked(),
 	}
+}
+
+// Thinking is the conversation's current thinking level, ai.TierNone when
+// tiering is off. It is the one source of truth the window's control, the
+// spoken phrases and the record all read: three ways to move it, one place it
+// lives.
+func (e *Engine) Thinking() ai.Tier {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.thinkingLocked()
+}
+
+// thinkingLocked resolves the effective level: the conversation's pin, or the
+// configured default when nothing has been pinned. Returning the *effective*
+// tier rather than the pin is what lets the control show a setting at all —
+// "unpinned" is not something a person can be shown.
+func (e *Engine) thinkingLocked() ai.Tier {
+	if !e.opts.Tiers.Enabled() {
+		return ai.TierNone
+	}
+	if _, ok := ai.ParseTier(string(e.thinking)); ok {
+		return e.thinking
+	}
+	if _, ok := e.opts.Tiers.Bindings[e.opts.Tiers.Default]; ok {
+		return e.opts.Tiers.Default
+	}
+	return ai.TierMedium
+}
+
+// SetThinking pins the conversation's thinking level. It applies from the next
+// turn — never to one already in flight, which would mean the answer being
+// streamed came from a model the control no longer names — and it lasts until
+// the conversation does.
+//
+// It reports the level actually in force, which is not always the one asked
+// for: a tier with no binding cannot be pinned to, and saying so here is what
+// lets the control refuse in place rather than at answer time.
+func (e *Engine) SetThinking(tier ai.Tier) (ai.Tier, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.opts.Tiers.Enabled() {
+		return ai.TierNone, fmt.Errorf("no model tiers are configured; add an [ai.tiers.instant] or [ai.tiers.deep] table")
+	}
+	if _, ok := ai.ParseTier(string(tier)); !ok {
+		return e.thinkingLocked(), fmt.Errorf("%q is not a thinking level; use instant, medium or deep", tier)
+	}
+	if _, ok := e.opts.Tiers.Bindings[tier]; !ok {
+		return e.thinkingLocked(), fmt.Errorf("there is no %s model configured; add an [ai.tiers.%s] table",
+			tierPhrase(tier), tier)
+	}
+	e.thinking = tier
+	e.publish(Event{Type: "thinking.changed", Data: map[string]any{
+		"thinking": string(tier), "label": ai.TierLabel(tier)}})
+	return tier, nil
 }
 
 // StartSession begins a new session. If a session is already active — for
@@ -909,6 +1013,12 @@ func (e *Engine) setStateLocked(to State) error {
 		// them. A surface left saying "Consulting claude" after the turn ended
 		// would be reporting work that belongs to nothing (issue #158).
 		e.runningTool, e.runningToolDetail = "", ""
+		// And the tier that served it, for exactly the same reason (#159): a
+		// pending turn labelled "Deep" after the turn ended would be claiming
+		// a model is working on an answer that already arrived. The
+		// conversation's *level* is untouched — that survives the turn, and
+		// the control has to keep showing it.
+		e.servingTier, e.servingModel = ai.TierNone, ""
 	}
 	id := ""
 	if e.current != nil {
@@ -1255,6 +1365,16 @@ func (e *Engine) maybeThinkLocked(s *sess) {
 	if e.routeIntentLocked(s) {
 		return
 	}
+	// A miss may still have asked for a tier ("think hard about this, …").
+	// Additive by construction: TurnTier claims nothing, so an utterance
+	// carrying an escalation reaches the model exactly as it would have —
+	// it just reaches a different one (issue #159, ADR 0063). After the
+	// router, because a whole-utterance pin is the router's to claim, and
+	// before the turn leaves the lock, because think() reads this field
+	// without one.
+	if tier, ok := intent.TurnTier(s.userText); ok {
+		s.askedTier = tier
+	}
 	if err := e.setStateLocked(StateThinking); err != nil {
 		e.failLocked(s, "session", err)
 		return
@@ -1344,12 +1464,21 @@ func (e *Engine) think(s *sess) {
 	// Feed values likewise (ADR 0031): cached readings only, never a fetch —
 	// a turn must not wait on a feed command.
 	feeds := e.gatherKnowledge(s)
-	messages := e.conversationMessages(s.userText, snapshot, remembered.Message, taught.Message, feeds.Message)
+	fullMessages := e.conversationMessages(s.userText, snapshot, remembered.Message, taught.Message, feeds.Message)
 
-	var toolDefs []ai.ToolDef
+	var allDefs []ai.ToolDef
 	if e.tools != nil && !e.tools.Empty() {
-		toolDefs = e.tools.Defs()
+		allDefs = e.tools.Defs()
 	}
+
+	// Which model answers this turn (issue #159, ADR 0063). Resolved once,
+	// here, *after* the tool definitions are known and before a single byte
+	// goes to a provider — which is what makes the never-instant-with-tools
+	// rule a property of the code path rather than a convention somebody has
+	// to remember. With no tiers configured this is the zero value and every
+	// line below resolves to exactly what it resolved to before tiers existed.
+	serve := e.beginTier(s, len(allDefs) > 0)
+	messages, toolDefs := e.tierPrompt(&serve, fullMessages, allDefs)
 
 	var speaker *streamingSpeaker
 	if e.opts.SpeakResponses && e.tts != nil && !s.quiet {
@@ -1360,7 +1489,16 @@ func (e *Engine) think(s *sess) {
 	// the preamble it has to take back (issue #52).
 	turn := spokenTurn{speaker: speaker}
 
-	e.publish(Event{Type: "assistant.started", Data: map[string]any{"session_id": s.id, "provider": e.provider.Name()}})
+	// The one spoken cue a deliberate wait earns, and the one sentence an
+	// unserviceable request earns, both said before the answer rather than
+	// after it: the point of each is to set the expectation the user is about
+	// to sit through.
+	notice := e.tierNotice(serve)
+	if notice != "" && speaker != nil {
+		speaker.speak(notice)
+	}
+
+	e.publish(Event{Type: "assistant.started", Data: e.assistantStartedData(s, serve)})
 
 	finalText := ""
 	// How many tool calls the model requested this turn — attempts, not
@@ -1380,13 +1518,37 @@ func (e *Engine) think(s *sess) {
 			// nothing; see streamingSpeaker.nextTurn and enqueue).
 			speaker.nextTurn()
 		}
-		text, calls, ok := e.streamOnce(s, ai.ChatRequest{
-			Model:       e.opts.Model,
-			MaxTokens:   e.opts.MaxTokens,
-			Temperature: e.opts.Temperature,
-			Messages:    messages,
-			Tools:       toolDefs,
-		}, speaker)
+		text, calls, ok, unreachable := e.streamOnce(s,
+			serve.provider(e.provider), e.tierRequest(serve, messages, toolDefs), speaker)
+		if unreachable != nil {
+			// The tier could not be reached and had produced nothing, so
+			// another one may still answer honestly. Only on the first round:
+			// once a turn has run tools, its history belongs to the model that
+			// asked for them, and swapping brains underneath that would be a
+			// different kind of dishonesty (ADR 0063).
+			if round > 0 || !e.failOverTier(s, &serve, unreachable, speaker) {
+				e.abortSpeaker(speaker)
+				if s.ctx.Err() == nil {
+					e.fail(s, "assistant", unreachable)
+				}
+				return
+			}
+			// The prompt follows the tier: a context budget and whether tools
+			// are offered at all are part of what a tier *is*.
+			messages, toolDefs = e.tierPrompt(&serve, fullMessages, allDefs)
+			if notice = e.tierNotice(serve); notice != "" && speaker != nil {
+				speaker.speak(notice)
+			}
+			text, calls, ok, unreachable = e.streamOnce(s,
+				serve.provider(e.provider), e.tierRequest(serve, messages, toolDefs), speaker)
+			if unreachable != nil {
+				e.abortSpeaker(speaker)
+				if s.ctx.Err() == nil {
+					e.fail(s, "assistant", unreachable)
+				}
+				return
+			}
+		}
 		if !ok {
 			e.abortSpeaker(speaker) // failed/cancelled/superseded — already reported
 			return
@@ -1452,13 +1614,34 @@ func (e *Engine) think(s *sess) {
 		if offer, transient := e.offerLine(s); offer != "" {
 			finalText = strings.TrimSpace(finalText) + " " + offer
 			if !transient {
-				recordedText = finalText
+				recordedText = strings.TrimSpace(recordedText) + " " + offer
 			}
 			if speaker != nil {
 				speaker.speak(offer)
 			}
 		}
 	}
+
+	// The tier notice leads the answer it qualifies (#159). It was spoken
+	// before the stream, which is where it belongs — the point of "this will
+	// take a moment" is that it arrives before the moment — and it is
+	// prepended here so the window, the overlay and the archive show the same
+	// sentence the user heard: assistant.finished's content is authoritative
+	// for all three, and a sentence that was only ever audio would leave a
+	// typed conversation with no record of why the answer came from where it
+	// did.
+	//
+	// Transient, on the briefing's terms and for its reason: it describes how
+	// this one turn was served, and carrying "I couldn't reach the deep model"
+	// into the model's own context as something it said would be noise the
+	// next answer has to reason around.
+	if notice != "" && finalText != "" {
+		finalText = notice + " " + strings.TrimSpace(finalText)
+	}
+
+	// What the record keeps about which model answered (#159): taken from the
+	// binding that actually served, never from the tier that was asked for.
+	e.noteServedTier(s, serve)
 
 	e.publish(Event{Type: "assistant.finished", Data: map[string]any{
 		"session_id": s.id, "content": finalText, "tool_calls": toolCalls}})
@@ -1492,15 +1675,24 @@ func (e *Engine) think(s *sess) {
 	e.persistArchive()
 }
 
-// streamOnce runs one provider turn, forwarding text deltas to the overlay
-// and, when a speaker is present, feeding complete sentences to it as they
-// form. ok is false when it already handled a terminal condition.
-func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeaker) (text string, calls []ai.ToolCall, ok bool) {
+// streamOnce runs one provider turn against prov, forwarding text deltas to
+// the overlay and, when a speaker is present, feeding complete sentences to it
+// as they form. ok is false when it already handled a terminal condition.
+//
+// unreachable is non-nil for the one failure another tier could still answer:
+// the provider produced *nothing at all* — Chat refused before streaming, or
+// the stream errored before a single token or tool call. In that case the
+// session has NOT been failed and the caller owns the decision, which is what
+// makes an honest failover possible (issue #159, ADR 0063). Every other
+// failure is reported here exactly as it always was; a stream that broke
+// half-way has already put words on the screen, and answering the rest from a
+// different model would be a worse kind of wrong than stopping.
+func (e *Engine) streamOnce(s *sess, prov ai.Provider, req ai.ChatRequest,
+	speaker *streamingSpeaker) (text string, calls []ai.ToolCall, ok bool, unreachable error) {
 	start := time.Now()
-	events, err := e.provider.Chat(s.ctx, req)
+	events, err := prov.Chat(s.ctx, req)
 	if err != nil {
-		e.fail(s, "assistant", err)
-		return "", nil, false
+		return "", nil, false, err
 	}
 	var full strings.Builder
 	var sc sentencer
@@ -1511,7 +1703,7 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 			if !responded {
 				s.timings.markFirstDelta()
 				if !e.advance(s, StateResponding) {
-					return "", nil, false
+					return "", nil, false, nil
 				}
 				responded = true
 				e.publish(Event{Type: "assistant.delta", Data: map[string]any{"session_id": s.id, "content": ""}})
@@ -1537,10 +1729,17 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 			s.timings.markFirstDelta()
 			calls = append(calls, ev.Call)
 		case ai.EventError:
-			if s.ctx.Err() == nil {
-				e.fail(s, "assistant", ev.Err)
+			if s.ctx.Err() != nil {
+				// Cancelled: that path owns the events, as it always has.
+				return "", nil, false, nil
 			}
-			return "", nil, false
+			if !responded && len(calls) == 0 {
+				// Nothing reached the user, so nothing has been claimed and
+				// another tier may still answer honestly. The caller decides.
+				return "", nil, false, ev.Err
+			}
+			e.fail(s, "assistant", ev.Err)
+			return "", nil, false, nil
 		case ai.EventDone:
 		}
 	}
@@ -1550,9 +1749,9 @@ func (e *Engine) streamOnce(s *sess, req ai.ChatRequest, speaker *streamingSpeak
 		}
 	}
 	e.log.Info("assistant turn finished", "component", "assistant", "session_id", s.id,
-		"provider", e.provider.Name(), "tool_calls", len(calls),
+		"provider", prov.Name(), "tool_calls", len(calls),
 		"duration_ms", time.Since(start).Milliseconds())
-	return strings.TrimSpace(full.String()), calls, true
+	return strings.TrimSpace(full.String()), calls, true, nil
 }
 
 // backToThinking returns the session to Thinking for a tool round whose text
@@ -1644,6 +1843,10 @@ func (e *Engine) conversationMessages(userText string, snapshot desktop.Snapshot
 		// conversation" has to mean this one.
 		e.approvals = make(map[string]bool)
 		e.grants = nil
+		// And the thinking level, for the same reason and by the same
+		// sentence (#159): a lapsed window is a new conversation, and a pin
+		// the user set an hour ago is not a decision about this question.
+		e.thinking = ai.TierNone
 		// The archived record ends with the thread; the new one must not
 		// append to it (ADR 0027). Nothing is pending to flush here — every
 		// commitTurn's staging is flushed on its own session tail — so only
@@ -1941,6 +2144,11 @@ func (e *Engine) reset(cancelActive bool) {
 	e.lastTurn = time.Time{}
 	e.approvals = make(map[string]bool)
 	e.grants = nil
+	// The thinking level goes with them (#159). A pin is a decision about the
+	// conversation being had — "stay on the deep model *for this*" — so a new
+	// conversation comes back to the configured default, the same rule the
+	// remembered approvals follow one line up.
+	e.thinking = ai.TierNone
 	// A record still unstaged here belongs to the thread that is ending —
 	// stage it standalone before the detach hands the batch over, then clear
 	// the display list: the confirmation records die with the head exactly

@@ -593,6 +593,24 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// Advisor delegation is enabled by configuring an advisor and nothing
 	// else: `jarvix setup` writes the tables, and each advisor carries its
 	// own authentication (ADR 0016).
+	// The model tiers (#159, ADR 0063), built once: the registry needs the
+	// deep binding below and the engine needs the whole set further down, and
+	// building it twice would open two HTTP clients onto the same endpoint.
+	tiers := tierSet(cfg, deps.Provider, logger)
+	// The model's own route up to the deep tier, registered only when there is
+	// one. A tool advertising an escalation that resolves to nothing would
+	// invite the model to promise a deeper answer this machine cannot give.
+	if deep, ok := tiers.Bindings[ai.TierDeep]; ok {
+		registry.Register(&tools.DeepThink{
+			Provider:    deep.Provider,
+			Model:       deep.Model,
+			Served:      deep.Model + deep.Advisor,
+			MaxTokens:   cfg.AI.MaxTokens,
+			Temperature: cfg.AI.Temperature,
+		})
+		logger.Info("tool enabled", "component", "tools", "tool", tools.DeepToolName,
+			"tier", string(ai.TierDeep))
+	}
 	advisorTiers := advisorPolicyTiers(cfg)
 	if len(cfg.Advisors) > 0 {
 		registry.Register(&tools.Advisor{
@@ -759,6 +777,11 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// does not hold.
 	approvalSvc := newApprovalStore(cfg.Tools.Policy.ShellAllow, paths.ApprovalsFile(), logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, screens, logger)
+	// The model tiers (#159, ADR 0063). Built here rather than inside
+	// engineOptions because medium-with-no-table binds to the provider the
+	// daemon just built — the [ai] brain — and that is a dependency, not a
+	// setting.
+	engOpts.Tiers = tiers
 	engOpts.Returning = briefingSvc
 	engOpts.Operating = situationSvc
 	engOpts.Approvals = &approvalsVoice{store: approvalSvc}
@@ -1315,6 +1338,22 @@ func (d *Daemon) registerMethods() {
 				snapshot["tool_detail"] = phase.ToolDetail
 			}
 		}
+		// The thinking level and, while a turn is in flight, the tier serving
+		// it (#159). Both absent when no tiers are configured, so a client
+		// that finds no "thinking" key knows there is no control to draw
+		// rather than having to ask a second question. The tier rides the
+		// snapshot for the reason tool does: a window opened mid-answer must
+		// label the wait the same way one that watched it start does.
+		if phase.Thinking != "" {
+			snapshot["thinking"] = string(phase.Thinking)
+			snapshot["thinking_label"] = ai.TierLabel(phase.Thinking)
+			snapshot["thinking_levels"] = d.thinkingLevels()
+		}
+		if phase.Tier != "" {
+			snapshot["tier"] = string(phase.Tier)
+			snapshot["tier_label"] = ai.TierLabel(phase.Tier)
+			snapshot["tier_model"] = phase.TierModel
+		}
 		// A pending tool confirmation rides the snapshot too (issue #76): a
 		// window opened during the wait missed tool.confirmation_required,
 		// and a state with no content and no affordance is exactly the
@@ -1396,6 +1435,7 @@ func (d *Daemon) registerMethods() {
 	d.registerSituationMethods()
 	d.registerEntryAdminMethods()
 	d.registerStateMethods()
+	d.registerThinkingMethods()
 }
 
 // pendingConfirmationReport renders the tool confirmation the session is

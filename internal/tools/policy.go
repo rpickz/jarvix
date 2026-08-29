@@ -284,6 +284,11 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	// Its counterpart, desktop.manage_window, is in neverSilent below.
 	ListManagedToolName:   PolicyAllow,
 	ReleaseWindowToolName: PolicyAllow,
+	// The model's escalation to the deep tier (#159). Allow for advisor.ask's
+	// exact argument: it reads and replies and nothing else — no more
+	// authority than the model turn Jarvix was already making — so it runs
+	// silently, which is what keeps the feature usable by voice.
+	DeepToolName: PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.

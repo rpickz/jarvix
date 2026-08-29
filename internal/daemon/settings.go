@@ -375,6 +375,10 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.vocabulary, d.knowledge,
 		d.conversations, d.windows, d.screens, d.log)
 	opts.Capture = capture
+	// The tiers are rebuilt around the freshly built brain (#159), so a
+	// changed [ai.tiers] table — or a changed ai.model that medium inherits —
+	// lands on the next turn rather than at the next restart.
+	opts.Tiers = tierSet(merged, deps.Provider, d.log)
 	// The approval store survives every reload like the memory book and the
 	// reminder service (#162): one instance for the daemon's life, so the
 	// spoken listing keeps reading the same list the writer writes and the
@@ -520,6 +524,11 @@ func idleClassChanged(running, next config.Config) bool {
 		// would keep talking to the old address — the exact failure the
 		// Providers form's Test button exists to prevent.
 		!reflect.DeepEqual(running.AI.Endpoints, next.AI.Endpoints) ||
+		// And [ai.tiers] on identical terms (#159): the tier tables are a map
+		// with no registry entry of their own, so without this a newly added
+		// [ai.tiers.deep] would sit in the file while the daemon kept
+		// answering everything from one brain.
+		!reflect.DeepEqual(running.AI.Tiers, next.AI.Tiers) ||
 		// [knowledge] is a structured table on the same terms as [[routines]]:
 		// no settings-registry entry, compared directly so a hand edit plus
 		// reload actually reschedules the feeds (ADR 0031). With no service

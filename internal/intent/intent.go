@@ -26,6 +26,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/rpickz/jarvix/internal/ai"
 )
 
 // Control names an effect the session engine performs itself rather than by
@@ -208,6 +210,12 @@ type Match struct {
 	// intent by construction — no phrase in this router adds or removes a
 	// standing grant.
 	ApprovalsList bool
+	// Thinking is the tier a spoken pin asked the conversation to stay on
+	// (#159), TierNone for every other intent. Only the tier travels: the
+	// router decides whether an utterance is a pin, and the engine owns what
+	// pinning means — including whether that tier is configured at all, which
+	// is a question about this machine rather than about the sentence.
+	Thinking ai.Tier
 }
 
 // Custom is one user-defined intent from configuration ([[intents.custom]]).
@@ -372,6 +380,10 @@ type rule struct {
 	provenanceList bool
 	// approvalsList marks the "what have i pre-approved" rules (#162).
 	approvalsList bool
+	// thinking carries a thinking-level pin's tier (#159), TierNone for every
+	// other rule. The engine hands it to the one place the level lives; the
+	// router decides only *whether* an utterance is a pin.
+	thinking ai.Tier
 }
 
 // builtin is one entry of the shipped grammar table.
@@ -677,6 +689,23 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: ProvenanceIntentName, pattern: p, provenanceList: true})
 	}
 	r.names = append(r.names, ProvenanceIntentName)
+
+	// The spoken thinking-level pins (#159). Owned literals like the three
+	// above, so a routine or custom intent claiming "switch to deep" is a
+	// config error naming this owner rather than a coin toss — the level is a
+	// setting, and two things able to move it by voice would be one too many.
+	for _, group := range thinkingPins {
+		for _, raw := range group.patterns {
+			p, err := compile(raw)
+			if err != nil {
+				// Unreachable for the shipped list, same as the three above.
+				return nil, fmt.Errorf("thinking pattern %q: %w", raw, err)
+			}
+			builtinNames[p.key()] = ThinkingIntentName
+			r.add(&rule{name: ThinkingIntentName, pattern: p, thinking: group.tier})
+		}
+	}
+	r.names = append(r.names, ThinkingIntentName)
 
 	// taken maps a compiled phrase to a human description of what owns it, so
 	// a routine phrase collision is reported against whichever of the three
@@ -1257,6 +1286,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		VocabList:      ru.vocabList,
 		ApprovalsList:  ru.approvalsList,
 		ProvenanceList: ru.provenanceList,
+		Thinking:       ru.thinking,
 	}
 	// The one free-text value lands with the family that owns the rule, so a
 	// consumer can never read another feature's words by mistake.

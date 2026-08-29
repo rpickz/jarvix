@@ -828,6 +828,19 @@ func timingsRows(data map[string]any) []ActivityRow {
 		{"release_to_first_audio_ms", "to audio"},
 	}
 	var parts []string
+	// Which tier answered leads the row (#159): it qualifies every number
+	// after it, because "model 6.2s" means something different depending on
+	// which model. Absent on a configuration with no tiers, so the row is
+	// exactly what it always was there. The keys are string literals for the
+	// reason toolPhrases' are — internal/session imports this package — and
+	// activity_tools_test.go pins them to the session.Stage* constants.
+	if tier := activityString(data, "tier"); tier != "" {
+		lead := tier
+		if model := activityString(data, "tier_model"); model != "" {
+			lead += " · " + model
+		}
+		parts = append(parts, lead)
+	}
 	for _, stage := range stages {
 		if ms, ok := activityInt(data, stage.key); ok {
 			parts = append(parts, stage.name+" "+formatActivityDuration(ms))

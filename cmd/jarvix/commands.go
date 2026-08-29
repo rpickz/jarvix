@@ -187,6 +187,28 @@ func printTimings(v any) {
 	if why, ok := report[session.StageNothingHeard].(string); ok && why != "" {
 		fmt.Printf("          %-33s %s\n", "heard nothing", why)
 	}
+	// Which model answered (#159). Printed last because it qualifies every
+	// number above it rather than sitting in the pipeline, and absent
+	// entirely on a configuration with no tiers — a line saying "medium" on
+	// every turn would claim a routing decision nobody made.
+	if tier, ok := report[session.StageTier].(string); ok && tier != "" {
+		served := tier
+		if model, ok := report[session.StageTierModel].(string); ok && model != "" {
+			served += " · " + model
+		}
+		if reason, ok := report[session.StageTierReason].(string); ok && reason != "" {
+			served += " (" + reason + ")"
+		}
+		fmt.Printf("          %-33s %s\n", "answered by tier", served)
+		// What was asked for and not served: the whole point of recording the
+		// reason is that a downgrade is legible after the fact.
+		if wanted, ok := report[session.StageTierWanted].(string); ok && wanted != "" {
+			fmt.Printf("          %-33s %s\n", "  asked for", wanted)
+		}
+		if n, ok := report[session.StageTierContextDropped]; ok {
+			fmt.Printf("          %-33s %5.0f exchanges\n", "  context left out for speed", toFloat(n))
+		}
+	}
 }
 
 // printLastTyping renders the typing audit trail: the most recent thing Jarvix
