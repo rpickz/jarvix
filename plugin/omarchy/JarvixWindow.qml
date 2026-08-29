@@ -7818,9 +7818,36 @@ FloatingWindow {
           text: model.text
           width: parent.width
           wrapMode: Text.Wrap
+
+          // The rendered size, held once so that both font bindings can read
+          // it without either depending on the other.
+          //
+          // Deriving letter spacing from `font.pixelSize` instead — which is
+          // what this delegate did until issue #203 — is a binding loop.
+          // `font` is one grouped value, not a bag of independent
+          // properties: reading any member subscribes to the whole group and
+          // writing any member notifies it, so a letterSpacing binding that
+          // reads pixelSize depends on a property that same binding
+          // participates in. Qt says so at runtime ("Binding loop detected
+          // for property font.letterSpacing") and then breaks the cycle the
+          // only way it can, by dropping a binding. Which one it drops is an
+          // evaluation-order detail, so `ui.text_size` and
+          // `ui.letter_spacing` could quietly stop applying, or apply to some
+          // messages and not others. Those are the reading-comfort settings
+          // (#121) — set deliberately, for readability — and a setting that
+          // silently stops working is worse than one that was never offered.
+          //
+          // Reading a plain property breaks the cycle without moving a single
+          // number: this is the same expression the pixelSize binding always
+          // had, so at the defaults (text size ×1.0, letter spacing 0.0) both
+          // lines below still reduce to the pre-#121 hard-coded rendering
+          // that TestReadingComfortDefaultsPinTheHardCodedRendering pins.
+          readonly property int bodyPixelSize:
+            Math.max(1, Math.round(Style.font.subtitle * win.chatTextScale))
+
           font.family: Style.font.family
-          font.pixelSize: Math.max(1, Math.round(Style.font.subtitle * win.chatTextScale))
-          font.letterSpacing: messageBody.font.pixelSize * win.chatLetterSpacing
+          font.pixelSize: messageBody.bodyPixelSize
+          font.letterSpacing: messageBody.bodyPixelSize * win.chatLetterSpacing
           lineHeight: win.chatLineSpacing
           lineHeightMode: Text.ProportionalHeight
           // The pending turn (issue #158) reads a shade quieter than an
