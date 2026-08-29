@@ -82,7 +82,11 @@ type derivedRule struct {
 	// that takes the barrier on its caller's behalf counts as one — see
 	// session.harness.awaitAppend, which is exactly that.
 	BarrierBodies []string
-	Advice        string
+	// Issue is the citation the finding carries. The author reading the report
+	// in CI has none of this context, and the fastest route to the reasoning is
+	// the issue the shape cost us.
+	Issue  string
+	Advice string
 }
 
 // derivedRules is deliberately short. Every entry is a shape that has actually
@@ -117,6 +121,7 @@ var derivedRules = []derivedRule{
 			"waitForActivityRow", "waitActivityRow",
 			"waitForRunObserved", "waitForRowsAndSessionEnd",
 		},
+		Issue: "#167",
 		Advice: "wait for the row itself (waitForActivityRow / waitActivityRow), " +
 			"not for the event the daemon's watcher derives it from",
 	},
@@ -137,8 +142,58 @@ var derivedRules = []derivedRule{
 		Causes:        []string{"awaitAppend", "awaitArchiveAppend"},
 		Barriers:      []string{"SyncArchive", "Shutdown"},
 		BarrierBodies: []string{"SyncArchive"},
+		Issue:         "#170",
 		Advice: "take the engine's read barrier (SyncArchive) before reading the id — " +
 			"the append lands the turns, the adoption happens after Append returns",
+	},
+	{
+		// #215. assistant.started is published at engine.go:1628 — before the
+		// provider request is opened (streamOnce reaches prov.Chat at
+		// engine.go:1891) and before a single word is committed to the voice.
+		// It proves think() reached that line and nothing more.
+		//
+		// Two tests took it as proof that the turn was still in flight and then
+		// acted on that belief. TestWakeWordInterruptsSpeech woke the engine
+		// while, on a starved runner, the whole turn had already finished, so
+		// startSessionLocked had nothing to cancel and the session.cancelled it
+		// waited for was never owed. TestInterruptBeforeAnyAnswerCommitsThe
+		// Question let a second session claim the fake's "first Chat call"
+		// parked branch, so the answer it waited for never came. Both timed out
+		// on CI and passed everywhere else, three times over.
+		//
+		// Reads are actions, not samples — that is what is new here. Cancelling,
+		// waking, superseding or reading the in-flight conversation are all
+		// things a test does *because* it believes a turn is still running, and
+		// assistant.started is the one event that cannot support that belief.
+		//
+		// The barriers are the two that hold regardless of scheduling: park the
+		// synthesizer (tts.Fake.SetHold) so the speaker cannot drain, or stall
+		// the provider outright (Delay = time.Hour) so no chunk can ever be
+		// produced. tts.started and assistant.delta are the weaker pair — they
+		// prove speech is playing and that the provider stream is open, which
+		// is what the repo already writes down at session/text_test.go:88 — and
+		// they are accepted because they are strictly better evidence than the
+		// event they replace. A bounded Delay is deliberately NOT a barrier:
+		// `Delay = 50 * time.Millisecond` is a window, and a window is what
+		// this whole family is made of.
+		Name:  "turn-in-flight action ordered by only assistant.started",
+		Reads: []string{"StartWake", "StartSession", "Cancel", "CancelSpeech", "ReplaySpeech", "Conversation"},
+		Causes: []string{
+			`waitFor("assistant.started")`,
+			`collectUntil("assistant.started")`,
+		},
+		Barriers: []string{
+			"SetHold",
+			"Delay = time.Hour",
+			`waitFor("assistant.delta")`,
+			`waitFor("tts.started")`,
+			`collectUntil("assistant.delta")`,
+			`collectUntil("tts.started")`,
+		},
+		Issue: "#215",
+		Advice: "assistant.started fires before the provider call and before speech, so it cannot " +
+			"prove a turn is still running; park the collaborator (tts.Fake.SetHold, Delay = time.Hour, " +
+			"a provider that signals when it has parked) or wait for tts.started / assistant.delta",
 	},
 }
 
@@ -221,15 +276,22 @@ func scanFuncForDerivedReads(fset *token.FileSet, f parsedFile, fn *ast.FuncDecl
 		seenBarrier := false
 		for _, c := range calls {
 			switch {
-			case contains(rule.Barriers, c.name) || dirBarriers[c.name]:
+			case contains(rule.Barriers, c.name):
+				seenBarrier = true
+			case c.kind == siteAssign:
+				// An assignment can establish an ordering (`Delay = time.Hour`
+				// stalls the provider for the rest of the test) but it can
+				// never *be* the cause or the read, so it stops here rather
+				// than falling through to them.
+			case dirBarriers[c.name]:
 				seenBarrier = true
 			case contains(rule.Causes, c.name):
 				seenCause = true
 			case contains(rule.Reads, c.name) && seenCause && !seenBarrier:
 				findings = append(findings, Finding{
 					File: f.path, Line: fset.Position(c.pos).Line, Func: fn.Name.Name,
-					Message: fmt.Sprintf("%s: %s. %s (see #167 and #170; %s with a reason opts out)",
-						rule.Name, c.name, rule.Advice, AllowMarker),
+					Message: fmt.Sprintf("%s: %s. %s (see %s; %s with a reason opts out)",
+						rule.Name, c.name, rule.Advice, rule.Issue, AllowMarker),
 				})
 			}
 		}
@@ -464,13 +526,26 @@ func parseAll(fset *token.FileSet, files []string) ([]parsedFile, error) {
 	return out, nil
 }
 
+// siteKind separates the two things a rule can match. A call is the ordinary
+// case; an assignment exists because some orderings are established by setting
+// a field rather than by calling anything — `h.provider.Delay = time.Hour`
+// stalls the provider for the rest of the test as firmly as any gate — and a
+// rule that could not see one would report the tests that take that route.
+type siteKind int
+
+const (
+	siteCall siteKind = iota
+	siteAssign
+)
+
 type callSite struct {
 	name string
+	kind siteKind
 	pos  token.Pos
 }
 
-// callSequence returns every call in the body, in source order, named the way
-// the rules above name them.
+// callSequence returns every call and field assignment in the body, in source
+// order, named the way the rules above name them.
 //
 // ast.Inspect walks in source order, which is what makes "before" answerable
 // without a control-flow graph. A control-flow graph would be the rigorous
@@ -479,28 +554,44 @@ type callSite struct {
 func callSequence(body *ast.BlockStmt) []callSite {
 	var calls []callSite
 	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if name := callName(call); name != "" {
-			calls = append(calls, callSite{name: name, pos: call.Pos()})
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			for _, name := range callNames(node) {
+				calls = append(calls, callSite{name: name, kind: siteCall, pos: node.Pos()})
+			}
+		case *ast.AssignStmt:
+			calls = append(calls, assignSites(node)...)
 		}
 		return true
 	})
 	return calls
 }
 
-// callName reduces a call to the identifier the rules match on: the function
+// literalNamedCalls are the wrappers whose identity, for a rule's purposes, is
+// their first string literal argument rather than their own name.
+//
+// IPC calls were the original case: every one of them is
+// `client.Call(method, …)`, so the selector alone says nothing. Event waits are
+// the same problem one level along — `waitFor(t, "assistant.started")` and
+// `waitFor(t, "tts.started")` are a defect and its fix, and a scan that folds
+// both to `waitFor` cannot tell them apart (#215). The literal is looked for
+// among the arguments rather than at a fixed index because `Call` takes its
+// method first and the harness helpers take `*testing.T` first.
+var literalNamedCalls = []string{"Call", "waitFor", "waitEvent", "waitForEvent", "collectUntil"}
+
+// callNames reduces a call to the identifiers the rules match on: the function
 // name, or the final selector segment, so `h.engine.ActiveConversationID()`
 // and `engine.ActiveConversationID()` are one thing.
 //
-// IPC calls are the exception. Every one of them is `client.Call(method, …)`,
-// so the selector alone says nothing; the method is the first argument and the
-// name becomes `Call("activity.get")`. A non-literal method argument yields
-// plain `Call`, which no rule matches — a test that computes its method name
-// is outside what this scan can reason about, and guessing would be worse.
-func callName(call *ast.CallExpr) string {
+// A wrapper from literalNamedCalls yields a second name as well, qualified by
+// its first string literal argument — `waitFor("tts.started")`. Both are
+// emitted, so a rule may match the wrapper as a whole or one specific use of
+// it, and the rules written before this distinction existed keep working
+// unchanged. A wrapper called with no literal at all yields only the bare name,
+// which the qualified rules do not match: a test that computes the event it
+// waits for is outside what this scan can reason about, and guessing would be
+// worse than staying quiet.
+func callNames(call *ast.CallExpr) []string {
 	var base string
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
@@ -508,16 +599,64 @@ func callName(call *ast.CallExpr) string {
 	case *ast.SelectorExpr:
 		base = fun.Sel.Name
 	default:
-		return ""
+		return nil
 	}
-	if base == "Call" && len(call.Args) > 0 {
-		if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-			if method, err := strconv.Unquote(lit.Value); err == nil {
-				return `Call("` + method + `")`
-			}
+	names := []string{base}
+	if !contains(literalNamedCalls, base) {
+		return names
+	}
+	for _, arg := range call.Args {
+		lit, ok := arg.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		if value, err := strconv.Unquote(lit.Value); err == nil {
+			names = append(names, base+`("`+value+`")`)
+		}
+		break
+	}
+	return names
+}
+
+// assignSites names a field assignment by the field, and — when the value is
+// simple enough to write down — by the field and the value together, so a rule
+// can be as coarse or as exact as the ordering it describes deserves.
+// `Delay = time.Hour` is a barrier; `Delay` alone would also cover
+// `Delay = 50 * time.Millisecond`, which is a window and not a barrier at all.
+func assignSites(stmt *ast.AssignStmt) []callSite {
+	var sites []callSite
+	for i, lhs := range stmt.Lhs {
+		sel, ok := lhs.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		sites = append(sites, callSite{name: sel.Sel.Name, kind: siteAssign, pos: sel.Pos()})
+		if len(stmt.Rhs) != len(stmt.Lhs) {
+			continue
+		}
+		if value := simpleValue(stmt.Rhs[i]); value != "" {
+			sites = append(sites, callSite{name: sel.Sel.Name + " = " + value, kind: siteAssign, pos: sel.Pos()})
 		}
 	}
-	return base
+	return sites
+}
+
+// simpleValue renders an identifier or a qualified identifier (`time.Hour`,
+// `forever`) and refuses everything else. Anything with structure — an
+// arithmetic expression, a call, a composite literal — is deliberately not
+// rendered: a rule naming a value has to be readable by eye, and a scan that
+// pretty-printed arbitrary expressions would invite rules that match on
+// whitespace.
+func simpleValue(expr ast.Expr) string {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.SelectorExpr:
+		if pkg, ok := value.X.(*ast.Ident); ok {
+			return pkg.Name + "." + value.Sel.Name
+		}
+	}
+	return ""
 }
 
 func callsAny(body *ast.BlockStmt, names []string) bool {
@@ -525,7 +664,7 @@ func callsAny(body *ast.BlockStmt, names []string) bool {
 		return false
 	}
 	for _, c := range callSequence(body) {
-		if contains(names, c.name) {
+		if c.kind == siteCall && contains(names, c.name) {
 			return true
 		}
 	}
