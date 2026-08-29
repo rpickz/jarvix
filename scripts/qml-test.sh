@@ -265,8 +265,82 @@ fi
 # finishes, so nothing is lost but the line-by-line trickle.
 BINDING_LOOP='Binding loop detected'
 
+# The same idea, twice more (issue #208). Both of these were in the suite's
+# output while it reported success, and the lesson #203 acted on is that a
+# warning nobody gates on is a defect nobody sees.
+#
+# `Cannot set activeFocusOnTab to false once item is the active focus item` is
+# Qt refusing to take a keyboard user out of the tab chain while they are
+# standing in it. It refuses and then *leaves the property as it was*, so an
+# item whose `activeFocusOnTab` is driven by a binding ends up describing its
+# reachability by focus history: the control somebody was on when the state
+# changed keeps the value it was refused, the identical control beside it does
+# not. Two controls in the same state, two different tab orders. #203 fixed the
+# confirmation card and could not add this gate, because four more of these
+# survived its scope, in the shared detail pane; #208 fixed those. The remedy
+# is always the same and is written up in JarvixCollectionRow.qml: keep
+# `activeFocusOnTab` constant and carry the distinction on `visible` or
+# `enabled`, both of which Qt's focus chain already skips.
+FOCUS_FLIP='Cannot set activeFocusOnTab to false'
+
+# `Unable to assign [undefined] to …` is a binding that named something which
+# does not exist — nearly always a theme member, since those are grouped
+# objects and QML answers a missing member with undefined rather than with an
+# error. The engine logs this, leaves the property at its default, and carries
+# on: the control renders, at the wrong size, in the wrong place, or in the
+# wrong colour, and nothing anywhere is red. `Style.font.small` did exactly
+# that to the thinking note for the whole of #206's life, forty-nine times a
+# run.
+#
+# This gate is as general as the other two and has no allow-list either. It is
+# safe to be: with that one binding corrected the whole suite emits none, and a
+# binding that evaluates to undefined is never what anybody meant — the value
+# the property ends up with is Qt's default, which no design chose. If one ever
+# fires for a genuinely transient reason, the fix is to give the expression a
+# defined fallback, not to teach the runner to ignore it.
+UNDEFINED_ASSIGN='Unable to assign [undefined]'
+
+# Reduce a warning to the thing that needs editing: drop the QTest prefix
+# naming the test function (a warning belongs to the QML file, not to whichever
+# test happened to instantiate it) and trim the absolute file:// URL to a
+# repo-relative path, so the summary reads like the rest of this repo's
+# failures.
+#
+# The focus-flip warning is the exception, and $1 is why: QQuickItem reports it
+# with no file and no line at all, so the test file it came out of is the only
+# clue there is, and the prefix becomes that instead of being dropped.
+tidy() {
+  sed -E -e "s|^QWARN[[:space:]]*: [^ ]+\(\) |${1:-}|" -e "s|file://$REPO_DIR/||"
+}
+
+# The lines of $output matching a gate's pattern, tidied. `|| true` because
+# `grep` reports "no match" as a failure and the file that is *clean* is the
+# common case; under `set -e` and `pipefail` the first clean file would
+# otherwise abort the script mid-suite, which is exactly the silent green these
+# gates exist to prevent.
+collect() {
+  printf '%s\n' "$output" | grep -F "$1" | tidy "${2:-}" || true
+}
+
+# Says what was found and fails the run. The explanation is the point: these
+# warnings are all several steps from their cause, and a gate that only prints
+# the warning teaches people to scroll past it.
+report() {
+  local found="$1"
+  shift
+  echo "qml-test: $1" >&2
+  shift
+  printf '%s\n' "$found" >&2
+  for line in "$@"; do
+    echo "qml-test: $line" >&2
+  done
+  failed=1
+}
+
 failed=0
 loops=""
+flips=""
+undefineds=""
 for file in "${files[@]}"; do
   path="$TESTS_DIR/$(basename "$file")"
   if [ ! -f "$path" ]; then
@@ -279,35 +353,44 @@ for file in "${files[@]}"; do
     failed=1
   fi
   printf '%s\n' "$output"
-  # Collected rather than reported here, and reduced to the location that
-  # needs editing: a loop in a ListView delegate is re-reported once per
-  # instantiation and once per test function, so the unfixed transcript
-  # produced forty identical lines saying what one line says. The QTest prefix
-  # naming the test function is dropped for the same reason — the loop belongs
-  # to the QML file, not to whichever test happened to instantiate it — and
-  # the absolute file:// URL is trimmed to a repo-relative path so the summary
-  # reads like the rest of this repo's failures.
-  #
-  # `|| true` because `grep` reports "no match" as a failure and the file that
-  # is *clean* is the common case; under `set -e` and `pipefail` the first
-  # loop-free file would otherwise abort the script mid-suite, which is
-  # exactly the silent green this gate exists to prevent.
-  found="$(printf '%s\n' "$output" | grep -F "$BINDING_LOOP" || true)"
-  if [ -n "$found" ]; then
-    loops+="$(printf '%s\n' "$found" \
-      | sed -E -e 's|^QWARN[[:space:]]*: [^ ]+\(\) ||' -e "s|file://$REPO_DIR/||")"$'\n'
-  fi
+  # Collected rather than reported here, and deduplicated at the end: a warning
+  # from a ListView delegate is re-reported once per instantiation and once per
+  # test function, so the unfixed transcript produced forty identical lines
+  # saying what one line says.
+  loops+="$(collect "$BINDING_LOOP")"$'\n'
+  flips+="$(collect "$FOCUS_FLIP" "$(basename "$path"): ")"$'\n'
+  undefineds+="$(collect "$UNDEFINED_ASSIGN")"$'\n'
 done
 
 # `grep .` drops the blank lines the per-file collection leaves behind, so an
-# empty result really is empty and the check below is a simple one.
+# empty result really is empty and each check below is a simple one.
 if loops="$(printf '%s' "$loops" | grep . | sort -u)" && [ -n "$loops" ]; then
-  echo "qml-test: a binding loop was reported. Qt broke the cycle by dropping a" >&2
-  echo "binding, so one of the properties below has quietly stopped updating:" >&2
-  printf '%s\n' "$loops" >&2
-  echo "qml-test: give the shared value a property of its own and have both" >&2
-  echo "bindings read that, rather than one of them reading the other." >&2
-  failed=1
+  report "$loops" \
+    "a binding loop was reported. Qt broke the cycle by dropping a
+binding, so one of the properties below has quietly stopped updating:" \
+    "give the shared value a property of its own and have both" \
+    "bindings read that, rather than one of them reading the other."
+fi
+
+if flips="$(printf '%s' "$flips" | grep . | sort -u)" && [ -n "$flips" ]; then
+  report "$flips" \
+    "an item's tab reachability was edited while somebody was
+standing on it. Qt refused the write and left the property as it was, so what
+Tab can reach now depends on where the keyboard happened to be:" \
+    "keep activeFocusOnTab constant for the life of the item and put" \
+    "the distinction on visible or enabled — Qt's focus chain already skips" \
+    "both, and it moves focus off rather than refusing. The warning names no" \
+    "file, so the test above it is the place to start looking."
+fi
+
+if undefineds="$(printf '%s' "$undefineds" | grep . | sort -u)" && [ -n "$undefineds" ]; then
+  report "$undefineds" \
+    "a binding evaluated to undefined. The property below kept
+Qt's default instead of the value the design asked for, and the only symptom
+is this line:" \
+    "the usual cause is a theme member that does not exist —" \
+    "Style.font.small for a theme whose ramp is caption/bodySmall/body/" \
+    "subtitle/title/display. Check the name against qmltest/stubs/qs/Commons."
 fi
 
 if [ "$failed" -ne 0 ]; then
