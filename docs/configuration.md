@@ -162,6 +162,10 @@ default = "medium"               # which tier a NEW conversation starts on:
                                  # "instant", "medium" or "deep". The
                                  # conversation's own level is the window's
                                  # Quick/Balanced/Deep control, not this.
+host_grace_ms = 700              # how long the answering model has before the
+                                 # instant one says it is thinking (see "The
+                                 # host" below). 0 switches it off; otherwise
+                                 # 100–5000. Needs [ai.tiers.instant].
 [ai.tiers.instant]               # small and immediate; never used for a turn
 provider = "lmstudio"            # that may call a tool (see below)
 model = "qwen3-1.7b"
@@ -2510,6 +2514,40 @@ deep thought that did not happen.
 
 `jarvix doctor` probes every configured tier for real, by name and endpoint, so
 a tier that cannot answer fails there rather than mid-conversation.
+
+### The host: the instant model keeps you company while the answer is worked out
+
+With `[ai.tiers.instant]` configured, the small model gets a second job. On a
+turn a *heavier* tier is answering, it becomes the **host**: if the answer has
+not started within `host_grace_ms` (700ms by default), it says one short line
+over the wait — "Let me think about that properly", or a question when it
+genuinely cannot tell what you meant.
+
+You never hear it on a fast turn. If the answer starts inside the grace the host
+says nothing at all, so ordinary quick exchanges are exactly as they were.
+
+The answering model's request always goes out **first**; the host's runs
+alongside it and can never delay it. When the answer arrives the host's sentence
+finishes and the answer follows it — one voice, no overlap — and if the answer
+beat it to the speaker the holding line is dropped unheard rather than said late.
+
+**The host never answers anything.** It has no tools at all, it is not shown
+your conversation, your screen or your knowledge base, and a line that states a
+fact, guesses, or claims to have done something is **thrown away rather than
+spoken**. That check is deliberately strict, so a host that phrases things
+unusually will sometimes be silent; the turn is unharmed, and the record says
+`host_outcome = "refused"` when it happens.
+
+If the host asks you something, that question *is* the turn — the answer attempt
+is dropped, and your reply carries on the same conversation with the original
+question still behind it.
+
+Switch it off with `host_grace_ms = 0`. Set Quick and it stands down anyway:
+covering a wait is its whole job, and Quick is you choosing not to have one.
+
+A cold host defeats itself, so keep `performance.warm_engines` on if you use
+this; a host that has not answered by the time the real answer arrives is simply
+skipped.
 
 ### Letting the model reach up
 

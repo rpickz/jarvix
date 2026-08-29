@@ -194,6 +194,22 @@ type Options struct {
 	// rule again, and here it is also the byte-identity guarantee an existing
 	// configuration is owed.
 	Tiers TierSet
+	// HostGrace is how long the answering tier has to begin streaming before
+	// the instant tier — the *host* — says one short holding line over the
+	// wait (issue #161, ADR 0064).
+	//
+	// Zero or negative stands the host down entirely, and that is the default
+	// on purpose: the host is a second provider call on every slow turn, so it
+	// is reached only from a configuration that asked for it
+	// (`[ai.tiers] host_grace_ms`). An engine built without it takes exactly
+	// the path it took before this feature existed.
+	HostGrace time.Duration
+	// HostGraceTimer overrides the grace clock, on ConfirmTimer's terms and
+	// for its reason: the interleavings this feature has to pin — a fast answer
+	// that must produce no chatter, a holding line the answer overtakes — are
+	// races, and a test that slept through the grace would be pinning the CI
+	// runner's load rather than the behaviour. Never set in production.
+	HostGraceTimer func(d time.Duration) (<-chan time.Time, func())
 }
 
 // Engine owns the session lifecycle: one active session at a time, one
@@ -236,6 +252,18 @@ type Engine struct {
 	// announce itself, and the test parks it on purpose to pin that window.
 	// Nil in production; set only before a session starts.
 	speakerQueued func()
+	// hostFinished, when non-nil, runs on the host's own goroutine as that
+	// goroutine exits, carrying what the host did — one of the host outcomes,
+	// or "" when it stood down without saying anything (issue #161).
+	//
+	// It is speakerQueued's sibling and exists for the same reason: every
+	// behaviour this feature promises is an interleaving between two goroutines
+	// racing for one turn, and the only alternative to a real happens-before
+	// edge is a sleep long enough to usually work. It is the edge a test waits
+	// on before it releases the answering tier, so "the host had decided by
+	// then" is a fact rather than a hope. Nil in production; set only before a
+	// session starts.
+	hostFinished func(outcome string)
 	// speech renders assistant text as its spoken form, carrying the
 	// configured pronunciation lexicon. Rebuilt (never mutated) by
 	// Reconfigure, so a session already speaking keeps the one it started
@@ -494,6 +522,32 @@ type sess struct {
 	// session leaves Idle and immutable after.
 	replay bool
 
+	// The host handoff (issue #161, ADR 0064). Two goroutines are racing for
+	// one turn — the answering tier streaming its reply, and the host deciding
+	// whether to say something over the wait — and these four fields are the
+	// entire arbitration between them.
+	//
+	// hostMu is a leaf: nothing under it ever takes Engine.mu, so it cannot
+	// deadlock against anything. It is the lock the race is decided under, and
+	// it has to be a lock rather than two channel closes, because the two
+	// decisions are mutually exclusive and each has to see the other's: a
+	// clarification cancelling an answer that has already put a word on the
+	// screen is exactly as wrong as an answer streaming under a question the
+	// host has already committed to asking.
+	//
+	// issued is closed once the answering tier's provider call has been made,
+	// and the host waits on it before opening its own — which is how "the
+	// answering request is issued first" is a guarantee rather than a hope
+	// about goroutine scheduling. begun is closed once that call produced its
+	// first output (a delta or a tool call, whichever came first). Both are
+	// created with the session, so a select on either is never a select on a
+	// nil channel.
+	hostMu      sync.Mutex
+	issued      chan struct{}
+	begun       chan struct{}
+	answerBegan bool
+	hostHolds   bool
+
 	// speaker is the turn's streaming speaker, registered at construction so
 	// CancelSpeech can ask the component that actually owns playback whether
 	// audio is live, instead of inferring it from the session state — the
@@ -527,6 +581,65 @@ func (s *sess) streamedText() string {
 	s.streamedMu.Lock()
 	defer s.streamedMu.Unlock()
 	return s.streamed.String()
+}
+
+// answerIssued is closed once the answering tier's provider call has been made.
+func (s *sess) answerIssued() <-chan struct{} { return s.issued }
+
+// answerBegun is closed once the answering tier produced its first output.
+func (s *sess) answerBegun() <-chan struct{} { return s.begun }
+
+// noteAnswerIssued records that the answering tier's request has gone out. It
+// is called immediately after Chat returns, whether or not it returned an
+// error: a tier that refused before streaming has still been *tried*, and a
+// host left waiting on a gate that will never open would sit out the turn in
+// silence.
+func (s *sess) noteAnswerIssued() {
+	s.hostMu.Lock()
+	select {
+	case <-s.issued:
+	default:
+		close(s.issued)
+	}
+	s.hostMu.Unlock()
+}
+
+// beginAnswer claims the turn for the answering tier and reports whether it
+// got it. False means the host committed to a clarifying question first: the
+// answer is abandoned, having said nothing, and the caller returns without
+// publishing a delta or moving the state — the clarification is this turn's
+// reply and there must be no half-started answer underneath it.
+//
+// Called from streamOnce at the first delta and at the first tool call, which
+// are the two ways a provider can produce output. With no host in play
+// hostHolds is always false and this is one uncontended lock on the turn's
+// first token.
+func (s *sess) beginAnswer() bool {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	if s.hostHolds {
+		return false
+	}
+	if !s.answerBegan {
+		s.answerBegan = true
+		close(s.begun)
+	}
+	return true
+}
+
+// claimHost takes the turn for the host's clarifying question, reporting
+// whether it may. False means the answering tier has already begun: it keeps
+// the turn, and the question is dropped — interrupting an answer that has
+// started to arrive, in order to ask what the user meant, is the worst of both
+// behaviours.
+func (s *sess) claimHost() bool {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	if s.answerBegan {
+		return false
+	}
+	s.hostHolds = true
+	return true
 }
 
 // NewEngine wires the engine. logger, registry, and store may be nil (no
@@ -777,6 +890,10 @@ func (e *Engine) startSessionLocked() (string, error) {
 		// drive the latency arithmetic (issue #72) the way they drive the
 		// follow-up window.
 		timings: timings{now: e.now},
+		// The host handoff's two gates, created with the session so nothing
+		// downstream has to check whether they exist (issue #161).
+		issued: make(chan struct{}),
+		begun:  make(chan struct{}),
 	}
 	e.log.Info("session started", "component", "session", "session_id", e.current.id)
 	return e.current.id, nil
@@ -1510,7 +1627,23 @@ func (e *Engine) think(s *sess) {
 
 	e.publish(Event{Type: "assistant.started", Data: e.assistantStartedData(s, serve)})
 
+	// The host (issue #161, ADR 0064): the instant tier covering the wait while
+	// the tier above it answers. Armed here, directly before the answering
+	// tier's request goes out, and deliberately doing no blocking work of its
+	// own — the goroutine it starts waits for that request to have been issued
+	// before it opens one, so the answer is always first on the wire.
+	//
+	// With no host configured this is a struct, a closed channel and nothing
+	// else, and every line below resolves to what it resolved to before.
+	host := e.startHost(s, serve, speaker, notice, s.userText)
+
 	finalText := ""
+	// clarified marks a turn the host took with a question instead of an
+	// answer. The tail below reads it twice: the return briefing does not ride
+	// a clarification (it is not the answer that absence was waiting for), and
+	// the record must name the host as what produced this turn rather than the
+	// tier that was abandoned before it said anything.
+	clarified := false
 	// How many tool calls the model requested this turn — attempts, not
 	// successes, because a denied or declined call is still the model trying
 	// to act. Zero on the final answer is the fact the activity feed's
@@ -1528,8 +1661,42 @@ func (e *Engine) think(s *sess) {
 			// nothing; see streamingSpeaker.nextTurn and enqueue).
 			speaker.nextTurn()
 		}
+		// The first round runs under the host's answer context so a clarifying
+		// question can abandon it; every later round runs under the session's,
+		// exactly as before. The host only ever covers the first round: by the
+		// second, the model has said something and gone back to work, and what
+		// the user is owed then is the tool progress reassurance of ADR 0016,
+		// not a second acknowledgement.
+		roundCtx := s.ctx
+		if round == 0 {
+			roundCtx = host.ctx()
+		}
 		text, calls, ok, unreachable := e.streamOnce(s,
-			serve.provider(e.provider), e.tierRequest(serve, messages, toolDefs), speaker)
+			roundCtx, serve.provider(e.provider), e.tierRequest(serve, messages, toolDefs), speaker)
+		if round == 0 {
+			// Joined here, and deliberately not with a defer: a deferred stop
+			// would run at the end of think(), *after* speaker.close() has
+			// closed the queue the host's holding line is enqueued on, and a
+			// send on a closed channel takes the daemon with it. Every exit
+			// path below this point is therefore downstream of a host that has
+			// provably finished. The first round always reaches this line, so
+			// the goroutine can never be left running either.
+			host.stop()
+			if line, asked := host.clarification(); asked {
+				// The host asked for a detail, so there is no answer to wait
+				// for: the question *is* this turn's reply. It is spoken and
+				// recorded like any other reply, which is what makes the user's
+				// answer to it an ordinary follow-up on the same thread — a
+				// clarification must never strand the question that prompted it.
+				if !e.speakHostClarification(s, speaker, line) {
+					e.abortSpeaker(speaker)
+					return
+				}
+				finalText, clarified = line, true
+				host.noteTookTurn()
+				break
+			}
+		}
 		if unreachable != nil {
 			// The tier could not be reached and had produced nothing, so
 			// another one may still answer honestly. Only on the first round:
@@ -1549,8 +1716,12 @@ func (e *Engine) think(s *sess) {
 			if notice = e.tierNotice(serve); notice != "" && speaker != nil {
 				speaker.speak(notice)
 			}
+			// The session's own context, not the host's: the host has been
+			// stopped by now (the failover is only reachable from the first
+			// round, past the join above), and a second attempt is a fresh
+			// round with nothing left to abandon it.
 			text, calls, ok, unreachable = e.streamOnce(s,
-				serve.provider(e.provider), e.tierRequest(serve, messages, toolDefs), speaker)
+				s.ctx, serve.provider(e.provider), e.tierRequest(serve, messages, toolDefs), speaker)
 			if unreachable != nil {
 				e.abortSpeaker(speaker)
 				if s.ctx.Err() == nil {
@@ -1619,8 +1790,12 @@ func (e *Engine) think(s *sess) {
 	// account is spoken here, and a briefing is transient — recording it would
 	// put into conversation memory precisely what the explicit-ask path takes
 	// care to keep out of it.
+	// Not on a clarification: the briefing rides "the first answer after an
+	// absence", and a question back to the user is not that answer — it is the
+	// turn before it. The offer waits for the reply, which is the turn the user
+	// actually asked for (issue #161).
 	recordedText := finalText
-	if finalText != "" {
+	if finalText != "" && !clarified {
 		if offer, transient := e.offerLine(s); offer != "" {
 			finalText = strings.TrimSpace(finalText) + " " + offer
 			if !transient {
@@ -1650,8 +1825,13 @@ func (e *Engine) think(s *sess) {
 	}
 
 	// What the record keeps about which model answered (#159): taken from the
-	// binding that actually served, never from the tier that was asked for.
-	e.noteServedTier(s, serve)
+	// binding that actually served, never from the tier that was asked for. A
+	// clarification has already written its own — the host produced this turn,
+	// and naming the tier that was abandoned before it said a word would be the
+	// exact false claim these keys exist to prevent (#161).
+	if !clarified {
+		e.noteServedTier(s, serve)
+	}
 
 	e.publish(Event{Type: "assistant.finished", Data: map[string]any{
 		"session_id": s.id, "content": finalText, "tool_calls": toolCalls}})
@@ -1697,10 +1877,22 @@ func (e *Engine) think(s *sess) {
 // failure is reported here exactly as it always was; a stream that broke
 // half-way has already put words on the screen, and answering the rest from a
 // different model would be a worse kind of wrong than stopping.
-func (e *Engine) streamOnce(s *sess, prov ai.Provider, req ai.ChatRequest,
+//
+// ctx bounds this one round. It is the session context for every round but the
+// first, and for that one it is the host's answer context (issue #161): a child
+// of the session's, cancelled when the host takes the turn with a clarifying
+// question. Cancelling it is therefore an *abandoned* round, not a failure, and
+// the checks below read it rather than s.ctx so both cases unwind the same
+// quiet way — the caller owns what happens next, exactly as it does for a tier
+// that could not be reached.
+func (e *Engine) streamOnce(s *sess, ctx context.Context, prov ai.Provider, req ai.ChatRequest,
 	speaker *streamingSpeaker) (text string, calls []ai.ToolCall, ok bool, unreachable error) {
 	start := time.Now()
-	events, err := prov.Chat(s.ctx, req)
+	events, err := prov.Chat(ctx, req)
+	// The answering tier has been tried, whatever it answered. Recorded before
+	// the error check so a refusing endpoint still releases the host, which is
+	// waiting on this before it opens a request of its own.
+	s.noteAnswerIssued()
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -1711,6 +1903,14 @@ func (e *Engine) streamOnce(s *sess, prov ai.Provider, req ai.ChatRequest,
 		switch ev.Type {
 		case ai.EventDelta:
 			if !responded {
+				if !s.beginAnswer() {
+					// The host committed to a clarifying question in the
+					// instant before this token arrived. Nothing is published
+					// and the state is not moved: the question is this turn's
+					// reply and must not have a half-started answer under it
+					// (issue #161). think() speaks it.
+					return "", nil, false, nil
+				}
 				s.timings.markFirstDelta()
 				if !e.advance(s, StateResponding) {
 					return "", nil, false, nil
@@ -1732,15 +1932,20 @@ func (e *Engine) streamOnce(s *sess, prov ai.Provider, req ai.ChatRequest,
 			}
 		case ai.EventToolCall:
 			// A tool call is the provider's first output as much as a token
-			// is. Without this mark, a round that narrates nothing would push
+			// is — for the host handoff as well as for the marks below.
+			if !s.beginAnswer() {
+				return "", nil, false, nil
+			}
+			// Without this mark, a round that narrates nothing would push
 			// firstDelta past the confirmation question's audio and the
 			// pipeline marks would fall out of order — the arithmetic behind
 			// issue #72's negative jarvix_ms.
 			s.timings.markFirstDelta()
 			calls = append(calls, ev.Call)
 		case ai.EventError:
-			if s.ctx.Err() != nil {
-				// Cancelled: that path owns the events, as it always has.
+			if ctx.Err() != nil {
+				// Cancelled, or abandoned because the host took the turn:
+				// either way that path owns the events, as it always has.
 				return "", nil, false, nil
 			}
 			if !responded && len(calls) == 0 {

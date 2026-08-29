@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -197,5 +198,75 @@ func TestTierDefaultIsASettingAndOutOfTheAssistantsReach(t *testing.T) {
 	// brains, and a tier is a brain.
 	if _, excluded := AssistantExcludedSettingReason("ai.tiers.default"); !excluded {
 		t.Error("the assistant may change its own default tier")
+	}
+}
+
+// The host's grace (#161, ADR 0064) is a scalar on [ai.tiers], beside
+// `default` — a property of the cascade rather than of one model — so it must
+// survive the hand-decode that harvests the tier tables around it.
+func TestTheHostGraceIsAScalarOnTheTiersTable(t *testing.T) {
+	cfg := parseTierDoc(t, tierDoc(`
+[ai.tiers]
+default = "medium"
+host_grace_ms = 400
+
+[ai.tiers.instant]
+provider = "fireworks"
+model = "small"
+`))
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.AI.Tiers.HostGraceMs; got != 400 {
+		t.Errorf("host_grace_ms = %d, want 400", got)
+	}
+	if got := cfg.AI.Tiers.HostGrace(); got.Milliseconds() != 400 {
+		t.Errorf("HostGrace() = %v, want 400ms", got)
+	}
+	// And it is not mistaken for a tier table by the harvest beside it.
+	if names := cfg.AI.Tiers.Names(); len(names) != 1 || names[0] != "instant" {
+		t.Errorf("tier names = %v, want instant alone", names)
+	}
+}
+
+// The shipped grace is 700ms, and it is on the default Config so a settings
+// screen reads a real number rather than a zero standing in for one.
+func TestTheHostGraceDefaultsTo700ms(t *testing.T) {
+	if got := Default().AI.Tiers.HostGraceMs; got != DefaultHostGraceMs {
+		t.Errorf("default host_grace_ms = %d, want %d", got, DefaultHostGraceMs)
+	}
+	cfg := parseTierDoc(t, tierDoc("\n[ai.tiers]\ndefault = \"medium\"\n"))
+	if got := cfg.AI.Tiers.HostGraceMs; got != DefaultHostGraceMs {
+		t.Errorf("a tiers table with no grace = %d, want the default %d", got, DefaultHostGraceMs)
+	}
+}
+
+// Zero is off — the turn is silence then the answer, exactly as before the
+// cascade existed — and it is the one value outside the bounds that is allowed.
+func TestTheHostGraceIsOffAtZeroAndBoundedOtherwise(t *testing.T) {
+	off := parseTierDoc(t, tierDoc("\n[ai.tiers]\nhost_grace_ms = 0\n\n[ai.tiers.instant]\nprovider = \"fireworks\"\nmodel = \"small\"\n"))
+	if err := off.Validate(); err != nil {
+		t.Errorf("Validate with the host switched off: %v", err)
+	}
+	if off.AI.Tiers.HostGrace() != 0 {
+		t.Errorf("HostGrace() = %v, want zero", off.AI.Tiers.HostGrace())
+	}
+	for _, bad := range []int{1, 99, 5001, -1} {
+		cfg := parseTierDoc(t, tierDoc(strings.ReplaceAll(`
+[ai.tiers]
+host_grace_ms = BAD
+
+[ai.tiers.instant]
+provider = "fireworks"
+model = "small"
+`, "BAD", strconv.Itoa(bad))))
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("host_grace_ms = %d was accepted", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "ai.tiers.host_grace_ms") {
+			t.Errorf("host_grace_ms = %d refused without naming the key: %v", bad, err)
+		}
 	}
 }

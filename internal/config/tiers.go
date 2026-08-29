@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/rpickz/jarvix/internal/ai"
@@ -82,10 +83,42 @@ type AITiers struct {
 	// Balanced / Deep control and its spoken equivalents move a
 	// conversation-scoped pin, and a new conversation comes back here.
 	Default string `toml:"default"`
+	// HostGraceMs is how long the answering tier has to begin streaming before
+	// the instant tier — acting as the *host* — says one short holding line
+	// over the wait (issue #161, ADR 0064). 0 switches the host off: the turn
+	// is silence then the answer, exactly as it was before the cascade existed.
+	//
+	// It lives on [ai.tiers] rather than on [ai.tiers.instant] because it is a
+	// property of the cascade, not of one model: it describes the relationship
+	// between two tiers, and a tier table describes one endpoint.
+	HostGraceMs int `toml:"host_grace_ms"`
 	// Tiers holds every [ai.tiers.<name>] table found, including names that
 	// are not tiers — validation names those rather than the loader dropping
 	// them, so a typo is reported instead of silently doing nothing.
 	Tiers map[string]AITier `toml:"-"`
+}
+
+// DefaultHostGraceMs is the shipped grace: 700ms, which is roughly where a
+// person stops reading a pause as "it heard me" and starts reading it as "did
+// it hear me?". Shorter and the host talks over turns that were about to answer
+// anyway; longer and the silence it exists to cover has already done its damage.
+//
+// It only ever takes effect on a configuration that has an instant tier — with
+// no host to speak, a grace governs nothing.
+const DefaultHostGraceMs = 700
+
+// The bounds a grace has to sit inside. Below the floor the host would speak
+// over turns that were about to answer, which is the one thing it must never
+// do; above the ceiling the silence it exists to cover has long since become
+// the user's problem, and they have interrupted.
+const (
+	minHostGraceMs = 100
+	maxHostGraceMs = 5000
+)
+
+// HostGrace is the configured grace as a duration.
+func (t AITiers) HostGrace() time.Duration {
+	return time.Duration(t.HostGraceMs) * time.Millisecond
 }
 
 // Enabled reports whether tiering is on at all: at least one tier table
@@ -111,11 +144,12 @@ func (t AITiers) Names() []string {
 	return names
 }
 
-// tiersTableKey is the key under [ai] that holds the tier tables, and the one
-// key of that table that is a scalar rather than a tier.
+// tiersTableKey is the key under [ai] that holds the tier tables, and the two
+// keys of that table that are scalars rather than tiers.
 const (
-	tiersTableKey   = "tiers"
-	tiersDefaultKey = "default"
+	tiersTableKey     = "tiers"
+	tiersDefaultKey   = "default"
+	tiersHostGraceKey = "host_grace_ms"
 )
 
 // parseAITiers harvests [ai.tiers] out of the loose decode. It runs from
@@ -130,14 +164,26 @@ func parseAITiers(md toml.MetaData, prim toml.Primitive, cfg *Config) error {
 	if err := md.PrimitiveDecode(prim, &raw); err != nil {
 		return fmt.Errorf("[ai.tiers]: %w", err)
 	}
-	tiers := AITiers{Default: cfg.AI.Tiers.Default, Tiers: map[string]AITier{}}
+	tiers := AITiers{
+		Default:     cfg.AI.Tiers.Default,
+		HostGraceMs: cfg.AI.Tiers.HostGraceMs,
+		Tiers:       map[string]AITier{},
+	}
 	for name, child := range raw {
-		if name == tiersDefaultKey {
+		switch name {
+		case tiersDefaultKey:
 			var value string
 			if err := md.PrimitiveDecode(child, &value); err != nil {
 				return fmt.Errorf("[ai.tiers]: default: %w", err)
 			}
 			tiers.Default = value
+			continue
+		case tiersHostGraceKey:
+			var value int
+			if err := md.PrimitiveDecode(child, &value); err != nil {
+				return fmt.Errorf("[ai.tiers]: host_grace_ms: %w", err)
+			}
+			tiers.HostGraceMs = value
 			continue
 		}
 		var tier AITier
@@ -177,6 +223,15 @@ func (c Config) validateTiers() []string {
 				"ai.tiers.default is %q but there is no [ai.tiers.%s] table; "+
 					"add one naming a provider and model (or an advisor), or choose another default", d, d))
 		}
+	}
+
+	// The host's grace (#161). Zero is off and always allowed; anything else
+	// has to be a window a person would actually notice, in both directions.
+	if g := set.HostGraceMs; g != 0 && (g < minHostGraceMs || g > maxHostGraceMs) {
+		problems = append(problems, fmt.Sprintf(
+			"ai.tiers.host_grace_ms is %d; use 0 (no holding line) or between %d and %d "+
+				"(default %d — how long the answering model has before the instant one says "+
+				"it is thinking)", g, minHostGraceMs, maxHostGraceMs, DefaultHostGraceMs))
 	}
 
 	for _, name := range set.Names() {
