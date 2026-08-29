@@ -123,6 +123,14 @@ func (h *harness) reader(name string) func(context.Context, time.Time, time.Time
 	}
 }
 
+// restartedAt binds the seam the up-front coverage caveat is read through:
+// this process began serving at started, so a window that opens before that
+// cannot be fully accounted for by the in-memory activity ring. Bound after
+// construction, the daemon's own late-bind path.
+func (h *harness) restartedAt(started time.Time) {
+	h.svc.BindStartedAfter(func(since time.Time) bool { return started.After(since) })
+}
+
 // withModel wires the provider seam. Done after construction, the daemon's
 // own late-bind path, so the tests exercise the shape production uses.
 func (h *harness) withModel() {
@@ -330,7 +338,7 @@ func TestAnAbsenceNobodyWitnessedIsStillAnAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.NoAbsence {
+	if view.NoRecord {
 		t.Fatalf("the window's button reported no absence %v after the last exchange: %+v",
 			reportedNow.Sub(reportedLastSeen), view)
 	}
@@ -351,30 +359,38 @@ func TestAnAbsenceNobodyWitnessedIsStillAnAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spoken == NoAbsenceSentence {
+	if spoken == NoRecordSentence {
 		t.Errorf("the spoken ask still denied the absence: %q", spoken)
 	}
 }
 
 // TestTheButtonAndTheVoiceAskAgreeAtEveryMoment. The two surfaces are the
-// same question asked twice, and the bug was precisely that they disagreed:
+// same question asked twice, and #188's bug was precisely that they disagreed:
 // one of them happened to follow an arrival and the other could not. They are
 // driven here through one state, in one order, and compared at every step.
+//
+// Since #190 the steps cover the SHORT gaps too — a moment, a minute, four
+// hours — because those are no longer a refusal on either surface but a real
+// window that both must read the same way. Agreement is asserted on the window
+// itself rather than on a flag: the spoken form carries the interval its
+// headline names, so a voice ask that composed over a different stretch from
+// the button's could not contain the button's own spoken age.
 func TestTheButtonAndTheVoiceAskAgreeAtEveryMoment(t *testing.T) {
 	h := newSeededHarness(t, reportedLastSeen, reportedLastSeen, SourceSessions)
 	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
 
 	steps := []struct {
-		name   string
-		do     func()
-		absent bool
+		name string
+		do   func()
+		away string
 	}{
-		{"the moment the user left", func() {}, false},
-		{"four hours later", func() { h.pass(4 * time.Hour) }, false},
-		{"exactly at the threshold", func() { h.pass(4 * time.Hour) }, true},
-		{"still nobody here, hours on", func() { h.pass(7 * time.Hour) }, true},
-		{"they come back", func() { h.seen() }, true},
-		{"and stay a while", func() { h.pass(time.Hour); h.seen() }, true},
+		{"the moment the user left", func() {}, "just now"},
+		{"a minute later", func() { h.pass(time.Minute) }, "a minute ago"},
+		{"four hours later", func() { h.pass(4*time.Hour - time.Minute) }, "four hours ago"},
+		{"exactly at the threshold", func() { h.pass(4 * time.Hour) }, "eight hours ago"},
+		{"still nobody here, hours on", func() { h.pass(7 * time.Hour) }, "fifteen hours ago"},
+		{"they come back", func() { h.seen() }, "fifteen hours ago"},
+		{"and stay a while", func() { h.pass(time.Hour); h.seen() }, "sixteen hours ago"},
 	}
 	for _, step := range steps {
 		step.do()
@@ -386,14 +402,29 @@ func TestTheButtonAndTheVoiceAskAgreeAtEveryMoment(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", step.name, err)
 		}
-		byVoice := spoken != NoAbsenceSentence
-		if view.NoAbsence == byVoice {
-			t.Errorf("%s: the button says absence=%v and the voice says absence=%v",
-				step.name, !view.NoAbsence, byVoice)
+		if view.NoRecord || spoken == NoRecordSentence {
+			t.Errorf("%s: an ask went unanswered — button %+v, voice %q", step.name, view, spoken)
 		}
-		if byVoice != step.absent {
-			t.Errorf("%s: absence reported = %v, want %v", step.name, byVoice, step.absent)
+		if view.AwaySpoken != step.away {
+			t.Errorf("%s: the button reported the window as %q, want %q",
+				step.name, view.AwaySpoken, step.away)
 		}
+		if !strings.Contains(spoken, step.away) {
+			t.Errorf("%s: the voice ask named a different window: %q", step.name, spoken)
+		}
+		if !strings.Contains(spoken, "A session finished.") ||
+			!strings.Contains(view.Spoken, "A session finished.") {
+			t.Errorf("%s: the sources were not read over the window: button %q, voice %q",
+				step.name, view.Spoken, spoken)
+		}
+	}
+	// And none of those fourteen reads spent the offer the one arrival armed
+	// (#189's rule, on the path #190 widened): it is still owed, once.
+	if got := offerOf(h.svc); got != offerSentence {
+		t.Errorf("offer after the reads = %q, want the offer sentence", got)
+	}
+	if got := offerOf(h.svc); got != "" {
+		t.Errorf("the same absence was offered twice: %q", got)
 	}
 }
 
@@ -411,7 +442,7 @@ func TestAnAbsenceIsReportedOncePerAbsenceHoweverItWasObserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.NoAbsence {
+	if first.NoRecord {
 		t.Fatalf("the read did not find the absence: %+v", first)
 	}
 
@@ -433,7 +464,7 @@ func TestAnAbsenceIsReportedOncePerAbsenceHoweverItWasObserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if later.NoAbsence || !later.Since.Equal(first.Since) {
+	if later.NoRecord || !later.Since.Equal(first.Since) {
 		t.Errorf("a later read reported %+v, want the same absence since %v",
 			later.Since, first.Since)
 	}
@@ -467,7 +498,7 @@ func TestSpeakThenAskAndAskThenSpeakReachTheSameAbsence(t *testing.T) {
 	askThenSpeak.seen()
 	askedFirst := offerOf(askThenSpeak.svc)
 
-	if viewA.NoAbsence || viewB.NoAbsence || !viewA.Since.Equal(viewB.Since) {
+	if viewA.NoRecord || viewB.NoRecord || !viewA.Since.Equal(viewB.Since) {
 		t.Errorf("speak-then-ask saw %+v and ask-then-speak saw %+v", viewA.Since, viewB.Since)
 	}
 	if spokeFirst != offerSentence || askedFirst != offerSentence {
@@ -495,47 +526,175 @@ func TestASecondNightWithNobodyHereSupersedesTheFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.NoAbsence || !view.Since.Equal(back) {
+	if view.NoRecord || !view.Since.Equal(back) {
 		t.Errorf("Since = %v, want the second absence starting at %v", view.Since, back)
 	}
 }
 
-// TestAReadShortOfTheThresholdSaysSoExactlyAsBefore. The derivation applies
-// the same boundary an arrival does, so the answer below it is unchanged: a
-// briefing after lunch is the thing the threshold exists to prevent.
-func TestAReadShortOfTheThresholdSaysSoExactlyAsBefore(t *testing.T) {
+// ------------------------------------------------------ asking always answers
+
+// TestAskingAlwaysAnswersOverWhateverWindowThereIs is #190 in one table. The
+// threshold decides when Jarvix VOLUNTEERS; it was never a rule about when an
+// account exists, and consulting it here meant an explicit ask was refused
+// without a single source being read — while the daemon sat on the routine
+// that ran, the reminder that fired and the session that finished over lunch.
+//
+// Every row is the same question over a different gap, on both surfaces, and
+// every row must read the sources and name the interval it read them over.
+func TestAskingAlwaysAnswersOverWhateverWindowThereIs(t *testing.T) {
+	line := Line{Category: Completed, Text: "The session on the ci refactor has finished."}
 	for _, tc := range []struct {
-		name string
-		gap  time.Duration
-		want bool
+		name    string
+		gap     time.Duration
+		content bool
+		want    string
 	}{
-		{"a second short of the threshold", 8*time.Hour - time.Second, false},
-		{"exactly the threshold", 8 * time.Hour, true},
-		{"a lunch break", 90 * time.Minute, false},
+		{"a minute", time.Minute, true, "Since you were last here a minute ago:"},
+		{"an hour, with something in it", 90 * time.Minute, true, "Since you were last here an hour ago:"},
+		{"a short gap with nothing in it", 90 * time.Minute, false,
+			"Nothing since you were last here, an hour ago."},
+		{"a second short of the threshold", 8*time.Hour - time.Second, true,
+			"Since you were last here seven hours ago:"},
+		{"a night, unchanged", 9 * time.Hour, true, "Since you were last here nine hours ago:"},
+		{"twice in a minute, with nobody having been anywhere", time.Second, false,
+			"Nothing since you were last here, just now."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSeededHarness(t, reportedLastSeen, reportedLastSeen.Add(tc.gap), SourceSessions)
-			h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+			if tc.content {
+				h.set1(SourceSessions, line)
+			}
 			view, err := h.svc.View(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if view.NoAbsence == tc.want {
-				t.Errorf("absence reported = %v, want %v", !view.NoAbsence, tc.want)
+			if view.NoRecord {
+				t.Fatalf("an ask over a %v gap was refused: %+v", tc.gap, view)
 			}
-			if !tc.want && view.Headline != NoAbsenceSentence {
-				t.Errorf("headline = %q, want the no-absence sentence", view.Headline)
+			if !strings.HasPrefix(view.Headline, tc.want) {
+				t.Errorf("headline = %q, want it to start %q", view.Headline, tc.want)
+			}
+			if n := h.readCount(SourceSessions); n != 1 {
+				t.Errorf("the sources were read %d times, want once over the window", n)
+			}
+			if tc.content && !strings.Contains(view.Spoken, line.Text) {
+				t.Errorf("the window's content was not reported: %q", view.Spoken)
+			}
+			// Both surfaces, one state, one answer — and asking twice inside
+			// the same minute must cost the same and say the same, because a
+			// read moves nothing.
+			spoken, err := h.svc.Briefing(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spoken != view.Spoken {
+				t.Errorf("the voice said %q and the button said %q", spoken, view.Spoken)
 			}
 		})
 	}
 }
 
-// TestAnUnknownWatermarkInventsNoAbsence. With no archive to seed from and
+// TestAskingSpendsNoOfferHoweverShortTheGap. The ask path was widened, not the
+// offer path: reading over a two-minute window must not arm an offer, must not
+// consume the one a night armed, and must not move the watermark that would
+// end the night (#189's rule, on the surface #190 opened up).
+func TestAskingSpendsNoOfferHoweverShortTheGap(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedLastSeen.Add(2*time.Minute), SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+
+	for range 3 {
+		if _, err := h.svc.Briefing(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.svc.View(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := offerOf(h.svc); got != "" {
+		t.Errorf("six asks over a two-minute window armed an offer: %q", got)
+	}
+
+	// The night that follows is still the whole night: the reads left the
+	// watermark exactly where the seed put it.
+	h.pass(9 * time.Hour)
+	h.seen()
+	if got := offerOf(h.svc); got != offerSentence {
+		t.Errorf("offer after the night = %q, want the offer sentence", got)
+	}
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Since.Equal(reportedLastSeen) {
+		t.Errorf("Since = %v, want the absence to start at the seed %v", view.Since, reportedLastSeen)
+	}
+}
+
+// TestTheOfferStillWaitsForTheThreshold is the other half of the same change,
+// and the one that would be easy to lose: an ask over lunch now answers, and
+// lunch must still not make Jarvix volunteer anything. The threshold's whole
+// job is the difference between speaking after a night and speaking after a
+// sandwich.
+func TestTheOfferStillWaitsForTheThreshold(t *testing.T) {
+	h := newHarness(t, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+	h.seen()
+	h.away(90 * time.Minute)
+
+	if got := offerOf(h.svc); got != "" {
+		t.Errorf("a ninety-minute gap volunteered %q", got)
+	}
+	// And the same state, asked rather than offered, reports the lunch. The
+	// arrival has already moved the watermark by the time this runs — the
+	// engine's own ordering — so this is also the case that would report an
+	// empty two microseconds if the ask read lastSeen alone.
+	spoken, err := h.svc.Briefing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(spoken, "A session finished.") {
+		t.Errorf("the ask after lunch = %q, want the lunch reported", spoken)
+	}
+	if !strings.Contains(spoken, "an hour ago") {
+		t.Errorf("the ask after lunch did not name the interval: %q", spoken)
+	}
+}
+
+// TestAStretchNobodyClosedBeatsTheOneAnArrivalDid. The plain window has two
+// candidates and the longer wins (see window). Hours after an arrival, with
+// nobody here, the open stretch is the news — reporting the one the arrival
+// closed instead would say "since you were last here, eight hours ago" to
+// someone who was demonstrably here five hours ago.
+func TestAStretchNobodyClosedBeatsTheOneAnArrivalDid(t *testing.T) {
+	h := newHarness(t, SourceSessions)
+	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
+	h.seen()              // 09:00
+	h.away(3 * time.Hour) // 12:00: a three-hour stretch, closed by an arrival
+	h.pass(5 * time.Hour) // 17:00: five hours with nobody here, still open
+	back := h.clock().Add(-5 * time.Hour)
+
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Since.Equal(back) {
+		t.Errorf("Since = %v, want the open five-hour stretch from %v", view.Since, back)
+	}
+	if view.AwaySpoken != "five hours ago" {
+		t.Errorf("AwaySpoken = %q, want the open stretch", view.AwaySpoken)
+	}
+}
+
+// TestAnUnknownWatermarkInventsNoWindow. With no archive to seed from and
 // nobody ever here, there is nothing to measure against — and the derivation
 // must not turn "I don't know" into "you've been away for ages". A fresh
 // install must not greet its first user with a briefing about a machine that
 // was not running, however long ago its clock thinks the epoch was.
-func TestAnUnknownWatermarkInventsNoAbsence(t *testing.T) {
+//
+// This is the ONLY state left in which an ask does not compose (#190). It is a
+// claim about the daemon's own records rather than about the length of a gap,
+// and the sentence says so.
+func TestAnUnknownWatermarkInventsNoWindow(t *testing.T) {
 	h := newHarness(t, SourceSessions)
 	h.set1(SourceSessions, Line{Category: Completed, Text: "A session finished."})
 	h.pass(30 * 24 * time.Hour)
@@ -544,15 +703,15 @@ func TestAnUnknownWatermarkInventsNoAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !view.NoAbsence {
+	if !view.NoRecord {
 		t.Errorf("an absence was invented from an unknown watermark: %+v", view)
 	}
 	spoken, err := h.svc.Briefing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spoken != NoAbsenceSentence {
-		t.Errorf("spoken = %q, want the no-absence sentence", spoken)
+	if spoken != NoRecordSentence {
+		t.Errorf("spoken = %q, want the no-record sentence", spoken)
 	}
 	if n := h.readCount(SourceSessions); n != 0 {
 		t.Errorf("sources were read %d times with no absence to report on", n)
@@ -572,7 +731,7 @@ func TestReadingAnAbsenceNeverMovesTheWatermark(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if view.NoAbsence || !view.Since.Equal(reportedLastSeen) {
+		if view.NoRecord || !view.Since.Equal(reportedLastSeen) {
 			t.Fatalf("read %d = %+v; asking must not consume the absence", i, view.Since)
 		}
 	}
@@ -603,6 +762,105 @@ func TestServiceHasNoWayToMarkTimeExceptArrive(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------ what the ring cannot cover
+
+// TestAWindowThatPredatesStartUpSaysSoUpFront is the second honesty gap #190
+// names. Four of the five sources are durable and answer for the whole window
+// with complete confidence after a restart; the fifth is an in-memory ring
+// that died with the previous process. A briefing whose WHOLE window predates
+// the restart therefore composed a confident "nothing happened" out of the
+// four that survived — and the one admission that existed was appended to the
+// activity line, which in that very case has nothing to say and so is not
+// there at all.
+//
+// So it is said up front, it names which half is lossy and which half is not,
+// and it sits where the trim cannot reach it.
+func TestAWindowThatPredatesStartUpSaysSoUpFront(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceActivity)
+	// The daemon came up four hours into the night, so the whole first stretch
+	// of the window is before anything this process could have observed.
+	h.restartedAt(reportedLastSeen.Add(4 * time.Hour))
+
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Caveat == "" {
+		t.Fatalf("a window opening before start-up carried no caveat: %+v", view)
+	}
+	// Up front means second: after the headline that says what shape this is
+	// in, and before the first fact.
+	if !strings.HasPrefix(view.Spoken, view.Headline+" "+view.Caveat) {
+		t.Errorf("the caveat is not up front: %q", view.Spoken)
+	}
+	// And it cannot be mistaken for "nothing happened", which is exactly what
+	// the sentence it follows says.
+	if !view.Empty || !strings.HasPrefix(view.Headline, "Nothing since you were last here") {
+		t.Fatalf("this test no longer covers the mistakable case: %+v", view)
+	}
+	for _, want := range []string{"I restarted", "my own record of what I ran",
+		"your reminders, focus threads, conversations and AI sessions", "complete"} {
+		if !strings.Contains(view.Caveat, want) {
+			t.Errorf("the caveat does not say %q: %q", want, view.Caveat)
+		}
+	}
+	// The record says a briefing could not cover its own window, and says it
+	// as an outcome rather than by carrying the sentence.
+	events := h.published()
+	if len(events) != 1 || events[0].data["partial"] != true {
+		t.Errorf("the event did not report the shortfall: %+v", events)
+	}
+}
+
+// TestAWindowInsideThisProcessCarriesNoCaveat. The admission is only worth
+// making when it is true; made unconditionally it would be noise, and noise is
+// what a listener learns to ignore.
+func TestAWindowInsideThisProcessCarriesNoCaveat(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceActivity)
+	h.restartedAt(reportedLastSeen.Add(-time.Hour))
+
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Caveat != "" {
+		t.Errorf("a fully covered window carried a caveat: %q", view.Caveat)
+	}
+	if events := h.published(); len(events) != 1 || events[0].data["partial"] != false {
+		t.Errorf("the event reported a shortfall that was not there: %+v", events)
+	}
+}
+
+// TestTheCaveatIsNeverTrimmedAway. The trim takes the tail, and an admission
+// in the tail is an admission that disappears exactly when the briefing is
+// busiest — which is the same reasoning that exempts the unavailability lines.
+func TestTheCaveatIsNeverTrimmedAway(t *testing.T) {
+	h := newSeededHarness(t, reportedLastSeen, reportedNow, SourceSessions, SourceReminders, SourceFocus)
+	h.restartedAt(reportedNow.Add(-time.Hour))
+	long := "This line is deliberately long enough that a handful of them will " +
+		"overrun the spoken budget for one briefing and force the trim."
+	h.set1(SourceSessions,
+		Line{Category: Awaiting, Text: long},
+		Line{Category: Completed, Text: long},
+		Line{Category: InProgress, Text: long})
+	h.set1(SourceReminders, Line{Category: Awaiting, Text: long})
+	h.set1(SourceFocus, Line{Category: Housekeeping, Text: long})
+
+	view, err := h.svc.View(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Truncated {
+		t.Fatal("five long lines did not trigger the trim")
+	}
+	if !strings.Contains(view.Spoken, view.Caveat) || view.Caveat == "" {
+		t.Errorf("the trim dropped the caveat: %q", view.Spoken)
+	}
+	if got := words(view.Spoken); got > maxSpokenWords {
+		t.Errorf("spoken briefing is %d words, over the %d-word budget", got, maxSpokenWords)
+	}
+}
+
 // ---------------------------------------------------------------- honesty
 
 // TestNothingHappenedIsNeverOfferedAndIsSaidPlainly is the honesty criterion
@@ -623,7 +881,7 @@ func TestNothingHappenedIsNeverOfferedAndIsSaidPlainly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(spoken, "Nothing while you were away") {
+	if !strings.HasPrefix(spoken, "Nothing since you were last here, nine hours ago.") {
 		t.Errorf("empty briefing = %q, want the plain nothing-happened sentence", spoken)
 	}
 	if strings.Contains(spoken, "three sessions") {

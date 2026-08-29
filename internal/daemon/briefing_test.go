@@ -17,10 +17,11 @@ import (
 // briefingView is the wire shape briefing.get serves.
 type briefingView struct {
 	Disabled   bool   `json:"disabled"`
-	NoAbsence  bool   `json:"no_absence"`
+	NoRecord   bool   `json:"no_record"`
 	Empty      bool   `json:"empty"`
 	Truncated  bool   `json:"truncated"`
 	Headline   string `json:"headline"`
+	Caveat     string `json:"caveat"`
 	Spoken     string `json:"spoken"`
 	Since      string `json:"since"`
 	AwaySpoken string `json:"away_spoken"`
@@ -67,18 +68,83 @@ func getBriefing(t *testing.T, client *ipc.Client) briefingView {
 	return view
 }
 
-// TestBriefingGetSaysThereIsNoAbsenceYet. The window's button must have an
-// honest answer before anyone has been anywhere.
-func TestBriefingGetSaysThereIsNoAbsenceYet(t *testing.T) {
+// TestBriefingGetSaysItHasNoRecordOfYou. The window's button must have an
+// honest answer before anyone has been anywhere — and on a daemon with an
+// empty archive and no exchange yet, that answer is about the record rather
+// than about the length of a gap: there is no window to measure at all. It is
+// the only remaining state in which the button does not compose (#190).
+func TestBriefingGetSaysItHasNoRecordOfYou(t *testing.T) {
 	h := startFocusDaemon(t)
 	client := dialDaemon(t, h.socket)
 
 	view := getBriefing(t, client)
-	if !view.NoAbsence {
-		t.Errorf("briefing.get on a fresh daemon = %+v, want no_absence", view)
+	if !view.NoRecord {
+		t.Errorf("briefing.get on a fresh daemon = %+v, want no_record", view)
+	}
+	if strings.Contains(view.Headline, "long enough") {
+		t.Errorf("the button still refuses on the length of a gap: %q", view.Headline)
 	}
 	if view.Spoken != "" || len(view.Sections) != 0 {
 		t.Errorf("a non-briefing carried content: %+v", view)
+	}
+}
+
+// TestBriefingGetAnswersOverAShortGap is #190 at the wire. One sighting two
+// hours ago, a reminder that fired inside those two hours, and the button
+// pressed — the gap is nowhere near `briefing.after_hours`, and the daemon is
+// holding the answer. It used to say "you haven't been away long enough for a
+// briefing" without reading a single source.
+func TestBriefingGetAnswersOverAShortGap(t *testing.T) {
+	h := startFocusDaemon(t)
+	h.provider.Response = "One reminder fired."
+	client := dialDaemon(t, h.socket)
+
+	plantOvernightReminders(t, h, "call the pharmacy", "file the expenses")
+	h.d.briefing.Arrive(time.Now().Add(-2 * time.Hour))
+
+	view := getBriefing(t, client)
+	if view.NoRecord {
+		t.Fatalf("a two-hour gap was refused: %+v", view)
+	}
+	if view.AwaySpoken != "two hours ago" {
+		t.Errorf("away_spoken = %q, want the two-hour window named", view.AwaySpoken)
+	}
+	if !strings.Contains(view.Spoken, "file the expenses") {
+		t.Errorf("the sources were not read over the short window: %q", view.Spoken)
+	}
+}
+
+// TestBriefingGetAdmitsTheStretchItCannotAccountFor is the second honesty gap
+// (#190) end to end. The daemon under test started moments ago and the window
+// opens twelve hours before that, so the in-memory activity ring covers none
+// of it — while the reminder store, the focus threads and the archive answer
+// for all of it. The reply has to say so up front, in its own field, so the
+// window can render it beside the headline rather than at the end of a list.
+func TestBriefingGetAdmitsTheStretchItCannotAccountFor(t *testing.T) {
+	h := startFocusDaemon(t)
+	client := dialDaemon(t, h.socket)
+	wasAway(h, 12)
+
+	view := getBriefing(t, client)
+	if view.Caveat == "" {
+		t.Fatalf("a window opening before start-up carried no caveat: %+v", view)
+	}
+	if !strings.HasPrefix(view.Spoken, view.Headline+" "+view.Caveat) {
+		t.Errorf("the caveat is not up front: %q", view.Spoken)
+	}
+	// The mistakable case: everything durable said nothing, so without the
+	// caveat this reads as a confident account of an empty night.
+	if !view.Empty {
+		t.Fatalf("this test no longer covers the mistakable case: %+v", view)
+	}
+	for _, want := range []string{"I restarted", "what I ran", "reminders", "kept on disk"} {
+		if !strings.Contains(view.Caveat, want) {
+			t.Errorf("the caveat does not say %q: %q", want, view.Caveat)
+		}
+	}
+	row := waitActivityRow(t, client, "Return briefing given")
+	if detail, _ := row["detail"].(string); !strings.Contains(detail, "predates my start-up") {
+		t.Errorf("row detail = %q, want the shortfall recorded", detail)
 	}
 }
 
@@ -103,7 +169,7 @@ func TestBriefingGetReportsAnAbsenceNobodyWitnessed(t *testing.T) {
 	h.d.briefing.Arrive(time.Now().Add(-reportedGap))
 
 	view := getBriefing(t, client)
-	if view.NoAbsence {
+	if view.NoRecord {
 		t.Fatalf("briefing.get %v after the last exchange = %+v, want the absence reported",
 			reportedGap, view)
 	}
@@ -124,7 +190,7 @@ func TestBriefingGetSaysNothingHappened(t *testing.T) {
 	if !view.Empty {
 		t.Errorf("briefing.get = %+v, want empty", view)
 	}
-	if !strings.HasPrefix(view.Spoken, "Nothing while you were away") {
+	if !strings.HasPrefix(view.Spoken, "Nothing since you were last here, twelve hours ago.") {
 		t.Errorf("spoken = %q", view.Spoken)
 	}
 	if view.AwaySpoken == "" || view.Since == "" {
@@ -151,7 +217,7 @@ func TestBriefingReadsTheSourcesJarvixAlreadyHas(t *testing.T) {
 	wasAway(h, 12)
 
 	view := getBriefing(t, client)
-	if view.Empty || view.NoAbsence {
+	if view.Empty || view.NoRecord {
 		t.Fatalf("briefing.get = %+v", view)
 	}
 	titles := make([]string, len(view.Sections))

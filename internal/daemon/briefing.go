@@ -105,6 +105,11 @@ func (d *Daemon) bindBriefing() {
 			SpeakOnReturn: c.Briefing.SpeakOnReturn,
 		}
 	})
+	// The one thing a briefing has to be able to say about itself: whether this
+	// process was running for the whole window. The daemon owns the answer —
+	// it is the only thing that knows when it started — and internal/briefing
+	// owns the sentence, beside the source names it has to spell out (#190).
+	d.briefing.BindStartedAfter(func(since time.Time) bool { return d.started.After(since) })
 	shared := &focusOnce{d: d}
 	d.briefing.BindSources(
 		briefing.Source{Name: briefing.SourceSessions, Read: shared.sessions},
@@ -331,8 +336,16 @@ func countedSentence(texts []string, singular, plural string) string {
 // that refreshed, and what failed. The schedule trail is persisted (ADR 0032)
 // and the feed statuses are current state, so both are true across a restart;
 // the failure count comes from the in-memory ring, which is honest observation
-// rather than a transaction log — so when this process did not exist for the
-// whole absence, the line says so instead of implying it saw everything.
+// rather than a transaction log.
+//
+// This line used to carry the restart admission itself — "My own record only
+// goes back to when I restarted." — and it is now made by the briefing, up
+// front, for every window that predates start-up (#190). Attached here it fired
+// only when this source had produced a line at all, which is the opposite of
+// the case that needed it: a window entirely before the restart is the one most
+// likely to leave the ring with nothing to say, and so the one where the
+// admission was silently dropped and the remaining, durable sources read as a
+// confident "nothing happened".
 func (d *Daemon) briefActivity(_ context.Context, since, now time.Time) ([]briefing.Line, error) {
 	var parts []string
 	if d.automations != nil {
@@ -372,16 +385,13 @@ func (d *Daemon) briefActivity(_ context.Context, since, now time.Time) ([]brief
 	if len(parts) == 0 {
 		return nil, nil
 	}
-	text := capitaliseFirst(joinClauses(parts)) + "."
-	if d.started.After(since) {
-		text += " My own record only goes back to when I restarted."
-	}
-	return []briefing.Line{{Category: briefing.Housekeeping, Text: text}}, nil
+	return []briefing.Line{{Category: briefing.Housekeeping,
+		Text: capitaliseFirst(joinClauses(parts)) + "."}}, nil
 }
 
 // activityFailures counts the failed rows the ring still holds inside the
 // window. Bounded and lossy by design (internal/daemon/activity.go); the
-// caller's restart admission is what keeps that honest.
+// briefing's up-front restart caveat is what keeps that honest.
 func (d *Daemon) activityFailures(since, now time.Time) int {
 	d.actMu.Lock()
 	defer d.actMu.Unlock()
@@ -477,13 +487,14 @@ func briefingViewReport(v briefing.Composed) map[string]any {
 		sections = append(sections, map[string]any{"title": s.Title, "lines": lines})
 	}
 	out := map[string]any{
-		"disabled":   v.Disabled,
-		"no_absence": v.NoAbsence,
-		"empty":      v.Empty,
-		"truncated":  v.Truncated,
-		"headline":   v.Headline,
-		"spoken":     v.Spoken,
-		"sections":   sections,
+		"disabled":  v.Disabled,
+		"no_record": v.NoRecord,
+		"empty":     v.Empty,
+		"truncated": v.Truncated,
+		"headline":  v.Headline,
+		"caveat":    v.Caveat,
+		"spoken":    v.Spoken,
+		"sections":  sections,
 	}
 	if !v.Since.IsZero() {
 		out["since"] = v.Since.Format(time.RFC3339)
@@ -512,6 +523,9 @@ func briefingActivityRow(data map[string]any) desktop.ActivityRow {
 	}
 	if truncated, _ := data["truncated"].(bool); truncated {
 		detail += " · shortened for speech"
+	}
+	if partial, _ := data["partial"].(bool); partial {
+		detail += " · part of the window predates my start-up"
 	}
 	if unavailable, _ := data["unavailable"].(string); unavailable != "" {
 		detail += " · could not read: " + unavailable

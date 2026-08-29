@@ -12,13 +12,23 @@
 // exists at all, and it is restated in ADR 0050 because a boundary that lives
 // only in a ticket is a boundary that erodes.
 //
-// Two more stances shape everything below.
+// Three more stances shape everything below.
 //
 // **Offered, not ambushed.** After a long enough absence, and only when at
 // least one source actually has something, one sentence is appended to the
 // answer the user came back and asked for. The briefing itself follows on
 // request. `briefing.speak_on_return` turns that into the whole account
 // spoken at the same moment, and it is off by default.
+//
+// **Asking always answers.** `briefing.after_hours` decides when Jarvix
+// *volunteers*; it was never a rule about when an account exists (#190). An
+// explicit ask — the voice phrase, the model's tool, the window's button —
+// composes over the stretch since the user was last here whatever its length,
+// and says plainly when there was nothing in it. Declining to look, on the
+// grounds that the gap was small, threw away facts the daemon was already
+// holding: come back from a two-hour lunch during which a routine ran and a
+// reminder fired, press the button, and the old answer was "you haven't been
+// away long enough for a briefing" — without a single source having been read.
 //
 // **Prepared lazily, never on a clock.** There is no scheduler in this
 // package and no goroutine — nothing summarises a machine nobody is using.
@@ -161,6 +171,11 @@ type Options struct {
 	// deterministic headline is used and no model is ever consulted — which
 	// is also what happens when the call fails.
 	Summarise func(ctx context.Context, prompt string) (string, error)
+	// StartedAfter reports whether the process began after the given moment,
+	// which is how a briefing knows that part of the window it is about
+	// predates it. Nil means "no idea", which reads as full coverage: an
+	// admission is only worth making when it is demonstrably true.
+	StartedAfter func(since time.Time) bool
 	// Budget bounds one full briefing; OfferBudget bounds the offer check.
 	// Zero means the defaults above.
 	Budget      time.Duration
@@ -187,9 +202,11 @@ type Service struct {
 	// settingsFn, sources and summarise are late-bindable and therefore
 	// guarded by mu, like everything else the daemon completes after
 	// construction.
-	settingsFn  func() Settings
-	sources     []Source
-	summarise   func(ctx context.Context, prompt string) (string, error)
+	settingsFn   func() Settings
+	sources      []Source
+	summarise    func(ctx context.Context, prompt string) (string, error)
+	startedAfter func(since time.Time) bool
+
 	budget      time.Duration
 	offerBudget time.Duration
 	publish     func(event string, data map[string]any)
@@ -205,6 +222,13 @@ type Service struct {
 	// it says how long ago the user was last here, which is the question the
 	// feature exists to answer. See standing.
 	lastSeen time.Time
+	// priorSeen is the sighting before lastSeen — the start of the stretch the
+	// most recent arrival closed. It exists because an explicit ask is not
+	// gated by the threshold (#190) and the engine records the arrival BEFORE
+	// it runs the briefing intent: by the time "what did I miss?" reaches this
+	// package the watermark is already now, so without this the voice ask would
+	// compose over a window of microseconds and report nothing. See window.
+	priorSeen time.Time
 	// absenceSince is the start of an absence that has already ENDED: the
 	// lastSeen value an arrival superseded. Zero means no ended absence is on
 	// record — which is not the same as "no absence", because an absence that
@@ -221,14 +245,15 @@ type Service struct {
 // NewService builds the briefing service and seeds its watermark.
 func NewService(opts Options, log *slog.Logger) *Service {
 	s := &Service{
-		now:         opts.Now,
-		settingsFn:  opts.Settings,
-		sources:     opts.Sources,
-		summarise:   opts.Summarise,
-		budget:      opts.Budget,
-		offerBudget: opts.OfferBudget,
-		publish:     opts.Publish,
-		log:         log,
+		now:          opts.Now,
+		settingsFn:   opts.Settings,
+		sources:      opts.Sources,
+		summarise:    opts.Summarise,
+		startedAfter: opts.StartedAfter,
+		budget:       opts.Budget,
+		offerBudget:  opts.OfferBudget,
+		publish:      opts.Publish,
+		log:          log,
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -294,6 +319,15 @@ func (s *Service) BindSummarise(summarise func(ctx context.Context, prompt strin
 	s.summarise = summarise
 }
 
+// BindStartedAfter late-binds the process's own start-up moment, for the same
+// construction-order reason as BindSources: the daemon knows when it began
+// serving and this package must not learn it from a clock of its own.
+func (s *Service) BindStartedAfter(startedAfter func(since time.Time) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startedAfter = startedAfter
+}
+
 // Arrive records that the user is demonstrably back: a user-started exchange
 // has reached the engine at now. It is pure arithmetic over one mutex — no
 // I/O, no source read, nothing that could make an ordinary turn wait — which
@@ -333,6 +367,18 @@ func (s *Service) Arrive(now time.Time) {
 		// absence is not one.
 		return
 	}
+	// Every arrival closes a stretch during which the user was not here,
+	// whatever its length, and an explicit ask is entitled to that stretch
+	// (#190). Recorded separately from absenceSince and BEFORE the threshold
+	// test, because the two answer different questions: this one is "what
+	// window is an ask about", which has no threshold in it, while
+	// absenceSince is "which absence is Jarvix still standing behind an offer
+	// about", which is entirely a question about the threshold. Writing a
+	// sub-threshold gap into absenceSince instead would supersede the night
+	// the offer was made about — so "yes, go on" to that offer, itself an
+	// exchange, would be answered with a briefing about the ten seconds since
+	// the offer was spoken.
+	s.priorSeen = previous
 	if now.Sub(previous) < afterDuration(set) {
 		return
 	}
@@ -392,7 +438,7 @@ func (s *Service) OfferLine(ctx context.Context) (line string, transient bool) {
 		spoken, _ := s.compose(ctx, since, s.budget, "return")
 		if spoken.Empty {
 			// Nothing happened, and the user did not ask. Silence is the
-			// honest answer: "nothing while you were away" is what an
+			// honest answer: "nothing since you were last here" is what an
 			// explicit ask earns, not what a return is greeted with.
 			return "", false
 		}
@@ -409,9 +455,17 @@ func (s *Service) OfferLine(ctx context.Context) (line string, transient bool) {
 // call site because both surfaces say them — the voice through Briefing, the
 // window through View's headline — and a surface that worded its own would be
 // composing, which ADR 0013 puts daemon-side for exactly this reason.
+//
+// There used to be a third, `NoAbsenceSentence` — "You haven't been away long
+// enough for a briefing." It is gone rather than merely unused, because it was
+// the refusal #190 was about, and a constant left lying around is a constant
+// the next reader trusts. What replaced it is NoRecordSentence, which is a
+// much narrower claim: not "your gap was too short to be worth an answer" but
+// "I have never seen you, so there is no window to measure". That is the only
+// state left in which an ask has nothing to compose over.
 const (
-	DisabledSentence  = "Return briefings are switched off."
-	NoAbsenceSentence = "You haven't been away long enough for a briefing."
+	DisabledSentence = "Return briefings are switched off."
+	NoRecordSentence = "I've no record of when you were last here, so I can't say what you missed."
 )
 
 // offerSentence is the whole ambush-avoidance contract in one line: it names
@@ -440,17 +494,21 @@ func (s *Service) probe(ctx context.Context, since time.Time) (bool, error) {
 
 // Briefing is the spoken briefing, for the deterministic phrases and the
 // model's tool alike. It never returns an error for having nothing to say:
-// "nothing while you were away" is an answer, and a spoken apology would
+// "nothing since you were last here" is an answer, and a spoken apology would
 // imply a fault where there was only a quiet night. The error is reserved for
 // a service that cannot brief at all.
+//
+// It reads the sources over whatever window there is, short or long (#190).
+// The threshold is not consulted here at all: it decides when Jarvix
+// volunteers, and this is the path where the user has already asked.
 func (s *Service) Briefing(ctx context.Context) (string, error) {
 	set := s.settings()
 	if !set.Enabled {
 		return DisabledSentence, nil
 	}
-	since, ok := s.standing(set)
+	since, ok := s.window(set)
 	if !ok {
-		return NoAbsenceSentence, nil
+		return NoRecordSentence, nil
 	}
 	composed, err := s.compose(ctx, since, s.budget, "ask")
 	if err != nil {
@@ -469,15 +527,62 @@ func (s *Service) View(ctx context.Context) (Composed, error) {
 	if !set.Enabled {
 		return Composed{Disabled: true, Headline: DisabledSentence}, nil
 	}
-	since, ok := s.standing(set)
+	since, ok := s.window(set)
 	if !ok {
-		return Composed{NoAbsence: true, Headline: NoAbsenceSentence}, nil
+		return Composed{NoRecord: true, Headline: NoRecordSentence}, nil
 	}
 	return s.compose(ctx, since, s.budget, "window")
 }
 
-// standing reports the absence a briefing would be about — and it DERIVES
-// that answer rather than only remembering one (#188).
+// window is the stretch of time an explicit ask is about. It is the one place
+// the ask path and the offer path part company (#190): the offer waits for
+// `briefing.after_hours`, and this does not consult it except to decide which
+// of two candidate stretches is the news.
+//
+// Four readings, in order, and each one is only reached because the ones above
+// it did not apply:
+//
+//  1. A **running absence** — nothing has arrived since lastSeen and the gap
+//     has passed the threshold (#188). It supersedes everything below, for the
+//     reason standingAbsence gives.
+//  2. The **standing absence** an arrival preserved. It outlives the offer on
+//     purpose, because the offer promised a briefing about *that* night and the
+//     user may take it up minutes later; a shorter window winning here would
+//     answer "yes, go on" with an account of the last ten seconds.
+//  3. The **plain window** since the user was last here, of any length. Two
+//     stretches are candidates and the longer wins: the one still open
+//     (lastSeen → now) and the one the last arrival closed (priorSeen →
+//     lastSeen). Immediately after an arrival the open one is microseconds old
+//     and the closed one is the lunch the user has just come back from; hours
+//     later, with nobody here, it is the other way round. Comparing their
+//     lengths picks the stretch the user means at both ends of that, and does
+//     it without a floor deciding what counts as "just arrived" — the ask path
+//     has no floor anywhere, by design.
+//  4. Nothing at all: no seed, no arrival, nobody ever here. There is no window
+//     to measure and none is invented — the same conservative direction #188
+//     and #150 both took, and the one a fresh install depends on.
+func (s *Service) window(set Settings) (time.Time, bool) {
+	// The clock is read before the lock, like settings, so no caller-supplied
+	// function ever runs while this service's mutex is held.
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if since, ok := s.standingAbsence(set, now); ok {
+		return since, true
+	}
+	if s.lastSeen.IsZero() {
+		return time.Time{}, false
+	}
+	if !s.priorSeen.IsZero() && s.lastSeen.Sub(s.priorSeen) > now.Sub(s.lastSeen) {
+		return s.priorSeen, true
+	}
+	return s.lastSeen, true
+}
+
+// standingAbsence reports the absence — in the threshold's sense of the word —
+// that a briefing would be about, and it DERIVES that answer rather than only
+// remembering one (#188). It is called with s.mu held and never reads the
+// clock itself, so its two inputs are exactly the two an absence is made of.
 //
 // An absence is a fact about two timestamps, the last sighting and now. It was
 // originally implemented as an event that had to be witnessed: only Arrive
@@ -508,12 +613,11 @@ func (s *Service) View(ctx context.Context) (Composed, error) {
 // Both readings survive the offer being spent: the offer is one sentence, the
 // absence is the subject, and the subject stands until the next absence
 // replaces it.
-func (s *Service) standing(set Settings) (time.Time, bool) {
-	// The clock is read before the lock, like settings, so no caller-supplied
-	// function ever runs while this service's mutex is held.
-	now := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+//
+// Since #190 this is no longer the whole of what an ask composes over — an ask
+// that finds no absence here still gets the plain window, see window — but it
+// is still the whole of what the *threshold* has an opinion about.
+func (s *Service) standingAbsence(set Settings, now time.Time) (time.Time, bool) {
 	if since, ok := runningAbsence(s.lastSeen, now, set); ok {
 		return since, true
 	}
@@ -547,6 +651,40 @@ func runningAbsence(lastSeen, now time.Time, set Settings) (time.Time, bool) {
 	}
 	return lastSeen, true
 }
+
+// coverage is the briefing's one admission about ITSELF: this process began
+// part-way through the window it is reporting on, so one of its sources cannot
+// account for the whole of it (#190).
+//
+// It matters most in exactly the case where it is least visible. Four of the
+// five sources are durable — the reminder store, the focus threads, the
+// conversation archive, the session transcripts — so after a restart they
+// answer for the whole window with complete confidence. The fifth, Jarvix's
+// own activity record, is an in-memory ring that died with the previous
+// process (#70). A briefing whose whole window predates the restart therefore
+// reads as a composed, confident "nothing happened" with the one thing that
+// could not be checked left unsaid. That is not an omission a listener can
+// detect, which is the definition of the kind this package refuses to make.
+//
+// So it is said up front rather than appended to the activity line, where it
+// used to live: attached there it only appeared when the activity source had
+// something to say, which is precisely not the case it was needed for.
+func (s *Service) coverage(since time.Time) string {
+	s.mu.Lock()
+	startedAfter := s.startedAfter
+	s.mu.Unlock()
+	if startedAfter == nil || !startedAfter(since) {
+		return ""
+	}
+	return restartSentence
+}
+
+// restartSentence names the shortfall and, just as importantly, its edges: a
+// listener who is told only "some of this is missing" has been handed a doubt
+// rather than a fact, and cannot tell which half of the briefing to trust.
+const restartSentence = "I restarted partway through this stretch, so my own record of what I ran " +
+	"only goes back to then; your reminders, focus threads, conversations and AI sessions are " +
+	"kept on disk, so those are complete."
 
 // read runs every source under one context, turning a refusal into an
 // Unavailable line rather than a hole. A source may return at most one line

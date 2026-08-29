@@ -1737,11 +1737,23 @@ were added to. It does not and will not watch your machine — no keystrokes, no
 window history, no browsing, no process list. That boundary is the reason the
 feature exists in this shape, and ADR 0050 records it so it stays.
 
+**Asking always answers.** `after_hours` decides when Jarvix *volunteers* that
+sentence; it has never been a rule about when an account exists. Ask — by
+voice, or with the button — and the sources are read over however long it has
+been since you were last here, a minute or a night, and what they hold is
+reported. There is no gap too short to be told the truth about.
+
 What the design guarantees:
 
 - **Nothing happened means nothing is said.** No offer is ever appended, and
-  an explicit ask gets "Nothing while you were away" — never a manufactured
-  report, and no model call to manufacture one with.
+  an explicit ask gets "Nothing since you were last here, an hour ago" — the
+  interval named, never a manufactured report, and no model call to manufacture
+  one with.
+- **It admits what it cannot cover.** Jarvix's record of what *it* ran lives in
+  memory and dies when it restarts; your reminders, focus threads,
+  conversations and AI sessions are on disk. When the period you are asking
+  about began before Jarvix last started, it says so up front rather than
+  letting the durable half read as a confident "nothing happened".
 - **A source it could not read is named**, never quietly dropped: you can tell
   "nothing happened there" from "I did not look".
 - **The prose is checked.** The opening sentence may be worded by the model,
