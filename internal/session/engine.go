@@ -172,6 +172,11 @@ type Options struct {
 	// and a matched briefing phrase an honest spoken refusal, the same
 	// disabled-means-absent rule the other collaborators follow.
 	Returning Returning
+	// Operating is the situation report's seam (#196, ADR 0061). Nil — a
+	// daemon built without the situation service — makes a matched situation
+	// phrase an honest spoken refusal, the same disabled-means-absent rule
+	// every other collaborator here follows.
+	Operating Operating
 }
 
 // Engine owns the session lifecycle: one active session at a time, one

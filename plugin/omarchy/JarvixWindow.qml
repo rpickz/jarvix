@@ -76,6 +76,14 @@ FloatingWindow {
   readonly property var tabs: [
     { id: "chat", label: "Chat" },
     { id: "activity", label: "Activity" },
+    // situation — the situation report (#196, ADR 0061): one composed answer
+    // to "where are we?", every line linking to the thing it describes
+    // through the provenance navigation. Self-contained in
+    // JarvixSituationTab.qml (own socket, request ids 600-699,
+    // situation.get). Beside Activity rather than inside it: the Activity tab
+    // is a live chronological ring of one row per event, and this is the
+    // summary of the machine that ring is a record of.
+    { id: "situation", label: "Situation" },
     // focus — the focus threads (#123, ADR 0041): threads with anchors,
     // parked thoughts and the live timeboxed session, self-contained in
     // JarvixFocusTab.qml (own socket, request ids 500–599, focus.list /
@@ -2639,6 +2647,15 @@ FloatingWindow {
       knowledgeReveal = ref
       openTab("knowledge")
       revealKnowledgeRow()
+      return
+    }
+    if (tab === "automations") {
+      // The Automations tab holds several listings — schedules, reminders,
+      // spoken commands — and no single "showing an item" state to set, so
+      // this opens the tab and stops there. The daemon labels the action
+      // accordingly ("Show in Automations"), which is why this is a weaker
+      // promise rather than a broken one.
+      openTab("automations")
     }
   }
 
@@ -4090,6 +4107,23 @@ FloatingWindow {
       anchors.right: parent.right
       anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
       anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+    }
+
+    // The Situation tab (#196): self-contained in its own file with its own
+    // daemon socket, on the Focus tab's terms — the window only places it,
+    // gates its connection on visibility, and answers its one signal, which
+    // is a navigation only the window that owns the tabs can perform.
+    JarvixSituationTab {
+      id: situationScreen
+      visible: win.socketReady && win.currentTab === "situation"
+      active: win.visible && win.currentTab === "situation"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+      onNavigate: function(tab, ref) { win.revealIn(tab, ref) }
     }
 
     // The settings screen fills the content pane while its tab is current.

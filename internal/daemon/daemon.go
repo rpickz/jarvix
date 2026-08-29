@@ -31,6 +31,7 @@ import (
 	"github.com/rpickz/jarvix/internal/quiesce"
 	"github.com/rpickz/jarvix/internal/reminders"
 	"github.com/rpickz/jarvix/internal/session"
+	"github.com/rpickz/jarvix/internal/situation"
 	"github.com/rpickz/jarvix/internal/statehold"
 	"github.com/rpickz/jarvix/internal/stt"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -136,6 +137,13 @@ type Daemon struct {
 	// window's full version. It owns no goroutine and no clock — everything
 	// it does happens while the user is demonstrably back.
 	briefing *briefing.Service
+	// situation composes the situation report (#196, ADR 0061) — the one
+	// answer to "where are we?". Always present and construction-wired on the
+	// briefing service's exact terms: the engine carries it as its operating
+	// seam, the model's tool relays it, and situation.get serves the window's
+	// full version. It owns no goroutine and no clock; everything it does
+	// happens because somebody asked.
+	situation *situation.Service
 	// started is when this process began serving. The briefing reads it to
 	// admit that its in-memory activity record cannot cover an absence that
 	// began before the restart — a shortfall the ring's own doc comment names
@@ -673,6 +681,12 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// only exists once the daemon does, including the live config the three
 	// briefing.* settings are read from.
 	briefingSvc := newBriefingService(convs, bus, logger)
+	// The situation report (#196, ADR 0061) is built here for the same reason
+	// again: the engine carries it (Options.Operating) and cannot be built
+	// without it. Its six sources and its provider seam bind after the daemon
+	// exists (bindSituation) — everything a report reads only exists once the
+	// daemon does.
+	situationSvc := newSituationService(convs, bus, logger)
 	// The approval store (#162, ADR 0053) is built before the engine for the
 	// briefing service's exact reason: the engine carries it
 	// (Options.Approvals, the read-only half that answers "what have I
@@ -682,6 +696,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	approvalSvc := newApprovalStore(cfg.Tools.Policy.ShellAllow, paths.ApprovalsFile(), logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, screens, logger)
 	engOpts.Returning = briefingSvc
+	engOpts.Operating = situationSvc
 	engOpts.Approvals = &approvalsVoice{store: approvalSvc}
 	// "Where did that come from?" (#168) is answered by the same resolver the
 	// window's panel uses, which lives on the daemon — so the composer is
@@ -789,6 +804,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		memory: book, vocabulary: vocab, knowledge: feeds, focus: focusSvc,
 		reminders:     remindersSvc,
 		briefing:      briefingSvc,
+		situation:     situationSvc,
 		started:       time.Now(),
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
@@ -816,6 +832,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	d.bindFocus()
 	d.bindReminders()
 	d.bindBriefing()
+	d.bindSituation()
 	// The return-briefing tool (#150, ADR 0050): the model's path for the
 	// natural phrasings the deterministic grammar deliberately does not claim
 	// ("did anything happen overnight?"). Always registered — the service
@@ -823,6 +840,13 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// user's own work, answered to the user, at their own machine.
 	registry.Register(tools.NewBriefing(tools.BriefingOptions{Service: briefingSvc, Log: logger}))
 	logger.Info("tool enabled", "component", "tools", "tool", tools.BriefingToolName)
+	// The situation-report tool (#196, ADR 0061): the model's path for the
+	// phrasings the deterministic grammar deliberately does not claim ("how's
+	// the machine looking?", "anything blocking me?"). Always registered and
+	// allow-tier by built-in default, on the briefing tool's exact terms — it
+	// is a read of the user's own machine, answered to the user, at it.
+	registry.Register(tools.NewSituation(tools.SituationOptions{Service: situationSvc, Log: logger}))
+	logger.Info("tool enabled", "component", "tools", "tool", tools.SituationToolName)
 	// The automation scheduler (ADR 0032), built after the daemon exists
 	// because its fire path is the daemon's: policy pre-check, refusal
 	// notification, session entry. Nothing fires before Run starts it.
@@ -1305,6 +1329,7 @@ func (d *Daemon) registerMethods() {
 	d.registerOverlayMethods()
 	d.registerReminderMethods()
 	d.registerBriefingMethods()
+	d.registerSituationMethods()
 	d.registerEntryAdminMethods()
 	d.registerStateMethods()
 }

@@ -153,6 +153,11 @@ type Match struct {
 	// the listing above it is a flag rather than an argv — nothing about
 	// what happened while the user was away can live in this table.
 	Briefing bool
+	// Situation marks "what's going on" (#196, ADR 0061): the engine answers
+	// with the situation report's one composed account of the machine as it
+	// stands. A flag rather than an argv, for the briefing's exact reason —
+	// nothing about the state of the machine can live in this table.
+	Situation bool
 	// Focus is the focus-thread action this utterance asks for (#123),
 	// FocusNone for every other intent. The engine performs none of these
 	// itself — it hands the whole match to the focus runner, which owns the
@@ -347,6 +352,8 @@ type rule struct {
 	monitorNames bool
 	// briefing marks the "what did i miss" rules (#150).
 	briefing bool
+	// situation marks the "what's going on" rules (#196).
+	situation bool
 	// focus and focusWindows carry a focus rule's action (#123); focus is
 	// FocusNone for every other rule.
 	focus        FocusAction
@@ -570,6 +577,22 @@ func New(opts Options) (*Router, error) {
 		r.add(&rule{name: BriefingIntentName, pattern: p, briefing: true})
 	}
 	r.names = append(r.names, BriefingIntentName)
+	// The situation report (#196, ADR 0061) compiles on exactly the same
+	// terms as the briefing above, and for the same reason: a flag-carrying
+	// built-in whose answer is composed elsewhere, and a fixed phrase with
+	// one right outcome that ADR 0017 forbids spending a provider round-trip
+	// on.
+	for _, raw := range situationPatterns {
+		p, err := compile(raw)
+		if err != nil {
+			// Unreachable for the shipped list; a bad pattern added later must
+			// fail compilation, not silently never match.
+			return nil, fmt.Errorf("situation pattern %q: %w", raw, err)
+		}
+		builtinNames[p.key()] = SituationIntentName
+		r.add(&rule{name: SituationIntentName, pattern: p, situation: true})
+	}
+	r.names = append(r.names, SituationIntentName)
 	// The fixed half of the focus grammar (#123) compiles with the built-ins
 	// and enters the same collision world: a custom intent or routine
 	// claiming "take a break" is a config error naming both owners. The
@@ -995,6 +1018,36 @@ var windowNamesPatterns = []string{
 // and the intent.executed event.
 const BriefingIntentName = "briefing.speak"
 
+// SituationIntentName identifies the situation report (#196, ADR 0061) in
+// logs and the intent.executed event.
+const SituationIntentName = "situation.speak"
+
+// situationPatterns are the utterances that ask for the situation report.
+// Fully literal, like every built-in: a near-synonym is a code change with a
+// test, not a similarity threshold.
+//
+// The list is anchored on the whole-machine question and takes no free text.
+// "What's going on with the deploy" is a question for the model about one
+// thing, not a request for this account, and ambiguity belongs to the model —
+// which reaches the same answer for every phrasing this table does not claim,
+// through the situation tool. That is also why the bare word "status" is not
+// here: it is one word, it is the most likely thing to be said as part of a
+// longer sentence STT has clipped, and claiming it would make a whole class of
+// half-heard questions answer with a report nobody asked for.
+var situationPatterns = []string{
+	"whats going on",
+	"what is going on",
+	"whats the situation",
+	"what is the situation",
+	"where are we",
+	"where are we at",
+	"where are things",
+	"wheres everything at",
+	"how are we doing",
+	"give me a status report",
+	"status report",
+}
+
 // briefingPatterns are the utterances that ask for the return briefing.
 // Fully literal, like every built-in: a near-synonym is a code change with a
 // test, not a similarity threshold. The list is deliberately anchored on
@@ -1198,6 +1251,7 @@ func (ru *rule) match(fields []string) (Match, bool) {
 		WindowNames:  ru.windowNames,
 		MonitorNames: ru.monitorNames,
 		Briefing:     ru.briefing,
+		Situation:    ru.situation,
 		Focus:        ru.focus, FocusWindows: ru.focusWindows,
 		Reminder:       ru.reminder,
 		VocabList:      ru.vocabList,

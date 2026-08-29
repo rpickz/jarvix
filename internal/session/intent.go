@@ -160,6 +160,8 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 		ack, runErr = e.runMonitorNameList(s)
 	case m.Briefing:
 		ack, runErr = e.runBriefing(s)
+	case m.Situation:
+		ack, runErr = e.runSituation(s)
 	case m.Focus != intent.FocusNone:
 		var alive bool
 		ack, runErr, alive = e.runFocus(s, m)
@@ -221,16 +223,23 @@ func (e *Engine) runIntent(s *sess, m intent.Match, utterance string, started ti
 			// action happened. The ear stays silent; the history says "Done."
 			recorded = "Done."
 		}
-		if m.Briefing && runErr == nil {
-			// The composed briefing is transient (#150, ADR 0050): it is not
-			// written to any store, and it does not become conversation
-			// memory. What is recorded is that a briefing was given — the
-			// silent-script's shape above, for a different reason: the
-			// exchange belongs in the record, its content does not. The
-			// refusal path is exempt because "the return briefing is not
+		if (m.Briefing || m.Situation) && runErr == nil {
+			// A composed briefing (#150, ADR 0050) and a composed situation
+			// report (#196, ADR 0061) are both transient: neither is written
+			// to any store, and neither becomes conversation memory. What is
+			// recorded is that it was given — the silent-script's shape above,
+			// for a different reason: the exchange belongs in the record, its
+			// content does not. A report has the stronger claim on this rule of
+			// the two, because it describes a moment and a described moment
+			// read back later is stated with a confidence it has lost.
+			//
+			// The refusal path is exempt because "the return briefing is not
 			// available on this daemon" is an ordinary spoken failure with
 			// nothing to keep out of anything.
 			recorded = briefingRecord
+			if m.Situation {
+				recorded = situationRecord
+			}
 		}
 		e.commitTurn(s, utterance, recorded)
 	}
