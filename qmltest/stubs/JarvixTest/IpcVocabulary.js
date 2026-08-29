@@ -130,6 +130,7 @@ var events = {
   "focus.recap": true,
   "focus.skipped": true,
   "intent.executed": true,
+  "jobs.changed": true,
   "knowledge.injected": true,
   "knowledge.updated": true,
   "memory.entry_changed": true,

@@ -68,6 +68,7 @@ var natures = map[string]Nature{
 	"advisor.ask":            NatureReadOnly,
 	"thinking.ask_deep":      NatureReadOnly,
 	"desktop.release_window": NatureReadOnly,
+	"jobs.status":            NatureReadOnly,
 
 	// Changes Jarvix can put back.
 	"config.write_entry":    NatureReversible,
@@ -83,6 +84,20 @@ var natures = map[string]Nature{
 	"desktop.name_window":   NatureReversible,
 	"desktop.manage_window": NatureReversible,
 	"artifact.create":       NatureReversible,
+
+	// The job verbs (#200, ADR 0065). Each rewrites one small TOML document
+	// whole, so "the previous bytes" is a complete and exact reversal, exactly
+	// as it is for the memory book and the reminders.
+	//
+	// What the reversal puts back is the JOB, not what the job did. Undoing a
+	// jobs.start removes the job; it does not un-run the steps it had already
+	// taken, and those carry their own records under the job's id — which is
+	// what makes "undo the tidy job" a different and larger request than "undo
+	// starting the tidy job". The distinction is real, it is visible in the
+	// account, and it is why these are reversible rather than one-way.
+	"jobs.start":  NatureReversible,
+	"jobs.stop":   NatureReversible,
+	"jobs.answer": NatureReversible,
 
 	// One-way.
 	"shell.run":            NatureIrreversible,

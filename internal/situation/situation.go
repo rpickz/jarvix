@@ -199,6 +199,11 @@ const (
 	SourceSchedules = "schedules"
 	SourceActivity  = "activity"
 	SourceWindows   = "windows"
+	// SourceJobs is the work that outlives a conversation (#200, ADR 0065).
+	// It arrived exactly as this package's doc comment predicted it would: one
+	// more entry in this list, one more Source in the daemon's bind, and not a
+	// line of the composer, the ordering or the speech budget changed.
+	SourceJobs = "jobs"
 )
 
 // Budget and cache bounds. Both are wall-clock ceilings on one user-visible

@@ -127,9 +127,12 @@ type Action struct {
 	// Target names what was touched, for the account's provenance column: a
 	// file path, a window's description, an artifact's name.
 	Target string
-	// Job is the piece of work this action belonged to (#200). Empty today,
-	// because jobs do not exist yet — it is here so that grouping is a query
-	// the day they land rather than a migration. See ADR 0064.
+	// Job is the piece of work this action belonged to (#200, ADR 0065).
+	// Empty for anything the user asked for in a conversation; set for
+	// anything a job did. It is filled in by Note from the job id the runner
+	// installs on the tool context (WithJob), so no tool sets it by hand and
+	// grouping is a query rather than a migration, exactly as ADR 0064
+	// designed it.
 	Job string
 	// Provenance are the #168 references the action touched, stored as
 	// references and never as content, exactly as internal/provenance does.
@@ -311,6 +314,37 @@ func RecorderFrom(ctx context.Context) Recorder {
 	return r
 }
 
+type jobKey struct{}
+
+// WithJob marks a context as belonging to one job (#200, ADR 0065), so every
+// action recorded under it carries that job's id.
+//
+// It is the second half of the arrangement WithRecorder describes and it rides
+// the same seam for the same reason: the twelve places that build an Action are
+// spread across six packages, none of which should have to know that jobs
+// exist. A job runner installs its id once, on the context it dispatches
+// through, and every record the step produces is grouped by construction. ADR
+// 0064 named this as the one thing #200 had to supply, and this is it.
+//
+// An empty id installs nothing, so a session's ordinary tool call is the same
+// context it always was and its records carry no job — which is the truth: it
+// was not part of one.
+func WithJob(ctx context.Context, id string) context.Context {
+	if strings.TrimSpace(id) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, jobKey{}, id)
+}
+
+// JobFrom returns the job id installed on ctx, empty when there is none.
+func JobFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(jobKey{}).(string)
+	return id
+}
+
 // Note records one action. Safe to call from anywhere: with no recorder
 // installed it does nothing, so a tool exercised by a unit test or run
 // outside a turn behaves exactly as it did before this feature existed.
@@ -321,6 +355,13 @@ func Note(ctx context.Context, a Action) Record {
 	r := RecorderFrom(ctx)
 	if r == nil {
 		return Record{}
+	}
+	// The job id is read here rather than set by each caller, which is the
+	// whole point of it being ambient: no tool has to learn what a job is, and
+	// a tool that already knows (because it was handed one explicitly) keeps
+	// its own answer.
+	if a.Job == "" {
+		a.Job = JobFrom(ctx)
 	}
 	rec, err := r.Append(a)
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	"github.com/rpickz/jarvix/internal/config"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/jobs"
 	"github.com/rpickz/jarvix/internal/session"
 	"github.com/rpickz/jarvix/internal/statehold"
 	"github.com/rpickz/jarvix/internal/tools"
@@ -192,6 +193,9 @@ func (d *Daemon) registerUndoMethods() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if strings.TrimSpace(p.Job) != "" {
+			if err := d.settleBeforeUndo(p.Job); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
+			}
 			out, err := d.undoer.JobActions(ctx, p.Job)
 			if err != nil {
 				return nil, ipc.Errorf(ipc.CodeInvalidParams, "%v", err)
@@ -211,6 +215,45 @@ func (d *Daemon) registerUndoMethods() {
 		}
 		return undoOutcomeReport(out), nil
 	})
+}
+
+// settleBeforeUndo answers the second question ADR 0064 left to #200: **may a
+// job that is still running be undone?**
+//
+// No. A reversal that ran underneath a live runner would be racing the thing it
+// is reversing — restoring a file the next step is about to rewrite, moving a
+// window the job is about to move back — and the account would end up
+// describing a state the machine was never in. "I can't tell whether that
+// stuck" is exactly the answer this feature refuses to produce, so the request
+// is refused instead, with the thing to do about it.
+//
+// A PARKED job is different and is allowed, because it is not acting: it is
+// waiting for a person, and that person has just said something better than an
+// answer. Undoing it stops it, and must — resuming from a checkpoint whose
+// effects have been reversed would be resuming into a world the checkpoint does
+// not describe.
+//
+// A job id nothing recognises passes straight through: the account is asked, and
+// answers honestly that it holds nothing for it.
+func (d *Daemon) settleBeforeUndo(ref string) error {
+	if d.jobStore == nil {
+		return nil
+	}
+	job, err := d.jobStore.Find(ref)
+	if err != nil {
+		return nil
+	}
+	switch job.State {
+	case jobs.Ready, jobs.Running:
+		return fmt.Errorf("%s is still working; stop it first and then I can put back what it did",
+			job.Name)
+	case jobs.Parked:
+		if _, err := d.jobRunner.Stop(job.ID,
+			"You asked me to undo what it had done, so I stopped it first."); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // undoViewReport renders the account for the wire.
