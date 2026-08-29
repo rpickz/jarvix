@@ -155,12 +155,38 @@ func (e *Engine) FinishWake(id string, rec audio.Recording, spoken time.Duration
 // transcript otherwise, and "I didn't catch that" is a better answer than a
 // session that fails for no visible reason.
 func stripWakeWord(transcript, word string, aliases []string) string {
+	fields, n, ok := wakeWordPrefix(transcript, word, aliases)
+	if !ok {
+		return transcript
+	}
+	rest := strings.Join(fields[n:], " ")
+	if strings.TrimSpace(rest) == "" {
+		return transcript
+	}
+	return rest
+}
+
+// wakeWordPrefix finds the summons at the front of a transcript: the split
+// fields, how many of them the name (or an accepted alias) occupies, and
+// whether one was found at all.
+//
+// It is separated from stripWakeWord because two different questions are
+// asked of the same answer, and both must be answered by the same code. The
+// engine asks "what is left after the summons?" — stripWakeWord, above. The
+// voice-corpus harness (#143) asks the prior question: did whisper write
+// something this matcher accepts *as* the name? For a recording that is only
+// the word "Jarvix" those diverge, because stripWakeWord deliberately leaves
+// a name-only utterance whole — so a harness reading its return value alone
+// could not tell "the name was recognised" from "nothing matched", which is
+// precisely the distinction issue #83 is about. A second implementation of
+// the alias comparison would be the one thing worse than that.
+func wakeWordPrefix(transcript, word string, aliases []string) (fields []string, n int, ok bool) {
 	targets := make([][]string, 0, 1+len(aliases))
 	if w := foldedWords(word); len(w) > 0 {
 		targets = append(targets, w)
 	}
 	if len(targets) == 0 {
-		return transcript
+		return nil, 0, false
 	}
 	for _, alias := range aliases {
 		if w := foldedWords(alias); len(w) > 0 {
@@ -172,20 +198,16 @@ func stripWakeWord(transcript, word string, aliases []string) string {
 	// it — leaving "Smith, open the window" would be worse than either.
 	sort.SliceStable(targets, func(i, j int) bool { return len(targets[i]) > len(targets[j]) })
 
-	fields := strings.Fields(transcript)
+	fields = strings.Fields(transcript)
 	for start := 0; start < len(fields) && start < 2; start++ {
 		for _, target := range targets {
 			if !wordsMatchAt(fields, start, target) {
 				continue
 			}
-			rest := strings.Join(fields[start+len(target):], " ")
-			if strings.TrimSpace(rest) == "" {
-				return transcript
-			}
-			return rest
+			return fields, start + len(target), true
 		}
 	}
-	return transcript
+	return fields, 0, false
 }
 
 // wordsMatchAt reports whether the target's words appear in fields starting
