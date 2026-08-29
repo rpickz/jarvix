@@ -19,6 +19,7 @@ import (
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/launchkind"
+	"github.com/rpickz/jarvix/internal/managed"
 	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/placement"
 )
@@ -142,6 +143,22 @@ type Desktop struct {
 	// Nil is a daemon with no nicknames, which behaves exactly as one did
 	// before #180 — a nil *monitors.Store answers every lookup "not known".
 	screens *monitors.Store
+	// managed is the managed-window store (#197): the windows Jarvix opened
+	// and the ones the user handed over. Nil is a daemon that manages
+	// nothing, which behaves exactly as one did before #197 — every window
+	// is the user's, and the three managed-window tools are not registered.
+	managed *managed.Store
+	// terminals is the terminal-class list ([tools.typing] terminal_classes),
+	// shared with the typing tools so a window that counts as a command line
+	// when typing counts as one when it is handed over. Empty uses the
+	// shipped list.
+	terminals []string
+	// typingEnabled reports whether the typing tools exist on this daemon
+	// ([tools.typing] enable). Nil means "assume they do", the pre-#197
+	// reading; the managed-window sentences consult it so a build that
+	// cannot type says so when a window is handed over rather than when
+	// something is finally typed.
+	typingEnabled func() bool
 
 	mu sync.Mutex
 	// inventory is the last capture and when it was taken.
@@ -195,6 +212,15 @@ type DesktopOptions struct {
 	// Screens is the monitor-nickname store (#180). Nil leaves every monitor
 	// reference resolving connector names and "current" only.
 	Screens *monitors.Store
+	// Managed is the managed-window store (#197, ADR 0062). Nil leaves every
+	// window unmanaged and the three managed-window tools unregistered.
+	Managed *managed.Store
+	// TerminalClasses is the window-class list whose contents are a command
+	// line ([tools.typing] terminal_classes). Empty uses the shipped list.
+	TerminalClasses []string
+	// TypingEnabled reports whether this daemon has the typing tools
+	// ([tools.typing] enable). Nil assumes it does.
+	TypingEnabled func() bool
 	// Log records each action. Nil uses slog.Default().
 	Log *slog.Logger
 
@@ -224,8 +250,11 @@ func NewDesktop(opts DesktopOptions) *Desktop {
 			Reserved:    ReservedWindowWords(),
 			PhraseOwner: opts.PhraseOwner,
 		}),
-		screens: opts.Screens,
-		pending: make(map[string]pendingTarget),
+		screens:       opts.Screens,
+		managed:       opts.Managed,
+		terminals:     append([]string(nil), opts.TerminalClasses...),
+		typingEnabled: opts.TypingEnabled,
+		pending:       make(map[string]pendingTarget),
 	}
 	if d.launcher == nil {
 		d.launcher = &execLauncher{scrubEnv: opts.ScrubEnv}
@@ -267,10 +296,15 @@ const (
 	verbName
 )
 
-// Tools returns the seven window tools, in the order they are registered and
+// Tools returns the window tools, in the order they are registered and
 // therefore offered to the model: read first, then act.
+//
+// The three managed-window verbs (#197) are appended only when this daemon
+// has a store for them. A daemon without one manages nothing, and offering
+// the model a "take control" tool that can only refuse would be inviting a
+// call that cannot work.
 func (d *Desktop) Tools() []Tool {
-	return []Tool{
+	tools := []Tool{
 		&windowTool{d: d, verb: verbList},
 		&windowTool{d: d, verb: verbListApps},
 		&windowTool{d: d, verb: verbFocus},
@@ -279,6 +313,10 @@ func (d *Desktop) Tools() []Tool {
 		&windowTool{d: d, verb: verbLaunch},
 		&windowTool{d: d, verb: verbName},
 	}
+	if d.managed != nil {
+		tools = append(tools, d.ManagedTools()...)
+	}
+	return tools
 }
 
 // Names returns the tool names, for the daemon's startup log.
@@ -928,6 +966,24 @@ func (d *Desktop) launch(ctx context.Context, app string) (string, error) {
 		d.publishRefusal("launch", started, "it would not start")
 		return fmt.Sprintf("%s would not start. Tell the user in one short sentence that it failed, "+
 			"and do not retry.", started), nil
+	}
+	// A window Jarvix opened is managed from birth (#197), and its identity is
+	// how it is recognised: the class the terminal table asked the window to
+	// carry (#198). The claim is recorded now, before the window exists —
+	// there is nothing else to record it against — and becomes a managed
+	// record the first time an inventory shows a window wearing the class.
+	//
+	// An empty identity claims nothing, and that is the honest answer rather
+	// than a gap: only a terminal-hosted launch is given a class of ours, so
+	// a graphical program opens a window Jarvix has no way to recognise, and
+	// claiming it would mean adopting whichever window happened to appear
+	// next.
+	if err := d.managed.ClaimLaunch(identity, started); err != nil {
+		// The launch happened; only the claim failed. Say so in the journal
+		// and carry on — refusing to report a successful launch because a
+		// state file would not write would be the tail wagging the dog.
+		d.log.Warn("launched window could not be claimed as managed", "component", "tools",
+			"program", started, "identity", identity, "error", err.Error())
 	}
 	d.log.Info("application launched", "component", "tools", "tool", LaunchAppToolName,
 		"app", name, "program", started, "kind", program.Kind.String(),
