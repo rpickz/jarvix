@@ -25,6 +25,11 @@ func TestDangerousSettingsAreExactlyTheEnumeratedSet(t *testing.T) {
 		"tools.artifacts",
 		"tools.desktop",
 		"tools.desktop_apps",
+		// The launch overrides (#194) are dangerous by the tools. prefix, and
+		// deserve it: they decide whether a program is started bare or handed
+		// to a terminal, which is a decision about what actually runs.
+		"tools.launch.graphical_programs",
+		"tools.launch.terminal_programs",
 		"tools.shell",
 		"tools.shell_max_output_kb",
 		"tools.shell_timeout_sec",
