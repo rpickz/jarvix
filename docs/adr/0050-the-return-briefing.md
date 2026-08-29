@@ -109,6 +109,47 @@ the daemon's one unambiguous sighting. Anything else available — a window that
 stayed open, a process that kept running — is the surveillance this ADR
 forbids.
 
+**But a sighting is only half of it, and the original wording of this section
+elided the other half.** It said the absence *is detected on the next arrival*,
+which read as a rule about *how* an absence comes to exist rather than about
+where the one input comes from — and the implementation followed it literally.
+`Arrive` compared the two timestamps; every reader returned only what a
+previous arrival had stored. So the daemon could hold a fifteen-hour-old
+watermark from the archive and still answer "you haven't been away long enough"
+to a user who had been away all night, because nothing had *witnessed* the
+night (#188). It was worst on the surface a returning user is most likely to
+touch — the window's "What did I miss?" button — because pressing it involves
+no exchange at all, and it made the feature's behaviour depend on the order of
+the user's first two actions: speak-then-ask worked, ask-then-speak did not.
+
+The corrected rule:
+
+> **An absence is a fact derivable from two timestamps — the last sighting and
+> now — not an event that has to be witnessed.** Every reader derives it, at
+> the moment it is asked, from the watermark and the clock. Nothing needs to
+> have happened for the daemon to be able to say how long it has been.
+
+An arrival keeps three jobs, and they are the three no reader can do for
+itself. It **ends** the absence, by moving the watermark — the act that makes a
+running absence stop being derivable, which is why nothing else may write that
+field. It **preserves** the absence it just ended, so the briefing is still
+askable once the user is back. And it **arms the one offer**, because an offer
+rides an answer and only an exchange has an answer to ride.
+
+Where the two readings disagree, the *running* absence wins. It is always the
+more recent: the stored one only ever holds a watermark that a later arrival
+superseded, so it began and ended before the running one started. And "the
+absence ended" cannot be true while nothing has arrived to end it — when the
+user is asking, the honest reading is that they are standing in it.
+
+Reading is a read. It moves no watermark, arms no offer, and spends none: an
+absence is still reported once per absence however it was first observed, and
+the "asked once per absence" rule on the offer is untouched. The conservative
+stance is untouched too — an unknown watermark (no archive, nobody ever here)
+yields no absence rather than an enormous one, and a clock that went backwards
+gives a negative gap, which is below any threshold and so reads as no absence,
+exactly as it does on the arrival path.
+
 **A clockfire is not a sighting.** A reminder speaking at three in the morning
 starts a session, commits a turn, and writes to the archive exactly as a
 spoken exchange does; counting it would erase the very night the briefing
@@ -242,6 +283,10 @@ Speaking without being asked is not, so it is opt-in.
 - The offer costs one source read, once per absence, running while the answer
   it will be appended to is still draining out of the speaker. Every other
   exchange pays one interface call and a mutex.
+- Deriving the absence costs a clock read and the same mutex, on the read path
+  only. The alternative — a goroutine that notices the threshold passing — is
+  the timer this design refuses, and it would be strictly worse: it would have
+  to survive suspend, and the wall-clock difference already does, for free.
 - A briefing costs one bounded model call for one sentence. If it fails, the
   facts are read out plainly.
 - The activity ring is in-memory, bounded and lossy, and it dies with the

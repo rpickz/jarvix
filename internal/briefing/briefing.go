@@ -173,6 +173,12 @@ type Options struct {
 // Service holds the one thing this feature has to remember: when the user was
 // last here, and whether a standing absence still owes them an offer.
 //
+// "When the user was last here" is the load-bearing half. An absence is not
+// stored — it is READ OFF that watermark and the clock, whenever anyone asks
+// (#188). Nothing has to have witnessed a night for the daemon to be able to
+// say it was a night; it only has to know when the user was last here, which
+// is precisely what the seed is for.
+//
 // It is not a store. Nothing here is written to disk, and a restart starts
 // again from the seed — which is exactly right, because the seed is the
 // durable record (the conversation archive) and this is a cache of it.
@@ -194,9 +200,15 @@ type Service struct {
 	// Scheduled sessions — a reminder speaking at three in the morning — do
 	// not touch it, because the daemon talking to itself is not the user
 	// being here, and counting it would erase the very absence this measures.
+	//
+	// It is also the whole input to a *running* absence: paired with the clock
+	// it says how long ago the user was last here, which is the question the
+	// feature exists to answer. See standing.
 	lastSeen time.Time
-	// absenceSince is the start of the standing absence: the lastSeen value
-	// the arrival superseded. Zero means there is no absence to report.
+	// absenceSince is the start of an absence that has already ENDED: the
+	// lastSeen value an arrival superseded. Zero means no ended absence is on
+	// record — which is not the same as "no absence", because an absence that
+	// is still running has nothing stored anywhere and is derived instead.
 	absenceSince time.Time
 	// offerDue is the one-shot half. It is set when an absence is detected
 	// and cleared the first time an answer could carry the offer, whether or
@@ -287,6 +299,19 @@ func (s *Service) BindSummarise(summarise func(ctx context.Context, prompt strin
 // I/O, no source read, nothing that could make an ordinary turn wait — which
 // is what lets the engine call it on every exchange.
 //
+// Arrive is no longer how an absence becomes KNOWN — standing derives that
+// from the watermark and the clock (#188) — and the three jobs it kept are
+// the three no reader can do for itself:
+//
+//  1. It **ends** the absence. Moving lastSeen to now is the act that makes a
+//     running absence stop being derivable, which is why nothing else in this
+//     package may write that field.
+//  2. It **preserves** the absence it just ended, in absenceSince, so the
+//     briefing stays askable after the user is back — the subject stands
+//     until the next absence replaces it (ADR 0050).
+//  3. It **arms the one offer**. The offer rides an answer, and only an
+//     exchange has an answer to ride, so only an arrival can owe one.
+//
 // A qualifying gap supersedes any standing offer rather than stacking with
 // it. That is the ticket's rule read literally: an offer belongs to one
 // absence, and after a second night the news is the second night's.
@@ -339,6 +364,16 @@ func afterDuration(set Settings) time.Duration {
 // it is transient like a recap, and committing it here would smuggle into
 // conversation memory exactly what the explicit-ask path is careful to keep
 // out of it.
+//
+// This reader deliberately does NOT derive its absence the way standing does
+// (#188), and the asymmetry is the point rather than an oversight. OfferLine
+// is reachable from one place only: an exchange, whose answer the sentence
+// rides. The engine takes Arrive first on that path and always has, so by the
+// time this runs the watermark is already now and there is no running absence
+// left to derive — the arrival has ended it and stored it. Deriving here would
+// therefore add nothing, and arming an offer from a read would break the one
+// rule this function exists to keep: the question is asked once per absence,
+// and an offer belongs to an answer, not to a glance at the window.
 func (s *Service) OfferLine(ctx context.Context) (line string, transient bool) {
 	set := s.settings()
 	s.mu.Lock()
@@ -413,7 +448,7 @@ func (s *Service) Briefing(ctx context.Context) (string, error) {
 	if !set.Enabled {
 		return DisabledSentence, nil
 	}
-	since, ok := s.standing()
+	since, ok := s.standing(set)
 	if !ok {
 		return NoAbsenceSentence, nil
 	}
@@ -434,23 +469,83 @@ func (s *Service) View(ctx context.Context) (Composed, error) {
 	if !set.Enabled {
 		return Composed{Disabled: true, Headline: DisabledSentence}, nil
 	}
-	since, ok := s.standing()
+	since, ok := s.standing(set)
 	if !ok {
 		return Composed{NoAbsence: true, Headline: NoAbsenceSentence}, nil
 	}
 	return s.compose(ctx, since, s.budget, "window")
 }
 
-// standing reports the absence a briefing would be about. It survives the
-// offer being spent: the offer is one sentence, the absence is the subject,
-// and the subject stands until the next absence replaces it.
-func (s *Service) standing() (time.Time, bool) {
+// standing reports the absence a briefing would be about — and it DERIVES
+// that answer rather than only remembering one (#188).
+//
+// An absence is a fact about two timestamps, the last sighting and now. It was
+// originally implemented as an event that had to be witnessed: only Arrive
+// compared the two, so only an arrival could establish that a night had
+// passed. Every reader that does not follow an arrival — the window's "What
+// did I miss?" button most of all, because pressing it involves no exchange at
+// all — then answered "you haven't been away long enough" however long the
+// real gap was. The user was away ten hours, came back, pressed the button and
+// was told they had not been away. The daemon knew: the seed had put the last
+// exchange in lastSeen and it was fifteen hours old. Nothing consulted it.
+//
+// So the reading is done here, where the question is actually asked, and there
+// are two answers to pick between:
+//
+//   - A **running** absence: nothing has arrived since lastSeen and the gap
+//     has already passed the threshold. "The absence ended" cannot be true
+//     when nothing has arrived to end it — the honest reading is that it is
+//     still standing, and the person asking is standing in it.
+//   - An **ended** absence, in absenceSince, kept by the arrival that closed
+//     it so the briefing is still askable afterwards.
+//
+// A running absence wins, and it is always the more recent of the two: the
+// stored one only ever holds a lastSeen value that a later arrival superseded,
+// so it began — and ended — before the running one started. Preferring it is
+// the same supersession Arrive already performs, applied to a night that has
+// not been witnessed yet.
+//
+// Both readings survive the offer being spent: the offer is one sentence, the
+// absence is the subject, and the subject stands until the next absence
+// replaces it.
+func (s *Service) standing(set Settings) (time.Time, bool) {
+	// The clock is read before the lock, like settings, so no caller-supplied
+	// function ever runs while this service's mutex is held.
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if since, ok := runningAbsence(s.lastSeen, now, set); ok {
+		return since, true
+	}
 	if s.absenceSince.IsZero() {
 		return time.Time{}, false
 	}
 	return s.absenceSince, true
+}
+
+// runningAbsence is the derivation, and it is deliberately a free function
+// over three values rather than a method: an absence is arithmetic on
+// (lastSeen, now, threshold) and nothing else, and writing it where it cannot
+// reach the Service makes that unmissable — in particular it cannot move the
+// watermark, so no read can ever consume the thing it is reading.
+//
+// It applies exactly the tests Arrive applies to a witnessed gap, which is
+// what makes the two paths agree at the boundary rather than merely near it:
+//
+//   - A zero lastSeen means no sighting and no seed, so there is nothing to
+//     measure against. Silence, not invention — the conservative direction
+//     ADR 0050 chose, and the one a fresh install depends on.
+//   - A now that is not after lastSeen is a clock that went backwards. A
+//     negative gap is below any threshold and so reads as no absence, which
+//     is the same answer Arrive gives it.
+func runningAbsence(lastSeen, now time.Time, set Settings) (time.Time, bool) {
+	if lastSeen.IsZero() {
+		return time.Time{}, false
+	}
+	if now.Sub(lastSeen) < afterDuration(set) {
+		return time.Time{}, false
+	}
+	return lastSeen, true
 }
 
 // read runs every source under one context, turning a refusal into an
