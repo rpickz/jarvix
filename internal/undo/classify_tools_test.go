@@ -55,6 +55,9 @@ func TestClassificationsMatchRealToolNames(t *testing.T) {
 		{tools.NameWindowToolName, undo.NatureReversible},
 		{tools.ManageWindowToolName, undo.NatureReversible},
 		{tools.ArtifactToolName, undo.NatureReversible},
+		{tools.JobsStartToolName, undo.NatureReversible},
+		{tools.JobsStopToolName, undo.NatureReversible},
+		{tools.JobsAnswerToolName, undo.NatureReversible},
 
 		{tools.ListWindowsToolName, undo.NatureReadOnly},
 		{tools.ListAppsToolName, undo.NatureReadOnly},
@@ -68,6 +71,7 @@ func TestClassificationsMatchRealToolNames(t *testing.T) {
 		{tools.ReminderListToolName, undo.NatureReadOnly},
 		{tools.BriefingToolName, undo.NatureReadOnly},
 		{tools.SituationToolName, undo.NatureReadOnly},
+		{tools.JobsStatusToolName, undo.NatureReadOnly},
 		{tools.KnowledgeGetToolName, undo.NatureReadOnly},
 		{tools.AdvisorToolName, undo.NatureReadOnly},
 		{tools.DeepToolName, undo.NatureReadOnly},

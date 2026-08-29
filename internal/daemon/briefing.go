@@ -112,6 +112,11 @@ func (d *Daemon) bindBriefing() {
 	d.briefing.BindStartedAfter(func(since time.Time) bool { return d.started.After(since) })
 	shared := &focusOnce{d: d}
 	d.briefing.BindSources(
+		// Jobs lead, for the situation report's reason with more force here: a
+		// job that parked at two in the morning has been stopped all night, and
+		// a briefing that mentioned it fourth would be burying the one thing
+		// that has been waiting longest.
+		briefing.Source{Name: briefing.SourceJobs, Read: d.briefJobs},
 		briefing.Source{Name: briefing.SourceSessions, Read: shared.sessions},
 		briefing.Source{Name: briefing.SourceReminders, Read: d.briefReminders},
 		briefing.Source{Name: briefing.SourceFocus, Read: shared.threads},

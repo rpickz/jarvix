@@ -222,10 +222,10 @@ func (s *Store) Latest() (reversible Record, last Record, ok bool) {
 // Job returns one job's records, oldest first — which is the order they
 // happened in, so a caller reversing them walks the slice backwards.
 //
-// Nothing sets Job today: #200 has not landed. The method exists, is tested,
-// and is the whole of "grouping is available the day jobs land" — see ADR
-// 0064. A job id nothing carries returns an empty slice, which is the honest
-// answer for a job that did nothing rather than an error.
+// The id is set by undo.Note from the job context a runner installs (#200,
+// ADR 0065). A job id nothing carries returns an empty slice, which is the
+// honest answer for a job that did nothing rather than an error — and it is
+// what a job that only read things gets.
 func (s *Store) Job(job string) []Record {
 	if s == nil || strings.TrimSpace(job) == "" {
 		return nil

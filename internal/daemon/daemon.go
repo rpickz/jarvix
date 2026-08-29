@@ -24,6 +24,7 @@ import (
 	"github.com/rpickz/jarvix/internal/hotkey"
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/jobs"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/launchkind"
 	"github.com/rpickz/jarvix/internal/managed"
@@ -156,6 +157,14 @@ type Daemon struct {
 	// full version. It owns no goroutine and no clock; everything it does
 	// happens because somebody asked.
 	situation *situation.Service
+	// jobStore is the work that outlives a conversation and jobRunner is the
+	// supervisor that carries it out (#200, ADR 0065). Always present, for the
+	// account's reason: a job is the strongest thing a user can delegate, and
+	// a switch that turned the record of it off would be a switch that made
+	// unsupervised work unaccountable. The runner owns one always-armed loop
+	// (ADR 0049) and one goroutine per running job, both drained at shutdown.
+	jobStore  *jobs.Store
+	jobRunner *jobs.Runner
 	// started is when this process began serving. The briefing reads it to
 	// admit that its in-memory activity record cannot cover an absence that
 	// began before the restart — a shortfall the ring's own doc comment names
@@ -791,6 +800,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// runs with this store on its context, and a tool that changes something
 	// records it there.
 	account := newUndoStore(paths, bus, gate, logger)
+	// The jobs store and its supervisor (#200, ADR 0065). Built here, before
+	// the engine, because the job tools registered below carry the service and
+	// the service carries these; the planner and the actor bind after the
+	// daemon exists (bindJobs), for the situation service's reason — a job
+	// plans through the live provider and acts through the live registry, and
+	// neither exists yet.
+	jobStore := newJobsStore(paths, bus, gate, logger)
+	jobRunner := jobs.NewRunner(jobs.RunnerOptions{Store: jobStore}, logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, screens, logger)
 	engOpts.Undo = account
 	// The model tiers (#159, ADR 0063). Built here rather than inside
@@ -909,6 +926,8 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		briefing:      briefingSvc,
 		account:       account,
 		situation:     situationSvc,
+		jobStore:      jobStore,
+		jobRunner:     jobRunner,
 		started:       time.Now(),
 		conversations: convs, searcher: searcher,
 		notifier: deps.Notifier, openWindow: deps.OpenWindow,
@@ -959,6 +978,17 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// is a read of the user's own machine, answered to the user, at it.
 	registry.Register(tools.NewSituation(tools.SituationOptions{Service: situationSvc, Log: logger}))
 	logger.Info("tool enabled", "component", "tools", "tool", tools.SituationToolName)
+	// The four job verbs (#200, ADR 0065). Always registered, like the
+	// briefing and the situation report, because the store and the supervisor
+	// always exist. Their tiers are the gate's default rather than a built-in:
+	// starting a job is a grant of authority and asking about it is the
+	// shape a confirmation is FOR, and jobs.start words its own card so the
+	// scope is what the user judges rather than a tool name.
+	d.bindJobs()
+	for _, tool := range tools.NewJobs(tools.JobsOptions{Service: &jobService{d: d}, Log: logger}) {
+		registry.Register(tool)
+		logger.Info("tool enabled", "component", "tools", "tool", tool.Name())
+	}
 	// The automation scheduler (ADR 0032), built after the daemon exists
 	// because its fire path is the daemon's: policy pre-check, refusal
 	// notification, session entry. Nothing fires before Run starts it.
@@ -1075,6 +1105,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	boundaryEvents, unsubscribeBoundary := d.bus.Subscribe()
 	d.post.Go(func() { d.watchReminderBoundaries(ctx, boundaryEvents, unsubscribeBoundary) })
 	d.reminders.Start(ctx)
+	// The job supervisor (#200, ADR 0065) on the same terms: its always-armed
+	// loop and every step in flight derive from the daemon's own context, and
+	// its tracked group is what the jobs shutdown stage drains. Started here
+	// rather than earlier so that the first sweep finds a daemon that can
+	// already plan and act — and its own first pass is what adopts any job
+	// that was mid-step when the last process went away, recording that step
+	// as unverified rather than guessing at it.
+	d.jobRunner.Start(ctx)
 	d.startPTT(ctx)
 	d.startWake(ctx)
 	d.log.Info("jarvixd ready", "component", "daemon", "version", build.Version)
@@ -1143,6 +1181,14 @@ func (d *Daemon) shutdown() {
 		// sessions stage. Anything still owed simply stays pending on disk —
 		// which is exactly what makes the next boot's late fire inevitable.
 		{"reminders", d.remindersDrain, d.remindersInFlight},
+		// The job supervisor after the sessions, for the automation
+		// scheduler's reason with one of its own: a step in flight is a tool
+		// call, and cancelling the daemon's context reaches it. Anything a job
+		// had not finished simply stays on disk at its checkpoint — which is
+		// what makes the next boot pick it up, and what makes the step that
+		// was interrupted come back as unverified rather than as done (ADR
+		// 0065).
+		{"jobs", d.jobsDrain, d.jobsInFlight},
 		// The feed scheduler last of the drains: a draining session may be
 		// mid-Get, and its sync fetch finishes (or is killed by its own
 		// timeout) before this stage is reached. The drain kills any fetch

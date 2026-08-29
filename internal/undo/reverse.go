@@ -219,10 +219,15 @@ func (u *Undoer) Apply(ctx context.Context, id string) (Outcome, error) {
 // JobActions reverses every reversible action a job took, in reverse order,
 // and reports which were reversed and which could not be.
 //
-// Nothing sets a job id yet (#200). The ordering, the per-action report and
-// the "which could not be" half are implemented and tested here so that when
-// jobs land the only new code is the code that fills the field in. See ADR
-// 0064.
+// One confirmation covers the whole job, not one per step (#200, ADR 0065).
+// The manager's decision is "put the deploy job back" — a single judgement
+// about a single piece of work — and asking it twelve times converts one
+// decision into a fatigue test whose twelfth answer is not a judgement. It
+// widens nothing the gate protects: a tool identity the policy denies still
+// refuses per action below, and the clobber guard still refuses per file.
+//
+// A job that is still RUNNING is refused before it gets here, by the caller
+// that owns the job's state. See ADR 0065.
 func (u *Undoer) JobActions(ctx context.Context, job string) (JobOutcome, error) {
 	if u == nil || u.store == nil {
 		return JobOutcome{Job: job, Spoken: "I'm not keeping an account of what I've done."}, nil

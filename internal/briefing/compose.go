@@ -324,6 +324,8 @@ func sourceNoun(source string) string {
 		return "what I've been running"
 	case SourceConversations:
 		return "our conversations"
+	case SourceJobs:
+		return "the jobs I'm working on"
 	default:
 		return source
 	}
@@ -338,6 +340,11 @@ const (
 	SourceFocus         = "focus"
 	SourceActivity      = "activity"
 	SourceConversations = "conversations"
+	// SourceJobs is the work that outlives a conversation (#200, ADR 0065).
+	// A briefing is about a stretch the user was away for, which is precisely
+	// when a job will have parked on something only they can settle — so this
+	// is the source most likely to have news on the morning after.
+	SourceJobs = "jobs"
 )
 
 // list joins clauses the way a sentence would: "a", "a and b", "a, b and c".

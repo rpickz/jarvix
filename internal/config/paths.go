@@ -133,6 +133,20 @@ func (p Paths) ManagedFile() string { return filepath.Join(p.State, "managed.tom
 // a command they would rather not keep.
 func (p Paths) UndoFile() string { return filepath.Join(p.State, "undo.toml") }
 
+// JobsFile is the work that outlives a conversation (#200, ADR 0065): one
+// stanza per direction the user gave, with its scope, its ledger and whatever
+// it is waiting for.
+//
+// State rather than config.toml for the account's exact reason, sharpened. A
+// job is written continuously by Jarvix, without asking, while it works; a job
+// file inside configuration would mean an assistant that edits the permission
+// gate's own document every time it takes a step — and #109's wall exists
+// precisely so it cannot. Hand-editable all the same, and more consequentially
+// than most: a scope in this file is a grant of authority, so a person must be
+// able to read exactly what they granted, and setting a parked job back to
+// ready is how they say "carry on" with a text editor.
+func (p Paths) JobsFile() string { return filepath.Join(p.State, "jobs.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

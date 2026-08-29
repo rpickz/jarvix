@@ -109,7 +109,14 @@ func (d *Daemon) bindSituation() {
 	// focusOnce's mutex already makes safe — the second caller waits for the
 	// first read rather than starting a second one.
 	shared := &focusOnce{d: d}
+	// Jobs lead. They share NeedsYou with the AI sessions and with the
+	// reminders, and within a rank the declaration order decides — so a job
+	// parked on a question it cannot answer itself is said before a session
+	// waiting for a reply, which is the right order for the one rank where
+	// both can appear: the session is a conversation the user can pick up
+	// whenever they like, and the job is work that has stopped dead.
 	d.situation.BindSources(
+		situation.Source{Name: situation.SourceJobs, Read: d.situationJobs},
 		situation.Source{Name: situation.SourceSessions, Read: shared.situationSessions},
 		situation.Source{Name: situation.SourceFocus, Read: shared.situationThreads},
 		situation.Source{Name: situation.SourceReminders, Read: d.situationReminders},

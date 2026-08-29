@@ -159,6 +159,7 @@ var daemonEvents = []string{
 	"focus.recap",
 	"focus.skipped",
 	"intent.executed",
+	"jobs.changed",
 	"knowledge.injected",
 	"knowledge.updated",
 	"memory.entry_changed",
