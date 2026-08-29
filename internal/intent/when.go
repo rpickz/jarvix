@@ -36,7 +36,9 @@ import (
 //	                      the daytime reading (nine in the morning)
 //	in twenty minutes   — relative: "in N minutes/hours", "in an hour",
 //	in an hour and a half "in half an hour", "in two and a half hours",
-//	                      "in one hour and five minutes"
+//	                      "in one hour and five minutes" — and "an" for the
+//	                      one, so the parser reads back every sentence
+//	                      SpokenDuration can say
 
 // When is one parsed time expression: either a relative delay or a clock
 // reading, with the ambiguity of a bare 12-hour hour carried explicitly so
@@ -214,9 +216,16 @@ func parseClockMinutes(words []string) (int, bool) {
 		if n, ok := smallWords[w]; ok && n >= 10 {
 			return n, true // "fifteen" through "nineteen"
 		}
-		if n, ok := tensWords[w]; ok {
+		if n, ok := tensWords[w]; ok && n <= 59 {
 			return n, true // "thirty"
 		}
+		// The bound is not decoration. tensWords runs to "ninety", so without
+		// it "at three sixty" read as 3:60 — and time.Date normalises a minute
+		// of 60 into the next hour rather than rejecting it, so the reminder
+		// was accepted, confirmed as "at four this afternoon", and fired an
+		// hour from where the words pointed. A minute that does not exist has
+		// to be a miss here, where the caller can fall through to the model,
+		// not a silent carry in the calendar (issue #172).
 		return 0, false
 	case 2:
 		if words[0] == "oh" {
@@ -258,7 +267,7 @@ func parseRelative(words []string) (time.Duration, bool) {
 	}
 	// The general reading: N minutes | N hours [and M minutes].
 	for split := 1; split < len(words); split++ {
-		n, ok := parseNumber(words[:split])
+		n, ok := parseCount(words[:split])
 		if !ok || n < 1 {
 			continue
 		}
@@ -286,6 +295,31 @@ func parseRelative(words []string) (time.Duration, bool) {
 		}
 	}
 	return 0, false
+}
+
+// parseCount reads the quantity in a relative expression: a number, or the
+// indefinite article standing in for one.
+//
+// The article is here because of a round-trip defect the property test in
+// when_property_test.go found (issue #172). SpokenDuration renders 65 minutes
+// as "an hour and five minutes" — that is the sentence Jarvix speaks when it
+// confirms a reminder — and the grammar could not read its own words back:
+// parseNumber has no entry for "an", so "in an hour and five minutes" missed
+// the table and fell through to the model, while the synonymous "in one hour
+// and five minutes" matched. A user repeating what the assistant just said
+// took the slower, less certain path for the whole hour-and-something family.
+//
+// It is fixed on the parsing side rather than by making SpokenDuration say
+// "one hour": the parser faces speech, and a person WILL say "an hour and ten
+// minutes". Widening what is understood cannot make any previously-matching
+// utterance match differently — the loop that calls this already tries every
+// split and keeps looking when one fails — so this only ever turns a miss into
+// a hit.
+func parseCount(words []string) (int, bool) {
+	if len(words) == 1 && (words[0] == "a" || words[0] == "an") {
+		return 1, true
+	}
+	return parseNumber(words)
 }
 
 // Resolve applies the next-occurrence rule: the moment this expression means,
@@ -407,8 +441,14 @@ func calendarDays(a, b time.Time) int {
 }
 
 // SpokenDuration renders a delay the way the confirmation says it: "twenty
-// minutes", "an hour", "an hour and a half", "two and a half hours", "one
-// hour and five minutes".
+// minutes", "an hour", "an hour and a half", "two and a half hours", "an hour
+// and five minutes".
+//
+// Every string it can produce parses back through ParseWhen to the same
+// duration, and when_property_test.go pins that for the whole expressible
+// range rather than for a handful of examples. The comment used to say "one
+// hour and five minutes" while the code said "an hour and five minutes", and
+// the parser agreed with the comment — see parseCount.
 func SpokenDuration(d time.Duration) string {
 	if d < time.Minute {
 		d = time.Minute

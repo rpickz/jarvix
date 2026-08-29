@@ -50,8 +50,12 @@ var tensNames = [10]string{
 
 // parseNumber reads a number from consecutive normalized words. It accepts a
 // digit string ("30", "150") or English words ("thirty", "thirty five",
-// "one hundred and fifty", "a hundred"). ok is false for anything else — the
-// caller treats that as no match.
+// "one hundred and fifty", "a hundred", "nine hundred and ninety nine"). ok is
+// false for anything else — the caller treats that as no match.
+//
+// The word forms reach the same 0–maxParsedNumber the digit form does, which
+// is what makes this and SpokenNumber inverse: anything Jarvix can say, it can
+// read back. Per-slot bounds are the caller's job, not this function's.
 func parseNumber(words []string) (int, bool) {
 	if len(words) == 0 {
 		return 0, false
@@ -70,8 +74,26 @@ func parseNumber(words []string) (int, bool) {
 	switch {
 	case rest[0] == "hundred":
 		hundreds, rest = 100, rest[1:]
-	case len(rest) > 1 && (rest[0] == "a" || rest[0] == "one") && rest[1] == "hundred":
-		hundreds, rest = 100, rest[2:]
+	case len(rest) > 1 && rest[1] == "hundred":
+		// "a hundred", "one hundred" … "nine hundred". The multiplier used to
+		// stop at one, which left SpokenNumber and parseNumber — the "one copy
+		// of words-to-numbers" this file exists to be — non-inverse over their
+		// own declared range: SpokenNumber(999) says "nine hundred and
+		// ninety-nine" and nothing here could read it back. The round-trip
+		// property in when_property_test.go is what caught it (issue #172),
+		// through a reminder confirmed as "in nine hundred and ninety-nine
+		// hours" that the user could not repeat.
+		//
+		// Widening what is UNDERSTOOD cannot loosen any slot: every caller
+		// bounds the value afterwards (volume 0–150, workspace 1–10), so
+		// "volume nine hundred" is still a miss — it is now a miss for being
+		// out of range rather than for being unreadable, which is the same
+		// answer arrived at honestly.
+		if n, ok := smallWords[rest[0]]; ok && n >= 1 && n <= 9 {
+			hundreds, rest = n*100, rest[2:]
+		} else if rest[0] == "a" {
+			hundreds, rest = 100, rest[2:]
+		}
 	}
 	if hundreds == 0 {
 		return parseUnder100(words)
