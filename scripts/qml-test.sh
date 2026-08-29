@@ -240,7 +240,33 @@ if [ "${#files[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# A binding loop is a failure of this suite, wherever it comes from (issue
+# #203).
+#
+# Qt reports one as a warning and then carries on, having broken the cycle by
+# dropping a binding — so the window still renders, the tests still pass, and
+# the property that stopped updating is whichever one the engine happened to
+# drop. That is the worst shape a UI defect can take: it is invisible on the
+# machine you are looking at and different on the machine you are not. #203
+# shipped with one for months for exactly that reason, on the transcript's
+# letter spacing, which meant a reading-comfort setting somebody had turned up
+# on purpose could silently stop applying.
+#
+# So the runner reads its own output. This is general rather than a test of
+# the one loop that has been fixed: every future loop, in any file the suite
+# touches, production or harness, fails the run on the push that introduced it
+# — which is the only moment it is cheap to fix. There is no allow-list, and
+# adding one would defeat the point; a loop that is genuinely acceptable does
+# not exist, because "acceptable" would have to mean "we know which binding Qt
+# will drop", and that is exactly what nobody knows.
+#
+# The output is captured rather than streamed so it can be scanned. Each file
+# takes a couple of hundred milliseconds and is printed the moment it
+# finishes, so nothing is lost but the line-by-line trickle.
+BINDING_LOOP='Binding loop detected'
+
 failed=0
+loops=""
 for file in "${files[@]}"; do
   path="$TESTS_DIR/$(basename "$file")"
   if [ ! -f "$path" ]; then
@@ -248,10 +274,41 @@ for file in "${files[@]}"; do
     exit 1
   fi
   echo "--- $(basename "$path")"
-  if ! (cd "$REPO_DIR" && "$RUNNER" -input "$path" -import "$STUBS_DIR"); then
+  output=""
+  if ! output="$(cd "$REPO_DIR" && "$RUNNER" -input "$path" -import "$STUBS_DIR" 2>&1)"; then
     failed=1
   fi
+  printf '%s\n' "$output"
+  # Collected rather than reported here, and reduced to the location that
+  # needs editing: a loop in a ListView delegate is re-reported once per
+  # instantiation and once per test function, so the unfixed transcript
+  # produced forty identical lines saying what one line says. The QTest prefix
+  # naming the test function is dropped for the same reason — the loop belongs
+  # to the QML file, not to whichever test happened to instantiate it — and
+  # the absolute file:// URL is trimmed to a repo-relative path so the summary
+  # reads like the rest of this repo's failures.
+  #
+  # `|| true` because `grep` reports "no match" as a failure and the file that
+  # is *clean* is the common case; under `set -e` and `pipefail` the first
+  # loop-free file would otherwise abort the script mid-suite, which is
+  # exactly the silent green this gate exists to prevent.
+  found="$(printf '%s\n' "$output" | grep -F "$BINDING_LOOP" || true)"
+  if [ -n "$found" ]; then
+    loops+="$(printf '%s\n' "$found" \
+      | sed -E -e 's|^QWARN[[:space:]]*: [^ ]+\(\) ||' -e "s|file://$REPO_DIR/||")"$'\n'
+  fi
 done
+
+# `grep .` drops the blank lines the per-file collection leaves behind, so an
+# empty result really is empty and the check below is a simple one.
+if loops="$(printf '%s' "$loops" | grep . | sort -u)" && [ -n "$loops" ]; then
+  echo "qml-test: a binding loop was reported. Qt broke the cycle by dropping a" >&2
+  echo "binding, so one of the properties below has quietly stopped updating:" >&2
+  printf '%s\n' "$loops" >&2
+  echo "qml-test: give the shared value a property of its own and have both" >&2
+  echo "bindings read that, rather than one of them reading the other." >&2
+  failed=1
+fi
 
 if [ "$failed" -ne 0 ]; then
   echo "qml-test: FAILED" >&2
