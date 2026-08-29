@@ -31,7 +31,7 @@ func TestComposeBadgesFollowEnrolmentAndActivity(t *testing.T) {
 		{Name: "ci refactor", Active: true, Anchors: []string{"0xa"}},
 		{Name: "invoices", Active: false, Anchors: []string{"0xb"}},
 	}
-	rows := Compose(true, windows, threads, map[string]string{"0xc": "notes"})
+	rows := Compose(true, windows, threads, map[string]string{"0xc": "notes"}, nil)
 	if len(rows) != 3 {
 		t.Fatalf("rows = %d, want 3 (the unenrolled window must stay clean): %+v", len(rows), rows)
 	}
@@ -70,7 +70,7 @@ func TestComposeAIStateAdmitsOnlyTheKnownVocabulary(t *testing.T) {
 		"confused":    "",
 	} {
 		threads := []Thread{{Name: "th", Active: true, Anchors: []string{"0xa"}, AIState: state}}
-		rows := Compose(true, windows, threads, nil)
+		rows := Compose(true, windows, threads, nil, nil)
 		if len(rows) != 1 {
 			t.Fatalf("state %q: rows = %d, want 1", state, len(rows))
 		}
@@ -83,13 +83,13 @@ func TestComposeAIStateAdmitsOnlyTheKnownVocabulary(t *testing.T) {
 func TestComposeDisabledOrUnfocusedIsEmpty(t *testing.T) {
 	windows := []desktop.Window{win("0xa", 1, 0, 0, 800, 600, true)}
 	threads := []Thread{{Name: "th", Active: true, Anchors: []string{"0xa"}}}
-	if rows := Compose(false, windows, threads, nil); rows != nil {
+	if rows := Compose(false, windows, threads, nil, nil); rows != nil {
 		t.Errorf("disabled: rows = %+v, want none — overlays.enabled is the one global off switch", rows)
 	}
 	// No focused window: no workspace is knowably visible, so nothing may
 	// claim to be on screen.
 	blurred := []desktop.Window{win("0xa", 1, 0, 0, 800, 600, false)}
-	if rows := Compose(true, blurred, threads, nil); rows != nil {
+	if rows := Compose(true, blurred, threads, nil, nil); rows != nil {
 		t.Errorf("no focus: rows = %+v, want none", rows)
 	}
 }
@@ -102,7 +102,7 @@ func TestComposeFullscreenSilencesTheWorkspace(t *testing.T) {
 		{Name: "th", Active: true, Anchors: []string{"0xa"}},
 		{Name: "video", Active: false, Anchors: []string{"0xf"}},
 	}
-	if rows := Compose(true, windows, threads, nil); rows != nil {
+	if rows := Compose(true, windows, threads, nil, nil); rows != nil {
 		t.Errorf("fullscreen workspace: rows = %+v, want none — an overlay must not float over "+
 			"a covering window, and the fullscreen window's own overlay hides by design", rows)
 	}
@@ -114,7 +114,7 @@ func TestComposeOverlaysOnlyTheFocusedWorkspace(t *testing.T) {
 		win("0xb", 2, 0, 0, 800, 600, false), // enrolled, but elsewhere
 	}
 	threads := []Thread{{Name: "th", Active: true, Anchors: []string{"0xa", "0xb"}}}
-	rows := Compose(true, windows, threads, nil)
+	rows := Compose(true, windows, threads, nil, nil)
 	if len(rows) != 1 || rows[0].X != 0 || rows[0].Y != 0 {
 		t.Fatalf("rows = %+v, want only the focused workspace's window", rows)
 	}
@@ -130,7 +130,7 @@ func TestComposeSuppressesOverlaysUnderFloatingWindows(t *testing.T) {
 	clear := win("0xb", 1, 0, 600, 800, 400, false) // nowhere near it
 	windows := []desktop.Window{floater, covered, clear}
 	threads := []Thread{{Name: "th", Active: true, Anchors: []string{"0xa", "0xb"}}}
-	rows := Compose(true, windows, threads, map[string]string{"0xfl": "float"})
+	rows := Compose(true, windows, threads, map[string]string{"0xfl": "float"}, nil)
 	positions := map[[2]int]bool{}
 	for _, r := range rows {
 		positions[[2]int{r.X, r.Y}] = true
@@ -155,7 +155,7 @@ func TestComposeSuppressesOverlaysUnderFloatingWindows(t *testing.T) {
 	tiledFocus := win("0xt", 1, 0, 600, 600, 400, true)
 	windows = []desktop.Window{tiledFocus, other, unfocused}
 	threads = []Thread{{Name: "th", Active: true, Anchors: []string{"0xfl3"}}}
-	rows = Compose(true, windows, threads, nil)
+	rows = Compose(true, windows, threads, nil, nil)
 	for _, r := range rows {
 		if r.X == 700 && r.Y == 0 {
 			t.Errorf("unfocused floating window under another floater kept its overlay: %+v", r)
@@ -172,7 +172,7 @@ func TestComposeActiveThreadWinsASharedAnchor(t *testing.T) {
 		{Name: "first inactive", Active: false, Anchors: []string{"0xa"}},
 		{Name: "the active one", Active: true, Anchors: []string{"0xa"}, AIState: StateNeedsYou},
 	}
-	rows := Compose(true, windows, threads, nil)
+	rows := Compose(true, windows, threads, nil, nil)
 	if len(rows) != 1 || rows[0].Badge == nil {
 		t.Fatalf("rows = %+v, want one badged row", rows)
 	}
@@ -185,7 +185,7 @@ func TestComposeActiveThreadWinsASharedAnchor(t *testing.T) {
 	// Inactive-only: first in order wins, every time.
 	threads[1].Active = false
 	for range 5 {
-		rows = Compose(true, windows, threads, nil)
+		rows = Compose(true, windows, threads, nil, nil)
 		if rows[0].Badge.Thread != "first inactive" {
 			t.Fatalf("badge thread = %q, want the first inactive thread deterministically", rows[0].Badge.Thread)
 		}
@@ -198,7 +198,7 @@ func TestComposeSkipsWindowsWithoutGeometry(t *testing.T) {
 	flat := win("0xa", 1, 0, 0, 0, 0, true)
 	windows := []desktop.Window{flat}
 	threads := []Thread{{Name: "th", Active: true, Anchors: []string{"0xa"}}}
-	if rows := Compose(true, windows, threads, nil); rows != nil {
+	if rows := Compose(true, windows, threads, nil, nil); rows != nil {
 		t.Errorf("rows = %+v, want none for zero-sized geometry", rows)
 	}
 }
@@ -209,7 +209,7 @@ func TestComposeSkipsWindowsWithoutGeometry(t *testing.T) {
 func TestComposedRowsNeverCarryAddresses(t *testing.T) {
 	windows := []desktop.Window{win("0xdeadbeef", 1, 0, 0, 800, 600, true)}
 	threads := []Thread{{Name: "th", Active: true, Anchors: []string{"0xdeadbeef"}, AIState: StateWorking}}
-	rows := Compose(true, windows, threads, map[string]string{"0xdeadbeef": "builds"})
+	rows := Compose(true, windows, threads, map[string]string{"0xdeadbeef": "builds"}, nil)
 	raw, err := json.Marshal(rows)
 	if err != nil {
 		t.Fatal(err)

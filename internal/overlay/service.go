@@ -17,7 +17,8 @@ import (
 // so window movement is observed by polling the inventory. The cadence is
 // deliberately gentle and deliberately conditional:
 //
-//   - While anything is enrolled (a thread with an anchor, or a nickname),
+//   - While anything is enrolled (a thread with an anchor, a nickname, or a
+//     window Jarvix manages),
 //     the loop ticks every DefaultPollInterval and republishes only when the
 //     composed rows actually changed. A moved, resized, killed, or
 //     workspace-switched window therefore converges within one interval —
@@ -25,9 +26,10 @@ import (
 //     for two brief subprocesses a tick (the inventory, plus the focus
 //     snapshot's own anchor-liveness read).
 //   - With nothing enrolled the loop parks: no timer, no subprocess, nothing
-//     — a user who never touches threads or nicknames pays zero. It wakes on
-//     Poke, which the daemon wires to the bus events that can change
-//     enrolment (focus.changed, a window being named, a settings change).
+//     — a user who never touches threads, nicknames or managed windows pays
+//     zero. It wakes on Poke, which the daemon wires to the bus events that
+//     can change enrolment (focus.changed, a window being named or handed
+//     over, a settings change).
 //
 // An event-driven geometry seam would tighten the latency; the ADR records
 // why polling was chosen and what would justify revisiting it.
@@ -53,6 +55,15 @@ type Options struct {
 	// NicknamesHeld is the cheap half of the enrolment gate: whether any
 	// nickname exists, answered without a compositor call. Nil means none.
 	NicknamesHeld func() bool
+	// Managed maps window addresses to whether Jarvix manages them (#197),
+	// judged against the inventory just read — the store reconciles against
+	// it, exactly as the nickname registry prunes against it. Nil means
+	// nothing is managed.
+	Managed func(windows []desktop.Window) map[string]bool
+	// ManagedHeld is the managed half of the enrolment gate: whether Jarvix
+	// manages anything at all, answered without a compositor call. Nil means
+	// none.
+	ManagedHeld func() bool
 	// Enabled is the live overlays.enabled switch, read per computation so a
 	// settings change lands on the next tick or poke, no restart.
 	Enabled func() bool
@@ -206,7 +217,9 @@ func (s *Service) compute(ctx context.Context) ([]Row, bool) {
 			break
 		}
 	}
-	if !anchored && (s.opts.NicknamesHeld == nil || !s.opts.NicknamesHeld()) {
+	named := s.opts.NicknamesHeld != nil && s.opts.NicknamesHeld()
+	held := s.opts.ManagedHeld != nil && s.opts.ManagedHeld()
+	if !anchored && !named && !held {
 		return nil, false
 	}
 	if s.opts.Windows == nil {
@@ -228,7 +241,11 @@ func (s *Service) compute(ctx context.Context) ([]Row, bool) {
 	if s.opts.Tags != nil {
 		tags = s.opts.Tags(windows)
 	}
-	return Compose(true, windows, threads, tags), true
+	var managed map[string]bool
+	if s.opts.Managed != nil {
+		managed = s.opts.Managed(windows)
+	}
+	return Compose(true, windows, threads, tags, managed), true
 }
 
 // publishIfChanged emits the rows when they differ from the last published

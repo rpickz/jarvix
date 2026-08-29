@@ -1,11 +1,21 @@
 // Package overlay composes the tiny top-right window overlays (#127): for
 // every window the user has deliberately enrolled — anchored to a focus
-// thread (#123) or given a nickname (#126) — one static row saying where the
-// window is and what, at most, may be drawn on it: a thread badge (filled
-// when its thread is active, hollow otherwise), an optional AI-session state
-// (#124/#137), and the nickname tag. Windows enrolled in neither way get no
-// row at all: clean by default is an acceptance criterion, not a styling
+// thread (#123), given a nickname (#126), or handed over to Jarvix to manage
+// (#197) — one static row saying where the window is and what, at most, may
+// be drawn on it: a managed mark, a thread badge (filled when its thread is
+// active, hollow otherwise), an optional AI-session state (#124/#137), and
+// the nickname tag. Windows enrolled in none of those ways get no row at
+// all: clean by default is an acceptance criterion, not a styling
 // preference.
+//
+// Management is enrolment in its own right, and that is the one thing the
+// #197 addition changes about the rules above. A managed window earns a chip
+// even with no thread and no nickname, because the whole point of marking it
+// is that "can Jarvix act in here?" is answerable by looking rather than by
+// remembering — a mark that only appeared on windows the user had ALSO
+// nicknamed would answer the question for the wrong half of the desktop. The
+// converse still holds exactly: an unmanaged, unanchored, unnamed window
+// carries nothing.
 //
 // All of the deciding happens here, in Go, where it is tested (ADR 0013):
 // which windows earn an overlay, which thread owns a shared anchor, whether
@@ -112,14 +122,22 @@ type Row struct {
 	// means no dot — the #137 seam's off state, and the permanent state of
 	// every thread that is not an AI session.
 	AIState string `json:"ai_state,omitempty"`
+	// Managed marks a window Jarvix manages (#197): one it opened, or one the
+	// user handed over. Absent means unmanaged, which is every window by
+	// default — the field is omitted rather than sent false so an older
+	// surface, which would draw nothing for it either way, sees a payload
+	// byte-for-byte identical to the one it used to get.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // Compose decides the whole overlay surface for one moment of desktop state.
-// It is pure — inventory, threads, and tags in, rows out — which is what
-// makes every rule above testable without a compositor. tags maps window
-// address to nickname; rows come back in a stable order (top-left first) so
+// It is pure — inventory, threads, tags and the managed set in, rows out —
+// which is what makes every rule above testable without a compositor. tags
+// maps window address to nickname and managed maps it to whether Jarvix
+// manages the window; rows come back in a stable order (top-left first) so
 // callers can compare successive results byte-for-byte.
-func Compose(enabled bool, windows []desktop.Window, threads []Thread, tags map[string]string) []Row {
+func Compose(enabled bool, windows []desktop.Window, threads []Thread, tags map[string]string,
+	managed map[string]bool) []Row {
 	if !enabled {
 		return nil
 	}
@@ -161,13 +179,14 @@ func Compose(enabled bool, windows []desktop.Window, threads []Thread, tags map[
 		}
 		badge, hasBadge := badges[w.Address]
 		tag := tags[w.Address]
-		if !hasBadge && tag == "" {
+		held := managed[w.Address]
+		if !hasBadge && tag == "" && !held {
 			continue // unenrolled windows stay completely clean
 		}
 		if occluded(w, windows, workspace) {
 			continue
 		}
-		row := Row{X: w.X, Y: w.Y, Width: w.Width, Height: w.Height, Tag: tag}
+		row := Row{X: w.X, Y: w.Y, Width: w.Width, Height: w.Height, Tag: tag, Managed: held}
 		if hasBadge {
 			b := badge
 			row.Badge = &b
@@ -186,7 +205,14 @@ func Compose(enabled bool, windows []desktop.Window, threads []Thread, tags map[
 		if rows[i].X != rows[j].X {
 			return rows[i].X < rows[j].X
 		}
-		return rows[i].Tag < rows[j].Tag
+		if rows[i].Tag != rows[j].Tag {
+			return rows[i].Tag < rows[j].Tag
+		}
+		// Two untagged windows sharing a corner is already pathological; the
+		// managed flag is the last thing left that distinguishes them, and a
+		// total order is what makes publish-on-change a comparison rather
+		// than a coin toss.
+		return !rows[i].Managed && rows[j].Managed
 	})
 	return rows
 }
