@@ -63,6 +63,19 @@ Rectangle {
   // The focus ring: a colour *and* a thicker border, like the composer.
   border.color: row.activeFocus ? Color.accent : "transparent"
   border.width: row.activeFocus ? 2 : 0
+  // The one `activeFocusOnTab` in this file that is still a binding, and it
+  // has to be: `interactive` is not a visibility or an enabled-ness, so there
+  // is nothing for Qt's focus chain to skip on. Carrying it on `enabled`
+  // instead — the remedy the buttons below use — would disable the row's
+  // children too, and a listing whose rows do not drill down still offers Run
+  // and Forget.
+  //
+  // It is safe as written because callers set it per delegate from data the
+  // delegate was built with, so it does not move under a live row. If one ever
+  // makes it move, the runner will say so: scripts/qml-test.sh fails the suite
+  // on "Cannot set activeFocusOnTab to false", and the answer then is a row
+  // that is always in the tab chain and announces in words that it does not
+  // open — not a re-bind of this property.
   activeFocusOnTab: interactive
   Accessible.role: interactive ? Accessible.Button : Accessible.ListItem
   Accessible.name: title
@@ -146,7 +159,28 @@ Rectangle {
         color: Util.alpha(Color.accent, actionButton.activeFocus ? 0.35 : 0.18)
         border.color: Color.accent
         border.width: actionButton.activeFocus ? 2 : 1
-        activeFocusOnTab: visible
+        // A constant for the life of the delegate, and it has to be (issue
+        // #208, the rule #203 established on the confirmation card).
+        //
+        // Qt refuses to clear `activeFocusOnTab` on the item that currently
+        // holds focus — it logs "Cannot set activeFocusOnTab to false once
+        // item is the active focus item" and leaves the property as it was —
+        // so the old binding, `visible`, made a button's tab-reachability
+        // depend on where the keyboard happened to be when the row's labels
+        // changed rather than on the row's state. A button somebody was
+        // standing on when its label was cleared stayed in the tab chain for
+        // the rest of the session, while the identical button in the row
+        // below left as intended: two rows in the same state, two different
+        // tab orders. These rows are how a routine gets disabled and a fact
+        // gets forgotten, so the tab order moving underneath a keyboard user
+        // mid-operation is the worst moment for it.
+        //
+        // Nothing about what is reachable changes. `visible` is already the
+        // distinction Qt supports and already honours: its focus chain skips
+        // whatever is invisible or disabled, so a button with no label was
+        // never a tab stop and still is not. Only the property expressing it
+        // has moved to the one Qt will not fight over.
+        activeFocusOnTab: true
         Accessible.role: Accessible.Button
         Accessible.name: row.actionName
         Keys.onReturnPressed: row.actionTriggered()
@@ -174,7 +208,8 @@ Rectangle {
         color: Util.alpha(Color.popups.text, action2Button.activeFocus ? 0.16 : 0.06)
         border.color: action2Button.activeFocus ? Color.accent : Util.alpha(Color.popups.text, 0.4)
         border.width: action2Button.activeFocus ? 2 : 1
-        activeFocusOnTab: visible
+        // Constant, for the reason spelled out on the first button above.
+        activeFocusOnTab: true
         Accessible.role: Accessible.Button
         Accessible.name: row.action2Name
         Keys.onReturnPressed: row.action2Triggered()
@@ -202,7 +237,8 @@ Rectangle {
         color: Util.alpha(Color.popups.text, action3Button.activeFocus ? 0.16 : 0.06)
         border.color: action3Button.activeFocus ? Color.accent : Util.alpha(Color.popups.text, 0.4)
         border.width: action3Button.activeFocus ? 2 : 1
-        activeFocusOnTab: visible
+        // Constant, for the reason spelled out on the first button above.
+        activeFocusOnTab: true
         Accessible.role: Accessible.Button
         Accessible.name: row.action3Name
         Keys.onReturnPressed: row.action3Triggered()

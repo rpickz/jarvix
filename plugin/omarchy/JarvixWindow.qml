@@ -7784,7 +7784,13 @@ FloatingWindow {
             color: Util.alpha(Color.popups.text, replayButton.activeFocus ? 0.18 : 0.06)
             border.color: Util.alpha(Color.popups.text, 0.5)
             border.width: replayButton.activeFocus ? 2 : 0
-            activeFocusOnTab: enabled
+            // Constant for the life of the delegate (issues #203/#208): Qt
+            // refuses to clear `activeFocusOnTab` on the item holding focus,
+            // so binding it to a value that moves — `enabled` here follows the
+            // daemon coming and going — would make tab-reachability a function
+            // of focus history. `enabled` still carries the distinction, and
+            // Qt's focus chain already skips a disabled or invisible item.
+            activeFocusOnTab: true
             Accessible.role: Accessible.Button
             Accessible.name: "Say this message again"
             Keys.onReturnPressed: win.requestReplay(model.pos, model.role)
@@ -8414,7 +8420,22 @@ FloatingWindow {
         wrapMode: Text.WordWrap
         text: win.thinkingNote
         font.family: Style.font.family
-        font.pixelSize: Style.font.small
+        // `bodySmall`, because the theme has no `small` — it never did, and
+        // asking for one silently rendered this note at Qt's own default size
+        // rather than at the smaller one it was reaching for (issue #208). A
+        // missing member on a grouped theme object is not an error in QML: the
+        // binding evaluates to undefined, the engine logs "Unable to assign
+        // [undefined] to int" once per instantiation and leaves the property
+        // at its default, so the only symptom is a note that is the wrong
+        // size in a window full of text that is the right size.
+        //
+        // `bodySmall` rather than `caption` because this is a sentence — the
+        // daemon's own words about why a level could not be taken — and
+        // `caption` is the ramp's bottom rung, used in the bar for one- and
+        // two-word labels. One step under the window's body size is what "a
+        // note beneath the control" wants; three steps is a footnote nobody
+        // reads.
+        font.pixelSize: Style.font.bodySmall
         color: Util.alpha(Color.popups.text, 0.75)
         Accessible.role: Accessible.StaticText
         Accessible.name: text
@@ -8437,7 +8458,12 @@ FloatingWindow {
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.margins: Style.space(10)
-          activeFocusOnTab: composer.enabled
+          // Constant, for the reason given on the replay button above: the
+          // daemon going down must not rewrite the tab chain under a caret
+          // that is already in this field. `composer.enabled` still disables
+          // it — this input is a child of the composer — and Qt's focus chain
+          // skips a disabled item.
+          activeFocusOnTab: true
           readOnly: !win.socketReady
           clip: true
           // Every size comes from the shell's Style tokens, so the field

@@ -31,16 +31,8 @@ QtObject {
     readonly property int rowPaddingX: 12
   }
 
-  readonly property QtObject font: QtObject {
-    // A family that certainly resolves under the offscreen platform. Naming a
-    // real face would make the tests depend on the runner's font set.
-    readonly property string family: "sans-serif"
-    readonly property int caption: 10
-    readonly property int bodySmall: 12
-    readonly property int body: 14
-    readonly property int subtitle: 16
-    readonly property int title: 20
-    readonly property int display: 28
-    readonly property int icon: 14
-  }
+  // The type ramp lives in StyleFont.qml rather than inline here, so that a
+  // harness file can read a size off it without qmllint reporting every member
+  // as missing from bare QObject. See that file.
+  readonly property StyleFont font: StyleFont {}
 }

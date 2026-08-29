@@ -529,7 +529,13 @@ Item {
             color: Util.alpha(Color.popups.text, toggle.activeFocus ? 0.18 : 0.08)
             border.color: Util.alpha(Color.popups.text, 0.5)
             border.width: toggle.activeFocus ? 2 : 1
-            activeFocusOnTab: visible
+            // Constant for the life of the delegate (issues #203/#208): Qt
+            // refuses to clear `activeFocusOnTab` on the item holding focus,
+            // so binding it here would describe the tab chain by focus history
+            // rather than by state. `visible` is the distinction, and Qt's
+            // focus chain already skips an invisible item — the control a
+            // field of this type does not use was never a tab stop.
+            activeFocusOnTab: true
             Accessible.role: Accessible.CheckBox
             Accessible.name: fieldRow.modelData.label
 
@@ -562,7 +568,8 @@ Item {
             color: Util.alpha(Color.popups.text, cycler.activeFocus ? 0.18 : 0.08)
             border.color: Util.alpha(Color.popups.text, 0.5)
             border.width: cycler.activeFocus ? 2 : 1
-            activeFocusOnTab: visible
+            // Constant, for the reason given on the toggle above.
+            activeFocusOnTab: true
             Accessible.role: Accessible.ComboBox
             Accessible.name: fieldRow.modelData.label
 
@@ -606,7 +613,10 @@ Item {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.margins: Style.space(8)
-              activeFocusOnTab: entryBox.visible
+              // Constant, for the reason given on the toggle above. This input
+              // is a child of entryBox, so it is already invisible whenever
+              // entryBox is, and Qt's focus chain skips it either way.
+              activeFocusOnTab: true
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               color: Color.popups.text

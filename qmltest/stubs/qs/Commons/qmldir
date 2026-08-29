@@ -1,3 +1,4 @@
 module qs.Commons
 singleton Style 1.0 Style.qml
+StyleFont 1.0 StyleFont.qml
 singleton Util 1.0 Util.qml

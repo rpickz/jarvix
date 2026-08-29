@@ -72,7 +72,18 @@ Item {
       color: Util.alpha(Color.accent, detailActionButton.activeFocus ? 0.3 : 0.15)
       border.color: Color.accent
       border.width: detailActionButton.activeFocus ? 2 : 1
-      activeFocusOnTab: visible
+      // Constant for the life of the pane, for the reason JarvixCollectionRow
+      // spells out at length (issues #203/#208): Qt refuses to clear
+      // `activeFocusOnTab` on the item that holds focus, so a binding here
+      // described the tab chain by focus history rather than by state.
+      //
+      // This is the site the suite was actually shouting about. `visible` on a
+      // child is the *effective* value, and this pane is a form that a whole
+      // tab hides when it closes — so pressing Save and then leaving the form
+      // flipped it while the keyboard was still on the button, four times a
+      // run. Reachability is unchanged: Qt's focus chain already skips an
+      // invisible item, so a pane with no action was never a tab stop.
+      activeFocusOnTab: true
       Accessible.role: Accessible.Button
       Accessible.name: pane.actionName
       Keys.onReturnPressed: pane.actionTriggered()
