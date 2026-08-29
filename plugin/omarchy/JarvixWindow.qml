@@ -135,7 +135,10 @@ FloatingWindow {
       requestMemory()
       requestVocabulary()
     }
-    else if (id === "approvals") requestApprovals()
+    else if (id === "approvals") {
+      requestApprovals()
+      requestManagedWindows()
+    }
     else if (id === "chat" && pendingCardIndex >= 0) {
       // A permission question must never be hidden by tab state: coming back
       // to Chat lands on the card, wherever the list had been scrolled.
@@ -3033,6 +3036,88 @@ FloatingWindow {
     }
   }
 
+  // --- managed windows (#197, ADR 0062) ------------------------------------
+  // The windows Jarvix manages, listed on the Approvals tab — beneath the
+  // standing command grants, because it is the same kind of thing and the
+  // tab's own argument applies verbatim: a permission you cannot find is a
+  // permission you cannot revoke. Handing a window over grants access to it;
+  // this is where that grant is visible and where it is taken back.
+  //
+  // Release is one ungated verb and there is deliberately no Manage button to
+  // match it. Taking a window over is a grant, and a grant is made out loud
+  // on a card that names the window; giving one up needs no permission at
+  // all, which is why the button is here and its opposite is not.
+  //
+  // Same thin-client shape as every other collection: windows.managed for the
+  // listing, windows.release for the one write, and every rule — which window
+  // a row names, whether typing is even possible — decided daemon-side.
+  property var managedWindows: []
+  property string managedPath: ""
+  property bool managedTyping: true
+  // JSON-RPC ids from this feature's own private range (950–999), so its
+  // replies are recognisable by construction and disjoint from every other
+  // surface's.
+  property int managedRequestId: 0
+  property int managedReleaseRequestId: 0
+  property int nextManagedRequestId: 950
+
+  function takeManagedRequestId() {
+    var id = nextManagedRequestId
+    nextManagedRequestId = nextManagedRequestId >= 999 ? 950 : nextManagedRequestId + 1
+    return id
+  }
+
+  function requestManagedWindows() {
+    if (!daemon.connected) return
+    managedRequestId = takeManagedRequestId()
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: managedRequestId, method: "windows.managed"
+    }) + "\n")
+  }
+
+  function loadManagedWindows(result) {
+    managedWindows = result.windows || []
+    managedPath = String(result.path || "")
+    managedTyping = result.typing !== false
+  }
+
+  // releaseManagedWindow hands one back. Ungated, immediate, and no
+  // confirmation: giving up power needs no permission.
+  function releaseManagedWindow(reference) {
+    if (!daemon.connected || String(reference || "") === "") return
+    managedReleaseRequestId = takeManagedRequestId()
+    daemon.write(JSON.stringify({
+      jsonrpc: "2.0", id: managedReleaseRequestId, method: "windows.release",
+      params: { window: String(reference) }
+    }) + "\n")
+  }
+
+  // managedSubtitle says how the window came to be managed, and — the fact a
+  // reader of this tab most needs — what that does NOT include.
+  function managedSubtitle(w) {
+    var how = String(w.source || "") === "launched"
+      ? "Jarvix opened it" + (String(w.program || "") !== "" ? " to run " + String(w.program) : "")
+      : "You handed it over"
+    if (w.terminal === true) {
+      return how + " · a terminal, so anything typed here is confirmed command by command"
+    }
+    return how
+  }
+
+  // managedMeta places the window the way a person would look for it.
+  function managedMeta(w) {
+    var parts = ["workspace " + String(w.workspace || "")]
+    if (w.focused === true) parts.push("the one you are in")
+    if (String(w.since || "") !== "") parts.push("since " + String(w.since).slice(0, 10))
+    if (String(w.reference || "") === "") {
+      // No unambiguous way to name this window back to the daemon, so no
+      // Release button either — a button that released a sibling would be
+      // worse than none. Say the way out rather than leaving a dead row.
+      parts.push("say \u201clet this go\u201d while it has focus")
+    }
+    return parts.join(" \u00b7 ")
+  }
+
   // approvalSubtitle says what the grant IS — how long it lasts — because
   // that is the fact a person revoking needs first.
   function approvalSubtitle(a) {
@@ -3534,6 +3619,15 @@ FloatingWindow {
       // the history travels.
       requestApprovals()
       break
+    case "desktop.action":
+      // A window was handed over or let go (#197) — by voice, by the button
+      // below, or by a launch Jarvix made. The event names the verb and the
+      // window in words; the listing reply is where the rest travels. Only
+      // the two verbs that change the managed set re-read, so focusing and
+      // moving windows costs this tab nothing.
+      if (params.verb === "manage" || params.verb === "release" || params.verb === "launch")
+        requestManagedWindows()
+      break
     case "memory.entry_changed":
       // A fact was added or edited — from this window's form or another
       // client's. The event carries id and size only; the listing reply is
@@ -3751,6 +3845,17 @@ FloatingWindow {
           }
         } else if (frame.id !== undefined && frame.id === win.memoryRequestId) {
           if (frame.result) win.loadMemory(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.managedRequestId) {
+          if (frame.result) win.loadManagedWindows(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.managedReleaseRequestId) {
+          // A refusal must be seen — the window may have closed between the
+          // listing and the click, and "nothing happened" with no reason is
+          // the shrug this whole feature exists to replace.
+          if (frame.error) {
+            win.errorStage = "managed windows"
+            win.errorMessage = String(frame.error.message || "the window could not be released")
+          }
+          win.requestManagedWindows()
         } else if (frame.id !== undefined && frame.id === win.approvalsRequestId) {
           if (frame.result) win.loadApprovals(frame.result)
         } else if (frame.id !== undefined && frame.id === win.approvalsForgetRequestId) {
@@ -3854,6 +3959,7 @@ FloatingWindow {
         win.requestVocabulary()
         win.requestMonitors()
         win.requestPlacementVocabulary()
+        win.requestManagedWindows()
         // The transcript's typography settings (issue #121) load with the
         // rest of the connect snapshot; until they arrive the property
         // defaults render the shipped look.
@@ -6868,6 +6974,61 @@ FloatingWindow {
             accent: true
             onClicked: win.openApprovalAdd("deny")
           }
+
+          // --- the windows Jarvix manages (#197) ---------------------------
+          // Beneath the command grants because it is the same kind of thing
+          // seen from the other side: those say which commands run without
+          // asking, this says which windows Jarvix may act inside. Both are
+          // grants, and both belong where a person can find and undo them.
+          Text {
+            text: "Windows Jarvix manages"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: win.managedTyping
+              ? "Managed windows may be read, moved and typed into. Being managed is not "
+                + "permission to run anything: text typed into a terminal is confirmed command "
+                + "by command, exactly as a shell command is."
+              : "Managed windows may be read and moved. Typing is switched off in your "
+                + "configuration ([tools.typing] enable), so nothing is typed into them."
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Util.alpha(Color.popups.text, 0.7)
+          }
+
+          JarvixEmptyState {
+            visible: win.managedWindows.length === 0
+            width: parent.width
+            text: "Jarvix manages no windows — every window on your desktop is yours alone.\n"
+              + "Say \u201ctake control of this terminal\u201d to hand one over."
+          }
+
+          Repeater {
+            model: win.managedWindows
+
+            delegate: JarvixCollectionRow {
+              required property var modelData
+              width: approvalsColumn.width
+              title: String(modelData.nickname || "") !== ""
+                ? String(modelData.nickname) + " \u2014 " + String(modelData.app || "")
+                : String(modelData.app || "")
+              subtitle: win.managedSubtitle(modelData)
+              meta: win.managedMeta(modelData)
+              // No button for a row with no unambiguous reference: releasing
+              // the wrong one of three identical terminals would be worse
+              // than the button not being there, and managedMeta says what to
+              // do instead.
+              actionLabel: String(modelData.reference || "") === "" ? "" : "Release"
+              actionName: "Stop managing " + String(modelData.app || "") + " — Jarvix keeps its hands off it"
+              onActionTriggered: win.releaseManagedWindow(modelData.reference)
+            }
+          }
         }
       }
 
@@ -6906,6 +7067,9 @@ FloatingWindow {
           : "Both lists live in " + win.approvalsPath
             + " under [tools.policy] — yours to edit. "
             + "Deny rules and always-risky commands still ask, or refuse, whatever is allowed here."
+            + (win.managedPath === "" ? ""
+               : " The managed windows live in " + win.managedPath
+                 + "; deleting an entry there releases it, exactly as the button does.")
         font.family: Style.font.family
         font.pixelSize: Style.font.subtitle
         color: Util.alpha(Color.popups.text, 0.7)

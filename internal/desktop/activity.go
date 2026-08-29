@@ -143,7 +143,9 @@ func ActivityKinds() []string {
 // would feed on its own output) all stay off the feed. Two happens once: a
 // final answer produced without a single tool call also gets the explicit
 // text-only marker, because "the model claimed it acted but called no tool"
-// must be diagnosable at a glance, not by noticing an absence.
+// must be diagnosable at a glance, not by noticing an absence. Two happens a
+// second time since #197: text aimed at a terminal is a command, so it gets a
+// command row as well as its typing row.
 func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 	one := func(r ActivityRow) []ActivityRow { return []ActivityRow{clipActivityRow(r)} }
 	switch eventType {
@@ -215,7 +217,7 @@ func ActivityRowsFor(eventType string, data map[string]any) []ActivityRow {
 			Label:  "Denied by policy: " + activityString(data, "tool"),
 			Detail: joinActivity(activityString(data, "rule"), activityString(data, "command"))})
 	case "typing.audit":
-		return one(typingAuditRow(data))
+		return typingAuditRows(data)
 	case "desktop.action":
 		return one(desktopActionRow(data))
 	case "desktop.refusal":
@@ -470,6 +472,30 @@ func declineReason(source string) string {
 // typingAuditRow renders a typing decision (ADR 0023). The event never
 // carries the typed text, and this row never invents a place for it: lengths
 // and outcomes only, with the reason when the daemon refused.
+// typingAuditRows renders one typing decision — and, when the target was a
+// terminal, a second row saying what it actually was.
+//
+// The second row is the #197 promise kept: typing into a terminal IS running a
+// command, so it appears in the feed as a command, verbatim, with the rule
+// that judged it — the same evidence a `shell.run` call leaves. Without it a
+// standing `shell_allow` would let a command reach a shell through the
+// keyboard with nothing in the record but "typed 24 characters", which is the
+// audit hole this feature would otherwise have opened. It comes FIRST, because
+// what was run matters more than how many characters it took.
+func typingAuditRows(data map[string]any) []ActivityRow {
+	rows := make([]ActivityRow, 0, 2)
+	if command := activityString(data, "command"); command != "" {
+		label := "Command typed into a terminal"
+		if outcome := activityString(data, "outcome"); outcome != "typed" {
+			label = "Command NOT typed into a terminal"
+		}
+		rows = append(rows, clipActivityRow(ActivityRow{Kind: ActivityKindGate,
+			Label:  label,
+			Detail: joinActivity(command, activityString(data, "rule"), activityString(data, "window"))}))
+	}
+	return append(rows, clipActivityRow(typingAuditRow(data)))
+}
+
 func typingAuditRow(data map[string]any) ActivityRow {
 	window := activityString(data, "window")
 	target := "into " + window

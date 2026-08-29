@@ -4,11 +4,12 @@ package daemon
 // construction over the shared seams, the bus watcher that keeps it prompt,
 // the overlays.get verb, and the shutdown drain adapters.
 //
-// The feed composes three things the daemon already owns — the focus threads
-// (#123), the nickname registry (#126), and the compositor inventory (ADR
-// 0022) — into rows the QML overlay surface draws verbatim (ADR 0013). All
-// of the deciding lives in internal/overlay, where it is tested against
-// fakes; nothing here does more than hand seams across.
+// The feed composes four things the daemon already owns — the focus threads
+// (#123), the nickname registry (#126), the managed-window store (#197), and
+// the compositor inventory (ADR 0022) — into rows the QML overlay surface
+// draws verbatim (ADR 0013). All of the deciding lives in internal/overlay,
+// where it is tested against fakes; nothing here does more than hand seams
+// across.
 
 import (
 	"context"
@@ -48,6 +49,18 @@ func (d *Daemon) newOverlayService() *overlay.Service {
 		},
 		NicknamesHeld: func() bool {
 			return d.windows != nil && d.windows.NicknameCount() > 0
+		},
+		Managed: func(windows []desktop.Window) map[string]bool {
+			// Nil when the window tools are off (tools.desktop): with no
+			// window tools there is no managed-window store either, so no
+			// window can be managed — badges and tags still work.
+			if d.windows == nil {
+				return nil
+			}
+			return d.windows.ManagedByAddress(windows)
+		},
+		ManagedHeld: func() bool {
+			return d.windows != nil && d.windows.ManagedCount() > 0
 		},
 		Enabled: func() bool { return d.runningConfig().Overlays.Enabled },
 		Publish: func(rows []overlay.Row) {
@@ -120,9 +133,11 @@ func overlayRowsPayload(rows []overlay.Row) []overlay.Row {
 
 // watchOverlays pokes the feed on the bus events that can change what the
 // overlays say without the geometry moving: a thread switch or anchor change
-// (focus.changed), a nickname assignment (desktop.action), and a settings
-// change (config.changed / config.setting_changed — the overlays.enabled
-// switch, but also any reload). Poking rather than recomputing here keeps
+// (focus.changed), a nickname assignment or a window handed over or let go
+// (desktop.action, and desktop.refusal for the attempt that did not take), and
+// a settings change (config.changed / config.setting_changed — the
+// overlays.enabled switch, but also any reload). Poking rather than
+// recomputing here keeps
 // one computation path: the service coalesces however many events arrive.
 // Everything else — moves, resizes, closed windows — is the poll's job.
 func (d *Daemon) watchOverlays(ctx context.Context, events <-chan session.Event, unsubscribe func()) {
@@ -136,7 +151,8 @@ func (d *Daemon) watchOverlays(ctx context.Context, events <-chan session.Event,
 				return
 			}
 			switch ev.Type {
-			case "focus.changed", "desktop.action", "config.changed", "config.setting_changed":
+			case "focus.changed", "desktop.action", "desktop.refusal",
+				"config.changed", "config.setting_changed":
 				d.overlays.Poke()
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/desktop"
+	"github.com/rpickz/jarvix/internal/managed"
 )
 
 // Every test here runs against a fake compositor and a fake keyboard. Nothing
@@ -31,6 +33,7 @@ type typingHarness struct {
 	comp     *desktop.FakeCompositor
 	kb       *desktop.FakeKeyboard
 	registry *Registry
+	store    *managed.Store
 	logs     *bytes.Buffer
 
 	mu     sync.Mutex
@@ -47,6 +50,17 @@ type typingSetup struct {
 	rateLimit int
 	rateOver  time.Duration
 	terminals []string
+	// shellAllow are `[tools.policy] shell_allow` patterns — the standing
+	// approvals of #162 — so a test can prove that one covering a command
+	// covers it when it is typed into a terminal too (#197).
+	shellAllow []string
+	// shellDeny are `[tools.policy] shell_deny` patterns.
+	shellDeny []string
+	// managed, when set, gives the window tools a managed-window store in a
+	// temp directory, so a test can hand a window over. The gate equivalence
+	// deliberately does NOT depend on it — see
+	// TestManagementChangesNothingAboutTheGate.
+	managed bool
 }
 
 func newTypingHarness(t *testing.T, setup typingSetup) *typingHarness {
@@ -67,7 +81,13 @@ func newTypingHarness(t *testing.T, setup typingSetup) *typingHarness {
 	// that the payload never reaches a log is only worth anything if the test
 	// is holding every log it could reach.
 	logger := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h.windows = NewDesktop(DesktopOptions{Compositor: h.comp, launcher: &fakeLauncher{}, Log: logger})
+	desktopOpts := DesktopOptions{Compositor: h.comp, launcher: &fakeLauncher{}, Log: logger}
+	if setup.managed {
+		h.store = managed.NewStore(filepath.Join(t.TempDir(), "managed.toml"),
+			managed.StoreOptions{}, logger)
+		desktopOpts.Managed = h.store
+	}
+	h.windows = NewDesktop(desktopOpts)
 	h.typing = NewTyping(TypingOptions{
 		Windows:         h.windows,
 		Keyboard:        h.kb,
@@ -76,6 +96,12 @@ func newTypingHarness(t *testing.T, setup typingSetup) *typingHarness {
 		RateWindow:      setup.rateOver,
 		TerminalClasses: setup.terminals,
 		Log:             logger,
+		// The gate, wired exactly as the daemon wires it: text aimed at a
+		// terminal is classified under the shell.run identity, through the
+		// registry so a recompiled policy is the one that answers (#197).
+		Classify: func(command string) Verdict {
+			return h.registry.CheckCommand(ShellToolName, command)
+		},
 		OnAudit: func(a TypingAudit) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -83,13 +109,19 @@ func newTypingHarness(t *testing.T, setup typingSetup) *typingHarness {
 		},
 		now: h.nowFn,
 	})
-	policy, err := NewPolicy(PolicyConfig{Default: setup.def, Tools: setup.tiers})
+	policy, err := NewPolicy(PolicyConfig{Default: setup.def, Tools: setup.tiers,
+		ShellAllow: setup.shellAllow, ShellDeny: setup.shellDeny})
 	if err != nil {
 		t.Fatalf("NewPolicy: %v", err)
 	}
 	h.registry = NewRegistry(logger)
 	for _, tool := range h.typing.Tools() {
 		h.registry.Register(tool)
+	}
+	if setup.managed {
+		for _, tool := range h.windows.ManagedTools() {
+			h.registry.Register(tool)
+		}
 	}
 	h.registry.SetPolicy(policy)
 	return h

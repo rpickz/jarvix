@@ -6,11 +6,20 @@ import qs.Commons
 import qs.Ui
 
 // Tiny top-right window overlays (#127): on each window the user has
-// deliberately enrolled — anchored to a focus thread or given a nickname —
-// a small static chip carrying at most a thread badge (filled = active
-// thread, hollow = inactive), an AI-session state glyph, and the nickname
-// tag. Unenrolled windows carry nothing; `overlays.enabled = false` clears
-// everything.
+// deliberately enrolled — anchored to a focus thread, given a nickname, or
+// handed over to Jarvix to manage (#197) — a small static chip carrying at
+// most a managed mark, a thread badge (filled = active thread, hollow =
+// inactive), an AI-session state glyph, and the nickname tag. Unenrolled
+// windows carry nothing; `overlays.enabled = false` clears everything.
+//
+// The managed mark is a SQUARE bracket-cornered outline, and its shape is
+// the whole of its meaning. The three marks a chip can carry have to be
+// told apart at a glance and without colour discrimination, so each one is
+// a different silhouette: the thread badge is a circle (filled or hollow),
+// the AI-session state is a Nerd Font glyph, and this is a square outline
+// with a solid centre — a "held" mark. It sits leftmost so it reads first,
+// which is the order the question is asked in: can Jarvix act in here, and
+// then what else is true of this window.
 //
 // Display-only in the strict ADR 0013 sense: the daemon's overlay feed
 // (internal/overlay) decides which windows get a chip, which thread owns a
@@ -42,6 +51,10 @@ Item {
   // The finished rows, verbatim from the feed. Empty means nothing overlaid
   // — nothing enrolled, overlays disabled, a fullscreen workspace, or no
   // daemon; all four render identically as absence.
+  //
+  // A row's `managed` flag is absent rather than false for an unmanaged
+  // window, so `!!modelData.managed` below is the whole of the reading: a
+  // daemon that predates #197 sends no such field and draws no such mark.
   property var rows: []
   property bool socketReady: false
 
@@ -171,6 +184,11 @@ Item {
 
           readonly property int maxWidth: root.regionWidth - root.chipInset * 2
           readonly property bool hasBadge: !!modelData.badge
+          // Whether Jarvix manages this window (#197): one it opened, or one
+          // the user handed over. It is a fact about the window, not about a
+          // thread or a name, so it renders on its own and a window carrying
+          // nothing else still gets a chip for it.
+          readonly property bool managed: !!modelData.managed
           readonly property string tag: modelData.tag || ""
           // The AI-session dot (#124/#137). The daemon admits exactly three
           // states onto the wire; the glyph/colour table below is
@@ -205,6 +223,30 @@ Item {
             id: content
             anchors.centerIn: parent
             spacing: Style.space(6)
+
+            // The managed mark: a square outline with a solid centre. Square
+            // rather than round so it can never be mistaken for the thread
+            // badge beside it, and outline-plus-centre rather than a plain
+            // block so it stays legible against either theme. Static, like
+            // everything on this surface — a window's management does not
+            // change often enough to be worth a person noticing motion.
+            Rectangle {
+              visible: chip.managed
+              width: Style.space(10)
+              height: width
+              radius: Math.max(1, Style.space(1))
+              anchors.verticalCenter: parent.verticalCenter
+              color: "transparent"
+              border.color: Color.popups.text
+              border.width: Math.max(1, Style.space(1))
+
+              Rectangle {
+                anchors.centerIn: parent
+                width: Math.max(2, parent.width - Style.space(5))
+                height: width
+                color: Color.popups.text
+              }
+            }
 
             // The thread badge: filled when the thread is active, hollow
             // otherwise — a shape-and-fill difference, readable without

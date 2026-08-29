@@ -26,6 +26,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ipc"
 	"github.com/rpickz/jarvix/internal/knowledge"
 	"github.com/rpickz/jarvix/internal/launchkind"
+	"github.com/rpickz/jarvix/internal/managed"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/overlay"
@@ -452,6 +453,16 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// window tools, because it is a store rather than a feature: with nothing
 	// named it costs one stat on the first resolution and no file at all.
 	screens := monitors.NewStore(paths.MonitorsFile(), monitors.StoreOptions{Gate: gate}, logger)
+	// The managed windows (#197, ADR 0062): the ones Jarvix opened and the
+	// ones the user handed over. Built on the screen store's exact terms — a
+	// store, not a feature, costing one stat on the first question — and
+	// before the window tools, which hold it.
+	//
+	// It is deliberately built whether or not typing is on. Acquisition still
+	// works for reading and placement when typing is off, and a store that
+	// only existed when typing did would make "you have handed this over, but
+	// I cannot type in it" impossible to say.
+	managedWindows := managed.NewStore(paths.ManagedFile(), managed.StoreOptions{Gate: gate}, logger)
 	var windows *tools.Desktop
 	if cfg.Tools.Desktop || cfg.Tools.Typing.Enable {
 		windows = tools.NewDesktop(tools.DesktopOptions{
@@ -472,6 +483,25 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 			ScrubEnv:    providerKeyEnvNames(cfg),
 			PhraseOwner: router.owner,
 			Screens:     screens,
+			Managed:     managedWindows,
+			// One terminal-class list, shared with the typing tools: a window
+			// that counts as a command line when something is typed into it
+			// must count as one when it is handed over, or the two features
+			// would disagree about what a terminal is.
+			TerminalClasses: cfg.Tools.Typing.TerminalClasses,
+			// Whether this build can type at all. Captured by value rather
+			// than read live, and that is honest rather than lazy: the typing
+			// tools are registered here, once, so `[tools.typing] enable`
+			// takes effect at a restart and nowhere else — a seam that
+			// pretended to follow a reload would report a capability the
+			// registry does not have.
+			//
+			// It is consulted only to SAY so. Acquisition works either way;
+			// the confirmation and the acquisition sentence name the
+			// limitation, so a user handing over a terminal in order to have
+			// things typed into it hears why nothing will be, before they
+			// answer.
+			TypingEnabled: func() bool { return cfg.Tools.Typing.Enable },
 			// The event carries what was done to which window so the overlay
 			// can show it; addresses stay daemon-side, and spoken summaries
 			// never mention either.
@@ -526,7 +556,28 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 				if a.Reason != "" {
 					d["reason"] = a.Reason
 				}
+				// The one exception to the rule above, and the reason it is
+				// safe to make: a payload aimed at a terminal is a COMMAND,
+				// the gate judged it as one, and a command that ran must be
+				// findable in the feed as a command (#197). Set only when the
+				// classification actually happened — every other typing row
+				// still carries a length and nothing else.
+				if a.Command != "" {
+					d["command"] = a.Command
+				}
+				if a.Rule != "" {
+					d["rule"] = a.Rule
+				}
 				bus.Publish(session.Event{Type: "typing.audit", Data: d})
+			},
+			// The permission gate, under the shell.run identity: text typed
+			// into a terminal faces exactly the classification a shell command
+			// faces (#197, ADR 0062). Read through the registry rather than
+			// captured, because remembering an approval recompiles the policy
+			// and swaps it in — a captured *Policy would be the gate as it was
+			// at boot, which is the one gate nobody asked for.
+			Classify: func(command string) tools.Verdict {
+				return registry.CheckCommand(tools.ShellToolName, command)
 			},
 			Log: logger,
 		})

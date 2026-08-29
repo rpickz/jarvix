@@ -1227,6 +1227,52 @@ Three rules are worth knowing.
   two, pseudotiling has no size of its own, and a scratchpad is summoned rather
   than placed. Asking for one by name gets the reason back, not "unknown".
 
+#### The windows Jarvix manages (ADR 0062)
+
+Every window on your desktop is one of two things. A **managed** window is one
+Jarvix opened, or one you handed over; it may be read, moved and typed into,
+and a job may run there. Everything else is yours, and Jarvix keeps its hands
+off it.
+
+```
+Jarvix, take control of this terminal   # asks first, naming the window
+Jarvix, what do you manage
+Jarvix, let this go                     # immediate, never gated
+```
+
+or in the conversation window: **Approvals → Windows Jarvix manages**, with a
+Release button on each. A window Jarvix launched into a terminal is managed
+from the start — the `--class` it was opened with is how it is recognised.
+
+**Being managed is not permission to run anything.** Typing into a terminal is
+running commands, so text aimed at one is classified and confirmed *exactly*
+as a shell command is: the command verbatim on the card, compound commands
+split and judged part by part, risky words always asked about, deny rules
+refusing outright, and your own `[tools.policy] shell_allow` entries applying
+just as they would to `shell.run`. That classification does not depend on
+management at all — an unmanaged terminal that has focus is judged the same
+way — which is what makes "take control of it first" useless as a way around
+the gate. Two consequences follow: `shell.run = "deny"` also refuses typing
+into terminals, and a typed command appears in the activity feed as a command,
+verbatim, beside the rule that judged it.
+
+Handing a window over always asks, however `[tools.policy]` is written: a
+global `default = "allow"` does not reach `desktop.manage_window`, and the
+answer is never remembered for the next window. Letting one go never asks.
+
+Management lives in `managed.toml` under the state directory
+(`$XDG_STATE_HOME/jarvix`, default `~/.local/state/jarvix`), one `[[window]]`
+table each, documented in the file's own header. Deleting a table releases
+that window — the file's version of the same ungated release. A window is
+matched on all four of its address, stable id, class and process id together,
+because a window-manager address on its own is a handle that gets reused;
+management ends when the window closes, and nothing is left claiming one that
+has gone.
+
+With `[tools.typing] enable = false` (the shipped default) acquisition still
+works for reading and placement, and the confirmation says so before you
+answer rather than leaving you to discover it when nothing is typed.
+
 A routine that uses `place_next` **launches its windows one at a time and
 switches your view to each step's workspace**, because a tiling layout decides
 where a window lands the moment it maps. A routine without it keeps launching

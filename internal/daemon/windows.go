@@ -7,6 +7,7 @@ import (
 
 	"github.com/rpickz/jarvix/internal/intent"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/tools"
 )
 
 // routerHolder tracks the intent router currently in force, for the window
@@ -78,6 +79,74 @@ func (d *Daemon) registerWindowMethods() {
 			// The seam's refusals are spoken-ready and safe on the wire —
 			// collision owners and reserved-word descriptions, never
 			// addresses or compositor diagnostics.
+			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
+		}
+		return map[string]any{"spoken": spoken}, nil
+	})
+
+	d.registerManagedWindowMethods()
+}
+
+// registerManagedWindowMethods adds the managed-window surface (#197, ADR
+// 0062): `windows.managed` for the window's list and the CLI, and
+// `windows.release` to hand one back.
+//
+// Both are ungated, and the second one deliberately so: giving up power needs
+// no permission, so the Release button in the window does what "let this go"
+// does, immediately, with nothing to answer. There is no acquisition verb
+// here to match, and that asymmetry is the design — taking a window over is a
+// grant, and a grant is made out loud, on a confirmation card that names the
+// window (desktop.manage_window). A one-click "manage" would be the same
+// grant with none of the naming.
+func (d *Daemon) registerManagedWindowMethods() {
+	d.server.Handle("windows.managed", func(json.RawMessage) (any, error) {
+		if d.windows == nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError,
+				"the window tools are switched off on this daemon (tools.desktop)")
+		}
+		listings, err := d.windows.ManagedWindowListings(context.Background())
+		if err != nil {
+			d.log.Warn("windows.managed failed", "component", "daemon", "error", err.Error())
+			return nil, ipc.Errorf(ipc.CodeSessionError,
+				"the window manager is not available, so the managed windows cannot be listed")
+		}
+		if listings == nil {
+			// An empty list is an empty array, never JSON null: "I manage
+			// nothing" is a statement, and no client should need a null guard
+			// to hear it.
+			listings = []tools.ManagedWindowListing{}
+		}
+		return map[string]any{
+			"windows": listings,
+			"path":    d.windows.ManagedStorePath(),
+			// Whether this build can type at all, so the window can say what
+			// management does and does not buy here rather than leaving the
+			// user to discover it when nothing is typed.
+			"typing": d.runningConfig().Tools.Typing.Enable,
+		}, nil
+	})
+
+	d.server.Handle("windows.release", func(params json.RawMessage) (any, error) {
+		if d.windows == nil {
+			return nil, ipc.Errorf(ipc.CodeSessionError,
+				"the window tools are switched off on this daemon (tools.desktop)")
+		}
+		var p struct {
+			// Window describes which window, as a person would — the
+			// reference a windows.managed row carries, or anything else the
+			// window matcher understands.
+			Window string `json:"window"`
+		}
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, ipc.Errorf(ipc.CodeInvalidParams, "windows.release params: %v", err)
+			}
+		}
+		if p.Window == "" {
+			return nil, ipc.Errorf(ipc.CodeInvalidParams, "windows.release needs a window")
+		}
+		spoken, err := d.windows.ReleaseWindow(context.Background(), p.Window)
+		if err != nil {
 			return nil, ipc.Errorf(ipc.CodeSessionError, "%v", err)
 		}
 		return map[string]any{"spoken": spoken}, nil
