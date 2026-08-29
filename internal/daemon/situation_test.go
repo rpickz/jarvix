@@ -253,6 +253,14 @@ func TestTheReportRowSaysNothingAboutWhatItSaid(t *testing.T) {
 	if !strings.Contains(view.Spoken, "zarquon") {
 		t.Fatalf("the salt is not in the report, so this proves nothing: %q", view.Spoken)
 	}
+	// The row is derived from the report, not published with it: the daemon's
+	// own feed subscriber writes it after briefing.get has already answered
+	// (docs/ipc.md says as much of every activity.row). Sampling the feed on
+	// the reply's heels therefore races the watcher — green on an idle
+	// machine, red on a loaded runner, which is how this failed on two
+	// unrelated pull requests before anyone read the assertion. Wait for the
+	// row itself, as every other feed assertion in this package does.
+	waitForActivityRow(t, client, "Situation report given")
 	for _, row := range activityRows(t, client) {
 		if row.Label != "Situation report given" {
 			continue
