@@ -119,7 +119,7 @@ clean:
 # --- Test-depth targets (issue #8) -----------------------------------------
 # Local and CI invocations are identical: CI calls these same targets.
 
-.PHONY: fuzz bench bench-engines mutate soak soak-repeat soak-constrained soak-unraced voice-corpus voice-corpus-baseline
+.PHONY: fuzz fuzz-properties bench bench-engines mutate soak soak-repeat soak-constrained soak-unraced voice-corpus voice-corpus-baseline
 
 # Fuzz every parser that eats external input. Each target runs briefly; the
 # committed seed corpora under testdata/fuzz regression-check known inputs on
@@ -133,6 +133,23 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzReadStream$$' -fuzztime=$(FUZZTIME) ./internal/ai/openaicompat
 	$(GO) test -run='^$$' -fuzz='^FuzzRouterMatch$$' -fuzztime=$(FUZZTIME) ./internal/intent
 	$(GO) test -run='^$$' -fuzz='^FuzzRedact$$' -fuzztime=$(FUZZTIME) ./internal/desktop
+
+# The property targets of issue #172: the shell classifier, the
+# remembered-approval matrix and the spoken-time parser, each attacked with the
+# invariants that make them security controls rather than heuristics, stated as
+# laws rather than as a table of examples.
+#
+# Deliberately NOT part of `fuzz` above, which .github/workflows/test-depth.yml
+# runs for thirty seconds a target on every pull request. These are searches
+# rather than regression checks and they belong on the weekly clock
+# (.github/workflows/mutation.yml, five minutes a target), so the PR gate stays
+# where it is. What the PR gate does keep is the committed corpora: every one
+# of these targets replays its testdata on a plain `go test`, in milliseconds,
+# so a case the fuzzer has already found can never come back unnoticed.
+fuzz-properties:
+	$(GO) test -run='^$$' -fuzz='^FuzzShellClassifier$$' -fuzztime=$(FUZZTIME) ./internal/tools
+	$(GO) test -run='^$$' -fuzz='^FuzzRememberOffer$$' -fuzztime=$(FUZZTIME) ./internal/tools
+	$(GO) test -run='^$$' -fuzz='^FuzzParseWhen$$' -fuzztime=$(FUZZTIME) ./internal/intent
 
 # Latency/throughput benchmarks over our own pipeline (fakes, not engines).
 # BENCHCOUNT=5 gives benchstat-able samples; CI passes it, local runs default
@@ -167,14 +184,22 @@ voice-corpus:
 voice-corpus-baseline:
 	$(GO) test -tags voicecorpus -count=1 -v ./internal/voicecorpus -voicecorpus.update-baseline
 
-# Mutation testing over the session engine (the core state machine).
-# GOFLAGS=-count=1 keeps gremlins' baseline honest: a cached test run makes
-# the derived per-mutant timeout near zero and everything "times out".
-# The gremlins version is pinned so the documented mutation score stays
-# reproducible — bump it deliberately and re-triage the survivors.
-GREMLINS_VERSION ?= v0.6.0
+# Mutation testing over the security-critical packages, with a report of the
+# mutants that survived (issue #172). The package set, the flags and the report
+# all live in the script, so .github/workflows/mutation.yml and a local run are
+# the same run — and the report is a file rather than a wall of scrolling
+# output, because the previous target's output was read by nobody.
+#
+# The gremlins version is pinned in the script so the documented mutation score
+# stays reproducible — bump it deliberately and re-triage the survivors.
+# docs/mutation.md holds the current triage: every survivor either killed or
+# recorded as accepted, with its reason.
+#
+#   make mutate                          # the defined package set
+#   make mutate MUTATE_PKGS=./internal/tools
+MUTATE_PKGS ?=
 mutate:
-	GOFLAGS=-count=1 $(GO) run github.com/go-gremlins/gremlins/cmd/gremlins@$(GREMLINS_VERSION) unleash --timeout-coefficient 3 ./internal/session
+	scripts/mutation-report.sh $(MUTATE_PKGS)
 
 # --- Soak (issue #171) ------------------------------------------------------
 # The commands that catch this repo's ordering failures, which the PR gate's

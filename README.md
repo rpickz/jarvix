@@ -599,6 +599,8 @@ make ci                # exactly what the CI gate runs
 make coverage-ratchet  # total coverage vs the floor in coverage.floor
 make soak              # the high-count, constrained runs that catch ordering faults
 make voice-corpus      # real recordings through the real whisper (needs the tag and a corpus)
+make fuzz-properties   # the classifier and parser laws, attacked by the fuzzer
+make mutate            # mutation testing, with a report of the survivors
 ```
 
 The entire session lifecycle is testable with fakes — `internal/session`'s
@@ -611,6 +613,16 @@ parallelism, to show up at all. Those are soaked nightly instead —
 [docs/soak.md](docs/soak.md) has the exact commands to run one by hand, what the
 coverage floor is (and is not), and the two guards that catch the ordering traps
 this repo has already fallen into.
+
+There is a second such class, and it is the reason `make fuzz-properties` and
+`make mutate` are on the list above. Several of the pieces that decide whether
+Jarvix may run a command, or when a reminder fires, are classifiers over an
+unbounded input space, and a table of examples only ever proves the cases
+somebody thought of. Those components are stated as **properties** — laws that
+hold for every input — and attacked with generated input on a weekly schedule
+rather than on the PR gate, so the fast gate stays fast.
+[docs/mutation.md](docs/mutation.md) is the properties, the mutation report,
+and what the first report cost to act on.
 
 Every test above uses fakes, and there is one thing fakes cannot prove: that
 whisper, biased the way this daemon biases it, turns *real speech* into the
@@ -628,6 +640,7 @@ Architecture, protocol, and design decisions:
 - [docs/providers.md](docs/providers.md) — provider abstractions
 - [docs/soak.md](docs/soak.md) — soaking, the coverage floor, and the test guards
 - [docs/voice-corpus.md](docs/voice-corpus.md) — the real-voice test corpus and its harness
+- [docs/mutation.md](docs/mutation.md) — the classifier properties and the mutation report
 - [docs/adr/](docs/adr/) — architecture decision records
 - [docs/CHECKLIST.md](docs/CHECKLIST.md) — development checklist
 

@@ -8,5 +8,11 @@ coverage.out
 # evidence for one run on one machine, and CI retains its own as artefacts.
 /soak-logs/
 
+# Mutation output (scripts/mutation-report.sh). Same argument as the soak
+# logs: a report is evidence for one run on one commit, and the scheduled
+# workflow keeps its own as an artefact. What DOES belong in the tree is the
+# triage of a report — docs/mutation.md.
+/mutation-out/
+
 # Stray agent worktrees
 .claude/

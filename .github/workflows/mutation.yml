@@ -1,0 +1,99 @@
+# Mutation testing and long-running property fuzzing, on a schedule (issue
+# #172).
+#
+# Both of these are minutes-to-an-hour long, so neither belongs anywhere near
+# the PR gate — the fast gate stays fast, and these run while nobody is
+# waiting. What they are NOT is optional: the properties in
+# internal/tools/fuzz_test.go, internal/intent/when_property_test.go and
+# internal/session/fuzz_test.go are the statements that the shell classifier,
+# the approval matrix and the spoken-time parser cannot be talked into a wrong
+# answer, and this is where those statements are actually attacked at length.
+#
+# This file exists rather than another job in test-depth.yml because the
+# mutation job needed all four of the things it did not have — a defined
+# package set, a schedule, a report kept as an artefact, and somebody reading
+# it — and a job with a report is a different thing from a job that scrolls.
+# docs/mutation.md is where a report is turned into work.
+name: mutation
+
+on:
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "seconds of fuzzing per target"
+        required: false
+        default: "300s"
+  schedule:
+    # Monday 03:00 UTC, the slot the manual mutation job nominally had. Weekly
+    # rather than nightly because mutants move when the tests move, and the
+    # tests move on the scale of a week — a nightly report that is identical
+    # six mornings running is a report people stop opening.
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation
+  cancel-in-progress: false
+
+jobs:
+  # The property targets, fuzzed properly. On the PR gate these same targets
+  # run only their committed corpora, which takes milliseconds; here the
+  # fuzzer is allowed to go looking. Anything it finds is written to
+  # testdata/fuzz — the artefact below is how that file gets off the runner
+  # and into a commit, because a crasher nobody can reproduce is a crasher
+  # nobody fixes.
+  properties:
+    name: property fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Fuzz the classifiers and the parsers
+        run: make fuzz-properties FUZZTIME=${{ inputs.fuzztime || '300s' }}
+      - name: Upload anything the fuzzer found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ github.sha }}
+          path: |
+            internal/*/testdata/fuzz/**
+          retention-days: 90
+
+  mutation:
+    name: mutation testing
+    runs-on: ubuntu-latest
+    # An hour is generous and deliberately so. The previous job's 30 minutes
+    # was set when it ran one package; the defined set is three, and a run cut
+    # off half way produces a partial survivor list, which is worse than none —
+    # it reads like progress.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Mutate the security-critical packages
+        run: make mutate
+      - name: Upload the surviving-mutant report
+        # Not `if: success()`. The report is the reason the job exists, and the
+        # run exits nonzero exactly when there is something in it worth
+        # reading.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report-${{ github.sha }}
+          path: mutation-out/
+          # A quarter of a year: long enough that a report can be compared with
+          # the one before it, which is the only way "12 survivors" means
+          # anything.
+          retention-days: 90
+      - name: Summarise on the run page
+        if: ${{ !cancelled() }}
+        run: cat mutation-out/mutation-report.md >>"$GITHUB_STEP_SUMMARY"
