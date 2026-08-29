@@ -105,6 +105,21 @@ func (p Paths) ApprovalsFile() string { return filepath.Join(p.State, "approvals
 // they cannot correct.
 func (p Paths) MonitorsFile() string { return filepath.Join(p.State, "monitors.toml") }
 
+// ManagedFile is the managed-window store (#197, ADR 0062): the windows
+// Jarvix opened, and the ones the user handed over by saying so.
+//
+// State rather than config.toml, on the monitor store's exact terms: it is
+// written by voice ("take control of this terminal"), and a write that needs
+// config-write ceremony is a write the user cannot make by talking. It is
+// hand-editable all the same — deleting a stanza releases a window, which is
+// the file's version of the same ungated release the spoken verb performs.
+//
+// Note what it is NOT: it is not a permission file. Nothing in it lets a
+// command run; the permission gate's own configuration stays in config.toml
+// under [tools.policy], where #109's wall keeps it out of the assistant's
+// reach.
+func (p Paths) ManagedFile() string { return filepath.Join(p.State, "managed.toml") }
+
 // ConversationsDir returns where archived conversations live (ADR 0027).
 // State, like history: transcripts of what was said in the user's home,
 // machine-local, and deletable at will (`jarvix conversations delete`).

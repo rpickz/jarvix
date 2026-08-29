@@ -31,6 +31,7 @@ import (
 	"github.com/rpickz/jarvix/internal/focus"
 	"github.com/rpickz/jarvix/internal/history"
 	"github.com/rpickz/jarvix/internal/ipc"
+	"github.com/rpickz/jarvix/internal/managed"
 	"github.com/rpickz/jarvix/internal/memory"
 	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/vocabulary"
@@ -337,6 +338,7 @@ func validateStagedRoots(configRoot, stateRoot string, report *RestoreReport) []
 		filepath.Join(stateRoot, "vocabulary.toml"): vocabulary.ValidateFile,
 		filepath.Join(stateRoot, "focus.toml"):      focus.ValidateFile,
 		filepath.Join(stateRoot, "monitors.toml"):   monitors.ValidateFile,
+		filepath.Join(stateRoot, "managed.toml"):    managed.ValidateFile,
 		filepath.Join(stateRoot, "history.json"): func(p string) error {
 			_, _, err := (&history.File{Path: p}).Load()
 			return err
