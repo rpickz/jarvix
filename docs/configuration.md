@@ -205,6 +205,14 @@ desktop_apps = []                # what desktop.launch_app may start; empty
                                  # means anything on PATH, e.g.
                                  # ["firefox", "alacritty", "/opt/apps/notes"]
 
+[tools.launch]                   # how a program starts, when Jarvix gets it
+                                 # wrong — see "How a program is started" below.
+                                 # Both empty on almost every machine.
+terminal_programs = []           # open these inside [intents] terminal,
+                                 # e.g. ["claude", "opencode"]
+graphical_programs = []          # start these directly, expecting a window,
+                                 # e.g. ["obsidian"]
+
 [tools.typing]                   # Jarvix typing on YOUR keyboard — read the
                                  # Typing section below before enabling this
 enable = false                   # off by default, like shell.run
@@ -263,7 +271,8 @@ shell_deny = []                  # extra command prefixes that never run,
 # "artifact.create" = "allow"    # built-in default: it only writes into the
                                  # artifact directory. Unknown tools default
                                  # to "ask".
-# "desktop.list_windows" = "allow"   # built-in defaults: the two window reads
+# "desktop.list_windows" = "allow"   # built-in defaults: the desktop reads
+# "desktop.list_apps" = "allow"      # (windows, what is launchable) and focus
 # "desktop.focus_window" = "allow"   # run silently; move, close and launch
                                      # take the default above ("ask")
 # "conversations.search" = "allow"   # built-in default: a read of your own
@@ -1034,6 +1043,39 @@ routine, and every argument in it is shown verbatim on the confirmation card
 before anything is written. It still cannot hand arguments to the
 `desktop.launch_app` tool — that stance
 ([ADR 0022](adr/0022-desktop-window-control.md)) is unchanged.
+
+**How a program is started.** Not every program opens a window. `claude`,
+`opencode`, `codex` and `grok` are command-line tools: started on their own,
+with no terminal and nothing on stdin, they exit immediately — so Jarvix opens
+them **inside the terminal you named in `[intents] terminal`**, and says so
+("Claude is running in a terminal") rather than promising a window that nothing
+will open. A graphical application is started directly, exactly as before.
+
+Which is which comes from your machine, not from a guess: a graphical
+application ships an XDG desktop entry and a command-line tool does not, and a
+desktop entry that says `Terminal=true` is believed outright. Where that gets
+it wrong, say so once:
+
+```toml
+[tools.launch]
+terminal_programs  = ["claude"]     # open these inside the terminal
+graphical_programs = ["obsidian"]   # start these directly
+```
+
+Both are editable in **Settings** ("Programs to open inside a terminal",
+"Programs that open their own window"); a name in both lists is refused, since
+a program starts one way or the other. Jarvix knows how to run a command inside
+alacritty, foot, ghostty, gnome-terminal, kitty, konsole, wezterm and xterm; any
+other terminal is refused by name rather than guessed at, and the terminals that
+publish a window-class flag get one, so the window can be found afterwards.
+
+Two things answering to one name — a `claude` command and a Claude Desktop
+application — is a question, never a coin toss; and a program on a machine with
+no desktop entries at all cannot be classified, so Jarvix says so and asks
+instead of launching hopefully. `desktop.list_apps` is the catalogue the
+assistant reads before naming something, so "launch Claude" does not depend on
+what it assumes a Linux machine has
+([ADR 0061](adr/0061-how-each-program-is-started.md)).
 
 **Identity, and the two-Chrome-profiles problem.** Chromium runs every profile
 in a single process, so a personal-profile window and a work-profile window
@@ -2250,6 +2292,7 @@ How much it asks first:
 | `desktop.move_window` | ask | Changes your workspace layout |
 | `desktop.close_window` | ask | Closes something you might be in the middle of |
 | `desktop.launch_app` | ask | Starts a program |
+| `desktop.list_apps` | allow | Reads what is installed and how each thing starts; runs nothing |
 
 The confirmation names the actual window — "I want to close firefox, the window
 titled GitHub. Should I go ahead?" — generated from the live window list, never
