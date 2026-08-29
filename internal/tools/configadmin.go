@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // This file is the assistant's hands on its own configuration (issue #105,
@@ -189,6 +191,15 @@ type ConfigAdmin interface {
 	// outside the assistant's writable space; false for keys that are merely
 	// unknown (those come back as correctable errors, never as the wall).
 	ExcludedSetting(key string) (string, bool)
+	// Path is the file every one of these verbs writes.
+	//
+	// It is here for the account (#201, ADR 0064): "what would restore this
+	// config write" is the previous bytes of that file, and the previous
+	// bytes can only be taken by whoever knows the path, before the write.
+	// The tool asks rather than being handed one at construction because the
+	// daemon's Paths are the single source of that answer and a second copy
+	// would be a second thing to keep in step.
+	Path() string
 }
 
 // ConfigToolsOptions configure the family.
@@ -722,7 +733,7 @@ func (t *configWriteEntry) Confirmation(input json.RawMessage) (command, summary
 // untouched, surface it when the model's view is stale), the field-keyed
 // problem feedback, and a success wording drawn from the entry AS WRITTEN,
 // re-read from the file, never from the request.
-func (t *configWriteEntry) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *configWriteEntry) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args writeEntryArgs
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", fmt.Errorf("invalid config.write_entry arguments: %w", err)
@@ -783,6 +794,12 @@ func (t *configWriteEntry) Execute(_ context.Context, input json.RawMessage) (st
 		fingerprint = current.Fingerprint
 	}
 
+	// The bytes that would put this back, taken before the write lands. The
+	// byte-preserving editor keeps comments, key order and spacing that no
+	// re-serialisation reproduces, so the file itself is the only honest
+	// answer to "what did it look like before" (#201).
+	prevFile := undo.Snapshot(ctx, t.c.admin.Path())
+
 	receipt, err := t.c.admin.UpsertEntry(family, addressed, args.Entry, fingerprint)
 	var adminErr *ConfigAdminError
 	if asConfigAdminError(err, &adminErr) && adminErr.Conflict && edit {
@@ -840,6 +857,10 @@ func (t *configWriteEntry) Execute(_ context.Context, input json.RawMessage) (st
 	}
 	t.c.log.Info("config entry written", "component", "tools", "tool", t.Name(),
 		"family", family, "name", writtenName, "created", receipt.Created, "applied", receipt.Applied)
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: fmt.Sprintf("%s the %s %q", verb, configEntryFamilies[family], writtenName),
+	})
 	written, rerr := t.c.admin.GetEntry(family, writtenName)
 	if rerr != nil {
 		// Written but unreadable back — report the write honestly without
@@ -915,7 +936,7 @@ func (t *configDeleteEntry) Confirmation(input json.RawMessage) (command, summar
 // Execute implements Tool. Same conflict discipline as the write: delete
 // under the fingerprint of our own read, retry once when the file moved but
 // the entry did not, surface it when the entry itself changed.
-func (t *configDeleteEntry) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *configDeleteEntry) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Family string `json:"family"`
 		Name   string `json:"name"`
@@ -940,6 +961,8 @@ func (t *configDeleteEntry) Execute(_ context.Context, input json.RawMessage) (s
 	if err != nil {
 		return fmt.Sprintf("error: %v", err), nil
 	}
+
+	prevFile := undo.Snapshot(ctx, t.c.admin.Path())
 
 	receipt, err := t.c.admin.DeleteEntry(family, before.Name, before.Fingerprint)
 	adminErr = nil
@@ -969,6 +992,10 @@ func (t *configDeleteEntry) Execute(_ context.Context, input json.RawMessage) (s
 	t.c.forgetRead(family, before.Name)
 	t.c.log.Info("config entry deleted", "component", "tools", "tool", t.Name(),
 		"family", family, "name", before.Name, "applied", receipt.Applied)
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: fmt.Sprintf("deleted the %s %q", configEntryFamilies[family], before.Name),
+	})
 	return fmt.Sprintf("Deleted: the %s %q was removed from the configuration; nothing else "+
 		"changed. %s Confirm to the user in one short sentence.",
 		configEntryFamilies[family], before.Name, appliedText(receipt.Applied, receipt.Reason)), nil
@@ -1161,7 +1188,7 @@ func (t *configWriteSetting) Confirmation(input json.RawMessage) (command, summa
 }
 
 // Execute implements Tool.
-func (t *configWriteSetting) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *configWriteSetting) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args writeSettingArgs
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", fmt.Errorf("invalid config.write_setting arguments: %w", err)
@@ -1189,6 +1216,7 @@ func (t *configWriteSetting) Execute(_ context.Context, input json.RawMessage) (
 	if err != nil {
 		return fmt.Sprintf("The value could not be read: %v. Send it in the setting's own type.", err), nil
 	}
+	prevFile := undo.Snapshot(ctx, t.c.admin.Path())
 	receipt, err := t.c.admin.WriteSetting(key, value)
 	if err != nil {
 		var adminErr *ConfigAdminError
@@ -1203,6 +1231,15 @@ func (t *configWriteSetting) Execute(_ context.Context, input json.RawMessage) (
 	}
 	t.c.log.Info("config setting written", "component", "tools", "tool", t.Name(),
 		"key", key, "applied", receipt.Applied, "needs_restart", receipt.NeedsRestart)
+	// The key travels into the account, the value does not. Settings the
+	// assistant may write hold no secrets today, but the account is a file on
+	// disk and a summary is spoken aloud — config.setting_changed already
+	// publishes keys only, and this row keeps the same promise. What would
+	// restore the value is in the [action.file] stanza, where it belongs.
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: fmt.Sprintf("changed the setting %s", key),
+	})
 	status := appliedText(receipt.Applied, receipt.Reason)
 	if receipt.NeedsRestart {
 		status = "The value is saved, but the daemon must be restarted before it takes " +

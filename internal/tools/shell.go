@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // Shell runs non-interactive commands on the user's behalf — the tool behind
@@ -114,5 +116,20 @@ func (s *Shell) Execute(ctx context.Context, input json.RawMessage) (string, err
 	}
 	logger.Info("command finished", "component", "tools", "tool", "shell.run",
 		"duration_ms", time.Since(start).Milliseconds(), "output_bytes", out.Len())
+	// The account records that this ran, verbatim, and promises nothing about
+	// putting it back (#201, ADR 0064). That distinction is the ticket's
+	// spine: a shell command the user approved is described honestly, never
+	// falsely offered as undoable, because Jarvix has no idea what it did and
+	// an offer it could not keep would be worse than no offer at all. The
+	// command is the summary because a summary of a command is a paraphrase,
+	// and this is the one row where a paraphrase would be a lie.
+	//
+	// Recorded whatever the exit status: a command that failed still ran, and
+	// half of it may well have landed.
+	undo.Note(ctx, undo.Action{
+		Tool:    ShellToolName,
+		Summary: "ran " + args.Command,
+		Restore: undo.OneWay(ShellToolName),
+	})
 	return result, nil
 }

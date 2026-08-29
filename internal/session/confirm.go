@@ -12,6 +12,7 @@ import (
 	"github.com/rpickz/jarvix/internal/provenance"
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // This file is the engine half of the tool permission gate (ADR 0014): the
@@ -461,7 +462,13 @@ func (e *Engine) executeTool(s *sess, call ai.ToolCall, speaker *streamingSpeake
 	var sink provenance.Sink
 	s.timings.beginExcluded(StageToolRuns)
 	start := time.Now()
-	result = e.tools.Execute(provenance.WithSink(s.ctx, &sink), call)
+	// The account rides the same context as the provenance sink, and for the
+	// same argument (#201): the code that knows what it changed and what
+	// would put it back is reached through interfaces whose signatures belong
+	// to what they do, so exactly the tools that change the machine say so
+	// and the rest are untouched. A nil recorder installs nothing.
+	toolCtx := undo.WithRecorder(provenance.WithSink(s.ctx, &sink), e.opts.Undo)
+	result = e.tools.Execute(toolCtx, call)
 	s.timings.endExcluded()
 	stopProgress()
 	// Derived from the call and its outcome, never from the model's words:
@@ -588,6 +595,21 @@ const (
 // ended underneath it, in which case the caller must stop without reporting
 // anything — the cancel path owns those events.
 func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirmOutcome, alive bool) {
+	// Which decisions are one-way is said HERE, before the question goes
+	// out, rather than discovered afterwards in the account (#201, ADR 0064).
+	// A manager should know that a command cannot be taken back at the moment
+	// they approve it; learning it later is learning nothing useful.
+	//
+	// It rides req.summary rather than a field of its own, and that is the
+	// decision: the summary is the one string every surface already renders —
+	// the window's card, the overlay, the spoken question when details are
+	// on, the pending snapshot a window opening mid-question reads, and the
+	// record kept in the conversation archive. A new field would have reached
+	// whichever surface was updated for it and left the rest quietly silent
+	// about the thing that matters most. The structured flag goes on the
+	// event beside it, for a surface that later wants to style the warning
+	// rather than merely show it.
+	req.summary = undo.Annotate(req.tool, req.summary)
 	timeout := e.opts.ConfirmTimeout
 	if timeout <= 0 {
 		timeout = DefaultConfirmTimeout
@@ -660,6 +682,14 @@ func (e *Engine) awaitConfirmation(s *sess, req confirmRequest) (outcome confirm
 		"session_id": s.id, "tool": req.tool, "command": req.command,
 		"summary": req.summary, "rule": req.rule,
 		"timeout_sec": int(timeout.Seconds()),
+	}
+	if undo.CardNote(req.tool) != "" {
+		// The warning is already inside the summary above, which is what
+		// every surface renders today. This flag is the same fact in a form
+		// a surface can act on rather than only print, and it is set only
+		// when the summary actually carries the clause, so the two can never
+		// disagree about whether the user was told.
+		confirmData["irreversible"] = true
 	}
 	// The remember offer rides the same event as the question (#162), so the
 	// card can show the exact rule on the button before the user commits and
@@ -782,8 +812,18 @@ func (e *Engine) spokenConfirmationPrompt(req confirmRequest) string {
 // fact in the present tense — "Running a shell command" while it runs. One
 // table, two grammatical forms: the gate and the transcript cannot end up
 // describing one capability two ways.
+// The one-way clause is appended here as well as inside the summary, because
+// this branch does not use the summary at all — it is the abbreviated audio,
+// and abbreviating away "this cannot be undone" would be abbreviating away
+// the only part of the question a person cannot recover by looking at the
+// screen afterwards (#201). It is the SHORT form: the reason belongs on the
+// card, which is where this sentence has just told the user to look.
 func shortConfirmationPrompt(tool string) string {
-	return fmt.Sprintf("May I %s? The details are on screen.", desktop.ToolActionAsk(tool))
+	ask := fmt.Sprintf("May I %s? The details are on screen.", desktop.ToolActionAsk(tool))
+	if note := undo.SpokenNote(tool); note != "" {
+		return ask + " " + note
+	}
+	return ask
 }
 
 // speakPrompt asks the confirmation question out loud.

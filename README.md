@@ -454,6 +454,45 @@ never clashes with another binding. See
 [ADR 0008](docs/adr/0008-daemon-side-push-to-talk.md) (including the privacy
 model: non-chord key events are discarded immediately and never logged).
 
+**What did you do, and put it back.** Jarvix keeps an account of every change
+it makes to this machine in your name — a config entry saved, a fact
+remembered, a phrase taught, a reminder set, a window moved, an artifact
+written, a command run — and, where it can, what would restore it.
+
+```bash
+jarvix actions        # newest first, with which ones can be put back
+jarvix undo           # put the last change back
+jarvix undo a17       # put one particular change back
+```
+
+For anything Jarvix wrote to a file, "what would restore it" is the exact
+bytes that were there before — comments, key order and spacing included, so an
+undo is a reversal and not a second edit. For a window it is the workspace,
+layer and geometry it was in. **For a shell command it is nothing, and Jarvix
+says so rather than pretending**: a command that has run has run, and an offer
+it could not keep would be worse than no offer. The same goes for a script, a
+routine, a keystroke, a closed window and a refreshed feed — each is recorded,
+described, and never promised as undoable.
+
+Which decisions are one-way is said **on the confirmation card, before you
+approve** — "This can't be undone: a command that has run has run" — because
+learning it afterwards would be learning nothing useful.
+
+An undo is a change like any other, so it faces the same permission tier as
+the thing it reverses, and it **refuses rather than clobbering** when it
+cannot tell: if you edited the file yourself after Jarvix wrote it, `jarvix
+undo` says what it found and leaves your edit alone rather than overwriting
+it. Putting something back is itself recorded, so the account is always the
+whole story.
+
+The account is bounded and says so — "I keep the last 100 actions; 37 older
+ones have dropped off" — because an account that silently forgets is worse
+than one that tells you what it no longer has. It lives at
+`~/.local/state/jarvix/undo.toml`, private (0600) and hand-editable; deleting
+a stanza removes that record, which is the right thing to do with a command
+you would rather not keep a copy of. See
+[ADR 0064](docs/adr/0064-review-and-undo.md).
+
 ### Backing up the assistant's memory of you
 
 Jarvix's whole knowledge of you — remembered facts, taught vocabulary, focus

@@ -39,6 +39,7 @@ import (
 	"github.com/rpickz/jarvix/internal/tools"
 	"github.com/rpickz/jarvix/internal/transcript"
 	"github.com/rpickz/jarvix/internal/tts"
+	"github.com/rpickz/jarvix/internal/undo"
 	"github.com/rpickz/jarvix/internal/vocabulary"
 	"github.com/rpickz/jarvix/internal/wake"
 	"github.com/rpickz/jarvix/internal/warm"
@@ -139,6 +140,15 @@ type Daemon struct {
 	// window's full version. It owns no goroutine and no clock — everything
 	// it does happens while the user is demonstrably back.
 	briefing *briefing.Service
+	// account is the record of what Jarvix changed on this machine, and
+	// undoer is what puts it back (#201, ADR 0064). Always present and
+	// construction-wired on the reminder service's terms: the engine installs
+	// the store on every tool call's context, the undo.* verbs read and
+	// reverse through it, and there is deliberately no switch that turns it
+	// off — an assistant that could act without an account would be exactly
+	// the delegation-without-accountability the operator direction rules out.
+	account *undo.Store
+	undoer  *undo.Undoer
 	// situation composes the situation report (#196, ADR 0061) — the one
 	// answer to "where are we?". Always present and construction-wired on the
 	// briefing service's exact terms: the engine carries it as its operating
@@ -776,7 +786,13 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	// the write path uses, so the voice can never describe a list the gate
 	// does not hold.
 	approvalSvc := newApprovalStore(cfg.Tools.Policy.ShellAllow, paths.ApprovalsFile(), logger)
+	// The account of what Jarvix does in the user's name (#201, ADR 0064),
+	// built before the engine because the engine carries it: every tool call
+	// runs with this store on its context, and a tool that changes something
+	// records it there.
+	account := newUndoStore(paths, bus, gate, logger)
 	engOpts := engineOptions(cfg, compositor, bus, book, vocab, feeds, convs, windows, screens, logger)
+	engOpts.Undo = account
 	// The model tiers (#159, ADR 0063). Built here rather than inside
 	// engineOptions because medium-with-no-table binds to the provider the
 	// daemon just built — the [ai] brain — and that is a dependency, not a
@@ -891,6 +907,7 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 		memory: book, vocabulary: vocab, knowledge: feeds, focus: focusSvc,
 		reminders:     remindersSvc,
 		briefing:      briefingSvc,
+		account:       account,
 		situation:     situationSvc,
 		started:       time.Now(),
 		conversations: convs, searcher: searcher,
@@ -918,6 +935,14 @@ func New(cfg config.Config, paths config.Paths, logger *slog.Logger, deps Deps) 
 	provVoice.d = d
 	d.bindFocus()
 	d.bindReminders()
+	// The reverser binds here, after the daemon exists, because it needs two
+	// things the store does not: the live permission gate (an undo is judged
+	// as the action it reverses) and the compositor seam (a window reversal
+	// is dispatched, not written). Both are the daemon's, and both are read
+	// live rather than snapshotted, so a config.reload changes what an undo
+	// is allowed to do exactly as it changes what a tool call is.
+	d.undoer = undo.NewUndoer(account, undoGate{registry: registry},
+		undoPlacer{comp: compositor})
 	d.bindBriefing()
 	d.bindSituation()
 	// The return-briefing tool (#150, ADR 0050): the model's path for the
@@ -1431,6 +1456,7 @@ func (d *Daemon) registerMethods() {
 	d.registerFocusMethods()
 	d.registerOverlayMethods()
 	d.registerReminderMethods()
+	d.registerUndoMethods()
 	d.registerBriefingMethods()
 	d.registerSituationMethods()
 	d.registerEntryAdminMethods()

@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/rpickz/jarvix/internal/provenance"
+	"github.com/rpickz/jarvix/internal/undo"
 	"github.com/rpickz/jarvix/internal/vocabulary"
 )
 
@@ -162,7 +164,7 @@ func (t *vocabularyTeach) Schema() json.RawMessage {
 // hard-to-hear flag was refused reports both halves honestly: the entry is
 // taught, the flag is not, and pretending otherwise in either direction
 // would be the silent-cap failure ADR 0037 forbids.
-func (t *vocabularyTeach) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *vocabularyTeach) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Phrase     string `json:"phrase"`
 		Meaning    string `json:"meaning"`
@@ -173,6 +175,11 @@ func (t *vocabularyTeach) Execute(_ context.Context, input json.RawMessage) (str
 		return "", fmt.Errorf("invalid vocabulary.teach arguments: %w", err)
 	}
 
+	// One snapshot brackets the teach AND the hard-to-hear flag below,
+	// deliberately: they are two writes to one file but one thing the user
+	// asked for, and an account that offered to undo half of it would put
+	// back a phrase that was never taught that way (#201).
+	prevFile := undo.Snapshot(ctx, t.v.store.Path())
 	entry, warning, err := t.v.store.Teach(args.Phrase, args.Meaning, args.Note, t.v.sourceTurn())
 	if err != nil {
 		return fmt.Sprintf("error: the phrase was not saved: %v", err), nil
@@ -192,6 +199,11 @@ func (t *vocabularyTeach) Execute(_ context.Context, input json.RawMessage) (str
 			}
 		}
 	}
+	prevFile.Note(ctx, undo.Action{
+		Tool:       t.Name(),
+		Summary:    fmt.Sprintf("taught the phrase %q", entry.Phrase),
+		Provenance: []string{provenance.KindVocabulary + ":" + entry.ID},
+	})
 	result += "\nConfirm to the user in one short sentence what the phrase now means."
 	if warning != "" {
 		result += "\nNote: " + warning + "."
@@ -287,11 +299,12 @@ func (t *vocabularyForget) Confirmation(input json.RawMessage) (command, summary
 }
 
 // Execute implements Tool.
-func (t *vocabularyForget) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (t *vocabularyForget) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	entry, reason, ok := t.resolve(input)
 	if !ok {
 		return reason, nil
 	}
+	prevFile := undo.Snapshot(ctx, t.v.store.Path())
 	forgotten, err := t.v.store.Forget(entry.ID)
 	if err != nil {
 		if errors.Is(err, vocabulary.ErrUnknownID) {
@@ -302,6 +315,10 @@ func (t *vocabularyForget) Execute(_ context.Context, input json.RawMessage) (st
 		}
 		return fmt.Sprintf("error: %v", err), nil
 	}
+	prevFile.Note(ctx, undo.Action{
+		Tool:    t.Name(),
+		Summary: fmt.Sprintf("forgot the taught phrase %q", forgotten.Phrase),
+	})
 	return fmt.Sprintf("Forgotten and deleted from disk: %q. "+
 		"Confirm to the user in one sentence.", forgotten.Phrase), nil
 }

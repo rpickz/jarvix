@@ -374,6 +374,10 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	capture.committed = d.captureCommitted
 	opts := engineOptions(merged, d.compositor, d.bus, d.memory, d.vocabulary, d.knowledge,
 		d.conversations, d.windows, d.screens, d.log)
+	// The account survives every reload like the memory book and the approval
+	// store: one instance for the daemon's life, so a reload can never leave
+	// the engine recording into a store the undo verbs do not read.
+	opts.Undo = d.account
 	opts.Capture = capture
 	// The tiers are rebuilt around the freshly built brain (#159), so a
 	// changed [ai.tiers] table — or a changed ai.model that medium inherits —

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rpickz/jarvix/internal/provenance"
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // Renderer turns artifact source of one format into a viewable file. The
@@ -122,8 +123,13 @@ const (
 // of KB).
 const MaxArtifactSourceBytes = 1 << 20
 
+// ArtifactToolName is the registry name of the artifact tool, exported so the
+// policy's tiers, the status surfaces and the account can name it without a
+// literal.
+const ArtifactToolName = "artifact.create"
+
 // Name implements Tool.
-func (a *Artifact) Name() string { return "artifact.create" }
+func (a *Artifact) Name() string { return ArtifactToolName }
 
 // Description implements Tool.
 func (a *Artifact) Description() string {
@@ -276,6 +282,26 @@ func (a *Artifact) Execute(ctx context.Context, input json.RawMessage) (string, 
 	if a.OnCreated != nil {
 		a.OnCreated(renderer.Format(), outPath)
 	}
+
+	// The account (#201, ADR 0064). Creating a file is the file restore's
+	// other half: "what would put this back" is that the file was not there,
+	// so undoing it removes what was made — guarded by the same digest as
+	// every other file reversal, so an artifact the user has since edited is
+	// refused rather than deleted out from under them.
+	//
+	// Only outPath is recorded, deliberately, even though a rendered format
+	// also leaves a source file beside it. The account is of things the user
+	// would miss, and the rendered document is the artifact; a row per
+	// intermediate would make the review pane read like a build log.
+	undo.Note(ctx, undo.Action{
+		Tool:    ArtifactToolName,
+		Summary: fmt.Sprintf("made the %s artifact %q", renderer.Format(), filepath.Base(outPath)),
+		Target:  outPath,
+		Restore: undo.Restore{Kind: undo.KindFile, File: &undo.FileRestore{
+			Path: outPath, Existed: false, AfterDigest: undo.DigestOf(outPath),
+		}},
+		Provenance: []string{provenance.KindArtifact + ":" + outPath},
+	})
 
 	// What went into the answer (issue #168). The path is reported to the
 	// turn, not to the model: this is the one thing about the call the

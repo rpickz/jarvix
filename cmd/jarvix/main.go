@@ -30,6 +30,10 @@ Usage:
   jarvix conversations show <id>   Print one conversation (read-only)
   jarvix conversations open <id>   Continue one as the active conversation
   jarvix conversations delete <id> Delete one from disk (--all deletes every one)
+  jarvix actions                What Jarvix has changed on this machine, newest
+                                first, and which of them it can put back
+  jarvix undo [id]              Put the last change back (or one by id)
+  jarvix undo --job <id>        Put a whole piece of work back, newest step first
   jarvix memory list [query]    List remembered facts (the knowledge base)
   jarvix memory forget <what>   Delete a remembered fact, by id or by words
   jarvix approvals list         List commands that run without asking
@@ -116,6 +120,28 @@ func run(args []string) int {
 			return fail(fmt.Errorf("usage: jarvix ask \"question\""))
 		}
 		err = cmdAsk(paths, rest[0])
+	case "actions":
+		if len(rest) > 0 {
+			return fail(fmt.Errorf("usage: jarvix actions"))
+		}
+		err = cmdActions(paths)
+	case "undo":
+		// An id and --job are alternatives, not a pair: "undo a12" names one
+		// action and "undo --job deploy" names a piece of work, and accepting
+		// both would leave the caller guessing which won.
+		switch {
+		case len(rest) == 0:
+			err = cmdUndo(paths, "", "")
+		case rest[0] == "--job":
+			if len(rest) != 2 {
+				return fail(errUndoUsage)
+			}
+			err = cmdUndo(paths, "", rest[1])
+		case len(rest) == 1 && !strings.HasPrefix(rest[0], "-"):
+			err = cmdUndo(paths, rest[0], "")
+		default:
+			return fail(errUndoUsage)
+		}
 	case "listen":
 		err = cmdListen(paths)
 	case "cancel":

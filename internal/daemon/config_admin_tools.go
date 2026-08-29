@@ -175,6 +175,12 @@ func (a *assistantConfigAdmin) GetEntry(family, name string) (tools.ConfigEntry,
 	return tools.ConfigEntry{Family: spec.family, Name: canonical, Entry: entry, Fingerprint: fp}, nil
 }
 
+// Path implements tools.ConfigAdmin: the file every one of these verbs
+// writes. It is what the account snapshots before a write, so "what would
+// restore this" is the previous bytes of the real file rather than a guess
+// (#201, ADR 0064).
+func (a *assistantConfigAdmin) Path() string { return a.d.paths.ConfigFile() }
+
 // UpsertEntry implements tools.ConfigAdmin by invoking the window's own
 // config.upsert_entry handler with the assistant source — the shared
 // pipeline end to end (shape whitelist, whole-document validation,

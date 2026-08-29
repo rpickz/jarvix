@@ -44,7 +44,12 @@ func TestShortPromptIsSpokenByDefault(t *testing.T) {
 	// The deadline event is published only after the question has been asked
 	// aloud, so once it arrives the prompt's synthesis request is on record.
 	h.waitFor(t, "tool.confirmation_deadline")
-	if got, want := h.tts.Last().Text, "May I run a shell command? The details are on screen."; got != want {
+	// The one-way warning rides the short prompt for shell.run (#201): the
+	// abbreviation may drop the command, because that is on screen, and may
+	// not drop "this can't be undone", because by the time the user could
+	// read it they have already answered.
+	if got, want := h.tts.Last().Text,
+		"May I run a shell command? The details are on screen. This can't be undone."; got != want {
 		t.Errorf("spoken prompt = %q, want the short default %q", got, want)
 	}
 
@@ -84,16 +89,22 @@ func TestVerbatimPromptWhenSpeakDetailsIsOn(t *testing.T) {
 // change is a reviewed decision — these sentences are the product's voice —
 // and so an unmapped tool provably names itself rather than borrowing a
 // friendlier class.
+// The one-way clause (#201) appears on exactly the tools internal/undo
+// classifies as irreversible, and is the SHORT form: the reason belongs on
+// the card, which is where the sentence before it has just pointed. An
+// unmapped tool gets no clause at all — a guess about whether an unfamiliar
+// capability can be taken back is worse than no claim.
 func TestShortPromptWording(t *testing.T) {
+	const oneWay = " This can't be undone."
 	cases := map[string]string{
-		"shell.run":                      "May I run a shell command? The details are on screen.",
-		tools.IntentToolName:             "May I run your custom command? The details are on screen.",
-		tools.ScriptToolName:             "May I run one of your scripts? The details are on screen.",
-		tools.RoutineToolName:            "May I run one of your routines? The details are on screen.",
+		"shell.run":                      "May I run a shell command? The details are on screen." + oneWay,
+		tools.IntentToolName:             "May I run your custom command? The details are on screen." + oneWay,
+		tools.ScriptToolName:             "May I run one of your scripts? The details are on screen." + oneWay,
+		tools.RoutineToolName:            "May I run one of your routines? The details are on screen." + oneWay,
+		tools.KnowledgeRefreshToolName:   "May I refresh one of your feeds? The details are on screen." + oneWay,
+		tools.TypeTextToolName:           "May I type on your keyboard? The details are on screen." + oneWay,
+		tools.PressKeyToolName:           "May I type on your keyboard? The details are on screen." + oneWay,
 		tools.AdvisorToolName:            "May I consult another assistant? The details are on screen.",
-		tools.KnowledgeRefreshToolName:   "May I refresh one of your feeds? The details are on screen.",
-		tools.TypeTextToolName:           "May I type on your keyboard? The details are on screen.",
-		tools.PressKeyToolName:           "May I type on your keyboard? The details are on screen.",
 		tools.MemoryForgetToolName:       "May I forget one of your saved facts? The details are on screen.",
 		tools.ConfigWriteSettingToolName: "May I change one of your settings? The details are on screen.",
 		tools.ConfigWriteEntryToolName:   "May I save a configuration entry? The details are on screen.",

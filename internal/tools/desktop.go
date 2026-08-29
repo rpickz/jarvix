@@ -22,6 +22,7 @@ import (
 	"github.com/rpickz/jarvix/internal/managed"
 	"github.com/rpickz/jarvix/internal/monitors"
 	"github.com/rpickz/jarvix/internal/placement"
+	"github.com/rpickz/jarvix/internal/undo"
 )
 
 // This file implements the desktop window tools (ADR 0022): the assistant can
@@ -752,8 +753,50 @@ func (d *Desktop) act(ctx context.Context, verb desktopVerb, w desktop.Window, a
 	d.log.Info("window action", "component", "tools", "verb", verbName,
 		"class", w.Class, "address", w.Address, "workspace", args.Workspace,
 		"monitor", args.Monitor, "mode", args.Mode)
+	d.record(ctx, verb, w, args)
 	d.publish(verbName, w.Describe())
 	return done + " Confirm it to the user in one short sentence. Do not describe the window in detail."
+}
+
+// record writes one window action to the account (#201, ADR 0064).
+//
+// w is the window as the compositor reported it a moment ago — BEFORE the
+// dispatch — which is exactly what makes a placement reversible: workspace,
+// floating, fullscreen and geometry together are the whole of where a window
+// was, and the compositor takes all four back as a set. This is the one
+// reversal that is not a file, and it is bespoke because the state lives in
+// the compositor and nowhere else.
+//
+// Focus is deliberately not recorded at all. Moving the user's attention is
+// not a change to the machine — nothing is different once they look
+// somewhere else — and a row per "switch to my browser" would bury the
+// account in the one action nobody would ever want back.
+//
+// Close and launch are recorded and marked one-way, from the same table the
+// confirmation card read: Jarvix cannot reopen a window with what was in it,
+// and cannot un-start a program that has started.
+func (d *Desktop) record(ctx context.Context, verb desktopVerb, w desktop.Window, args windowArgs) {
+	switch verb {
+	case verbMove:
+		undo.Note(ctx, undo.Action{
+			Tool:    MoveWindowToolName,
+			Summary: fmt.Sprintf("moved %s %s", w.Describe(), describePlacement(args)),
+			Target:  w.Describe(),
+			Restore: undo.Restore{Kind: undo.KindWindow, Window: &undo.WindowState{
+				Address: w.Address, StableID: w.StableID, Class: w.Class, PID: w.PID,
+				Describe: w.Describe(), Workspace: w.Workspace, WorkspaceName: w.WorkspaceName,
+				Floating: w.Floating, Fullscreen: w.Fullscreen,
+				X: w.X, Y: w.Y, Width: w.Width, Height: w.Height,
+			}},
+		})
+	case verbClose:
+		undo.Note(ctx, undo.Action{
+			Tool:    CloseWindowToolName,
+			Summary: "closed " + w.Describe(),
+			Target:  w.Describe(),
+			Restore: undo.OneWay(CloseWindowToolName),
+		})
+	}
 }
 
 // place applies the vocabulary to one resolved window.
