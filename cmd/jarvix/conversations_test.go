@@ -245,6 +245,7 @@ func TestRunConversationsSearch(t *testing.T) {
 				"retention": true,
 				"active_id": "20260821-104500-ab12",
 				"searched":  2,
+				"matched":   17,
 				"results": []map[string]any{
 					{"id": "20260821-104500-ab12", "turn": 3, "role": "user",
 						"ts": "2026-08-21T10:45:00Z", "current": true,
@@ -274,6 +275,8 @@ func TestRunConversationsSearch(t *testing.T) {
 		"* = earlier in the active conversation",
 		// A record that could not be searched is stated, never hidden.
 		"20260810-080000-ef56", "could not be searched",
+		// And so is the cap: two of seventeen must not read as two of two.
+		"showing 2 of 17 matching passages",
 		"open one with: jarvix conversations show <id>",
 	} {
 		if !strings.Contains(stdout, want) {

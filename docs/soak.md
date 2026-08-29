@@ -15,7 +15,10 @@ more that had been walking through it for months:
 Coverage was 83.3% throughout and did not help with any of them. These are
 ordering faults, and statement coverage does not measure ordering.
 
-So there are three things now, and this page is what each is for.
+So there are three things now, and this page is what each is for. A fourth —
+the store fault-injection suite — is documented below, because it is the same
+argument applied to a different kind of failure: not what the schedule does,
+but what the disk does.
 
 ---
 
@@ -267,3 +270,71 @@ directory holding every legitimate use of the same calls, which it asserts are
 all silent. Change a rule and both halves must still hold. The `_good` fixture
 is the important one — a guard that cries wolf gets deleted, and takes its true
 positives with it.
+
+---
+
+## 4. The store fault-injection suite
+
+`internal/storefault` is the shared suite every durable store runs
+(issue #173): the conversation archive, the memory book, the taught
+vocabulary, the focus threads, the reminders, the approval ledger and the
+monitor nicknames. It is not about ordering — that is what the soak and the
+guards above are for — it is about the conditions that actually break durable
+files.
+
+Six promises, each its own named subtest so a red build reads as the promise
+that broke and the store that broke it:
+
+| subtest | the promise |
+| --- | --- |
+| `AFailedWriteLeavesThePreviousFileAndTheMemoryIntact` | a write that fails mid-flight leaves the previous file byte-identical and the in-memory state unchanged |
+| `AFullDiskIsSurfacedAndNoSuccessIsRecorded` | ENOSPC at the write seam is surfaced, no id is handed back, and the store still works once there is room |
+| `ACorruptFileIsNotOverwrittenAndTheStoreSaysSo` | an unparseable document is set aside (or left where it is) but never overwritten, the store starts clean, and it discloses what it found |
+| `AHandEditBetweenOperationsIsPickedUp` | an edit made between two operations lands on the next one — no restart, no watcher |
+| `IDsAreNeverReusedAcrossAReload` | an id is retired with the record that held it |
+| `AReadConcurrentWithAWriteNeverSeesAPartialRecord` | a reader running alongside a writer never observes half a record |
+
+### Adding a store
+
+Fill in a `storefault.Subject` and implement `storefault.Store` over the real
+type, in the store's own package (the write seam and the on-disk shape are
+both unexported, and the adapter is the one part that has to know what a
+focus thread actually is). That is the whole of it — see
+`internal/monitors/faults_test.go`, which joined last, was not on the
+ticket's list, and needed no new assertions: the two ways it differs (it
+mints no ids, and its records are single words) are declared on the Subject
+rather than special-cased in the suite.
+
+### Hermetic by construction
+
+Nothing fills a disk, drops a privilege, or chmods a directory to provoke a
+failure. Faults arrive through the store's own `write` field — the seam each
+store already carries so a write can be made to fail on command — because a
+real filesystem cannot be made to fail hermetically: every trick a test could
+play on a temp directory is either privileged or repaired by the store's own
+chmod on the next write, and a fault that needs a privileged runner is a
+fault nobody runs.
+
+### What it found
+
+Five real defects on its first runs, all fixed at the mechanism:
+
+- **The approval ledger overwrote an unreadable file** instead of setting it
+  aside, destroying the user's approval history on the first write after any
+  damage. Every sibling store moves it aside.
+- **The approval ledger never picked up a hand edit** — it loaded once per
+  process, and the daemon runs for days, so an edit was silently reverted by
+  the next write from the cached copy.
+- **The approval ledger committed to memory before the disk took the write**,
+  so a refused write left it reporting a card grant, with a date, that no
+  file held.
+- **The archive could bury a torn line.** A failed append leaves half a line
+  at the end of a transcript; both readers tolerate a torn *last* line and
+  treat a bad line anywhere earlier as corruption — so the next successful
+  append turned one lost turn into a lost conversation. The writer now cuts
+  back to the last complete line first.
+- **The archive reported a conversation being created as damaged.** Creating
+  a transcript is an `open(O_CREAT)` and then a write, and the search scan
+  runs without the store's lock on purpose, so a search landing between the
+  two saw a zero-length file and told the user their live conversation could
+  not be searched.

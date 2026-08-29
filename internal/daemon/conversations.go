@@ -184,13 +184,19 @@ func (d *Daemon) registerConversationMethods() {
 			skipped = append(skipped, map[string]any{"id": u.ID, "error": u.Err})
 		}
 		d.log.Info("conversation search", "component", "daemon",
-			"results", len(matches), "searched", stats.Conversations, "skipped", len(stats.Skipped))
+			"results", len(matches), "matched", stats.Matched,
+			"searched", stats.Conversations, "skipped", len(stats.Skipped))
 		return map[string]any{
 			"retention": d.retentionOn(),
 			"active_id": activeID,
 			"results":   results,
-			"searched":  stats.Conversations,
-			"skipped":   skipped,
+			// How many passages matched altogether, so a client that got the
+			// capped twenty can say "showing 20 of 137" instead of implying
+			// that twenty is all there was (issue #173). The limit was the
+			// one cap in the search path that truncated in silence.
+			"matched":  stats.Matched,
+			"searched": stats.Conversations,
+			"skipped":  skipped,
 		}, nil
 	})
 
