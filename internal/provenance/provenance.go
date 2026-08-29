@@ -55,6 +55,20 @@ const (
 	KindConversation = "conversation"
 	// KindArtifact is a file a tool produced; Ref is its path.
 	KindArtifact = "artifact"
+	// KindReminder is a one-shot reminder (ADR 0046); Ref is its id.
+	//
+	// It arrived with the situation report (#196, ADR 0061) rather than with
+	// a turn: nothing injects a reminder into a model's context, so no answer
+	// is ever attributed to one. What it exists for is the other half of this
+	// vocabulary — a line in a report saying which thing it is about, so the
+	// window can take the reader there through the resolver every other
+	// source already goes through.
+	KindReminder = "reminder"
+	// KindSchedule is a scheduled routine or script (ADR 0032); Ref is
+	// "routine:<name>" or "script:<name>", the two together because the two
+	// namespaces are separate and a bare name would be ambiguous. Added with
+	// KindReminder, for the same reason and on the same terms.
+	KindSchedule = "schedule"
 	// KindTool is any other tool call that returned output. Tool names the
 	// tool and Subject its subject — never a query, because a query can quote
 	// the very facts it searches for (the Activity pane's "query not shown"

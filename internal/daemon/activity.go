@@ -74,6 +74,12 @@ func (d *Daemon) watchActivity(ctx context.Context, events <-chan session.Event,
 			if ev.Type == "briefing.given" {
 				d.appendActivity(ev, briefingActivityRow(ev.Data))
 			}
+			// The situation report's row (#196, ADR 0061), on the same terms:
+			// worded beside its own verb, and carrying that a report was given
+			// and never a word of what it said.
+			if ev.Type == "situation.given" {
+				d.appendActivity(ev, situationActivityRow(ev.Data))
+			}
 			for _, row := range desktop.ActivityRowsFor(ev.Type, ev.Data) {
 				d.appendActivity(ev, row)
 			}

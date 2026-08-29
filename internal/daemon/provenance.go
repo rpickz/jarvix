@@ -137,6 +137,10 @@ func (d *Daemon) describe(ref provenance.Reference) (name, note string, gone boo
 		return d.describeConversation(ref)
 	case provenance.KindArtifact:
 		return d.describeArtifact(ref)
+	case provenance.KindReminder:
+		return d.describeReminder(ref)
+	case provenance.KindSchedule:
+		return d.describeSchedule(ref)
 	case provenance.KindTool:
 		return describeTool(ref), "", false, nil
 	}
@@ -281,6 +285,49 @@ func (d *Daemon) describeArtifact(ref provenance.Reference) (string, string, boo
 		"id": "open", "label": "Open the file", "invoke": true,
 	}}
 }
+
+// describeReminder names a pending reminder by the user's own sentence, which
+// is the one string the reminder store holds and the one it was written to
+// speak back (ADR 0046) — so naming it here breaks no content boundary.
+//
+// A reminder that has fired or been cancelled is gone rather than absent: it
+// left the pending list, and offering a button to a row that is now history
+// would be the dead affordance ADR 0055 refuses.
+func (d *Daemon) describeReminder(ref provenance.Reference) (string, string, bool, []map[string]any) {
+	if d.reminders != nil {
+		for _, p := range d.reminders.Snapshot().Pending {
+			if p.ID == ref.Ref {
+				return "the reminder “" + shorten(p.Text, factNameRunes) + "”", "", false,
+					[]map[string]any{tabAction("Show in Automations", "automations", p.ID)}
+			}
+		}
+	}
+	return "a reminder", "this reminder is no longer pending", true, nil
+}
+
+// describeSchedule names a scheduled routine or script by its own name and the
+// schedule it runs on — both of them values the user wrote in config.toml.
+//
+// The ref carries the kind because the two namespaces are separate: a routine
+// and a script may share a name, and resolving a bare one would be a coin toss
+// between two different things the user configured.
+func (d *Daemon) describeSchedule(ref provenance.Reference) (string, string, bool, []map[string]any) {
+	if d.automations != nil {
+		for _, st := range d.automations.Status() {
+			if scheduleRef(string(st.Kind), st.Name) != ref.Ref {
+				continue
+			}
+			return "the scheduled " + string(st.Kind) + " “" + st.Name + "”", "", false,
+				[]map[string]any{tabAction("Show in Automations", "automations", st.Name)}
+		}
+	}
+	return "a schedule", "this schedule is no longer configured", true, nil
+}
+
+// scheduleRef is the identity a KindSchedule reference carries, written once so
+// the source that produces one and the resolver that reads it cannot disagree
+// about the separator.
+func scheduleRef(kind, name string) string { return kind + ":" + name }
 
 // describeTool names a tool call by its tool and, where the subject is itself
 // a reference, its subject. The two search tools are named by what they

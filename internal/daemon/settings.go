@@ -383,6 +383,12 @@ func (d *Daemon) applyRuntime(next config.Config) (applied bool, reason string) 
 	// The spoken source listing (#168) reads through the daemon, which
 	// outlives every reload, so it is simply rebuilt around the same one.
 	opts.Provenance = &provenanceVoice{d: d}
+	// The two composed-account seams survive every reload like the stores
+	// above: one service instance for the daemon's life, so a config change
+	// cannot leave a matched "what did I miss" or "what's going on" answering
+	// that the feature is not available on this daemon.
+	opts.Returning = d.briefing
+	opts.Operating = d.situation
 	// The runner chain is rebuilt around the same construction-wired
 	// services (ADR 0041, ADR 0046): the store instances survive every
 	// reload, exactly like the memory book they are modelled on.

@@ -473,6 +473,12 @@ func TestEverySourceKindResolvesToWordsAndAnHonestAction(t *testing.T) {
 		{Kind: provenance.KindDesktop, Strength: provenance.Available, Ref: "clipboard"},
 		{Kind: provenance.KindThread, Strength: provenance.Returned, Ref: "t404"},
 		{Kind: provenance.KindConversation, Strength: provenance.Returned, Ref: "c404"},
+		// The two kinds the situation report added (#196, ADR 0061). They are
+		// in this sweep for the same reason as everything else in it: a kind
+		// that resolves to a hole rather than to words is the failure the
+		// whole resolver exists to prevent, whichever feature minted it.
+		{Kind: provenance.KindReminder, Strength: provenance.Returned, Ref: "r404"},
+		{Kind: provenance.KindSchedule, Strength: provenance.Returned, Ref: "routine:gone"},
 		{Kind: provenance.KindTool, Strength: provenance.Returned,
 			Tool: "shell.run", Subject: "git status"},
 		{Kind: provenance.KindTool, Strength: provenance.Returned, Tool: "memory.search"},
@@ -512,6 +518,8 @@ func TestEverySourceKindResolvesToWordsAndAnHonestAction(t *testing.T) {
 		{provenance.KindVocabulary, "w404", "no longer taught"},
 		{provenance.KindThread, "t404", "ended"},
 		{provenance.KindConversation, "c404", "deleted"},
+		{provenance.KindReminder, "r404", "no longer pending"},
+		{provenance.KindSchedule, "routine:gone", "no longer configured"},
 	} {
 		item := itemFor(t, items, missing.kind, missing.ref)
 		if item["gone"] != true || item["actions"] != nil {

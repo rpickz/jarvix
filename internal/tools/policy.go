@@ -260,6 +260,7 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	ReminderListToolName:        PolicyAllow,
 	ReminderCancelToolName:      PolicyAllow,
 	BriefingToolName:            PolicyAllow,
+	SituationToolName:           PolicyAllow,
 }
 
 // neverSilent are the tools that must not inherit an "allow" policy default.

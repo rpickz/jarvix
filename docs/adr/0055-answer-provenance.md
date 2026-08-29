@@ -59,10 +59,23 @@ One collection point per kind, each at the line the fact is already in hand:
 | any tool call that ran and returned output | the tool loop, in `executeTool` | returned |
 | the focus thread a switch or recap read (ADR 0041/0043/0047) | `runFocus` | returned |
 
-Nothing else may add a source, and no code path anywhere asks the model to
-attribute anything. A call that returned an error contributes nothing: it
-returned no output, so saying it went into the answer would be the
+Nothing else may add a source **to a turn**, and no code path anywhere asks the
+model to attribute anything. A call that returned an error contributes nothing:
+it returned no output, so saying it went into the answer would be the
 overstatement this feature exists to avoid.
+
+**One thing has since reused the vocabulary without being a turn at all.** The
+situation report (#196, ADR 0061) gives each of its lines a `Reference` so the
+window can link a line to the thing it describes, and it composes those
+references at read time from the same live stores the lines were composed from.
+They enter no `Record`, no archive and no event — the report is transient — and
+they added two kinds beside the seven above, `KindReminder` and `KindSchedule`,
+resolving on identical terms. That is a use of the resolver, not a second
+collection point, and it satisfies the rule above trivially rather than bending
+it: the reference is derived by the code that read the fact, with no model
+anywhere near it. Anything else wanting to point a person at something should
+come this way too, and the test to extend is
+`TestEverySourceKindResolvesToWordsAndAnHonestAction`.
 
 Two tools know something their arguments cannot say — `artifact.create` knows
 which file it actually wrote after de-duplicating the name, and
