@@ -163,13 +163,14 @@ func cmdConversationsSearch(paths config.Paths, query string) error {
 		for _, u := range stats.Skipped {
 			skipped = append(skipped, fmt.Sprintf("%s (%s)", u.ID, u.Err))
 		}
-		printSearchResults(query, views, skipped, stats.Conversations, true)
+		printSearchResults(query, views, skipped, stats.Conversations, stats.Matched, true)
 		return nil
 	}
 	defer func() { _ = client.Close() }()
 	var result struct {
 		Retention bool               `json:"retention"`
 		Results   []searchResultView `json:"results"`
+		Matched   int                `json:"matched"`
 		Searched  int                `json:"searched"`
 		Skipped   []struct {
 			ID    string `json:"id"`
@@ -183,13 +184,14 @@ func cmdConversationsSearch(paths config.Paths, query string) error {
 	for _, u := range result.Skipped {
 		skipped = append(skipped, fmt.Sprintf("%s (%s)", u.ID, u.Error))
 	}
-	printSearchResults(query, result.Results, skipped, result.Searched, result.Retention)
+	printSearchResults(query, result.Results, skipped, result.Searched, result.Matched, result.Retention)
 	return nil
 }
 
 // printSearchResults renders ranked passages: where, when, who, and the
 // clipped text — with the hint that opening a result is one command away.
-func printSearchResults(query string, views []searchResultView, skipped []string, searched int, retention bool) {
+func printSearchResults(query string, views []searchResultView, skipped []string,
+	searched, matched int, retention bool) {
 	if !retention {
 		fmt.Println("retention is off (conversation.retention = \"off\") — recent conversations were not archived")
 	}
@@ -220,6 +222,13 @@ func printSearchResults(query string, views []searchResultView, skipped []string
 	}
 	if current {
 		fmt.Println("* = earlier in the active conversation")
+	}
+	// The result cap says when it fired (issue #173). Twenty passages out of
+	// two hundred looked exactly like twenty out of twenty, so "is that all
+	// of them?" had no answer and the honest one could not be given.
+	if matched > len(views) {
+		fmt.Printf("showing %d of %d matching passages — narrow the query to see the rest\n",
+			len(views), matched)
 	}
 	if len(views) > 0 {
 		fmt.Println("open one with: jarvix conversations show <id>")

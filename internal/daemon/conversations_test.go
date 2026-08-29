@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -406,6 +407,7 @@ type searchReply struct {
 		Passage string `json:"passage"`
 		Current bool   `json:"current"`
 	} `json:"results"`
+	Matched  int `json:"matched"`
 	Searched int `json:"searched"`
 	Skipped  []struct {
 		ID    string `json:"id"`
@@ -773,4 +775,235 @@ func TestConversationNewEndsTheThreadCleanly(t *testing.T) {
 	if l.ActiveID == "" || l.ActiveID == first {
 		t.Errorf("fresh thread landed in %q, want a new conversation (ended one was %q)", l.ActiveID, first)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The acknowledged-turn guarantee, for every reader
+// ---------------------------------------------------------------------------
+
+// parkingHistory holds exactly one Save open and lets every other one
+// through. It is the probe the #115/#116 fix introduced, made reusable
+// (issue #173).
+//
+// The archive flush runs on the session tail after session.finished
+// (ADR 0011), and the history write sits on that same tail immediately
+// before it. Parking that write therefore parks the tail with the exchange
+// committed and acknowledged — session.finished published, the client has
+// seen it — and the archive still knowing nothing about it. That is the
+// window #115 was, held open on demand instead of waited for on a starved
+// runner: on a daemon without the read-side barrier every assertion below
+// fails on every run, with no stress, no repetition and no sleeps.
+//
+// Only the FIRST save after Arm is held, and that is what makes this work
+// for conversation.open. Reopening persists the adopted head, so a gate that
+// held every save would park the very call it is meant to be testing; the
+// one that matters is the tail's, and the ones the reader makes on its own
+// behalf must pass.
+type parkingHistory struct {
+	history.Store
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+
+	mu    sync.Mutex
+	armed bool
+}
+
+func newParkingHistory() *parkingHistory {
+	return &parkingHistory{
+		Store:   history.NewFake(),
+		started: make(chan struct{}, 4),
+		release: make(chan struct{}),
+	}
+}
+
+// Arm holds the next Save until Release.
+func (p *parkingHistory) Arm() {
+	p.mu.Lock()
+	p.armed = true
+	p.mu.Unlock()
+}
+
+// Release lets the held Save finish. Safe to call more than once, which
+// matters because it runs both in the test and from a cleanup — a tail
+// parked when an assertion fails would otherwise hold the shutdown drain for
+// ever.
+func (p *parkingHistory) Release() { p.once.Do(func() { close(p.release) }) }
+
+func (p *parkingHistory) Save(messages []ai.Message, lastTurn time.Time) error {
+	p.mu.Lock()
+	hold := p.armed
+	p.armed = false
+	p.mu.Unlock()
+	if hold {
+		p.started <- struct{}{}
+		<-p.release
+	}
+	return p.Store.Save(messages, lastTurn)
+}
+
+// parked is a daemon whose session tail can be held open on demand.
+type parked struct {
+	*convFixture
+	hist *parkingHistory
+}
+
+func newParkedDaemon(t *testing.T) *parked {
+	t.Helper()
+	hist := newParkingHistory()
+	f := startConvDaemonWith(t, config.RetentionOn, hist)
+	// Cleanups run last-registered-first, so this releases before
+	// serveDaemon's stop waits on the drain.
+	t.Cleanup(hist.Release)
+	return &parked{convFixture: f, hist: hist}
+}
+
+// askAndPark drives one exchange to session.finished and leaves its tail
+// held at the history write: committed, acknowledged, unarchived.
+func (p *parked) askAndPark(t *testing.T, text string) {
+	t.Helper()
+	p.hist.Arm()
+	if err := p.client.Call("session.start", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.client.Call("session.submit", map[string]string{"text": text}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, p.client, "session.finished")
+	select {
+	case <-p.hist.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the session tail to reach the history write")
+	}
+}
+
+// TestEveryArchiveReaderSeesTheAcknowledgedTurn is the ticket's criterion in
+// full: the read-your-acknowledged-writes guarantee (#116) proven end to end
+// for every conversation.* reader, not only the two whose CI flakes provoked
+// it. Each reader takes the barrier itself, and each subtest holds the
+// window open deterministically rather than hoping for a slow runner.
+func TestEveryArchiveReaderSeesTheAcknowledgedTurn(t *testing.T) {
+	// list — the sibling flake: the conversation was there and active_id was
+	// still "", because the append that creates a conversation is also what
+	// adopts its id, and both happen on the tail.
+	t.Run("list", func(t *testing.T) {
+		p := newParkedDaemon(t)
+		p.askAndPark(t, "the question the listing must already know about")
+
+		l := p.list(t)
+		if len(l.Conversations) != 1 {
+			t.Fatalf("listed %d conversations, want the acknowledged one", len(l.Conversations))
+		}
+		if l.Conversations[0].Turns != 2 ||
+			l.Conversations[0].Preview != "the question the listing must already know about" {
+			t.Errorf("listing entry = %+v", l.Conversations[0])
+		}
+		if l.ActiveID != l.Conversations[0].ID {
+			t.Errorf("active_id = %q, want the conversation on disk %q", l.ActiveID, l.Conversations[0].ID)
+		}
+		p.hist.Release()
+	})
+
+	// search — the original: a hit found but current:false, or not found.
+	t.Run("search", func(t *testing.T) {
+		p := newParkedDaemon(t)
+		p.askAndPark(t, "an unrelated thread about kittens")
+
+		r := p.search(t, "kittens")
+		if len(r.Results) != 1 || !r.Results[0].Current {
+			t.Fatalf("post-acknowledgement search = %+v, want one current hit", r.Results)
+		}
+		if r.ActiveID == "" || r.Results[0].ID != r.ActiveID {
+			t.Errorf("current hit in %q but active is %q", r.Results[0].ID, r.ActiveID)
+		}
+		if r.Matched != 1 {
+			t.Errorf("matched = %d, want the one hit", r.Matched)
+		}
+		p.hist.Release()
+	})
+
+	// read — the transcript view opened the instant a turn finishes must
+	// include that turn, or the user watches their own words fail to appear.
+	t.Run("read", func(t *testing.T) {
+		p := newParkedDaemon(t)
+		p.ask(t, "the first question")
+		id := p.list(t).ActiveID
+		p.askAndPark(t, "the question that must already be readable")
+
+		var conv struct {
+			Turns []struct {
+				Role string `json:"role"`
+				Text string `json:"text"`
+			} `json:"turns"`
+		}
+		if err := p.client.Call("conversation.read", map[string]string{"id": id}, &conv); err != nil {
+			t.Fatal(err)
+		}
+		if len(conv.Turns) != 4 {
+			t.Fatalf("read %d turns, want the acknowledged exchange included: %+v", len(conv.Turns), conv.Turns)
+		}
+		if conv.Turns[2].Text != "the question that must already be readable" {
+			t.Errorf("third turn = %+v, want the just-acknowledged question", conv.Turns[2])
+		}
+		p.hist.Release()
+	})
+
+	// open — reopening must adopt the whole record, the just-finished turn
+	// included, or the model continues a conversation missing its last
+	// exchange.
+	t.Run("open", func(t *testing.T) {
+		p := newParkedDaemon(t)
+		p.ask(t, "the first question")
+		id := p.list(t).ActiveID
+		p.askAndPark(t, "the question the reopen must carry")
+
+		var opened struct {
+			ID    string `json:"id"`
+			Turns int    `json:"turns"`
+		}
+		if err := p.client.Call("conversation.open", map[string]string{"id": id}, &opened); err != nil {
+			t.Fatal(err)
+		}
+		if opened.ID != id || opened.Turns != 4 {
+			t.Errorf("reopen = %+v, want %q with all four turns", opened, id)
+		}
+		p.hist.Release()
+	})
+
+	// delete — the one where the barrier's absence is not a display bug.
+	// Without it the wipe finds an empty directory, answers "nothing to
+	// delete", and the tail then writes the conversation the user just
+	// destroyed onto the disk behind them.
+	t.Run("delete", func(t *testing.T) {
+		p := newParkedDaemon(t)
+		p.askAndPark(t, "the conversation the user asks to destroy")
+
+		var result struct {
+			Deleted int `json:"deleted"`
+		}
+		if err := p.client.Call("conversation.delete", map[string]bool{"all": true}, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Deleted != 1 {
+			t.Fatalf("deleted = %d, want the acknowledged conversation", result.Deleted)
+		}
+		// The tail runs now, and must find nothing left to write.
+		p.hist.Release()
+		if err := p.client.Call("conversation.reset", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		l := p.list(t)
+		if len(l.Conversations) != 0 || len(l.Unreadable) != 0 {
+			t.Fatalf("a destroyed conversation came back: %+v", l)
+		}
+		entries, err := os.ReadDir(p.dir)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".jsonl") {
+				t.Errorf("the destroyed conversation's transcript is still on disk: %s", entry.Name())
+			}
+		}
+	})
 }

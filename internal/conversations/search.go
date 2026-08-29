@@ -85,6 +85,17 @@ type Match struct {
 type SearchStats struct {
 	// Conversations is how many readable conversations were scanned.
 	Conversations int
+	// Matched is how many passages matched in total, before Query.Limit cut
+	// the list down to what came back.
+	//
+	// It is here because the limit is the one cap in this package that used
+	// to truncate in silence. A clipped passage says so with an ellipsis and
+	// a skipped conversation is named in Skipped, but a search that found
+	// two hundred hits and returned twenty looked exactly like a search that
+	// found twenty — so "is that all of them?" had no answer, and the
+	// honest one ("showing 20 of 200") could not be given. Equal to the
+	// number of matches returned whenever nothing was cut.
+	Matched int
 	// Skipped lists conversations that could not be (fully) searched, with
 	// why. The unreadable contract from List: skipped and reported, never a
 	// failed search.
@@ -159,15 +170,16 @@ func (c compiledQuery) matchTurn(text string) (hit, phrase bool, hitAt int) {
 	return true, false, first
 }
 
-// appendMatch appends turn number `turn` of conversation id when it matches.
-// Shared by the file store's streaming scan and the test fake, so there is
-// exactly one definition of what matches and how passages are clipped.
-func (c compiledQuery) appendMatch(id string, turn int, t Turn, out []Match) []Match {
+// consider offers turn number `turn` of conversation id to the ranking, and
+// records it when it matches. Shared by the file store's streaming scan and
+// the test fake, so there is exactly one definition of what matches and how
+// passages are clipped.
+func (c compiledQuery) consider(r *ranked, id string, turn int, t Turn) {
 	hit, phrase, at := c.matchTurn(t.Text)
 	if !hit {
-		return out
+		return
 	}
-	return append(out, Match{
+	r.add(Match{
 		ConversationID: id,
 		Turn:           turn,
 		Role:           t.Role,
@@ -177,36 +189,79 @@ func (c compiledQuery) appendMatch(id string, turn int, t Turn, out []Match) []M
 	})
 }
 
-// collectMatches appends every matching turn of one in-memory conversation.
-func (c compiledQuery) collectMatches(id string, turns []Turn, out []Match) []Match {
+// collectMatches offers every turn of one in-memory conversation.
+func (c compiledQuery) collectMatches(r *ranked, id string, turns []Turn) {
 	for i, t := range turns {
-		out = c.appendMatch(id, i+1, t, out)
+		c.consider(r, id, i+1, t)
 	}
-	return out
 }
 
-// rankMatches orders matches — exact phrase beats scattered words, then
-// recency, with id and turn breaking ties so the order is total and a search
-// run twice returns byte-identical results — and truncates to the limit.
-func (c compiledQuery) rankMatches(matches []Match) []Match {
-	sort.Slice(matches, func(i, j int) bool {
-		a, b := matches[i], matches[j]
-		if a.Phrase != b.Phrase {
-			return a.Phrase
-		}
-		if !a.Time.Equal(b.Time) {
-			return a.Time.After(b.Time)
-		}
-		if a.ConversationID != b.ConversationID {
-			return a.ConversationID > b.ConversationID
-		}
-		return a.Turn > b.Turn
-	})
-	if len(matches) > c.limit {
-		matches = matches[:c.limit]
+// better is the ranking: exact phrase beats scattered words, then recency,
+// with id and turn breaking ties so the order is TOTAL — which is what makes
+// a search run twice return byte-identical results, and what lets the best
+// results be kept as the scan runs rather than sorted at the end.
+func (c compiledQuery) better(a, b Match) bool {
+	if a.Phrase != b.Phrase {
+		return a.Phrase
 	}
-	return matches
+	if !a.Time.Equal(b.Time) {
+		return a.Time.After(b.Time)
+	}
+	if a.ConversationID != b.ConversationID {
+		return a.ConversationID > b.ConversationID
+	}
+	return a.Turn > b.Turn
 }
+
+// ranked keeps the best `limit` matches a scan has seen and counts the rest.
+//
+// Bounded on purpose, and this is the whole of what makes the streaming scan
+// stream all the way to the caller. The archive is unbounded and a broad
+// query matches a large fraction of it, so collecting every hit and sorting
+// at the end held one clipped passage per matching turn — three quarters of
+// a megabyte over four thousand turns, growing with the library for ever,
+// to then throw all but twenty of them away. Since the order is total, a
+// match that has already lost to `limit` others can never win, so it is
+// dropped the moment it loses. What is kept is at most twenty passages,
+// whatever the archive's size, and the results are identical to sorting the
+// lot (issue #173).
+type ranked struct {
+	c     compiledQuery
+	best  []Match
+	total int
+}
+
+func newRanked(c compiledQuery) *ranked {
+	return &ranked{c: c, best: make([]Match, 0, c.limit)}
+}
+
+// add offers one match to the ranking.
+func (r *ranked) add(m Match) {
+	r.total++
+	if len(r.best) < r.c.limit {
+		r.best = append(r.best, m)
+		r.siftLast()
+		return
+	}
+	if !r.c.better(m, r.best[len(r.best)-1]) {
+		return // it has already lost to `limit` others and cannot recover
+	}
+	r.best[len(r.best)-1] = m
+	r.siftLast()
+}
+
+// siftLast moves the newly placed last element up to where it belongs. The
+// slice is at most MaxSearchLimit long, so this is cheaper than any of the
+// alternatives and keeps the ordering identical to a full sort.
+func (r *ranked) siftLast() {
+	for i := len(r.best) - 1; i > 0 && r.c.better(r.best[i], r.best[i-1]); i-- {
+		r.best[i], r.best[i-1] = r.best[i-1], r.best[i]
+	}
+}
+
+// matches returns the ranked results. newRanked allocates the slice, so an
+// empty search encodes as [] rather than null.
+func (r *ranked) matches() []Match { return r.best }
 
 // clipPassage bounds one turn's text to maxRunes around the hit at byte
 // offset foldedAt, cutting on rune boundaries and marking cuts with an
@@ -278,7 +333,7 @@ func (s *FileStore) Search(q Query) ([]Match, SearchStats, error) {
 		return nil, SearchStats{}, fmt.Errorf("search conversations: %w", err)
 	}
 
-	matches := []Match{}
+	r := newRanked(c)
 	stats := SearchStats{Skipped: []Unreadable{}}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -286,47 +341,60 @@ func (s *FileStore) Search(q Query) ([]Match, SearchStats, error) {
 			continue
 		}
 		id := strings.TrimSuffix(name, ".jsonl")
-		found, skip, ok := s.scanTranscript(id, c)
+		skip, ok := s.scanTranscript(id, c, r)
 		if skip != nil {
 			stats.Skipped = append(stats.Skipped, *skip)
 		}
 		if ok {
 			stats.Conversations++
-			matches = append(matches, found...)
 		}
 	}
 	sort.Slice(stats.Skipped, func(i, j int) bool { return stats.Skipped[i].ID < stats.Skipped[j].ID })
-	return c.rankMatches(matches), stats, nil
+	stats.Matched = r.total
+	return r.matches(), stats, nil
 }
 
-// scanTranscript streams one transcript and returns its matches. ok reports
-// whether the conversation counted as searched; skip carries the report when
-// any of it could not be. Both can be set at once: a transcript that goes bad
+// scanTranscript streams one transcript into the ranking. ok reports whether
+// the conversation counted as searched; skip carries the report when any of
+// it could not be. Both can be set at once: a transcript that goes bad
 // midway keeps the matches found before the damage *and* reports it.
-func (s *FileStore) scanTranscript(id string, c compiledQuery) (found []Match, skip *Unreadable, ok bool) {
+func (s *FileStore) scanTranscript(id string, c compiledQuery, r *ranked) (skip *Unreadable, ok bool) {
 	f, err := os.Open(s.turnsPath(id))
 	if errors.Is(err, os.ErrNotExist) {
 		// Deleted between the directory listing and now. Ids are never
 		// reused, so this is a legitimate vanishing act, not an error.
-		return nil, nil, false
+		return nil, false
 	}
 	if err != nil {
 		// The error text names what went wrong, never what was said.
-		return nil, &Unreadable{ID: id, Err: err.Error()}, false
+		return &Unreadable{ID: id, Err: err.Error()}, false
 	}
 	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	if !scanner.Scan() {
-		return nil, &Unreadable{ID: id, Err: "conversation has an empty transcript"}, false
+		// An empty transcript is not damage, and reporting it as damage was
+		// a defect the concurrency case found (issue #173). Creating a
+		// conversation is an open(O_CREAT) followed by a write, and this
+		// scan deliberately runs without the store's lock, so a search that
+		// lands between the two sees a zero-length file — of a conversation
+		// that is perfectly well a moment later. The user would have been
+		// told their live conversation could not be searched.
+		//
+		// It is skipped in silence for the same reason a transcript that
+		// vanished mid-scan is: both are what a write in flight looks like
+		// from outside the lock, and neither is something to report. Damage
+		// that really is damage still surfaces — the listing takes the lock,
+		// so it sees the file whole, and Read says so outright.
+		return nil, false
 	}
 	var h header
 	if err := json.Unmarshal(scanner.Bytes(), &h); err != nil {
-		return nil, &Unreadable{ID: id, Err: "bad header"}, false
+		return &Unreadable{ID: id, Err: "bad header"}, false
 	}
 	if h.Schema != SchemaVersion {
-		return nil, &Unreadable{ID: id, Err: fmt.Sprintf("conversation schema version %d is not supported", h.Schema)}, false
+		return &Unreadable{ID: id, Err: fmt.Sprintf("conversation schema version %d is not supported", h.Schema)}, false
 	}
 
 	// A line that fails to parse is only tolerable when it is the last one —
@@ -339,7 +407,7 @@ func (s *FileStore) scanTranscript(id string, c compiledQuery) (found []Match, s
 	for scanner.Scan() {
 		line++
 		if badLine != 0 {
-			return found, &Unreadable{ID: id, Err: fmt.Sprintf("bad turn at line %d", badLine)}, true
+			return &Unreadable{ID: id, Err: fmt.Sprintf("bad turn at line %d", badLine)}, true
 		}
 		t = Turn{}
 		if err := json.Unmarshal(scanner.Bytes(), &t); err != nil {
@@ -347,14 +415,14 @@ func (s *FileStore) scanTranscript(id string, c compiledQuery) (found []Match, s
 			continue
 		}
 		turn++
-		found = c.appendMatch(id, turn, t, found)
+		c.consider(r, id, turn, t)
 	}
 	if err := scanner.Err(); err != nil {
 		// The scan broke partway (an over-long line, an I/O error): what was
 		// found before the break stands, and the break is reported.
-		return found, &Unreadable{ID: id, Err: err.Error()}, true
+		return &Unreadable{ID: id, Err: err.Error()}, true
 	}
-	return found, nil, true
+	return nil, true
 }
 
 // Search implements Searcher on the Fake, over the same matching and ranking
@@ -370,7 +438,7 @@ func (f *Fake) Search(q Query) ([]Match, SearchStats, error) {
 	if f.ListErr != nil {
 		return nil, SearchStats{}, f.ListErr
 	}
-	matches := []Match{}
+	r := newRanked(c)
 	stats := SearchStats{Skipped: []Unreadable{}}
 	for _, id := range f.order {
 		rec, ok := f.records[id]
@@ -378,7 +446,8 @@ func (f *Fake) Search(q Query) ([]Match, SearchStats, error) {
 			continue
 		}
 		stats.Conversations++
-		matches = c.collectMatches(id, rec.Turns, matches)
+		c.collectMatches(r, id, rec.Turns)
 	}
-	return c.rankMatches(matches), stats, nil
+	stats.Matched = r.total
+	return r.matches(), stats, nil
 }

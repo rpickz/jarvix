@@ -27,9 +27,12 @@ import (
 // rather than misparsed.
 const SchemaVersion = 1
 
-// PreviewChars caps the listing preview. One line of the first user turn is
-// what a person needs to recognise a conversation in a list; more would turn
-// the metadata file into a second copy of the transcript.
+// PreviewChars caps the listing preview, in bytes of the stored line. One
+// line of the first user turn is what a person needs to recognise a
+// conversation in a list; more would turn the metadata file into a second
+// copy of the transcript. A preview that was cut ends in an ellipsis, so the
+// cap discloses itself rather than handing back a sentence that reads as
+// complete.
 const PreviewChars = 120
 
 // RoleConfirmation marks a turn that is not an utterance but the record of a
@@ -182,6 +185,10 @@ type Store interface {
 	// Append adds turns to conversation id, creating it when id is "" (or
 	// names a conversation that no longer exists) and returning the id the
 	// turns actually landed in. Appending no turns is a no-op.
+	//
+	// A failed write returns no new id: the id is the caller's receipt that
+	// the turns are on disk, so a call that created a conversation and could
+	// not write it answers "" rather than naming a record that is not there.
 	Append(id string, turns []Turn) (string, error)
 	// Active returns the id of the conversation the live head belongs to, or
 	// "" when there is none. It is how a restarted daemon keeps appending to
@@ -224,7 +231,11 @@ func preview(turns []Turn) string {
 			for cut > 0 && !isRuneStart(line[cut]) {
 				cut--
 			}
-			line = line[:cut]
+			// And marked, the way a clipped search passage is marked. A cut
+			// the reader cannot see is a sentence the user is invited to
+			// read as complete — the listing would show the first half of
+			// what they said and give no sign there was a second.
+			line = line[:cut] + "…"
 		}
 		if line != "" {
 			return line

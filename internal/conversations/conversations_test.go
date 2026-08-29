@@ -623,8 +623,25 @@ func TestPreviewIsFirstLineAndCapped(t *testing.T) {
 	if strings.Contains(conv.Meta.Preview, "second line") {
 		t.Errorf("preview crossed a line break: %q", conv.Meta.Preview)
 	}
-	if len(conv.Meta.Preview) > PreviewChars {
+	if len(conv.Meta.Preview) > PreviewChars+len("…") {
 		t.Errorf("preview is %d chars, cap is %d", len(conv.Meta.Preview), PreviewChars)
+	}
+	// The cap discloses itself: a preview that was cut says so, rather than
+	// showing the first half of a sentence as if it were the whole of it.
+	if !strings.HasSuffix(conv.Meta.Preview, "…") {
+		t.Errorf("a truncated preview gives no sign it was cut: %q", conv.Meta.Preview)
+	}
+	// A preview that fits is never marked.
+	short, err := s.Append("", turnsAt(ts, "a short question", "a short answer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole, err := s.Read(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.Meta.Preview != "a short question" {
+		t.Errorf("an uncut preview was decorated: %q", whole.Meta.Preview)
 	}
 }
 
