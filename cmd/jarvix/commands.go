@@ -179,6 +179,14 @@ func printTimings(v any) {
 	if n, ok := report[session.StageSupersededSentences]; ok {
 		fmt.Printf("          %-33s %5.0f skipped\n", "stale sentences superseded", toFloat(n))
 	}
+	// The other non-duration key (issue #191): why the capture produced no
+	// words. This is the line someone reads after pressing the key and
+	// getting nothing back, so it prints the reason verbatim rather than a
+	// number — a turn with no stages and no explanation is the report saying
+	// nothing about the one thing that happened.
+	if why, ok := report[session.StageNothingHeard].(string); ok && why != "" {
+		fmt.Printf("          %-33s %s\n", "heard nothing", why)
+	}
 }
 
 // printLastTyping renders the typing audit trail: the most recent thing Jarvix
@@ -635,6 +643,14 @@ func followSession(client *ipc.Client, showTranscript bool) error {
 				fmt.Printf("✗ declined (%v) — nothing was run\n", ev.Data["source"])
 			case "tool.denied":
 				fmt.Printf("✗ denied by policy (%v): %v\n", ev.Data["rule"], ev.Data["command"])
+			case "session.nothing_heard":
+				// A capture that produced no words (issue #191). Printed,
+				// not returned as an error: nothing failed, and `jarvix ask`
+				// exiting non-zero because the room was quiet would break
+				// every script that wraps it. The reason carries the
+				// measurement for a user debugging a microphone.
+				fmt.Printf("%s (%v)\n", desktop.PendingTurnNothingHeard, ev.Data["reason"])
+				return nil
 			case "session.finished":
 				return nil
 			case "session.cancelled":

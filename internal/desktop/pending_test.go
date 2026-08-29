@@ -301,6 +301,7 @@ console.log(JSON.stringify({
   }),
   failures: failures.map(function (f) { return pendingTurnFailed(f.stage, f.message) }),
   cancelled: pendingTurnCancelled,
+  nothingHeard: pendingTurnNothingHeard,
   threshold: pendingElapsedThresholdSec
 }))
 `
@@ -313,11 +314,12 @@ console.log(JSON.stringify({
 		t.Fatalf("running the generated library under node failed: %v", err)
 	}
 	var answers struct {
-		Lines     []string `json:"lines"`
-		Chips     []string `json:"chips"`
-		Failures  []string `json:"failures"`
-		Cancelled string   `json:"cancelled"`
-		Threshold int      `json:"threshold"`
+		Lines        []string `json:"lines"`
+		Chips        []string `json:"chips"`
+		Failures     []string `json:"failures"`
+		Cancelled    string   `json:"cancelled"`
+		NothingHeard string   `json:"nothingHeard"`
+		Threshold    int      `json:"threshold"`
 	}
 	if err := json.Unmarshal(out, &answers); err != nil {
 		t.Fatalf("decoding the library's answers: %v", err)
@@ -347,6 +349,10 @@ console.log(JSON.stringify({
 	if answers.Cancelled != PendingTurnCancelled {
 		t.Errorf("cancelled wording = %q in JS, %q in Go", answers.Cancelled, PendingTurnCancelled)
 	}
+	if answers.NothingHeard != PendingTurnNothingHeard {
+		t.Errorf("nothing-heard wording = %q in JS, %q in Go",
+			answers.NothingHeard, PendingTurnNothingHeard)
+	}
 	if answers.Threshold != PendingElapsedThresholdSec {
 		t.Errorf("threshold = %d in JS, %d in Go", answers.Threshold, PendingElapsedThresholdSec)
 	}
@@ -367,6 +373,10 @@ func TestConversationWindowRendersThePendingTurnFromTheGeneratedLibrary(t *testi
 		"BarState.pendingTurnLine(",
 		"BarState.pendingTurnFailed(",
 		"BarState.pendingTurnCancelled",
+		// A capture that produced nothing resolves the pending row too
+		// (issue #191): a wait that simply stops updating reads as a hang,
+		// and a row that vanishes reads as the question having been lost.
+		"BarState.pendingTurnNothingHeard",
 	} {
 		if !strings.Contains(qml, want) {
 			t.Errorf("JarvixWindow.qml does not use %s; the pending turn's wording must come from Go", want)
@@ -377,6 +387,38 @@ func TestConversationWindowRendersThePendingTurnFromTheGeneratedLibrary(t *testi
 	// opened five seconds into a think has to agree with one that was open.
 	if !strings.Contains(qml, "state_since_ms") || !strings.Contains(qml, "since_ms") {
 		t.Error("JarvixWindow.qml does not read the daemon's phase start; the elapsed count would be a client guess")
+	}
+}
+
+// The overlay says the same nothing in the same words (issue #191). It is the
+// surface a push-to-talk user is actually looking at, and it is the one that
+// must not reach for errorMessage — that property is what paints the urgent
+// colour, holds the longer linger and prints "Jarvix hit a problem", none of
+// which a muted microphone has earned.
+func TestOverlayWordsANothingHeardWithoutTheErrorStyling(t *testing.T) {
+	source, err := os.ReadFile(pluginFilePath(t, "JarvixOverlay.qml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	qml := string(source)
+	for _, want := range []string{
+		`import "BarState.js" as BarState`,
+		`case "session.nothing_heard":`,
+		"BarState.pendingTurnNothingHeard",
+	} {
+		if !strings.Contains(qml, want) {
+			t.Errorf("JarvixOverlay.qml does not contain %s", want)
+		}
+	}
+	// The handler must set the notice, never the error. Checked on the
+	// statement itself rather than on the whole file, because errorMessage
+	// legitimately appears elsewhere.
+	handler := qml[strings.Index(qml, `case "session.nothing_heard":`):]
+	if end := strings.Index(handler, "break"); end > 0 {
+		handler = handler[:end]
+	}
+	if strings.Contains(handler, "errorMessage =") {
+		t.Errorf("the nothing-heard handler assigns errorMessage:\n%s", handler)
 	}
 }
 
