@@ -437,11 +437,10 @@ func TestWhatTheMachineCannotRunIsReportedNotRefused(t *testing.T) {
 	}
 }
 
-// TestATerminalEntryIsRefusedRatherThanStartedIntoNothing: an entry that says
-// it needs a terminal would produce the exact failure this ticket exists to
-// end — a process that starts, maps nothing, and is waited on for eight
-// seconds — so it is refused with the alternative named.
-func TestATerminalEntryIsRefusedRatherThanStartedIntoNothing(t *testing.T) {
+// terminalEntryResolver builds a resolver over one Terminal=true entry, with
+// everything it names installed.
+func terminalEntryResolver(t *testing.T, terminal string) Resolver {
+	t.Helper()
 	dir := filepath.Join(t.TempDir(), "applications")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -450,16 +449,44 @@ func TestATerminalEntryIsRefusedRatherThanStartedIntoNothing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "htop.desktop"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	resolver := Resolver{Entries: desktopentry.Load(dir),
+	return Resolver{Entries: desktopentry.Load(dir), Terminal: terminal,
 		LookPath: func(n string) (string, error) { return "/usr/bin/" + n, nil }}
+}
 
-	_, err := resolver.Resolve(Step{DesktopEntry: "htop"})
+// TestATerminalEntryIsLaunchedInsideTheTerminal: an entry that says it needs
+// a terminal used to be refused, because launching it bare produced the exact
+// failure #175 existed to end — a process that starts, maps nothing, and is
+// waited on for eight seconds. #194 supplied the remedy, so the entry's own
+// statement about itself is now honoured (ADR 0061).
+func TestATerminalEntryIsLaunchedInsideTheTerminal(t *testing.T) {
+	target, err := terminalEntryResolver(t, "ghostty").Resolve(Step{DesktopEntry: "htop"})
+	if err != nil {
+		t.Fatalf("a terminal entry was refused: %v", err)
+	}
+	want := []string{"/usr/bin/ghostty", "--class=dev.jarvix.htop", "-e", "/usr/bin/htop"}
+	if !slices.Equal(target.Argv, want) {
+		t.Errorf("argv = %v, want %v", target.Argv, want)
+	}
+	if !target.InTerminal() || target.Terminal != "ghostty" {
+		t.Errorf("target = %+v, want it to say which terminal it opens inside", target)
+	}
+	if target.FromEntry != "htop" {
+		t.Errorf("FromEntry = %q, want the entry it came from", target.FromEntry)
+	}
+}
+
+// TestATerminalEntryNeedsATerminalJarvixKnows: an unknown terminal is refused
+// by name rather than guessed at. Guessing -e would be the same silent
+// failure with an extra step — an argument the terminal rejects at start-up.
+func TestATerminalEntryNeedsATerminalJarvixKnows(t *testing.T) {
+	_, err := terminalEntryResolver(t, "st").Resolve(Step{DesktopEntry: "htop"})
 	if err == nil {
-		t.Fatal("a terminal entry resolved")
+		t.Fatal("an unknown terminal resolved")
 	}
 	if !strings.Contains(err.Error(), "runs in a terminal") ||
-		!strings.Contains(err.Error(), "args") {
-		t.Errorf("refusal = %q, want it to say why and what to do instead", err.Error())
+		!strings.Contains(err.Error(), "do not know how to run a command inside st") ||
+		!strings.Contains(err.Error(), "ghostty") {
+		t.Errorf("refusal = %q, want the reason and the terminals that are known", err.Error())
 	}
 }
 
@@ -474,6 +501,10 @@ func TestIdentityFlagsAreTheOnesTheProgramsAccept(t *testing.T) {
 		{"google-chrome-stable", "--class="},
 		{"firefox", "--class="},
 		{"foot", "--app-id="},
+		// The terminals come from launchkind's table, which routine defers to
+		// rather than keeping a second copy of (#194).
+		{"ghostty", "--class="},
+		{"alacritty", "--class="},
 	} {
 		flag, ok := IdentityFlag(tc.program)
 		if !ok || flag != tc.flag {

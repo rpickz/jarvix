@@ -13,6 +13,8 @@ import (
 	"syscall"
 
 	"github.com/rpickz/jarvix/internal/desktopentry"
+	"github.com/rpickz/jarvix/internal/intent"
+	"github.com/rpickz/jarvix/internal/launchkind"
 	"github.com/rpickz/jarvix/internal/tools"
 )
 
@@ -127,7 +129,15 @@ type Target struct {
 	// program. It is what lets a message say "the ChatGPT desktop entry"
 	// rather than "omarchy-launch-webapp".
 	FromEntry string
+	// Terminal is the terminal this target opens inside, empty for a target
+	// that opens a window of its own (#194). It is what lets a step's
+	// preview and its failure say "in ghostty" rather than describe a
+	// terminal launch as a window that will appear.
+	Terminal string
 }
+
+// InTerminal reports whether this target opens inside a terminal.
+func (t Target) InTerminal() bool { return t.Terminal != "" }
 
 // String renders the argv for a log line. Never for execution — there is no
 // code path that turns a Target back into a command line.
@@ -152,12 +162,67 @@ type Resolver struct {
 	// routine capture already keeps, so a test can say what is installed
 	// without installing anything.
 	LookPath func(name string) (string, error)
+	// Terminal is the program a `Terminal=true` desktop entry is opened
+	// inside — the same [intents] terminal "open a terminal" uses, so the
+	// user names their terminal once (#194). Empty uses intent's default,
+	// which is what a routine loaded by a document reader with no
+	// configuration in front of it gets.
+	Terminal string
 }
 
-// DefaultResolver reads this machine: PATH through exec.LookPath, and the
-// desktop entries under the XDG search path.
+// DefaultResolver reads this machine: PATH through exec.LookPath, the desktop
+// entries under the XDG search path, and the default terminal. A caller with
+// configuration in hand sets Terminal itself.
 func DefaultResolver() Resolver {
-	return Resolver{Entries: desktopentry.Default(), LookPath: exec.LookPath}
+	return Resolver{Entries: desktopentry.Default(), LookPath: exec.LookPath,
+		Terminal: intent.DefaultTerminal}
+}
+
+// terminalTarget builds the launch for a desktop entry that says it needs a
+// terminal.
+//
+// The entry's own Exec is the command; the terminal wraps it; and the window
+// gets the entry's id as its class where the terminal has a flag for that, so
+// a step's `match` has something stable to find. The step's own `identity` is
+// not consulted, because a desktop_entry step may not set one at all — the
+// entry's Exec decides what runs, and an appended class flag would be an
+// argument the wrapper never passes on (identityProblems says so at save
+// time, and this is the other half of the same rule).
+func (r Resolver) terminalTarget(entry desktopentry.Entry, argv []string, s Step,
+	lookPath func(string) (string, error), checkInstalled bool) (Target, error) {
+	terminal := strings.TrimSpace(r.Terminal)
+	if terminal == "" {
+		terminal = intent.DefaultTerminal
+	}
+	spelling, err := launchkind.LookupTerminal(terminal)
+	if err != nil {
+		return Target{}, fmt.Errorf("the %s desktop entry runs in a terminal, but %w", entry.ID, err)
+	}
+	path := terminal
+	if checkInstalled {
+		if try := strings.TrimSpace(entry.TryExec); try != "" {
+			if _, err := lookPath(try); err != nil {
+				return Target{}, fmt.Errorf("the %s desktop entry is here but %s is %w",
+					entry.ID, try, ErrNotInstalled)
+			}
+		}
+		program, err := lookPath(argv[0])
+		if err != nil {
+			return Target{}, fmt.Errorf("the %s desktop entry launches %s, which is %w",
+				entry.ID, argv[0], ErrNotInstalled)
+		}
+		argv[0] = program
+		if path, err = lookPath(terminal); err != nil {
+			return Target{}, fmt.Errorf("the %s desktop entry runs in a terminal, and %s is %w",
+				entry.ID, launchkind.TerminalName(terminal), ErrNotInstalled)
+		}
+	}
+	return Target{
+		Argv:      spelling.Wrap(path, spelling.Identity(entry.ID), append(argv, s.Args...)),
+		Label:     entry.ID,
+		FromEntry: entry.ID,
+		Terminal:  launchkind.TerminalName(terminal),
+	}, nil
 }
 
 // Resolve produces the argv a step launches, or the reason it cannot.
@@ -216,13 +281,17 @@ func (r Resolver) resolve(s Step, checkInstalled bool) (Target, error) {
 		}
 		if entry.Terminal {
 			// The entry says it needs a terminal window wrapped round it.
-			// Refusing is the honest answer rather than a limitation: a
-			// routine places graphical windows, and launching a terminal
-			// application with no terminal produces precisely the failure
-			// this ticket exists to end — a process that starts, maps
-			// nothing, and is waited on for eight seconds.
-			return Target{}, fmt.Errorf("the %s desktop entry runs in a terminal; name your terminal "+
-				"in app and the command in args instead", entry.ID)
+			//
+			// This was a refusal until #194, and the reasoning behind it was
+			// right: a routine places graphical windows, and launching a
+			// terminal application with no terminal produces precisely the
+			// failure #175 existed to end — a process that starts, maps
+			// nothing, and is waited on for eight seconds. What it lacked was
+			// a remedy, and there is one now: launchkind knows how to run a
+			// command inside the configured terminal, so the entry's own
+			// statement about itself is honoured instead of argued with
+			// (ADR 0061).
+			return r.terminalTarget(entry, argv, s, lookPath, checkInstalled)
 		}
 		if checkInstalled {
 			if try := strings.TrimSpace(entry.TryExec); try != "" {
@@ -309,20 +378,26 @@ var identityFlags = map[string]string{
 	"firefox":                   "--class=",
 	"firefox-developer-edition": "--class=",
 	"librewolf":                 "--class=",
-	"alacritty":                 "--class=",
-	"kitty":                     "--class=",
-	"foot":                      "--app-id=",
 }
 
 // IdentityFlag reports the flag a program accepts for setting its window's
 // class, and whether it accepts one at all. The argument may be a path; only
 // the base name decides.
 //
+// Terminals are not in the table above: they are in launchkind's, which has
+// to know their flags anyway to give a terminal-hosted program's window an
+// identity (#194). Two tables both claiming to know what `foot` accepts are
+// two tables that will eventually disagree, and the one that would be wrong
+// is whichever was not edited.
+//
 // Exported because the loader, the form's validation and the ADR's claim are
 // the same fact, and a second copy of this table is how they would drift.
 func IdentityFlag(program string) (string, bool) {
-	flag, ok := identityFlags[strings.ToLower(filepath.Base(strings.TrimSpace(program)))]
-	return flag, ok
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(program)))
+	if flag, ok := identityFlags[name]; ok {
+		return flag, ok
+	}
+	return launchkind.IdentityFlag(name)
 }
 
 // IdentityCapablePrograms lists the programs the identity mechanism works
@@ -331,6 +406,11 @@ func IdentityCapablePrograms() []string {
 	out := make([]string, 0, len(identityFlags))
 	for name := range identityFlags {
 		out = append(out, name)
+	}
+	for _, name := range launchkind.KnownTerminals() {
+		if _, ok := launchkind.IdentityFlag(name); ok {
+			out = append(out, name)
+		}
 	}
 	// A stable order so the same machine always words the refusal the same.
 	slices.Sort(out)
