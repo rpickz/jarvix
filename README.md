@@ -553,14 +553,23 @@ first. It inherits none of the daemon's environment, so none of your API keys
 are reachable, and it cannot touch Jarvix's own configuration — a job still
 cannot change what Jarvix is allowed to do.
 
-On a machine whose kernel cannot hold that boundary, **a job refuses to run
-the command and says so**, rather than running it unconfined. The permission
+It also cannot talk to Jarvix itself. Landlock governs files and has no
+opinion about sockets, so confining a command to a folder would still have left
+it free to *ask the daemon* to rewrite the configuration it could not reach —
+the wall reached through a different door. A second, narrower wall goes up
+beside the first: a job's command cannot open a unix socket at all, so the
+daemon's own is unreachable, and nothing about how the window or the terminal
+talk to Jarvix changes.
+
+On a machine whose kernel cannot hold either boundary, **a job refuses to run
+the command and says so**, rather than running it half-confined. The permission
 gate is unchanged: anything irreversible still stops and asks, and confinement
 is an extra wall rather than a substitute for one. What the boundary does
 *not* cover — the network, signals, and the fact that a command can still see
 that a file outside exists without being able to read it — is written down
 rather than implied. See
-[ADR 0068](docs/adr/0068-a-command-the-kernel-holds.md).
+[ADR 0068](docs/adr/0068-a-command-the-kernel-holds.md) and
+[ADR 0069](docs/adr/0069-the-socket-a-confined-command-cannot-reach.md).
 
 ### Backing up the assistant's memory of you
 

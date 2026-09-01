@@ -20,6 +20,10 @@ import (
 // package whose tests run a confined command needs this same three lines.
 func TestMain(m *testing.M) {
 	Reexec()
+	// The other role this binary plays: the probe that socket_test.go runs
+	// INSIDE a confinement, so the thing attempting a forbidden connection is a
+	// real process under a real filter rather than a test pretending to be one.
+	serveTestDial()
 	os.Exit(m.Run())
 }
 

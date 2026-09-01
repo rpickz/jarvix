@@ -244,18 +244,19 @@ an unconfined path by omission.
 Stated here rather than discovered later. Each was measured on the development
 machine unless marked otherwise.
 
-- **Unix sockets, including Jarvix's own.** *Measured.* Landlock defines no
-  right covering `connect(2)` to an `AF_UNIX` path, and a confined command
-  connected to a listener outside its roots with the socket's directory not
-  granted. `$XDG_RUNTIME_DIR/jarvix.sock` has no authentication beyond the file
-  mode, so a command that deliberately spoke the IPC protocol could drive the
-  daemon as a session — which would reach `config.write_entry` if the user's
-  tiers allow it. **This is the largest known hole in this boundary.** It
-  requires an adversarial command rather than a wandering one, and closing it
-  needs a mount namespace (so the socket has no name in the child) or
-  authenticated IPC; both are larger than this slice and neither is pretended to
-  be done. It does not weaken the filesystem claim, which is what the escape
-  tests are about.
+- **~~Unix sockets, including Jarvix's own.~~** *Measured, and then closed by
+  [ADR 0069](0069-the-socket-a-confined-command-cannot-reach.md).* Landlock
+  defines no right covering `connect(2)` to an `AF_UNIX` path, and a confined
+  command connected to a listener outside its roots with the socket's directory
+  not granted. `$XDG_RUNTIME_DIR/jarvix.sock` has no authentication beyond the
+  file mode, so a command that deliberately spoke the IPC protocol could drive
+  the daemon — reaching `config.set` and rewriting the very policy that bounds
+  it. **This was the largest known hole in this boundary, and it was a hole
+  through the guarantee rather than a narrowing of it**, so it did not stay
+  documented. A confined command now has no unix sockets at all: a seccomp
+  filter denying `socket(AF_UNIX, …)` is installed beside the Landlock ruleset,
+  on the same thread, refused on the same terms. The remaining entries below
+  stand.
 - **The network.** *Measured: open.* Deliberately not handled. Landlock's
   network rights (ABI 4) cover TCP `bind` and `connect` only, so UDP, DNS and
   raw sockets would remain open and "this command cannot reach the network"
@@ -277,6 +278,10 @@ machine unless marked otherwise.
 - **Anything the scope actually admits.** A job scoped to `~/code` can delete
   `~/code`. Confinement narrows *reach*; it says nothing about *judgement*, and
   judgement is the gate's job.
+- **The daemon's socket, from anything that is not a confined command.** The
+  socket still has no authentication: any process of the same user outside a
+  job's confinement drives it exactly as it always could. That is the CLI and
+  the window working, and it is the limit of ADR 0069's claim.
 - **Kernels below ABI 3.** They do not get a weaker boundary. They get a
   refusal.
 - **What a command did.** The account records that a command ran, verbatim, and
@@ -300,7 +305,8 @@ machine unless marked otherwise.
   confined command needs the same three lines in its `TestMain`.
 - **No new dependency.** The three Landlock syscalls are made by hand through
   `syscall.Syscall`; a library for forty lines would be a supply-chain cost
-  bought with a convenience.
+  bought with a convenience. The same is true of the seccomp filter ADR 0069
+  adds beside them.
 - The escape tests assert on the **file outside**, read back after the command,
   rather than on the error. A command can fail for a dozen reasons unrelated to
   the wall, and only the file distinguishes "the kernel refused it" from "it did

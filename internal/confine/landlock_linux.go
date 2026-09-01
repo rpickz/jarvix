@@ -193,7 +193,16 @@ func restrict(p plan) error {
 	if _, _, errno := syscall.Syscall(sysLandlockRestrictSelf, uintptr(ruleset), 0, 0); errno != 0 {
 		return fmt.Errorf("this kernel would not hold the boundary: %w", errno)
 	}
-	return nil
+	// The second wall, on the same thread and under the same no-new-privs, so
+	// the two are established or refused together (#222, ADR 0069). Landlock
+	// governs no access right over connecting to a unix socket, and Jarvix's own
+	// IPC socket is one — so without this the boundary would keep a command out
+	// of config.toml while leaving it free to ask the daemon to rewrite
+	// config.toml. See seccomp_linux.go.
+	//
+	// After Landlock rather than before, so that a kernel which can do neither
+	// reports the more fundamental failure first.
+	return denyUnixSockets()
 }
 
 // cloexec marks a descriptor to be closed by a successful execve, which is how

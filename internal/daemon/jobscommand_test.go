@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,7 +40,23 @@ import (
 // binary. See confine.Reexec.
 func TestMain(m *testing.M) {
 	confine.Reexec()
+	// The other role this binary plays: the attacker jobssocket_test.go runs
+	// INSIDE a job's confinement, so the thing trying to drive the daemon is a
+	// real process under the real walls rather than a test pretending to be one.
+	serveTestDrive()
 	os.Exit(m.Run())
+}
+
+// runPlainCommand runs a program with no confinement at all, for the control
+// cases that prove a wall is being tested rather than a broken probe.
+func runPlainCommand(t *testing.T, name string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // commandDaemon builds a daemon with shell.run registered, its own state

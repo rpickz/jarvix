@@ -195,7 +195,17 @@ func (s Spec) Check(sup Support) error {
 }
 
 // within reports whether path is inside dir, or is dir.
+//
+// The root directory is special-cased, and it is not a nicety. Written as the
+// obvious prefix test, `dir + "/"` becomes `"//"` when dir is `/`, which
+// matches nothing — so a scope whose root was `/` would have been found not to
+// contain Jarvix's own configuration, and would have been confined to a
+// boundary that admitted the entire filesystem. Everything is inside `/`, and
+// this says so.
 func within(path, dir string) bool {
+	if dir == string(filepath.Separator) {
+		return true
+	}
 	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
