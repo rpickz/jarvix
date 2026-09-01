@@ -100,12 +100,51 @@ func (s *Store) Bound() int {
 
 // Append implements Recorder: one action becomes one record.
 //
-// It is the only path that mints an id, and the only one that evicts. Unlike
-// every other store here it cannot refuse at the cap: refusing to record
-// would leave an action that happened with nothing in the account, which is
-// the one outcome this feature exists to prevent. So the oldest record goes,
-// the count of what has gone is kept, and the listing says so.
+// It and Reverse are the two paths that mint an id and the two that evict, and
+// they are one body below for exactly that reason. Unlike every other store
+// here neither can refuse at the cap: refusing to record would leave an action
+// that happened with nothing in the account, which is the one outcome this
+// feature exists to prevent. So the oldest record goes, the count of what has
+// gone is kept, and the listing says so.
 func (s *Store) Append(a Action) (Record, error) {
+	return s.record(a, "")
+}
+
+// Reverse records a completed reversal: the reversal's own row, AND the mark
+// on the row it put back, in one write and one announcement (#219).
+//
+// It exists because those two facts were two writes with the `undo.changed`
+// event published between them, and an account whose two halves can be
+// observed apart has a torn state by construction. A subscriber that re-read
+// on that event — a second window, a `jarvix undo list` running alongside —
+// could see the reversal listed while the row it reversed still reported
+// itself reversible and still offered a control to press. Ordering the two
+// writes would only have shrunk that window; a daemon that died between them
+// would still have left exactly the intermediate state on disk, and the
+// account would have come back up offering to undo something it had already
+// undone.
+//
+// So the ordering question is answered by not having an ordering: both facts
+// are one `persisted` value through one atomic temp-write-and-rename (the ADR
+// 0011 discipline that writeStore already keeps), so a crash leaves the
+// account either wholly before the reversal or wholly after it. There is no
+// third state to observe, at rest or in flight.
+//
+// The row being reversed is located BEFORE an id is minted, so a reversal of
+// something the account no longer holds costs neither an id nor a write.
+func (s *Store) Reverse(undone string, a Action) (Record, error) {
+	if strings.TrimSpace(undone) == "" {
+		return Record{}, fmt.Errorf("%w: a reversal has to say what it reversed", ErrUnknownAction)
+	}
+	return s.record(a, undone)
+}
+
+// record is the account's only growing write: one new row, optionally marking
+// one existing row as reversed by it. Append and Reverse are the two ways in,
+// and they share this body rather than each keeping their own copy of the
+// mint-evict-save-announce sequence — two copies is two places for the
+// announcement to drift back out of step with the file.
+func (s *Store) record(a Action, undone string) (Record, error) {
 	if s == nil {
 		return Record{}, fmt.Errorf("the action account is not available")
 	}
@@ -119,7 +158,29 @@ func (s *Store) Append(a Action) (Record, error) {
 	s.mu.Lock()
 	s.refreshLocked()
 	next := clone(s.st)
-	rec := Record{ID: mintID(&next), At: s.now().UTC(), Action: a}
+	marked := -1
+	if undone != "" {
+		for i := range next.records {
+			if next.records[i].ID == undone {
+				marked = i
+				break
+			}
+		}
+		if marked < 0 {
+			s.mu.Unlock()
+			return Record{}, fmt.Errorf("%w: %s", ErrUnknownAction, undone)
+		}
+	}
+	// One reading of the clock for both halves, not two. They are one event —
+	// the reversal happened and the row it reversed stopped standing at the
+	// same instant — and two readings of an injected clock that advances per
+	// call would put a gap in the file that never existed in the world.
+	at := s.now().UTC()
+	rec := Record{ID: mintID(&next), At: at, Action: a}
+	if marked >= 0 {
+		next.records[marked].UndoneBy = rec.ID
+		next.records[marked].UndoneAt = at
+	}
 	next.records = append(next.records, rec)
 	next.forgotten += evict(&next, s.max)
 	if err := s.saveLocked(next); err != nil {
@@ -253,32 +314,12 @@ func (s *Store) Job(job string) []Record {
 	return out
 }
 
-// MarkUndone records that one action has been reversed by another. Both rows
-// stay: the account is what happened, and a reversal happening is part of
-// what happened.
-func (s *Store) MarkUndone(id, by string) error {
-	if s == nil {
-		return ErrUnknownAction
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.refreshLocked()
-	next := clone(s.st)
-	found := false
-	for i := range next.records {
-		if next.records[i].ID != id {
-			continue
-		}
-		next.records[i].UndoneBy = by
-		next.records[i].UndoneAt = s.now().UTC()
-		found = true
-		break
-	}
-	if !found {
-		return fmt.Errorf("%w: %s", ErrUnknownAction, id)
-	}
-	return s.saveLocked(next)
-}
+// There is deliberately no MarkUndone. Marking a row reversed was a public
+// method until #219, and having it was the defect: it made "the reversal is
+// recorded" and "the row it reversed is marked" two writes that any caller
+// could put in either order, or perform only one of. Both rows still stay —
+// the account is what happened, and a reversal happening is part of what
+// happened — but they now arrive together, through Reverse.
 
 // Forget drops one row from the account.
 //
@@ -310,6 +351,14 @@ func (s *Store) Forget(id string) error {
 // emit publishes one undo.changed event, if anyone is listening. Never called
 // with s.mu held — Publish reaches the bus, and a report must never hold the
 // store's lock while it waits (the focus and reminder rule).
+//
+// It is also never called until the account it announces is settled on disk,
+// and that is the promise every subscriber is entitled to (#219): a client
+// that re-reads because it saw this event reads a file that already holds
+// everything the event refers to, including the mark on a row a reversal put
+// back. The event is a "look again", so an account that was not finished
+// changing when it fired would be inviting a reader to see a state that was
+// never true.
 func (s *Store) emit(action string, rec Record) {
 	if s.publish == nil {
 		return

@@ -3336,10 +3336,16 @@ FloatingWindow {
   // Re-read rather than patched, and that is the load-bearing half: whether a
   // row is now reversed, and by what, is the account's answer, and a window
   // that marked its own rows would be asserting an outcome it had not been
-  // told. It re-reads on the reply as well as on undo.changed because the
-  // event is published when the reversal's own row is written, an instant
-  // before the row it reversed is marked — so the reply is the moment both
-  // halves are certainly on disk.
+  // told.
+  //
+  // It re-reads on the reply as well as on undo.changed. That used to be
+  // load-bearing — the event was published when the reversal's own row was
+  // written, an instant before the row it reversed was marked, so only the
+  // reply was certain to find both halves on disk. Since #219 the account is
+  // written once and the event cannot arrive early, so this read is no longer
+  // covering for the event. It stays because the reply carries something the
+  // event does not: the daemon's spoken sentence, including a refusal, which
+  // is a reason to re-read on its own.
   function handleUndoApplyReply(frame) {
     if (frame.error) {
       accountNotice = String(frame.error.message || "")

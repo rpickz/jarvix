@@ -29,7 +29,10 @@ import (
 //
 //  3. **A reversal is itself an action.** It gets its own record, and the row
 //     it reversed is marked. The account is what happened, and putting
-//     something back is a thing that happened.
+//     something back is a thing that happened. Those two are one write, not
+//     two ordered ones (#219): the account is consistent at the moment it
+//     announces itself, and there is no intermediate state for a crash to
+//     leave behind or for a second window to read.
 
 // Decision is the gate's answer for one tool identity. It mirrors
 // tools.PolicyDecision without importing it: internal/tools imports this
@@ -231,10 +234,14 @@ func (u *Undoer) Apply(ctx context.Context, id string) (Outcome, error) {
 			Spoken: fmt.Sprintf("I couldn't undo %s: %v.", rec.Summary, err)}, nil
 	}
 
-	// The reversal earns its own row before the original is marked, so a
-	// crash between the two leaves an account with an unattributed reversal
-	// rather than a row claiming to have been undone by nothing.
-	reversal, appendErr := u.store.Append(Action{
+	// The reversal earns its own row and the row it reversed is marked, in one
+	// write (#219). They used to be two, in this order, and the account was
+	// observably torn between them: `undo.changed` fires on the first, so a
+	// second window re-reading on that event saw the reversal listed beside a
+	// row that still offered to undo something already undone. Ordering them
+	// the other way would only have moved the window; one write removes it,
+	// at rest as well as in flight — see Store.Reverse.
+	reversal, recordErr := u.store.Reverse(rec.ID, Action{
 		Tool:    rec.Tool,
 		Summary: "undid " + rec.Summary,
 		Target:  rec.Target,
@@ -243,10 +250,27 @@ func (u *Undoer) Apply(ctx context.Context, id string) (Outcome, error) {
 			Because: "undoing an undo is not something I offer; " +
 				"ask for the change again if you want it back"},
 	})
-	if appendErr == nil {
-		if err := u.store.MarkUndone(rec.ID, reversal.ID); err != nil {
-			return Outcome{}, err
-		}
+	if recordErr != nil {
+		// The reversal HAPPENED — the file is back, the window has moved —
+		// and only the account of it failed. So it is reported as done with
+		// what could not be confirmed said out loud, never as an error: the
+		// jobs ledger's rule, that a step whose outcome could not be
+		// confirmed is reported as unverified rather than as done or as
+		// never-started, applies just as much to a step whose outcome was
+		// certain and whose record was not. Returning an error here would
+		// have described a reversal that plainly did happen as one that did
+		// not, which is the reading the whole account exists to prevent.
+		//
+		// The store has already logged the write failure with the path. The
+		// row therefore still stands in the account and still offers a
+		// control — which is honest, because the account genuinely does not
+		// know, and pressing it again meets the clobber guard rather than a
+		// second reversal.
+		return Outcome{
+			Done: true, Record: rec,
+			Spoken: performed + " I couldn't write that down in my account, though, " +
+				"so it will still be listed as something I can undo.",
+		}, nil
 	}
 	return Outcome{Done: true, Record: rec, Reversal: reversal, Spoken: performed}, nil
 }
