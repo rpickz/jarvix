@@ -199,6 +199,60 @@ func TestOnlyTheTwoQuestionsCanBeAnswered(t *testing.T) {
 	}
 }
 
+// TestApproveIsAnsweringPlusTheTierAsItStandsNow pins ApproveOffer's bounds
+// (#225). It is AnswerOffer plus one clause, and the clause only speaks about a
+// gate approval it can actually consult a tier for.
+func TestApproveIsAnsweringPlusTheTierAsItStandsNow(t *testing.T) {
+	approval := func() Job {
+		j := ledger("tidy", Parked)
+		j.Question = Question{Why: WhyApproval, Ask: "Shall I?",
+			Step: Step{Tool: "memory.remember", Intent: "delete the old files"}}
+		return j
+	}
+	deny := func(reason string) Gate {
+		return func(Step) Verdict { return Verdict{Decision: Deny, Reason: reason} }
+	}
+
+	// A caller with no gate cannot ask, so the offer stands: the enforcement is
+	// the runner's, and a listing that guessed would be a second policy.
+	if ok, because := approval().ApproveOffer(nil); !ok {
+		t.Errorf("a surface that cannot ask the gate withheld the yes anyway: %q", because)
+	}
+	// AnswerOffer's own refusals come through unchanged and first — a boundary
+	// is not a tier, and saying "you turned that off" about one would be wrong.
+	boundary := ledger("tidy", Parked)
+	boundary.Question = Question{Why: WhyOutOfScope, Ask: "I stopped without doing it."}
+	_, plain := boundary.AnswerOffer()
+	if ok, because := boundary.ApproveOffer(deny("never mind the tier")); ok || because != plain {
+		t.Errorf("a boundary = (%v, %q), want AnswerOffer's own sentence %q", ok, because, plain)
+	}
+	// A planner's decision is not a question about a pending call, so there is
+	// no tier to consult and none is invented.
+	decision := ledger("tidy", Parked)
+	decision.Question = Question{Why: WhyDecision, Ask: "Which folder?", Step: Step{Question: "Which?"}}
+	if ok, because := decision.ApproveOffer(deny("memory.remember is off")); !ok {
+		t.Errorf("a planner's decision was refused on a tier it never uses: %q", because)
+	}
+	// A gate that only says no, with nothing to say about why, still names the
+	// tool — a refusal a reader cannot act on is the shrug this replaces.
+	ok, because := approval().ApproveOffer(deny(""))
+	if ok {
+		t.Fatal("a denied tool was still offered its yes")
+	}
+	if !strings.Contains(because, "memory.remember") {
+		t.Errorf("the refusal = %q, want it to name the tool", because)
+	}
+	// The gate's reason is carried verbatim, without doubling its full stop.
+	_, because = approval().ApproveOffer(
+		deny("I'm not allowed to use memory.remember (you turned it off)."))
+	if strings.Contains(because, ". —") {
+		t.Errorf("the refusal punctuates twice: %q", because)
+	}
+	if !strings.Contains(because, "you turned it off") {
+		t.Errorf("the refusal = %q, want the gate's own reason inside it", because)
+	}
+}
+
 // TestTheRunnerRefusesInTheOfferOwnWords is the pairing itself. A second
 // sentence for the same rule is the drift this arrangement exists to prevent.
 func TestTheRunnerRefusesInTheOffersOwnWords(t *testing.T) {

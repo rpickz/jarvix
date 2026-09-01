@@ -68,6 +68,22 @@ type Verdict struct {
 	Reason string
 }
 
+// Gate answers what the permission gate says about a step, asked at the moment
+// of asking rather than at the moment the step was proposed.
+//
+// It is the same answer Actor.Judge gives, handed to callers that have no actor
+// — a listing composing a row, the Answer verb declining a press. A surface that
+// decided eligibility from its own reading of the policy would be the second
+// place this rule lives, which is the drift ADR 0066 and #210 exist to prevent:
+// a control that is withheld and an action that is refused must not explain the
+// same standing instruction two ways.
+//
+// A nil Gate is a caller that cannot ask, and it reads as "no objection" rather
+// than as a refusal. That is safe because an offer is a courtesy and the
+// enforcement is Runner.once: the worst a missing gate can cost is a control
+// that is offered and then parks the job with the reason.
+type Gate func(Step) Verdict
+
 // Result is what one executed step actually did, as the runner observed it.
 type Result struct {
 	// Said is the tool's own result text. It is the gathered fact and the only
@@ -398,9 +414,18 @@ func (r *Runner) Answer(ref string, approved bool, said string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	// Job.AnswerOffer, again: the listing withholds its Answer control on this
-	// same question, so the two cannot explain the rule differently (#221).
-	if ok, because := job.AnswerOffer(); !ok {
+	// The offers, again: the listing withholds its controls on these same
+	// questions, so a row and a press cannot explain the rule differently
+	// (#221). Approving asks the stricter one — Job.ApproveOffer, which adds the
+	// tier as it stands now on the step this job kept whole (#225) — because
+	// that is the control the row would have withheld. Saying no asks the plain
+	// one: stopping a job is not a use of the tool it was waiting on, so a
+	// denial has nothing to say about it.
+	ok, because := job.AnswerOffer()
+	if approved {
+		ok, because = job.ApproveOffer(r.gate())
+	}
+	if !ok {
 		return job, errors.New(because)
 	}
 	out, err := r.store.Update(job.ID, func(j *Job) bool {
@@ -467,7 +492,9 @@ func (r *Runner) work(ctx context.Context, id string) {
 //  4. **Judge the scope.** Outside → the job STOPS and parks with the reason,
 //     and nothing whatever has been dispatched.
 //  5. **Judge the gate.** Deny → park. Ask → park ON THE QUESTION, keeping the
-//     step, so approving later resumes exactly this action.
+//     step, so approving later resumes exactly this action. A resumption is
+//     judged too and only its question is skipped: the tier in force when the
+//     step RUNS governs, not the tier in force when it was asked about (#225).
 //  6. **Do it**, and only now.
 //  7. **Checkpoint.** The ledger entry and the state go to disk before the
 //     loop comes round, so the step that just happened survives whatever
@@ -568,21 +595,46 @@ func (r *Runner) once(ctx context.Context, id string) (bool, error) {
 		return false, perr
 	}
 
-	// (5) The gate's floor, which a job does not lift however long it has run.
-	if !resuming {
-		switch verdict := actor.Judge(stepCtx, step); verdict.Decision {
-		case Deny:
-			_, perr := r.park(id, WhyRefused,
-				"I stopped without doing it: "+verdict.Reason+".", step)
-			return false, perr
-		case Ask:
-			ask := strings.TrimSpace(verdict.Question)
-			if ask == "" {
-				ask = "Shall I go ahead with " + step.Tool + "?"
-			}
-			_, perr := r.park(id, WhyApproval, ask, step)
-			return false, perr
+	// (5) The gate's floor, which a job does not lift however long it has run —
+	// and, since #225, does not lift by having been parked either.
+	//
+	// The gate is consulted on EVERY pass, resumption included. What a
+	// resumption skips is the question, not the judgement, and the two are not
+	// the same kind of answer:
+	//
+	//   - **Ask has already been answered.** The user was shown this exact
+	//     question and said yes. Asking it again would park the job on the
+	//     question it has just been unparked from, forever, which is the one
+	//     shape a resumption can never take.
+	//   - **Deny has not been answered by anybody.** A tier is the user's
+	//     standing instruction about a capability, not an opinion about this
+	//     job, and a job may sit parked for days while that instruction changes
+	//     underneath it. An approval given before a denial does not reach back
+	//     past it: internal/undo's Apply says exactly this of a reversal ("the
+	//     tier is the user's standing instruction about that capability and an
+	//     undo is not an exception to it"), and a job is less of an exception
+	//     than an undo is, because it is the surface that acts while nobody is
+	//     watching.
+	//
+	// So this is deliberately not `if !resuming { …the whole gate… }`. Skipping
+	// the gate outright was the defect; skipping only the question is the fix,
+	// and collapsing the two back together reopens it.
+	switch verdict := actor.Judge(stepCtx, step); {
+	case verdict.Decision == Deny:
+		// Word for word the reason a first-pass denial parks with, so a person
+		// reading the job's account cannot tell — and does not need to tell —
+		// whether the tier stood when the step was proposed or arrived while it
+		// waited.
+		_, perr := r.park(id, WhyRefused,
+			"I stopped without doing it: "+verdict.Reason+".", step)
+		return false, perr
+	case verdict.Decision == Ask && !resuming:
+		ask := strings.TrimSpace(verdict.Question)
+		if ask == "" {
+			ask = "Shall I go ahead with " + step.Tool + "?"
 		}
+		_, perr := r.park(id, WhyApproval, ask, step)
+		return false, perr
 	}
 
 	// (6) Only now — and the dispatch is written down BEFORE it happens.
@@ -635,6 +687,23 @@ func (r *Runner) once(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	return saved.State == Ready && ctx.Err() == nil, nil
+}
+
+// gate exposes the bound actor's own permission gate as the offers' seam, so a
+// control a listing withholds and a verb that declines read one tier through
+// one function.
+//
+// The context is Background because the gate is a policy lookup and not a call:
+// every Actor.Judge in this repository ignores it, and Answer — a user pressing
+// a button — has no request context to hand it. Nil when no actor is bound,
+// which is the disabled-means-absent rule: a daemon with nothing to act with
+// has no tier to report either, and the offer then stands on AnswerOffer alone.
+func (r *Runner) gate() Gate {
+	_, actor := r.seams()
+	if actor == nil {
+		return nil
+	}
+	return func(s Step) Verdict { return actor.Judge(context.Background(), s) }
 }
 
 // seams reads the late-bound planner and actor.

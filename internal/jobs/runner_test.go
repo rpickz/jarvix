@@ -306,6 +306,224 @@ func TestApprovingLaterResumesTheStepItStoppedOn(t *testing.T) {
 	}
 }
 
+// The three tier transitions across a park (#225).
+//
+// All three set the same job parked on the same approval and then change only
+// one thing — what the gate says when the job resumes. The resumption itself is
+// driven the way the jobs file documents it: setting a parked job's state back
+// to "ready" by hand is how a person says "carry on" with a text editor, and it
+// is also the shape of every resumption whose tier moved after the approval was
+// given. It reaches Runner.once with the question still on disk, which is
+// exactly the path the gate has to hold, and it keeps these three about the
+// runner's floor rather than about the offer that guards the button (which
+// TestApproveIsWithheldOnceTheJobsToolIsDenied covers).
+//
+// Nothing here sleeps, waits or races: work runs on the caller's goroutine and
+// every assertion is about work that has already finished.
+
+// parkedOnApproval runs a job until the gate parks it on a question, and
+// returns it. It fails the test unless that is what happened, so the tests
+// below start from an established fact rather than an assumption.
+func (r *rig) parkedOnApproval(t *testing.T, id string) Job {
+	t.Helper()
+	job := r.work(t, id)
+	if job.State != Parked || job.Question.Why != WhyApproval {
+		t.Fatalf("state = %q why = %q, want the job parked on the gate's question",
+			job.State, job.Question.Why)
+	}
+	if job.Question.Step.Tool == "" {
+		t.Fatal("the job parked without keeping the step, so there is nothing to resume")
+	}
+	return job
+}
+
+// resume puts a parked job back to work without answering it, which is the
+// jobs file's own hand-edit ("carry on") and the state a just-approved job is
+// left in. The question and its kept step stay on disk, so the runner takes the
+// resumption path.
+func (r *rig) resume(t *testing.T, id string) {
+	t.Helper()
+	if _, err := r.store.Update(id, func(j *Job) bool {
+		if j.State != Parked {
+			return false
+		}
+		j.State = Ready
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestATierChangedToDenyWhileParkedIsHonouredOnResumption is the whole of #225.
+// A tier is the user's standing instruction about a capability, and an approval
+// given before a denial does not reach back past it.
+func TestATierChangedToDenyWhileParkedIsHonouredOnResumption(t *testing.T) {
+	r := newRig(t, step("memory.remember", "delete the old files"))
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Ask, Question: "Shall I delete them?"}
+	}
+	job := r.start(t)
+	parked := r.parkedOnApproval(t, job.ID)
+
+	// The user turns the tool off while the job waits, and only then does the
+	// job carry on.
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Deny, Reason: "I'm not allowed to use memory.remember (you turned it off)"}
+	}
+	r.resume(t, job.ID)
+	after := r.work(t, job.ID)
+
+	// The claim is about the actor, not about the absence of an effect: the
+	// recording actor's Do is the one verb that acts, and it was never reached.
+	if did := r.actor.did(); len(did) != 0 {
+		t.Fatalf("the actor was called with %+v; a tier set to deny while the job "+
+			"was parked did not survive the resumption", did)
+	}
+	if after.State != Parked || after.Question.Why != WhyRefused {
+		t.Fatalf("state = %q why = %q, want parked and refused", after.State, after.Question.Why)
+	}
+	// The reason a first-pass denial parks with, word for word, so the account
+	// reads the same either way.
+	want := "I stopped without doing it: I'm not allowed to use memory.remember (you turned it off)."
+	if after.Question.Ask != want {
+		t.Errorf("the park says %q, want the denial's own wording %q", after.Question.Ask, want)
+	}
+	// AC 5: nothing went into the ledger as done, and the report cannot claim it.
+	if len(after.Ledger) != 0 {
+		t.Errorf("ledger = %+v, want nothing: the step never ran", after.Ledger)
+	}
+	if report := after.Report(); strings.Contains(report, "delete the old files") {
+		t.Errorf("report = %q, want it not to claim the denied step happened", report)
+	}
+	// And the job can still say where it stands, which is the reliability half.
+	if spoken := after.Spoken(); !strings.Contains(spoken, "you turned it off") {
+		t.Errorf("spoken = %q, want the refusal and its reason in the job's account", spoken)
+	}
+	// The pending step is kept, so the record of what was refused survives.
+	if after.Question.Step.Intent != parked.Question.Step.Intent {
+		t.Errorf("the refused step was not kept: %+v", after.Question.Step)
+	}
+}
+
+// TestATierStillAskingIsNotAskedAgainOnResumption is the guarantee the fix must
+// not break: the user has just answered this question, so the gate's Ask is
+// spent. Re-asking would park the job on the question it was unparked from,
+// forever.
+func TestATierStillAskingIsNotAskedAgainOnResumption(t *testing.T) {
+	r := newRig(t, step("memory.remember", "delete the old files"))
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Ask, Question: "Shall I delete them?"}
+	}
+	job := r.start(t)
+	parked := r.parkedOnApproval(t, job.ID)
+	plansBefore := len(r.planner.seen())
+
+	// The tier is unchanged — the gate would ask again if anybody asked it.
+	r.resume(t, job.ID)
+	after := r.work(t, job.ID)
+
+	did := r.actor.did()
+	if len(did) == 0 {
+		t.Fatal("the approved step never ran; an answered question must not be asked again")
+	}
+	// Byte-identical to what the user was shown: not re-planned, not rebuilt.
+	if did[0] != parked.Question.Step {
+		t.Errorf("dispatched %+v, want the kept step %+v unchanged", did[0], parked.Question.Step)
+	}
+	if after.State == Parked && after.Question.Why == WhyApproval {
+		t.Fatal("the job parked on the same question again; approving it could never finish")
+	}
+	// The approved step consumed no plan at all — the checkpoint, not a restart.
+	// One further plan, and it is the one that declared the job finished; a
+	// second would be the resumed step being proposed afresh, and a planner
+	// asked the same question twice may answer differently.
+	if plans := len(r.planner.seen()); plans != plansBefore+1 {
+		t.Errorf("the planner was consulted %d times across the resumption, want %d — "+
+			"the approved step must not be re-planned", plans-plansBefore, 1)
+	}
+	if len(after.Ledger) == 0 || after.Ledger[0].Intent != "delete the old files" {
+		t.Errorf("ledger = %+v, want the approved step recorded as it was approved", after.Ledger)
+	}
+}
+
+// TestATierWidenedToAllowRunsWithoutAFurtherQuestion. Widening is the easy
+// direction and it still has to be checked: the resumption must not invent a
+// question the gate no longer asks.
+func TestATierWidenedToAllowRunsWithoutAFurtherQuestion(t *testing.T) {
+	r := newRig(t, step("memory.remember", "delete the old files"))
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Ask, Question: "Shall I delete them?"}
+	}
+	job := r.start(t)
+	parked := r.parkedOnApproval(t, job.ID)
+
+	r.actor.verdict = func(Step) Verdict { return Verdict{Decision: Allow} }
+	r.resume(t, job.ID)
+	after := r.work(t, job.ID)
+
+	did := r.actor.did()
+	if len(did) == 0 || did[0] != parked.Question.Step {
+		t.Fatalf("dispatched %+v, want the kept step %+v", did, parked.Question.Step)
+	}
+	if after.State == Parked {
+		t.Errorf("state = %q why = %q, want the job to have carried on without another question",
+			after.State, after.Question.Why)
+	}
+}
+
+// TestApproveIsWithheldOnceTheJobsToolIsDenied is the offer half (#210's rule,
+// AC 4): the row stops offering a yes the runner would refuse, and the verb
+// declines in that same sentence.
+//
+// It withholds rather than settles, so a user who turns the tool back on gets
+// the control back. Spending the job on a tier that lasted an afternoon would
+// be a worse answer than the one the button gives.
+func TestApproveIsWithheldOnceTheJobsToolIsDenied(t *testing.T) {
+	r := newRig(t, step("memory.remember", "delete the old files"))
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Ask, Question: "Shall I delete them?"}
+	}
+	job := r.start(t)
+	parked := r.parkedOnApproval(t, job.ID)
+
+	// Still asking: the yes stands, and the plain answer offer never wavered.
+	if ok, because := parked.ApproveOffer(r.runner.gate()); !ok {
+		t.Fatalf("a job parked on a question the tier still asks was refused its yes: %q", because)
+	}
+
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Deny, Reason: "I'm not allowed to use memory.remember (you turned it off)"}
+	}
+	ok, because := parked.ApproveOffer(r.runner.gate())
+	if ok {
+		t.Fatal("Approve is still offered for a tool the user has turned off")
+	}
+	if !strings.Contains(because, "you turned it off") ||
+		!strings.Contains(because, "saying yes can't carry it on") {
+		t.Errorf("the refusal = %q, want it to name the tier and say why a yes will not do", because)
+	}
+
+	// The pairing itself: the verb refuses in the offer's own words.
+	if _, err := r.runner.Answer("tidy", true, ""); err == nil {
+		t.Fatal("the runner accepted an approval the listing had withheld")
+	} else if err.Error() != because {
+		t.Errorf("the runner refuses with %q and the listing says %q", err, because)
+	}
+	if did := r.actor.did(); len(did) != 0 {
+		t.Fatalf("the actor was called with %+v after a withheld approval", did)
+	}
+
+	// Saying no is not a use of the denied tool, so it still works — and it is
+	// the thing a user who has just turned the tool off most likely wants.
+	after, err := r.runner.Answer("tidy", false, "")
+	if err != nil {
+		t.Fatalf("a job could not be stopped by saying no to it: %v", err)
+	}
+	if after.State != Stopped {
+		t.Errorf("state = %q, want %q", after.State, Stopped)
+	}
+}
+
 // TestDecliningStopsTheJobRatherThanLookingForAnotherWayRound: a job that
 // carried on after a refusal would be inventing a plan the user has just
 // refused.
