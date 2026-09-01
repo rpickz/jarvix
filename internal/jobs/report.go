@@ -132,6 +132,49 @@ func (j Job) AnswerOffer() (bool, string) {
 	return true, ""
 }
 
+// ApproveOffer reports whether saying YES to a parked approval would actually
+// carry the job on, and the sentence to show when it would not.
+//
+// It is AnswerOffer plus one clause, and the clause is the gate's verdict on
+// the kept step as the tier stands NOW. A job can sit parked for days; if the
+// tool has been re-tiered to deny in the meantime, the approval the row offers
+// is one the runner will decline the moment it resumes (#225), and a control
+// that is offered and then refuses when pressed is the shrug this pairing
+// exists to replace. The tier is the user's standing instruction about that
+// capability, and a yes given now does not reach back past it — internal/undo's
+// Apply says the same of a reversal.
+//
+// Two bounds worth stating, because both are deliberate.
+//
+// It withholds rather than settles. Nothing is written: a user who turns the
+// tool back on gets the control back, which is the honest reading of a standing
+// instruction that has changed twice. Parking the job on the denial here would
+// spend a piece of work on a tier that lasted an afternoon.
+//
+// And it only speaks about an approval. A decision the planner could not settle
+// is not a question about a pending call — there is no tier to consult — and
+// saying NO is not a use of the tool at all, so the Say-no control is decided by
+// AnswerOffer alone. Stopping a job is never the thing a denial is denying.
+func (j Job) ApproveOffer(gate Gate) (bool, string) {
+	if ok, because := j.AnswerOffer(); !ok {
+		return false, because
+	}
+	if gate == nil || j.Question.Why != WhyApproval ||
+		strings.TrimSpace(j.Question.Step.Tool) == "" {
+		return true, ""
+	}
+	verdict := gate(j.Question.Step)
+	if verdict.Decision != Deny {
+		return true, ""
+	}
+	because := strings.TrimSuffix(strings.TrimSpace(verdict.Reason), ".")
+	if because == "" {
+		because = "I'm not allowed to use " + j.Question.Step.Tool
+	}
+	return false, j.Title() + " is waiting on something you have since turned off — " +
+		because + " — so saying yes can't carry it on."
+}
+
 // endedWord words a finished state for the refusals above.
 func endedWord(s State) string {
 	switch s {

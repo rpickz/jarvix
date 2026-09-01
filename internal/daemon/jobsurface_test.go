@@ -62,6 +62,30 @@ func jobsReport(list []jobs.Job, detail func(jobs.Step) string) map[string]any {
 	})
 }
 
+// jobsReportGated renders one listing through a permission gate, which is what
+// decides whether a parked approval is still worth offering a yes for (#225).
+func jobsReportGated(list []jobs.Job, gate jobs.Gate) map[string]any {
+	return jobsViewReport(jobsAccount{
+		jobs: list, now: jobsNow,
+		path: "/home/u/.local/state/jarvix/jobs.toml",
+		gate: gate,
+	})
+}
+
+// retier installs a policy that says one thing about one tool, which is the
+// user changing their standing instruction about a capability.
+func retier(t *testing.T, d *Daemon, tool string, decision tools.PolicyDecision) {
+	t.Helper()
+	policy, err := tools.NewPolicy(tools.PolicyConfig{
+		Default: tools.PolicyAsk,
+		Tools:   map[string]tools.PolicyDecision{tool: decision},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.registry.SetPolicy(policy)
+}
+
 // jobRows pulls the listing out of a report.
 func jobRows(t *testing.T, v map[string]any) []map[string]any {
 	t.Helper()
@@ -245,6 +269,58 @@ func TestTheControlsOfferedAreTheOnesThatWouldActuallyWork(t *testing.T) {
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 			t.Errorf("%s offers %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestApproveGoesAwayWhenTheToolIsTurnedOffWhileTheJobWaits is AC 4 of #225,
+// end to end through the real gate: the same job, the same question, read twice
+// with only the user's standing instruction changed between the two reads.
+//
+// It goes through jobActor.Judge and a compiled tools.Policy rather than a
+// stand-in, because the claim being made is that the row reads the RUNNER's
+// gate. A second reading of the policy here would be the drift the pairing
+// exists to prevent.
+func TestApproveGoesAwayWhenTheToolIsTurnedOffWhileTheJobWaits(t *testing.T) {
+	d := jobsDaemon(t)
+	job := parkedAt(aRunningJob(), jobs.WhyApproval, "Shall I look that up?",
+		jobs.Step{Tool: tools.MemorySearchToolName, Args: `{"query":"invoices"}`})
+
+	retier(t, d, tools.MemorySearchToolName, tools.PolicyAsk)
+	row := jobRows(t, jobsReportGated([]jobs.Job{job}, d.jobsAccount().gate))[0]
+	if got := strings.Join(controlIDs(t, row), ","); got != "approve,decline,stop" {
+		t.Fatalf("a job whose tier still asks offers %q, want the yes on the row", got)
+	}
+	if why, carried := row["why"]; carried {
+		t.Errorf("a row that offers its yes also explains why it cannot: %#v", why)
+	}
+
+	// The user turns the tool off while the job waits.
+	retier(t, d, tools.MemorySearchToolName, tools.PolicyDeny)
+	gate := d.jobsAccount().gate
+	row = jobRows(t, jobsReportGated([]jobs.Job{job}, gate))[0]
+
+	if got := strings.Join(controlIDs(t, row), ","); got != "decline,stop" {
+		t.Errorf("controls = %q, want the yes withheld and saying no still offered — "+
+			"stopping a job is not a use of the tool it was waiting on", got)
+	}
+	// Withheld with a reason, in the sentence the verb itself refuses with.
+	why, _ := row["why"].(string)
+	_, refusal := job.ApproveOffer(gate)
+	if why == "" || why != refusal {
+		t.Errorf("the row says %q and the verb refuses with %q; two sentences for one rule",
+			why, refusal)
+	}
+	if !strings.Contains(why, tools.MemorySearchToolName) {
+		t.Errorf("the refusal = %q, want it to name the tool that was turned off", why)
+	}
+
+	// And it withholds rather than settles: turning the tool back on gives the
+	// control back, because a standing instruction that changed twice has
+	// changed twice.
+	retier(t, d, tools.MemorySearchToolName, tools.PolicyAsk)
+	row = jobRows(t, jobsReportGated([]jobs.Job{job}, d.jobsAccount().gate))[0]
+	if got := strings.Join(controlIDs(t, row), ","); got != "approve,decline,stop" {
+		t.Errorf("controls = %q after the tool was turned back on, want the yes back", got)
 	}
 }
 

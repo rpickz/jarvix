@@ -30,6 +30,7 @@ package daemon
 //     sentence on this surface has been near a provider.
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -68,6 +69,13 @@ type jobsAccount struct {
 	// question. Nil means this daemon cannot say, which is honest and renders
 	// as no detail rather than as a guess.
 	detail func(jobs.Step) string
+	// gate answers what the permission gate says about a kept step as the tier
+	// stands right now, so a row withholds Approve on exactly the tier the
+	// runner would refuse it on (#225). It is the runner's own gate rather than
+	// a second reading of the policy. Nil means this daemon cannot ask, which
+	// leaves the offer standing — the enforcement is the runner's, and a listing
+	// that guessed would be the second place the rule lives.
+	gate jobs.Gate
 }
 
 // jobsAccount assembles the report's inputs from the running daemon.
@@ -80,6 +88,12 @@ func (d *Daemon) jobsAccount() jobsAccount {
 		a.detail = func(s jobs.Step) string {
 			return d.registry.ConfirmationDetail(ai.ToolCall{Name: s.Tool, Arguments: s.Args})
 		}
+		// The runner's own actor, asked the runner's own question. Constructed
+		// here rather than held on the daemon because jobActor is a stateless
+		// wrapper over *Daemon; what matters is that this is jobActor.Judge and
+		// not a second walk of the policy.
+		actor := &jobActor{d: d}
+		a.gate = func(s jobs.Step) jobs.Verdict { return actor.Judge(context.Background(), s) }
 	}
 	return a
 }
@@ -135,7 +149,7 @@ func jobRowReport(job jobs.Job, a jobsAccount) map[string]any {
 		"goal":     "You asked for “" + job.Goal + "”.",
 		"scope":    "It may act " + job.Scope.Stated() + ".",
 		"progress": "It has done " + job.Progress() + ".",
-		"controls": jobControls(job),
+		"controls": jobControls(job, a.gate),
 	}
 	if job.State == jobs.Parked {
 		if ask := strings.TrimSpace(job.Question.Ask); ask != "" {
@@ -158,9 +172,11 @@ func jobRowReport(job jobs.Job, a jobsAccount) map[string]any {
 		// wearing a conclusion's clothes.
 		row["report"] = job.Report()
 	}
-	if _, because := job.AnswerOffer(); because != "" && job.State == jobs.Parked {
-		// Parked, and no answer will move it. The row says so where the control
-		// would have been, in the sentence the verb itself refuses with.
+	if _, because := job.ApproveOffer(a.gate); because != "" && job.State == jobs.Parked {
+		// Parked, and no yes will move it — a boundary, a denial, or an approval
+		// whose tool the user has turned off since it was asked about (#225).
+		// The row says so where the control would have been, in the sentence the
+		// verb itself refuses with.
 		row["why"] = because
 	}
 	return row
@@ -241,15 +257,28 @@ const (
 // decision the planner could not settle needs the user's own words, so that
 // control carries a field — and the field's label is here too, because a label
 // is wording.
-func jobControls(job jobs.Job) []map[string]any {
+//
+// Approve is offered on the stricter question (Job.ApproveOffer, #225): a tool
+// re-tiered to deny while the job sat parked is one the runner will refuse on
+// resumption, so the button goes rather than becoming one that only apologises.
+// Say-no survives it — stopping a job is not a use of the tool it was waiting
+// on, and a user who has just turned that tool off is exactly the user who wants
+// to end the job cleanly.
+func jobControls(job jobs.Job, gate jobs.Gate) []map[string]any {
 	out := make([]map[string]any, 0, 3)
 	if ok, _ := job.AnswerOffer(); ok {
-		if job.Question.Why == jobs.WhyApproval {
+		approve, _ := job.ApproveOffer(gate)
+		switch {
+		case job.Question.Why == jobs.WhyApproval && approve:
 			out = append(out, map[string]any{
 				"id": jobControlApprove, "label": "Approve",
 				"name": "Approve what " + job.Name + " is waiting for and let it carry on",
 			})
-		} else {
+		case job.Question.Why == jobs.WhyApproval:
+			// Withheld, and the row's `why` says so. Absent rather than
+			// present-and-dead: the collection row skips an empty label in the
+			// focus chain, so no keyboard user lands on it either.
+		default:
 			out = append(out, map[string]any{
 				"id": jobControlAnswer, "label": "Send your answer",
 				"name":        "Answer what " + job.Name + " is waiting for and let it carry on",

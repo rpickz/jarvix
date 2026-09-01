@@ -101,6 +101,11 @@ load-bearing:**
    parks with the reason, and nothing whatever has been dispatched.**
 5. **Judge the gate** — `Actor.Judge`, the same registry and the same policy a
    session uses. Deny → park. Ask → park **on the question**, keeping the step.
+   A resumption is judged here too, and only its *question* is skipped (#225):
+   the user has answered that, so re-asking would park the job on the question
+   it was just unparked from — but nobody has answered a **denial**, and a job
+   that sat parked for days may have been overtaken by one. The tier in force
+   when the step **runs** governs, not the tier in force when it was asked about.
 6. **Do it**, and only now.
 7. **Checkpoint** — the ledger entry and the state go to disk before the loop
    comes round.
