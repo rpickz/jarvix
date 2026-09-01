@@ -34,6 +34,11 @@ Usage:
                                 first, and which of them it can put back
   jarvix undo [id]              Put the last change back (or one by id)
   jarvix undo --job <id>        Put a whole piece of work back, newest step first
+  jarvix jobs                   Work still in flight: what each job is doing,
+                                what it may touch, and what it is waiting for
+  jarvix jobs stop <name>       Stop a job; it says what it had done and had not
+  jarvix jobs answer <name> yes|no        Settle what a parked job is waiting for
+  jarvix jobs answer <name> <your answer> ...for one that asked you to decide
   jarvix memory list [query]    List remembered facts (the knowledge base)
   jarvix memory forget <what>   Delete a remembered fact, by id or by words
   jarvix approvals list         List commands that run without asking
@@ -141,6 +146,20 @@ func run(args []string) int {
 			err = cmdUndo(paths, rest[0], "")
 		default:
 			return fail(errUndoUsage)
+		}
+	case "jobs":
+		// The answer's words are joined rather than quoted, like `memory
+		// forget` and `approvals forget`: an answer to a job is a sentence, and
+		// a sentence arrives as arguments.
+		switch {
+		case len(rest) == 0:
+			err = cmdJobs(paths)
+		case rest[0] == "stop" && len(rest) == 2:
+			err = cmdJobsStop(paths, rest[1])
+		case rest[0] == "answer" && len(rest) >= 3:
+			err = cmdJobsAnswer(paths, rest[1], rest[2:])
+		default:
+			return fail(errJobsUsage)
 		}
 	case "listen":
 		err = cmdListen(paths)

@@ -1503,6 +1503,7 @@ func (d *Daemon) registerMethods() {
 	d.registerOverlayMethods()
 	d.registerReminderMethods()
 	d.registerUndoMethods()
+	d.registerJobMethods()
 	d.registerBriefingMethods()
 	d.registerSituationMethods()
 	d.registerEntryAdminMethods()

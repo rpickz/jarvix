@@ -103,3 +103,53 @@ func TestRegistry(t *testing.T) {
 		t.Errorf("out = %q", out)
 	}
 }
+
+// The verbatim detail a confirmation card shows is asked of the tool itself,
+// without a tier (#221).
+//
+// This is the difference the method exists for. CheckWithGrants consults
+// Confirmable only at the ask tier, because only the ask tier has a question to
+// word — so re-deriving a parked job's detail through Check would blank it the
+// moment somebody re-tiered the tool, leaving the window showing a question
+// with nothing underneath it. What the job parked on has not changed; only what
+// the gate would decide about it next time has.
+func TestTheConfirmationDetailIsTheToolsAnswerAndNotTheTiers(t *testing.T) {
+	r := NewRegistry(nil)
+	r.Register(&JobsStop{svc: &fakeWorking{}})
+	call := ai.ToolCall{Name: JobsStopToolName, Arguments: `{"name":"deploy"}`}
+
+	asking, err := NewPolicy(PolicyConfig{Default: PolicyAsk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetPolicy(asking)
+	card := r.Check(call)
+	if card.Decision != PolicyAsk || card.Command == "" {
+		t.Fatalf("the fixture no longer tests what it claims to: %#v", card)
+	}
+	if got := r.ConfirmationDetail(call); got != card.Command {
+		t.Errorf("ConfirmationDetail = %q, want the card's own %q", got, card.Command)
+	}
+
+	// Re-tiered to allow: the card's Command goes, because there is no card.
+	// The detail must not, because a job parked under the old tier is still
+	// parked and the user still has to see what they are approving.
+	allowing, err := NewPolicy(PolicyConfig{Default: PolicyAsk,
+		Tools: map[string]PolicyDecision{JobsStopToolName: PolicyAllow}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetPolicy(allowing)
+	if r.Check(call).Command != "" {
+		t.Fatal("an allow-tier verdict carries a command; the fixture is wrong")
+	}
+	if got := r.ConfirmationDetail(call); got != card.Command {
+		t.Errorf("ConfirmationDetail after a re-tier = %q, want the unchanged %q", got, card.Command)
+	}
+
+	// A tool with nothing to say, and one nobody registered, answer with
+	// silence rather than with a guess — which a card renders as no detail.
+	if got := r.ConfirmationDetail(ai.ToolCall{Name: "shell.run", Arguments: `{"command":"ls"}`}); got != "" {
+		t.Errorf("an unregistered tool answered %q", got)
+	}
+}
