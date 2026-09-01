@@ -15,10 +15,20 @@ import (
 
 	"github.com/rpickz/jarvix/internal/build"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/confine"
 	"github.com/rpickz/jarvix/internal/daemon"
 )
 
 func main() {
+	// First, before flags, configuration or logging (#222, ADR 0068).
+	//
+	// A job's shell command is confined by re-executing this binary: the second
+	// copy locks the boundary onto its own thread and then BECOMES the command.
+	// So the very first thing jarvixd does on start-up is ask whether it was
+	// started to be a daemon or to be somebody's command, and anything that ran
+	// before that question — a config read, a log line, a failed flag parse —
+	// would be work done by a process whose whole purpose is to exec away.
+	confine.Reexec()
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "jarvixd:", err)
 		os.Exit(1)

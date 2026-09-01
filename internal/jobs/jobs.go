@@ -119,6 +119,19 @@ const (
 	// touch. Refusing to guess is the whole of the enforcement promise: a
 	// subject nobody can name cannot be checked against a boundary.
 	WhyUnclear Why = "unclear"
+	// WhyUnconfined is this machine being unable to HOLD the boundary around a
+	// step — a kernel with no Landlock, or a scope shaped so that the boundary
+	// could not be built (ADR 0068, #222).
+	//
+	// It is its own reason rather than a shade of WhyUnclear, and the
+	// difference is the sentence the user gets. Unclear says "I could not tell
+	// what this would touch", and the way out of it is a step whose subject is
+	// readable. This says "I could tell perfectly well, and I could not stop it
+	// touching anything else" — the way out is a narrower scope, or a kernel
+	// that can do the work, and neither of those is a thing a user discovers by
+	// being told the first sentence. Not answerable: a yes cannot supply a
+	// kernel.
+	WhyUnconfined Why = "unconfined"
 	// WhyStuck is the planner failing — unreachable, or proposing nothing this
 	// package can act on.
 	WhyStuck Why = "stuck"
@@ -354,6 +367,23 @@ var forbidden = func() map[string]bool {
 type ErrUnenforceable struct{ Because string }
 
 func (e *ErrUnenforceable) Error() string { return "that scope cannot be enforced: " + e.Because }
+
+// ErrUnconfinable is what an Actor returns from Subject when the step is one
+// this machine can only run inside a boundary it cannot build — a command on a
+// kernel without Landlock, or inside a scope whose shape makes the confinement
+// impossible to express (ADR 0068).
+//
+// It is a distinct type rather than a string the runner matches, for the reason
+// tools.ErrNotManaged is: the runner has to make a DECISION on it — park with
+// WhyUnconfined rather than WhyUnclear — and a decision keyed on the wording of
+// a sentence is a decision that breaks the first time the sentence is improved.
+//
+// The daemon translates whatever the confinement layer reported into this,
+// rather than this package importing that layer: a job's model has no business
+// knowing which kernel feature holds its boundary, only that something must.
+type ErrUnconfinable struct{ Because string }
+
+func (e *ErrUnconfinable) Error() string { return e.Because }
 
 // Validate normalises a scope and refuses one that cannot be enforced.
 //

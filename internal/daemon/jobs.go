@@ -7,14 +7,18 @@ package daemon
 //
 // Three properties of the shape are worth naming before the code.
 //
-//   - **The subject table is the enforcement.** subjectOf below is the only
-//     code that says what a proposed tool call would touch, and it says it
-//     from the parsed arguments. A tool it does not know has NO readable
-//     subject, and the runner parks the job rather than guessing — which is
-//     why shell.run cannot be used inside a directory-scoped job at all. That
-//     is a real limitation and it is deliberate: a command's filesystem
-//     subject cannot be read out of its text, so a scope over a directory
-//     could not be enforced against one. See ADR 0065.
+//   - **The subject table is the enforcement.** Subject below is the only code
+//     that says what a proposed tool call would touch, and it says it from the
+//     parsed arguments. A tool it does not know has NO readable subject, and
+//     the runner parks the job rather than guessing.
+//   - **A shell command is the one step whose subject is never read** (#222,
+//     ADR 0068). It cannot be: a command's filesystem subject is not
+//     recoverable from its text, and a check that is right most of the time is
+//     worse than none because it will be trusted. So commandSubject reads
+//     nothing and instead establishes that the KERNEL will hold the command
+//     inside the job's roots — or refuses the step outright when this machine
+//     cannot. There is no third branch. ADR 0065 said this could not be done
+//     and was right about the parser; ADR 0068 is where it moved.
 //   - **The planner proposes and nothing else.** It cannot dispatch, it cannot
 //     widen a scope, and the two control verbs it is given — finishing and
 //     asking — are synthetic definitions this file owns. Plain prose from the
@@ -37,6 +41,7 @@ import (
 	"github.com/rpickz/jarvix/internal/ai"
 	"github.com/rpickz/jarvix/internal/briefing"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/confine"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/jobs"
 	"github.com/rpickz/jarvix/internal/session"
@@ -350,7 +355,10 @@ type jobActor struct{ d *Daemon }
 // tell", and the runner parks on it — refusing to guess is the whole of the
 // enforcement promise, because a subject nobody can name cannot be checked
 // against a boundary.
-func (a *jobActor) Subject(ctx context.Context, s jobs.Step) (jobs.Attempt, error) {
+func (a *jobActor) Subject(ctx context.Context, scope jobs.Scope, s jobs.Step) (jobs.Attempt, error) {
+	if s.Tool == tools.ShellToolName {
+		return a.commandSubject(scope, s)
+	}
 	if window, ok := windowShaped(s.Tool); ok {
 		return a.windowSubject(ctx, s, window)
 	}
@@ -365,6 +373,81 @@ func (a *jobActor) Subject(ctx context.Context, s jobs.Step) (jobs.Attempt, erro
 	return jobs.Attempt{}, fmt.Errorf(
 		"I have no way to tell what %s would touch, so I can't check it against this job's boundary",
 		s.Tool)
+}
+
+// commandSubject answers the question that used to have no answer (#222, ADR
+// 0068): what would a shell command touch?
+//
+// It does not answer it. It establishes that the question does not need
+// answering, and refuses when it cannot.
+//
+// The old refusal here was correct and is worth restating, because this
+// function is what replaced it: a command's filesystem subject cannot be
+// recovered from its text — quoting, variable expansion, `$(…)`, relative
+// paths, `cd` and symlinks each defeat a reader on their own — and a check that
+// is right most of the time is worse than none, because it will be trusted. So
+// nothing here reads the command. **There is deliberately no code in this
+// daemon that takes a command string and returns paths, and there must not be.**
+//
+// What there is instead is a precondition. If internal/confine can build a
+// kernel-held boundary around this job's roots, then the command physically
+// cannot reach outside them whatever its text says, and the attempt carries no
+// paths because there are none to check — the check has moved from a parser to
+// the kernel, and Scope.Judge is left with the question it can still answer,
+// which is whether the job was given shell.run at all. If the boundary cannot
+// be built — no Landlock, a Landlock too old to stop a file being emptied, a
+// scope with no directory in it, or a scope that swallows Jarvix's own
+// configuration — the step is refused with the reason, and the job parks on
+// WhyUnconfined without anything having been dispatched.
+//
+// Refusing is the only other option, and it is the one the ticket makes
+// non-negotiable: there is no third branch in which the command runs and the
+// boundary is merely hoped for. A job that parks visibly is what this daemon
+// did yesterday; a command that ran unconfined would be worse than that.
+func (a *jobActor) commandSubject(scope jobs.Scope, s jobs.Step) (jobs.Attempt, error) {
+	if err := a.confinement(scope).Check(confine.Available()); err != nil {
+		var unconfinable *confine.ErrUnconfinable
+		if errors.As(err, &unconfinable) {
+			// Translated into the jobs package's own type rather than passed
+			// through, so the runner's decision about how to park is keyed on a
+			// kind and not on a sentence, and so a job's model never has to
+			// import a kernel feature.
+			return jobs.Attempt{}, &jobs.ErrUnconfinable{Because: unconfinable.Because}
+		}
+		return jobs.Attempt{}, err
+	}
+	return jobs.Attempt{Tool: s.Tool}, nil
+}
+
+// confinement is the boundary one job's scope asks the kernel for, and it is
+// one function with two callers on purpose: commandSubject asks whether it can
+// be built, and Do builds it. A daemon that computed the boundary twice would
+// eventually check one thing and apply another, which is the shape of every
+// interesting security bug.
+//
+// Reserved is the whole of Jarvix's own footprint — its configuration, its
+// state, its data and its runtime directory. Naming them here rather than
+// inside internal/confine keeps that package free of any opinion about this
+// application's layout, and keeps the list next to the config.Paths it is read
+// from, so a new Jarvix directory is added in the place somebody adding one is
+// already looking.
+//
+// They are a refusal rather than a subtraction because Landlock cannot
+// subtract: its rights are a union up the directory tree, so a rule granting
+// less on a child does not narrow a rule granting more on its parent, and a
+// rule with no rights at all is rejected. There is no ruleset meaning "all of
+// ~ except ~/.config/jarvix". A scope that would need one is therefore declined
+// — which keeps #109's wall standing against the new route a command opens: a
+// job that cannot call config.write_entry must also not be able to run
+// `sed -i` over config.toml.
+func (a *jobActor) confinement(scope jobs.Scope) confine.Spec {
+	return confine.Spec{
+		Roots: scope.Roots,
+		Reserved: []string{
+			a.d.paths.Config, a.d.paths.State, a.d.paths.Data, a.d.paths.Runtime,
+			filepath.Dir(a.d.paths.Socket),
+		},
+	}
 }
 
 // subjectlessReads are the tools whose subject is nothing outside Jarvix: they
@@ -522,11 +605,34 @@ func (a *jobActor) Judge(_ context.Context, s jobs.Step) jobs.Verdict {
 // the tool, which is the gathered-not-recalled rule applied to the runner's own
 // bookkeeping: what went into the account is a fact the account holds, and a
 // tool that said it recorded something is not evidence that it did.
-func (a *jobActor) Do(ctx context.Context, job string, s jobs.Step) (jobs.Result, error) {
+func (a *jobActor) Do(ctx context.Context, job string, scope jobs.Scope,
+	s jobs.Step) (jobs.Result, error) {
 	before := len(a.d.account.Job(job))
 	toolCtx := undo.WithJob(undo.WithRecorder(ctx, a.d.account), job)
+	// The boundary rides the same context the account does, and for the same
+	// reason: the registry dispatches thirty tools identically and only one of
+	// them needs this. It is installed on EVERY step rather than only on the
+	// ones that look like commands — a tool that grew a shell out of it later
+	// would otherwise inherit an unconfined path by omission, and the shell
+	// tool's own refusal (see internal/tools.Shell.Execute) is what turns a
+	// missing boundary into a command that does not run rather than one that
+	// runs unheld.
+	toolCtx = confine.With(toolCtx, a.confinement(scope))
 	said := a.d.registry.Execute(toolCtx, ai.ToolCall{Name: s.Tool, Arguments: s.Args})
 	result := jobs.Result{Said: said, Failed: strings.HasPrefix(said, "error:")}
+	if s.Tool == tools.ShellToolName && !result.Failed && !tools.CommandSucceeded(said) {
+		// A command that ran and exited non-zero is not a tool that failed —
+		// shell.run worked perfectly — but it IS a step whose work did not
+		// happen, and the ledger's Failed flag is about the step (#222).
+		//
+		// Without this the report reads the entry as done and labels it with
+		// the model's own line about what it was for, so a command the kernel
+		// refused at the boundary would come back as "I did tidy the folder".
+		// That is #71 with a shell behind it: a sentence about an effect
+		// nobody observed, assembled out of an honest ledger that had been
+		// told the wrong fact.
+		result.Failed = true
+	}
 	if records := a.d.account.Job(job); len(records) > before {
 		result.Undo = records[len(records)-1].ID
 	}

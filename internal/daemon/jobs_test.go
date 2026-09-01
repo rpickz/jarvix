@@ -12,6 +12,7 @@ import (
 	"github.com/rpickz/jarvix/internal/audio"
 	"github.com/rpickz/jarvix/internal/briefing"
 	"github.com/rpickz/jarvix/internal/config"
+	"github.com/rpickz/jarvix/internal/confine"
 	"github.com/rpickz/jarvix/internal/desktop"
 	"github.com/rpickz/jarvix/internal/jobs"
 	"github.com/rpickz/jarvix/internal/situation"
@@ -73,7 +74,7 @@ func TestAJobIsRefusedAnUnmanagedWindow(t *testing.T) {
 		Address: "0x1", Class: "Alacritty", Title: "builds", PID: 42, Workspace: 1,
 	})
 	actor := &jobActor{d: d}
-	_, err := actor.Subject(context.Background(), jobs.Step{
+	_, err := actor.Subject(context.Background(), aJobScope(t), jobs.Step{
 		Tool: tools.MoveWindowToolName, Args: `{"window":"alacritty"}`})
 	if err == nil {
 		t.Fatal("a job was handed a window nobody had given it")
@@ -89,17 +90,76 @@ func TestAJobIsRefusedAnUnmanagedWindow(t *testing.T) {
 }
 
 // TestAToolWhoseSubjectCannotBeReadIsRefused is the sharpest consequence of
-// enforcing a scope rather than describing one: a shell command's files cannot
-// be read out of its text, so it cannot be checked against a directory, so a
-// job will not run one. See ADR 0065.
+// enforcing a scope rather than describing one: a tool whose effect the daemon
+// cannot name cannot be checked against a directory, so a job will not use one.
+//
+// shell.run left this list in #222 and did not join the readable ones — see
+// TestACommandIsAdmittedByTheBoundaryAndNotByAReading below, which is the whole
+// argument in one test.
 func TestAToolWhoseSubjectCannotBeReadIsRefused(t *testing.T) {
 	d := jobsDaemon(t)
 	actor := &jobActor{d: d}
-	for _, tool := range []string{"shell.run", tools.LaunchAppToolName, "made.up"} {
-		if _, err := actor.Subject(context.Background(),
+	for _, tool := range []string{tools.LaunchAppToolName, "made.up"} {
+		if _, err := actor.Subject(context.Background(), aJobScope(t),
 			jobs.Step{Tool: tool, Args: `{"command":"rm -rf /"}`}); err == nil {
 			t.Errorf("%s was given a readable subject; the boundary could not be checked against it", tool)
 		}
+	}
+}
+
+// TestACommandIsAdmittedByTheBoundaryAndNotByAReading (#222, ADR 0068).
+//
+// The attempt a command produces carries NO paths, and that is the design
+// rather than an omission: the daemon has not read the command, it has
+// established that the kernel will hold it. A future change that started
+// filling in paths here would be re-introducing the subject parser the whole
+// ticket exists to avoid, so the emptiness is asserted rather than left
+// incidental.
+func TestACommandIsAdmittedByTheBoundaryAndNotByAReading(t *testing.T) {
+	d := jobsDaemon(t)
+	if s := confine.Available(); !s.OK {
+		t.Skipf("THE BOUNDARY WAS NOT EXERCISED and this test proved nothing: %s "+
+			"(Landlock ABI %d)", s.Because, s.ABI)
+	}
+	got, err := (&jobActor{d: d}).Subject(context.Background(), aJobScope(t),
+		jobs.Step{Tool: tools.ShellToolName, Args: `{"command":"echo hello"}`})
+	if err != nil {
+		t.Fatalf("a command inside a confinable scope was refused: %v", err)
+	}
+	if len(got.Paths) != 0 {
+		t.Errorf("attempt = %+v, want no paths: reading a command's subject is the thing "+
+			"this design refuses to do", got)
+	}
+	if got.Tool != tools.ShellToolName {
+		t.Errorf("attempt = %+v, want the command's own tool identity so the scope's tool "+
+			"list is still checked", got)
+	}
+}
+
+// TestACommandIsRefusedWhenTheBoundaryCannotBeHeld is the ticket's
+// non-negotiable rule at the daemon boundary: on a machine that cannot confine,
+// the step is refused with a reason and nothing is dispatched. The refusal must
+// arrive as *jobs.ErrUnconfinable, because that is what makes the runner park
+// with the right sentence rather than with "I couldn't tell what it would
+// touch".
+func TestACommandIsRefusedWhenTheBoundaryCannotBeHeld(t *testing.T) {
+	d := jobsDaemon(t)
+	// A scope whose root swallows Jarvix's own state directory. Landlock rights
+	// are a union up the tree, so there is no ruleset admitting the root while
+	// excluding the configuration inside it — and a command in there could
+	// rewrite what Jarvix is allowed to do (#109).
+	scope := jobs.Scope{Tools: []string{tools.ShellToolName},
+		Roots: []string{filepath.Dir(d.paths.State)}}
+	_, err := (&jobActor{d: d}).Subject(context.Background(), scope,
+		jobs.Step{Tool: tools.ShellToolName, Args: `{"command":"echo hello"}`})
+	var unconfinable *jobs.ErrUnconfinable
+	if !errors.As(err, &unconfinable) {
+		t.Fatalf("error = %v, want a *jobs.ErrUnconfinable so the job parks with the "+
+			"reason a user can act on", err)
+	}
+	if !strings.Contains(unconfinable.Because, "my own configuration") {
+		t.Errorf("refusal = %q, want it to say which boundary made it impossible",
+			unconfinable.Because)
 	}
 }
 
@@ -107,7 +167,8 @@ func TestAToolWhoseSubjectCannotBeReadIsRefused(t *testing.T) {
 func TestAReadWithNoSubjectIsInScopeIfItsToolIs(t *testing.T) {
 	d := jobsDaemon(t)
 	actor := &jobActor{d: d}
-	got, err := actor.Subject(context.Background(), jobs.Step{Tool: tools.MemorySearchToolName})
+	got, err := actor.Subject(context.Background(), aJobScope(t),
+		jobs.Step{Tool: tools.MemorySearchToolName})
 	if err != nil {
 		t.Fatalf("a read of Jarvix's own state was refused: %v", err)
 	}
@@ -121,7 +182,8 @@ func TestAReadWithNoSubjectIsInScopeIfItsToolIs(t *testing.T) {
 func TestAWriteToJarvixsOwnStoresNamesTheRealFile(t *testing.T) {
 	d := jobsDaemon(t)
 	actor := &jobActor{d: d}
-	got, err := actor.Subject(context.Background(), jobs.Step{Tool: tools.MemoryRememberToolName})
+	got, err := actor.Subject(context.Background(), aJobScope(t),
+		jobs.Step{Tool: tools.MemoryRememberToolName})
 	if err != nil {
 		t.Fatal(err)
 	}
