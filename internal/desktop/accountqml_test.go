@@ -177,9 +177,11 @@ func TestTheAccountIsDrivenByItsEvent(t *testing.T) {
 				"undo.changed, not polled", polled)
 		}
 	}
-	// And on the reply as well, because undo.changed is published when the
-	// reversal's own row is written — an instant before the row it reversed is
-	// marked — so the reply is the moment both halves are certainly on disk.
+	// And on the reply as well. Not because the event is early any more — since
+	// #219 the account is one write and the event cannot announce a half of it
+	// — but because the reply carries the daemon's spoken sentence, refusals
+	// included, and a refusal leaves the account unchanged and therefore
+	// publishes nothing at all.
 	if !strings.Contains(qml, "function handleUndoApplyReply") ||
 		strings.Count(qml, "requestAccount()") < 3 {
 		t.Error("the account is not re-read after a reversal; the window would be " +

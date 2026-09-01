@@ -34,6 +34,10 @@ type undoHarness struct {
 	client  *ipc.Client
 	account *undo.Store
 	dir     string
+	// socket is kept so a test can open a SECOND connection — a second
+	// window on the Account tab, which is the only observer the ordering of
+	// the account's writes was ever visible to (#219).
+	socket string
 }
 
 func startUndoDaemon(t *testing.T) *undoHarness {
@@ -57,7 +61,8 @@ func startUndoDaemon(t *testing.T) *undoHarness {
 		t.Fatal(err)
 	}
 	serveDaemon(t, d)
-	return &undoHarness{d: d, client: dialDaemon(t, paths.Socket), account: d.account, dir: dir}
+	return &undoHarness{d: d, client: dialDaemon(t, paths.Socket), account: d.account,
+		dir: dir, socket: paths.Socket}
 }
 
 // recordFileChange puts one reversible file change into the daemon's own
@@ -234,5 +239,132 @@ func TestTheAccountSurvivesADaemonRestart(t *testing.T) {
 	}
 	if got.Summary != rec.Summary || !got.Reversible() {
 		t.Errorf("after a restart the row reads %+v, want the one that was written", got)
+	}
+}
+
+// TestASecondWindowSeesTheRowUndoneOnTheEventAlone is #219's acceptance
+// criterion over the real socket, with two subscriptions and one press.
+//
+// The window that presses the button was never the one at risk: it re-reads
+// from its own `undo.apply` reply, which arrives after everything the reversal
+// writes. Every other subscriber has only the event, and the event used to fire
+// when the reversal's own row was written and before the row it reversed was
+// marked — so a second window re-reading on it saw a reversal listed beside a
+// row that still offered an Undo control for something already undone.
+//
+// So the second connection is driven for real rather than inferred from the
+// first. It is dialled AFTER the change is recorded, so the only `undo.changed`
+// it can see is the reversal's, and through dialDaemon's own round trip, which
+// is what makes its subscription certain rather than merely likely (#179).
+//
+// **What this test is and is not.** It is the end-to-end half: two real
+// subscriptions, and the wire report — `can_undo`, `why`, `state`, `undone_by`
+// — read across a connection that was told nothing but the event. It is NOT
+// the test that would have caught the defect, and saying so is the point. The
+// old ordering left a window of one file write between the announcement and
+// the mark, and a socket round trip is not a barrier against a write on
+// another goroutine: run against the two-write version this passes twenty
+// times out of twenty, because the marking write wins the race on any machine
+// that is not starved. A test that catches a fault only when the runner is
+// loaded is the shape internal/testdiscipline exists to ban, so the ordering
+// itself is pinned where it can be pinned exactly — at the publish seam, with
+// no scheduling in it at all, in
+// undo.TestTheAccountIsConsistentTheMomentItAnnouncesItself.
+func TestASecondWindowSeesTheRowUndoneOnTheEventAlone(t *testing.T) {
+	h := startUndoDaemon(t)
+	rec := h.recordFileChange(t, "config.toml", "before\n", "after\n", `saved the routine "morning"`)
+	second := dialDaemon(t, h.socket)
+
+	var applied struct {
+		Done       bool   `json:"done"`
+		ReversalID string `json:"reversal_id"`
+	}
+	if err := h.client.Call("undo.apply", map[string]any{"id": rec.ID}, &applied); err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Done || applied.ReversalID == "" {
+		t.Fatalf("undo.apply = %+v, want it done with a row of its own", applied)
+	}
+
+	for _, window := range []struct {
+		name   string
+		client *ipc.Client
+	}{
+		{"the window that pressed it", h.client},
+		{"the second window", second},
+	} {
+		// The event is the whole of what this window is told. Nothing below
+		// consults the reply, and nothing waits on anything else.
+		waitForUndoChanged(t, window.client, applied.ReversalID)
+
+		var view struct {
+			Actions []struct {
+				ID         string `json:"id"`
+				Summary    string `json:"summary"`
+				Reversible bool   `json:"reversible"`
+				CanUndo    bool   `json:"can_undo"`
+				Why        string `json:"why"`
+				State      string `json:"state"`
+				UndoneBy   string `json:"undone_by"`
+			} `json:"actions"`
+		}
+		if err := window.client.Call("undo.list", nil, &view); err != nil {
+			t.Fatal(err)
+		}
+		var reversed, reversal bool
+		for _, row := range view.Actions {
+			switch row.ID {
+			case rec.ID:
+				reversed = true
+				if row.Reversible || row.CanUndo {
+					t.Errorf("%s: the row it has just put back still offers a control "+
+						"(reversible=%v can_undo=%v)", window.name, row.Reversible, row.CanUndo)
+				}
+				if row.UndoneBy != applied.ReversalID {
+					t.Errorf("%s: the row names %q as what reversed it, want %q",
+						window.name, row.UndoneBy, applied.ReversalID)
+				}
+				if !strings.Contains(row.Why, "already put that back") {
+					t.Errorf("%s: why = %q, want it to say the row is already back",
+						window.name, row.Why)
+				}
+				if !strings.Contains(row.State, "put") {
+					t.Errorf("%s: state = %q, want the sentence for a row already put back",
+						window.name, row.State)
+				}
+			case applied.ReversalID:
+				reversal = true
+			}
+		}
+		// Both halves, in the same read. An account that had delayed its
+		// announcement past its own row would be wrong in the other direction:
+		// a window told to look and shown nothing new.
+		if !reversed {
+			t.Errorf("%s: the row that was reversed is not in the account", window.name)
+		}
+		if !reversal {
+			t.Errorf("%s: the reversal that caused the event has no row of its own", window.name)
+		}
+	}
+}
+
+// waitForUndoChanged drains until the account announces the given row.
+//
+// Matched on the id rather than taking the first undo.changed, because a
+// connection open since before the change was recorded has one of its own
+// waiting, and a test that read the account on that one would be asking about
+// a moment nobody is claiming anything about.
+func waitForUndoChanged(t *testing.T, client *ipc.Client, id string) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-client.Events():
+			if ev.Type == "undo.changed" && ev.Data["id"] == id {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("no undo.changed for %s", id)
+		}
 	}
 }

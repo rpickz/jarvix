@@ -135,6 +135,27 @@ func TestOfferAndApplyAgreeOnEveryRecordTheAccountCanHold(t *testing.T) {
 		if !strings.Contains(why, "already put that back") {
 			t.Errorf("the withheld reason %q does not say it has already been done", why)
 		}
+
+		// And the press agrees, which is this file's whole claim and is worth
+		// asking of THIS state in particular (#219): the row's standing here is
+		// written by the reversal itself, so it is the one of the three that a
+		// change to how a reversal is recorded could quietly break. A second
+		// window that had drawn its control a moment before the mark landed
+		// would arrive exactly here.
+		out, err := undoer.Apply(context.Background(), again.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Done {
+			t.Fatal("a row that had already been put back was reversed a second time")
+		}
+		if !strings.Contains(out.Spoken, why) {
+			t.Errorf("the refusal %q does not carry the reason the listing showed: %q",
+				out.Spoken, why)
+		}
+		if got := readFile(t, path); got != "before\n" {
+			t.Errorf("the second press changed the file: %q", got)
+		}
 	})
 }
 

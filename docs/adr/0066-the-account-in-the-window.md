@@ -199,4 +199,74 @@ re-checked.
   The window re-reads — on the reply as well as on `undo.changed`, because the
   event is published when the reversal's own row is written, an instant before
   the row it reversed is marked, so the reply is the moment both halves are
-  certainly on disk.
+  certainly on disk. *(That last clause was true when this was written and is
+  no longer; see the amendment below.)*
+
+## Amendment (issue #219): the account is written once, not twice
+
+The wrinkle recorded at the end of the previous section was the last sentence
+of this decision, and it was a defect wearing a caveat: `undo.changed` was
+published a write too early, so a subscriber that re-read on it could see the
+reversal listed while the row it reversed still reported itself reversible and
+still offered a control. The window that pressed the button never saw it —
+it re-reads from its own apply reply, which arrives after the mark — so this
+only ever bit a second window, a `jarvix undo list` running alongside, or
+anything built on the event later.
+
+**The two writes became one, rather than being put in a better order.** The
+non-functional requirement asked for the ordering "such that no observer can
+see the intermediate state, and if that requires one write rather than two, say
+so" — and it does require one write, for a reason worth stating rather than
+discovering. Ordering the mark before the append only shrinks the window; it
+does not close it. A daemon that dies between two writes leaves exactly the
+intermediate state on disk, and the account comes back up either offering to
+undo something it has already undone or holding a mark that names a reversal
+with no row. Ordering answers the observer and not the crash, and the account's
+whole claim is that it is an honest record of what was done in your name.
+
+So `Store.MarkUndone` is gone and `Store.Reverse(undone, action)` takes its
+place: the reversal's row and the mark on the row it reversed are one
+`persisted` value through the one atomic temp-write-and-rename that ADR 0011's
+discipline already gives this file. There is no intermediate state to observe,
+in flight or at rest, and the announcement moves with the write rather than
+between two of them. `Append` and `Reverse` share one body for the same reason
+the gate's refusal clause is one function: two copies of mint-evict-save-announce
+is two places for the announcement to drift back out of step with the file.
+
+Removing the public `MarkUndone` is part of the fix rather than tidying after
+it. Having it was what made "the reversal is recorded" and "the row it reversed
+is marked" two facts a caller could write in either order, or write only one of.
+
+**What one write cannot fix, and is not pretended to.** The account is written
+after the file is put back, so a daemon that dies in between still leaves a
+reversal that happened with nothing in the account saying so. That window is
+this feature's from the first day and is unchanged here; what did change is the
+failure that is reachable without a crash. A store write that *fails* used to
+come back to `Apply` as an error, which described a reversal that plainly did
+happen as one that did not. It is now reported as done, with the gap said out
+loud: "I couldn't write that down in my account, though, so it will still be
+listed as something I can undo." That is the jobs ledger's rule (ADR 0065) —
+a step whose outcome could not be confirmed is reported honestly rather than as
+done or as never-started — applied to a step whose outcome was certain and
+whose record was not. The row therefore still stands and still offers a control,
+which is honest, and a second press meets the clobber guard rather than a second
+reversal.
+
+**Consequences of the amendment.**
+
+- `undo.changed` is unchanged on the wire: same event, same payload, same
+  `action: "recorded"`. What changed is what a subscriber is entitled to assume
+  when it fires — that the account it is being invited to re-read is already
+  final, mark included.
+- The window still re-reads on the apply reply as well, but no longer *because*
+  the event is early. It stays for what the reply alone carries: the daemon's
+  spoken sentence, including a refusal, which leaves the account unchanged and
+  so publishes nothing at all.
+- The ordering is pinned at the publish seam, in
+  `undo.TestTheAccountIsConsistentTheMomentItAnnouncesItself`, where two
+  subscribers read the account from inside the announcement — the earliest any
+  client can look, and therefore the tightest probe. The end-to-end test over
+  two real socket subscriptions is kept as the wire's half and is documented as
+  *not* the test that would have caught this: a socket round trip is not a
+  barrier against a write on another goroutine, and against the two-write
+  version it passes twenty times out of twenty.
