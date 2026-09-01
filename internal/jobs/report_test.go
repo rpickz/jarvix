@@ -77,7 +77,7 @@ func TestAJobWhereNothingWorkedDoesNotClaimOtherwise(t *testing.T) {
 func TestReadingIsNotChanging(t *testing.T) {
 	read := Entry{Intent: "looked at the folder", Tool: "memory.search", Said: "seven files", Verified: true}
 	job := ledger("tidy", Running, read, read, did("moved one"))
-	clause := job.progressClause()
+	clause := job.Progress()
 	if !strings.Contains(clause, "3 steps") {
 		t.Errorf("clause = %q, want the step count", clause)
 	}
@@ -130,5 +130,113 @@ func TestTheStatedJobCarriesTheGoalAndTheWholeBoundary(t *testing.T) {
 		if !strings.Contains(stated, want) {
 			t.Errorf("Stated() = %q, want it to say %q", stated, want)
 		}
+	}
+}
+
+// The offers (#221). One function, two callers: the sentence a surface shows
+// where a control would have been IS the sentence the verb refuses with, so a
+// listing and a press cannot explain the same rule differently.
+
+// TestStopIsOfferedExactlyWhileThereIsSomethingToStop.
+func TestStopIsOfferedExactlyWhileThereIsSomethingToStop(t *testing.T) {
+	for _, state := range []State{Ready, Running, Parked} {
+		if ok, why := ledger("tidy", state).StopOffer(); !ok || why != "" {
+			t.Errorf("a %s job is not offered a stop (%q); it still has somewhere to go",
+				state, why)
+		}
+	}
+	for _, tc := range []struct {
+		state State
+		word  string
+	}{
+		{Done, "finished"}, {Stopped, "been stopped"}, {Failed, "ended"},
+	} {
+		ok, why := ledger("tidy", tc.state).StopOffer()
+		if ok {
+			t.Errorf("a %s job is offered a stop that could only refuse", tc.state)
+		}
+		if !strings.Contains(why, tc.word) {
+			t.Errorf("the refusal for a %s job = %q, want it to say %q", tc.state, why, tc.word)
+		}
+		if !strings.HasPrefix(why, "Tidy ") {
+			t.Errorf("the refusal does not name the job as a sentence would: %q", why)
+		}
+	}
+}
+
+// TestOnlyTheTwoQuestionsCanBeAnswered. A boundary and a denial are not
+// opinions: the way past them is a new job with a scope that admits the work,
+// which is a thing the user does deliberately rather than a yes they nod
+// through. The sentence has to say so, because the alternative is a button that
+// looks like it would help.
+func TestOnlyTheTwoQuestionsCanBeAnswered(t *testing.T) {
+	parked := func(why Why, ask string) Job {
+		j := ledger("tidy", Parked)
+		j.Question = Question{Why: why, Ask: ask}
+		return j
+	}
+	for _, why := range []Why{WhyApproval, WhyDecision} {
+		if ok, because := parked(why, "Shall I?").AnswerOffer(); !ok {
+			t.Errorf("a job parked on %s cannot be answered (%q)", why, because)
+		}
+	}
+	for _, why := range []Why{WhyOutOfScope, WhyRefused, WhyUnclear, WhyStuck} {
+		ok, because := parked(why, "I stopped without doing it.").AnswerOffer()
+		if ok {
+			t.Errorf("a job parked on %s is offered an answer that cannot resume it", why)
+		}
+		if !strings.Contains(because, "isn't something I can carry on from") {
+			t.Errorf("the refusal for %s = %q, want it to say why an answer will not do",
+				why, because)
+		}
+		if strings.Contains(because, "..") {
+			t.Errorf("the refusal doubles its full stop: %q", because)
+		}
+	}
+	if ok, because := ledger("tidy", Running).AnswerOffer(); ok ||
+		!strings.Contains(because, "not waiting on anything") {
+		t.Errorf("a running job = (%v, %q), want a refusal saying it is not waiting", ok, because)
+	}
+}
+
+// TestTheRunnerRefusesInTheOfferOwnWords is the pairing itself. A second
+// sentence for the same rule is the drift this arrangement exists to prevent.
+func TestTheRunnerRefusesInTheOffersOwnWords(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir+"/jobs.toml", StoreOptions{}, nil)
+	runner := NewRunner(RunnerOptions{Store: store}, nil)
+	job, err := store.Start("tidy", "tidy up", Scope{
+		Tools: []string{"memory.search"}, Roots: []string{dir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not parked, so neither an answer nor — once it has ended — a stop will do.
+	if _, err := runner.Answer(job.Name, true, ""); err == nil {
+		t.Fatal("a job that is not waiting accepted an answer")
+	} else if _, because := job.AnswerOffer(); err.Error() != because {
+		t.Errorf("the runner refuses with %q and the listing says %q", err, because)
+	}
+	stopped, err := runner.Stop(job.Name, "You stopped it.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.Stop(job.Name, "You stopped it.")
+	if err == nil {
+		t.Fatal("a job that had already stopped was stopped again")
+	}
+	if _, because := stopped.StopOffer(); err.Error() != because {
+		t.Errorf("the runner refuses with %q and the listing says %q", err, because)
+	}
+}
+
+// TestTitleIsTheHandleAsAHeading. Every surface that leads a sentence with a
+// job's name needs the same answer, and the user typed it in whatever case
+// they liked.
+func TestTitleIsTheHandleAsAHeading(t *testing.T) {
+	if got := (Job{Name: "tidy downloads"}).Title(); got != "Tidy downloads" {
+		t.Errorf("Title = %q", got)
+	}
+	if got := (Job{}).Title(); got != "" {
+		t.Errorf("Title of a nameless job = %q, want nothing rather than a panic", got)
 	}
 }

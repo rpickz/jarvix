@@ -350,8 +350,12 @@ func (r *Runner) Stop(ref, why string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	if !job.State.Live() {
-		return job, fmt.Errorf("%s has already %s", job.Name, endedWord(job.State))
+	// The listing's own question, asked again at the moment of the press. A
+	// window draws its Stop button from Job.StopOffer and this refuses with the
+	// same sentence, so a job that ended between the two is declined in the
+	// words the row would have used (#221).
+	if ok, because := job.StopOffer(); !ok {
+		return job, errors.New(because)
 	}
 	r.mu.Lock()
 	cancel := r.stops[job.ID]
@@ -377,18 +381,6 @@ func (r *Runner) Stop(ref, why string) (Job, error) {
 	return out, nil
 }
 
-// endedWord words a finished state for a refusal sentence.
-func endedWord(s State) string {
-	switch s {
-	case Done:
-		return "finished"
-	case Stopped:
-		return "been stopped"
-	default:
-		return "ended"
-	}
-}
-
 // Answer settles what a parked job was waiting for and puts it back to work.
 //
 // Approving resumes from the checkpoint rather than restarting: the step the
@@ -406,12 +398,10 @@ func (r *Runner) Answer(ref string, approved bool, said string) (Job, error) {
 	if err != nil {
 		return Job{}, err
 	}
-	if job.State != Parked {
-		return job, fmt.Errorf("%s is not waiting on anything", job.Name)
-	}
-	if !job.Question.Why.Answerable() {
-		return job, fmt.Errorf("%s stopped because %s, which isn't something I can carry on from",
-			job.Name, strings.TrimSuffix(job.Question.Ask, "."))
+	// Job.AnswerOffer, again: the listing withholds its Answer control on this
+	// same question, so the two cannot explain the rule differently (#221).
+	if ok, because := job.AnswerOffer(); !ok {
+		return job, errors.New(because)
 	}
 	out, err := r.store.Update(job.ID, func(j *Job) bool {
 		if j.State != Parked {

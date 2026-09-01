@@ -211,6 +211,39 @@ func (r *Registry) CheckWithGrants(call ai.ToolCall, grants [][]string) Verdict 
 	return verdict
 }
 
+// ConfirmationDetail is the verbatim detail a confirmation card shows for one
+// call: the exact thing the user is approving, in the tool's own words rather
+// than in the model's account of them.
+//
+// It is the Confirmable seam asked DIRECTLY, without a tier, and that is the
+// whole reason it exists (#221). CheckWithGrants consults Confirmable only at
+// the ask tier, because only the ask tier has a question to word; a job that
+// parked on an approval hours ago has a question already worded and kept, and
+// what its surface still needs is the detail underneath it — the same string
+// `tool.confirmation_required` carries as `command`. Re-deriving that through
+// Check would make the detail vanish the moment the user re-tiered the tool,
+// which would blank the card for a question the job is still parked on.
+//
+// It is a pure function of the call's arguments, exactly as the gate's own
+// Command is, so the string it returns for a step kept whole is the string the
+// session's card showed when that step was judged. "" means this call has no
+// detail beyond its question, which is what a card renders as no command block.
+func (r *Registry) ConfirmationDetail(call ai.ToolCall) string {
+	tool, registered := r.tools[call.Name]
+	if !registered {
+		return ""
+	}
+	c, confirmable := tool.(Confirmable)
+	if !confirmable {
+		return ""
+	}
+	command, _, ok := c.Confirmation(json.RawMessage(call.Arguments))
+	if !ok {
+		return ""
+	}
+	return command
+}
+
 // Activity reports how a call should be surfaced while it runs, for tools
 // that implement Progressive. ok is false for every other tool, which is the
 // common case: most calls finish before anyone could wonder.

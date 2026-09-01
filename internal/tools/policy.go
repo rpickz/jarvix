@@ -284,6 +284,30 @@ var builtinToolDefaults = map[string]PolicyDecision{
 	// Its counterpart, desktop.manage_window, is in neverSilent below.
 	ListManagedToolName:   PolicyAllow,
 	ReleaseWindowToolName: PolicyAllow,
+	// jobs.status is allow, and it is the only one of the four job verbs that
+	// moves (#221). The argument is desktop.release_window's, restated for a
+	// read: **a question about work in flight must not cost a confirmation.**
+	//
+	// The whole premise of #195 is that the user is the manager of this
+	// machine, and a manager's most basic act is to look at what is running.
+	// Under the policy default a job inherited `ask`, so "what are my jobs
+	// doing" produced a permission prompt before it produced an answer — a
+	// toll booth in front of the one question that has to work when the model
+	// is the thing behaving oddly. It is the reads' argument (memory.search,
+	// conversations.search, situation, briefing, the three config reads) with
+	// one extra clause: the answer is composed from a ledger the daemon wrote
+	// as each step finished, so there is nothing here a question could protect
+	// — the tool carries no arguments beyond a name and cannot change a job,
+	// widen a scope or reach the machine.
+	//
+	// Its three siblings are deliberately absent and stay absent. jobs.start
+	// is a grant of authority and states its scope back on a card; jobs.stop
+	// ends work the user asked for; jobs.answer approves the very thing a job
+	// parked on, which is irreversible often enough that parking exists. All
+	// three take the policy default, and a user who disagrees writes
+	// `[tools.policy.tool]."jobs.stop" = "allow"` — the same sentence they
+	// would have to mean for any other tier.
+	JobsStatusToolName: PolicyAllow,
 	// The model's escalation to the deep tier (#159). Allow for advisor.ask's
 	// exact argument: it reads and replies and nothing else — no more
 	// authority than the model turn Jarvix was already making — so it runs

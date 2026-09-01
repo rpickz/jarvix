@@ -549,9 +549,12 @@ func (a *jobActor) Do(ctx context.Context, job string, s jobs.Step) (jobs.Result
 // work stopped until the user does something, which is the rank the report
 // leads with.
 //
-// The lines carry no provenance reference. There is no window surface for a job
-// yet, so a reference would resolve to a link that opens nothing — the
-// reminders source's argument for its fired lines, verbatim.
+// The lines carry no provenance reference. There is a window surface now (#221,
+// ADR 0067), but no per-job reveal state to navigate to — the Jobs tab is one
+// listing, not a listing plus a detail id — so a reference would open the tab
+// and stop there. That is the Automations tab's weaker promise (see revealIn),
+// and taking it on is a decision to make when there is a row worth landing on
+// rather than a side effect of a tab existing.
 func (d *Daemon) situationJobs(_ context.Context, at situation.Instant) ([]situation.Item, error) {
 	if d.jobStore == nil {
 		return nil, nil

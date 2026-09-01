@@ -31,7 +31,7 @@ func (j Job) Spoken() string {
 	case Parked:
 		return j.parkedLine()
 	case Ready, Running:
-		return capitalise(j.Name) + " is running: " + j.progressClause() + "."
+		return capitalise(j.Name) + " is running: " + j.Progress() + "."
 	case Done:
 		return capitalise(j.Name) + " has finished. " + j.Report()
 	case Stopped:
@@ -53,17 +53,27 @@ func (j Job) parkedLine() string {
 	}
 	if j.Question.Why.Answerable() {
 		return capitalise(j.Name) + " is waiting on you: " + ask +
-			" It has done " + j.progressClause() + " so far."
+			" It has done " + j.Progress() + " so far."
 	}
 	return capitalise(j.Name) + " has stopped and needs you: " + ask +
-		" It had done " + j.progressClause() + " before that."
+		" It had done " + j.Progress() + " before that."
 }
 
-// progressClause counts what actually happened, and never rounds up. A step
-// that read something is a step; a step that changed something is a change; the
-// two are counted separately because conflating them lets a job that looked at
+// Title is the job's handle as a heading — the user typed it in whatever case
+// they liked, and every surface that leads a sentence with it needs the same
+// answer. One implementation, because two would disagree the first time
+// somebody names a job "CI".
+func (j Job) Title() string { return capitalise(j.Name) }
+
+// Progress counts what actually happened, and never rounds up. A step that
+// read something is a step; a step that changed something is a change; the two
+// are counted separately because conflating them lets a job that looked at
 // forty files describe itself as having done forty things.
-func (j Job) progressClause() string {
+//
+// Exported since #221 because a listing needs the same count the spoken line
+// carries, and a surface that counted the ledger itself would be the second
+// place this arithmetic lives.
+func (j Job) Progress() string {
 	steps, acted, unsure := len(j.Ledger), j.Acted(), j.Unverified()
 	if steps == 0 {
 		return "nothing yet"
@@ -76,6 +86,62 @@ func (j Job) progressClause() string {
 		clause += fmt.Sprintf(", and %d I can't confirm either way", unsure)
 	}
 	return clause
+}
+
+// ---------------------------------------------------------------------------
+// The offers
+// ---------------------------------------------------------------------------
+
+// What a surface may offer to do with this job, and — when it may not — the
+// one sentence saying why.
+//
+// These exist for #221's window and are used by the Runner's own refusals, and
+// that pairing is the whole point (ADR 0066's `Undoer.Offer`, restated for
+// work rather than for reversal): a control the listing withholds and an
+// action the runner declines must not explain the same rule two ways. One
+// function, two callers — the surface asks before it draws a button, and the
+// verb asks again when the button is pressed, because a listing composed a
+// moment ago cannot promise what the job is doing now.
+
+// StopOffer reports whether stopping this job would do anything, and the
+// sentence to show when it would not.
+func (j Job) StopOffer() (bool, string) {
+	if j.State.Live() {
+		return true, ""
+	}
+	return false, j.Title() + " has already " + endedWord(j.State) + "."
+}
+
+// AnswerOffer reports whether the user saying something can resume this job,
+// and the sentence to show when it cannot.
+//
+// Two refusals, and they are different facts a reader acts on differently: a
+// job that is not parked is not waiting for anybody, and a job parked on a
+// boundary or a denial is waiting for a decision an answer cannot supply — the
+// way out of those is a new job with a scope that admits the work, which is a
+// thing the user does deliberately rather than a yes they nod through.
+func (j Job) AnswerOffer() (bool, string) {
+	if j.State != Parked {
+		return false, j.Title() + " is not waiting on anything."
+	}
+	if !j.Question.Why.Answerable() {
+		return false, j.Title() + " stopped because " +
+			strings.TrimSuffix(strings.TrimSpace(j.Question.Ask), ".") +
+			", which isn't something I can carry on from."
+	}
+	return true, ""
+}
+
+// endedWord words a finished state for the refusals above.
+func endedWord(s State) string {
+	switch s {
+	case Done:
+		return "finished"
+	case Stopped:
+		return "been stopped"
+	default:
+		return "ended"
+	}
 }
 
 // Report is the account of a finished job: what was done, what was not, and

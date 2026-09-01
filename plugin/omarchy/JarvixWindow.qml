@@ -93,6 +93,16 @@ FloatingWindow {
     // reason, restated: an action you cannot find is an action you cannot
     // reverse.
     { id: "account", label: "Account" },
+    // jobs — work still in flight (#221, ADR 0067): every job with its state,
+    // its goal in the user's own words, the scope it is bounded by, what it is
+    // waiting for, and controls to answer, stop or resume it. The fourth answer
+    // to "what is going on", beside Activity, Situation and Account, and the
+    // one about work that has NOT finished — Account is the record of what
+    // already happened. Its own tab rather than a corner of Situation because a
+    // manager's most basic act is looking at what is running, and a job you can
+    // only observe by successfully talking to a model is a job you cannot
+    // manage on the day the model is what is behaving oddly.
+    { id: "jobs", label: "Jobs" },
     // focus — the focus threads (#123, ADR 0041): threads with anchors,
     // parked thoughts and the live timeboxed session, self-contained in
     // JarvixFocusTab.qml (own socket, request ids 500–599, focus.list /
@@ -145,6 +155,13 @@ FloatingWindow {
       // happened.
       accountNotice = ""
       requestAccount()
+    }
+    else if (id === "jobs") {
+      // The notice is about a stop or an answer given while the user was last
+      // here. Leaving it on screen for a return visit would go on reporting an
+      // outcome from some earlier minute as though it had just happened.
+      jobsNotice = ""
+      requestJobs()
     }
     else if (id === "knowledge") requestKnowledge()
     else if (id === "providers") requestProviders()
@@ -3392,6 +3409,154 @@ FloatingWindow {
     return parts.join(" · ")
   }
 
+  // --- work in flight (#221, ADR 0067) --------------------------------------
+  // The jobs Jarvix is carrying out for the user, and steering them without
+  // asking a model's permission to look. The Account tab's discipline exactly
+  // (ADR 0066), applied to work that has not finished yet: every sentence a row
+  // shows — where the job stands, how long it has been there, what it may
+  // touch, what it is waiting for, what it has done — is composed by the daemon
+  // from the job's own ledger and placed here (ADR 0013).
+  //
+  // Nothing here decides what may be done either. `controls` comes back as the
+  // daemon's list of the actions that would actually work right now, worded by
+  // the same Job.StopOffer / Job.AnswerOffer the verbs refuse with — so a job
+  // that ended a moment ago has no Stop button rather than one that would
+  // explain itself differently from the refusal.
+  //
+  // Driven by jobs.changed rather than polled: a job parking, finishing or
+  // being answered anywhere — this window, the CLI, the model, the supervisor
+  // running unattended — re-reads the listing for every open window.
+  property var jobRows: []
+  property string jobsEmpty: ""
+  property string jobsDisclosure: ""
+  property string jobsPath: ""
+  // The daemon's own sentence about the last stop or answer asked for here.
+  // Held verbatim and never inspected: jobs.stop and jobs.answer report a
+  // refusal as a normal reply carrying its reason — Jarvix declining is not a
+  // fault — so a window that re-worded either would be claiming an outcome it
+  // never verified.
+  property string jobsNotice: ""
+  // Half-typed answers, by job id, kept on the window rather than on the
+  // delegate: the listing is re-read whenever any job moves, and a draft that
+  // lived on a delegate would be thrown away by somebody else's job finishing
+  // mid-sentence.
+  property var jobDrafts: ({})
+  // JSON-RPC ids from this feature's own private range (1050–1099, the account
+  // and approvals discipline) so its replies are recognisable by construction.
+  property int jobsListRequestId: 0
+  property int jobsActRequestId: 0
+  property int nextJobsRequestId: 1050
+
+  function takeJobsRequestId() {
+    var id = nextJobsRequestId
+    nextJobsRequestId = nextJobsRequestId >= 1099 ? 1050 : nextJobsRequestId + 1
+    return id
+  }
+
+  function requestJobs() {
+    if (!daemon.connected) return
+    jobsListRequestId = takeJobsRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: jobsListRequestId,
+      method: "jobs.list" }) + "\n")
+  }
+
+  // loadJobs takes the daemon's listing as given, in the order it arrives:
+  // live work first, newest first within each half. Which jobs are news and
+  // where they sit is the store's answer, not this file's.
+  function loadJobs(result) {
+    jobRows = result.jobs || []
+    jobsEmpty = String(result.empty || "")
+    jobsDisclosure = String(result.disclosure || "")
+    jobsPath = String(result.path || "")
+  }
+
+  function jobDraft(id) {
+    var held = win.jobDrafts[String(id)]
+    return held === undefined ? "" : String(held)
+  }
+
+  // setJobDraft rebuilds the map rather than writing into it. A `property var`
+  // holding an object notifies on assignment only, so mutating in place would
+  // leave every binding reading the value it had before the keystroke.
+  function setJobDraft(id, value) {
+    var next = {}
+    for (var key in win.jobDrafts) next[key] = win.jobDrafts[key]
+    next[String(id)] = String(value || "")
+    win.jobDrafts = next
+  }
+
+  // jobWordsControl is the offered control that needs the user's own words,
+  // or null. The daemon marks it — a gate approval is a yes about an action
+  // already shown, a planner's question is not — so this file never works out
+  // from a job's state whether a field belongs on the row.
+  function jobWordsControl(controls) {
+    var list = controls || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].words === true) return list[i]
+    }
+    return null
+  }
+
+  // runJobControl carries out one of the controls the daemon offered on a row.
+  // The control's `id` says which verb it is — the provenance panel's shape
+  // (runProvenanceAction) — so this file never decides that a job may be
+  // stopped or answered, only which message says what the daemon already said
+  // could be said.
+  //
+  // No confirmation card in front of any of it. The card exists for something
+  // the MODEL asked to do (ADR 0053); this is the manager's own instruction,
+  // given by hand, on a row that names the job and says what will happen. And
+  // approving here is not a way round the gate — it is the gate being answered:
+  // the job parked because the gate demanded a confirmation, the question and
+  // its verbatim detail are on the row above the button, and the daemon then
+  // runs the step it kept whole rather than planning a new one (#200).
+  function runJobControl(job, control) {
+    if (!daemon.connected || !control) return
+    var name = String(job.name || "")
+    if (name === "") return
+    // One call site per verb: the method is named once whichever answer this
+    // is, so nothing can grow a second, unchecked path to a job.
+    var method = "jobs.answer"
+    var params = null
+    switch (String(control.id || "")) {
+    case "stop":
+      method = "jobs.stop"
+      params = { name: name }
+      break
+    case "approve":
+      params = { name: name, approved: true }
+      break
+    case "answer":
+      params = { name: name, approved: true,
+        answer: win.jobDraft(String(job.id || "")) }
+      break
+    case "decline":
+      params = { name: name, approved: false }
+      break
+    }
+    if (params === null) return
+    jobsNotice = ""
+    jobsActRequestId = takeJobsRequestId()
+    daemon.write(JSON.stringify({ jsonrpc: "2.0", id: jobsActRequestId,
+      method: method, params: params }) + "\n")
+  }
+
+  // handleJobActionReply shows what the daemon said and then re-reads.
+  //
+  // Re-read rather than patched, and that is the load-bearing half: where a job
+  // stands after being answered is the store's answer — an approved job resumes
+  // from its checkpoint and may park again on the very next step — and a window
+  // that marked its own row would be asserting a state nobody looked at.
+  function handleJobActionReply(frame) {
+    if (frame.error) {
+      jobsNotice = String(frame.error.message || "")
+      requestJobs()
+      return
+    }
+    jobsNotice = String((frame.result || {}).spoken || "")
+    requestJobs()
+  }
+
   // --- speak again ---------------------------------------------------------
   // The per-message replay control (issue #122) is a thin client of the
   // daemon's `speech.replay` verb: it sends the row's record position (and
@@ -3908,6 +4073,17 @@ FloatingWindow {
       // minute for as long as it took to notice.
       requestAccount()
       break
+    case "jobs.changed":
+      // A job started, took a step, parked, was answered or ended — from a
+      // conversation, from `jarvix jobs`, from this tab, or from the
+      // supervisor with nobody watching. The event carries the job's id, name
+      // and state only; the goal, the scope, the question and the
+      // ledger-derived report all travel on the listing reply, and the ledger
+      // itself never travels at all. Re-read rather than patch (ADR 0013), and
+      // unconditionally rather than only while the tab is open, for the
+      // account's reason next door.
+      requestJobs()
+      break
     case "desktop.action":
       // A window was handed over or let go (#197) — by voice, by the button
       // below, or by a launch Jarvix made. The event names the verb and the
@@ -4156,6 +4332,10 @@ FloatingWindow {
           if (frame.result) win.loadAccount(frame.result)
         } else if (frame.id !== undefined && frame.id === win.accountApplyRequestId) {
           win.handleUndoApplyReply(frame)
+        } else if (frame.id !== undefined && frame.id === win.jobsListRequestId) {
+          if (frame.result) win.loadJobs(frame.result)
+        } else if (frame.id !== undefined && frame.id === win.jobsActRequestId) {
+          win.handleJobActionReply(frame)
         } else if (frame.id !== undefined && frame.id === win.approvalsRequestId) {
           if (frame.result) win.loadApprovals(frame.result)
         } else if (frame.id !== undefined && frame.id === win.approvalsForgetRequestId) {
@@ -4260,6 +4440,10 @@ FloatingWindow {
         win.requestMonitors()
         win.requestPlacementVocabulary()
         win.requestManagedWindows()
+        // Work in flight, on the same argument: whichever tab the window
+        // reopens on, the Jobs tab shows what is actually running rather than
+        // a blank that fills in a keystroke later.
+        win.requestJobs()
         // The transcript's typography settings (issue #121) load with the
         // rest of the connect snapshot; until they arrive the property
         // defaults render the shipped look.
@@ -7375,6 +7559,210 @@ FloatingWindow {
             + (win.managedPath === "" ? ""
                : " The managed windows live in " + win.managedPath
                  + "; deleting an entry there releases it, exactly as the button does.")
+        font.family: Style.font.family
+        font.pixelSize: Style.font.subtitle
+        color: Util.alpha(Color.popups.text, 0.7)
+      }
+    }
+
+    // The Jobs tab (#221, ADR 0067): work still in flight, and steering it.
+    //
+    // Every string on this screen except its section title arrived already
+    // worded. A row says where the job stands and how long it has been there
+    // (`state`), what it is waiting for (`question`), the verbatim detail
+    // underneath that question (`detail`), how much it has done (`progress`),
+    // the goal in the user's own words (`goal`), the boundary it is held to
+    // (`scope`), the ledger-derived account of a finished one (`report`), and
+    // why no answer will move it (`why`). Not one of those is a fact this
+    // window could check: the clock is the daemon's, the boundary is the
+    // daemon's, and the report is read back from a ledger written as each step
+    // finished — which is the whole of #200's honesty rule, and the reason no
+    // sentence here has been near a model.
+    //
+    // The controls are the daemon's too, and their absence is the refusal. A
+    // job with nothing to press has no buttons rather than dimmed ones, so a
+    // keyboard user never lands on a control that could only decline — the
+    // shared row skips an empty label in the focus chain, which makes that
+    // reachability and not just appearance (ADR 0066).
+    Item {
+      id: jobsScreen
+      visible: win.socketReady && win.currentTab === "jobs"
+      anchors.top: tabStrip.bottom
+      anchors.topMargin: Style.space(12)
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: errorBanner.visible ? errorBanner.top : parent.bottom
+      anchors.bottomMargin: errorBanner.visible ? Style.space(12) : 0
+
+      Flickable {
+        id: jobsScroll
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: jobsFooter.top
+        anchors.bottomMargin: Style.space(8)
+        contentHeight: jobsColumn.height + Style.space(12)
+        clip: true
+
+        Column {
+          id: jobsColumn
+          width: jobsScroll.width
+          spacing: Style.space(10)
+
+          Text {
+            text: "What Jarvix is working on"
+            font.family: Style.font.family
+            font.bold: true
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          // The outcome of the last stop or answer given here, in the daemon's
+          // own sentence and nowhere else's. A refusal comes back as a normal
+          // reply carrying its reason, so this line is the whole of what the
+          // window claims happened, and it claims exactly what it was told.
+          Text {
+            visible: win.jobsNotice !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: win.jobsNotice
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            color: Color.popups.text
+          }
+
+          JarvixEmptyState {
+            visible: win.jobRows.length === 0
+            width: parent.width
+            text: win.jobsEmpty
+          }
+
+          Repeater {
+            model: win.jobRows
+
+            delegate: Column {
+              id: jobEntry
+              required property var modelData
+              width: jobsColumn.width
+              spacing: Style.space(4)
+
+              readonly property string jobId: String(jobEntry.modelData.id || "")
+              readonly property var controls: jobEntry.modelData.controls || []
+              // The one control that needs typing, as the daemon marked it.
+              readonly property var wordsControl: win.jobWordsControl(jobEntry.controls)
+
+              JarvixCollectionRow {
+                width: jobEntry.width
+                // The standing, which leads with the job's own name and says
+                // in words — never in a colour — whether it is running,
+                // waiting on you, or over, and how long it has been that way.
+                title: String(jobEntry.modelData.state || "")
+                // What it is waiting for, verbatim in the words of whoever
+                // parked it: the gate's own generated question for an
+                // approval, the planner's for a decision.
+                subtitle: String(jobEntry.modelData.question || "")
+                // The verbatim detail a session's confirmation card shows
+                // under its question — the exact thing being approved, in the
+                // monospace block this design system reserves for values that
+                // must not be reworded.
+                detail: String(jobEntry.modelData.detail || "")
+                meta: String(jobEntry.modelData.progress || "")
+                actionLabel: jobEntry.controls.length > 0
+                  ? String(jobEntry.controls[0].label || "") : ""
+                actionName: jobEntry.controls.length > 0
+                  ? String(jobEntry.controls[0].name || "") : ""
+                onActionTriggered: win.runJobControl(jobEntry.modelData, jobEntry.controls[0])
+                action2Label: jobEntry.controls.length > 1
+                  ? String(jobEntry.controls[1].label || "") : ""
+                action2Name: jobEntry.controls.length > 1
+                  ? String(jobEntry.controls[1].name || "") : ""
+                onAction2Triggered: win.runJobControl(jobEntry.modelData, jobEntry.controls[1])
+                action3Label: jobEntry.controls.length > 2
+                  ? String(jobEntry.controls[2].label || "") : ""
+                action3Name: jobEntry.controls.length > 2
+                  ? String(jobEntry.controls[2].name || "") : ""
+                onAction3Triggered: win.runJobControl(jobEntry.modelData, jobEntry.controls[2])
+              }
+
+              // The goal, in the user's own words and never rewritten: it is
+              // the only record of what was actually asked for, and a job that
+              // had paraphrased its own instruction could not be audited
+              // against it.
+              Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: String(jobEntry.modelData.goal || "")
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+
+              // The boundary it is held to, all three faces of it, in the
+              // sentence the scope states about itself.
+              Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: String(jobEntry.modelData.scope || "")
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Util.alpha(Color.popups.text, 0.7)
+              }
+
+              // The account of a job that has ended: what was done, what was
+              // not, and — first — the steps whose outcome nobody saw.
+              Text {
+                visible: String(jobEntry.modelData.report || "") !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: String(jobEntry.modelData.report || "")
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Color.popups.text
+              }
+
+              // A job no answer can move says so in words where the Answer
+              // control would have been — the same sentence the verb itself
+              // refuses with, so the two cannot drift apart.
+              Text {
+                visible: String(jobEntry.modelData.why || "") !== ""
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: String(jobEntry.modelData.why || "")
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                color: Util.alpha(Color.popups.text, 0.7)
+              }
+
+              // The field for a job that asked the user to decide something.
+              // Present only when the daemon marked a control as needing
+              // words: an approval the gate demanded is a yes about an action
+              // already shown, and a text box in front of that would invite an
+              // answer nothing reads.
+              JarvixFormField {
+                visible: jobEntry.wordsControl !== null
+                width: parent.width
+                label: jobEntry.wordsControl !== null
+                  ? String(jobEntry.wordsControl.field_label || "") : ""
+                Component.onCompleted: text = win.jobDraft(jobEntry.jobId)
+                onEdited: function(value) { win.setJobDraft(jobEntry.jobId, value) }
+                onCommitted: win.runJobControl(jobEntry.modelData, jobEntry.wordsControl)
+              }
+            }
+          }
+        }
+      }
+
+      // What the listing is showing you the inside of, in the daemon's own
+      // sentence, and the file itself — because a job that has aged out of the
+      // bound is one somebody will go looking for.
+      Text {
+        id: jobsFooter
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        wrapMode: Text.Wrap
+        text: win.jobsDisclosure === "" ? ""
+          : win.jobsDisclosure + (win.jobsPath === "" ? "" : "  " + win.jobsPath)
         font.family: Style.font.family
         font.pixelSize: Style.font.subtitle
         color: Util.alpha(Color.popups.text, 0.7)
