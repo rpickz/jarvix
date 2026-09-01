@@ -109,18 +109,34 @@ type Planner interface {
 // Actor is the machine a job acts on. Three verbs, in the order they are always
 // called, because the order is the safety argument: read what the step would
 // touch, judge it, and only then do it.
+//
+// Two of the three take the scope, and that is deliberate rather than
+// convenient (#222, ADR 0068). Since a step can be a shell command, "what would
+// this touch" is no longer a question about the call alone: for a command the
+// answer is "whatever it likes, unless the kernel is holding it inside the
+// scope's roots", so Subject has to know the roots to say whether that
+// confinement can be built at all, and Do has to know them to build it. Passing
+// the scope explicitly rather than smuggling it on the context is the choice
+// this interface makes on purpose: the compiler is then the thing that notices a
+// new Actor which forgot about it, and a security parameter that can be
+// forgotten silently is one that will be.
 type Actor interface {
 	// Subject reports what a proposed step would ACTUALLY touch, read
 	// daemon-side out of the call's parsed arguments. An error means the
 	// daemon cannot say — which parks the job rather than guessing, because a
-	// subject nobody can name cannot be checked against a boundary.
-	Subject(ctx context.Context, s Step) (Attempt, error)
+	// subject nobody can name cannot be checked against a boundary. An
+	// *ErrUnconfinable means something narrower and is parked differently: the
+	// daemon knows exactly what would happen and cannot stop it happening
+	// outside the scope.
+	Subject(ctx context.Context, scope Scope, s Step) (Attempt, error)
 	// Judge classifies the step under the permission gate, exactly as a
-	// session would.
+	// session would. It takes no scope: the gate is the user's standing
+	// instruction about a capability and does not vary with a job's boundary.
 	Judge(ctx context.Context, s Step) Verdict
-	// Do runs the step. The job id is handed over so the account records which
-	// piece of work each change belonged to (#201, ADR 0064).
-	Do(ctx context.Context, job string, s Step) (Result, error)
+	// Do runs the step, inside the scope's boundary where the step is one that
+	// needs holding there. The job id is handed over so the account records
+	// which piece of work each change belonged to (#201, ADR 0064).
+	Do(ctx context.Context, job string, scope Scope, s Step) (Result, error)
 }
 
 // View is what a planner is shown. It is a copy: nothing a planner does can
@@ -488,9 +504,16 @@ func (r *Runner) work(ctx context.Context, id string) {
 //     is not acted on.
 //  2. **Plan.** The planner proposes, bounded by the step timeout.
 //  3. **Read the subject.** The daemon says what the call would touch. It
-//     cannot say → park.
+//     cannot say → park; it can say what the call would touch but cannot hold
+//     the call inside the scope → park, differently (#222).
 //  4. **Judge the scope.** Outside → the job STOPS and parks with the reason,
-//     and nothing whatever has been dispatched.
+//     and nothing whatever has been dispatched. For a step whose subject is a
+//     path this is the whole of the filesystem check. For a shell command
+//     there are no paths to check here and there never could be — the daemon
+//     has established instead that the kernel will hold the command inside the
+//     roots, and step 6 is where that boundary is applied. Which of the two a
+//     step gets is the Actor's decision and not this loop's; what this loop
+//     guarantees is that one of them happened before anything ran.
 //  5. **Judge the gate.** Deny → park. Ask → park ON THE QUESTION, keeping the
 //     step, so approving later resumes exactly this action. A resumption is
 //     judged too and only its question is skipped: the tier in force when the
@@ -578,8 +601,21 @@ func (r *Runner) once(ctx context.Context, id string) (bool, error) {
 
 	// (3) What would this actually touch? Read by the daemon, from the parsed
 	// call — never from the model's account of it.
-	attempt, err := actor.Subject(stepCtx, step)
+	//
+	// Since #222 there are two ways this can fail, and they are told apart
+	// rather than folded together, because they leave the user with different
+	// work to do. A subject the daemon cannot READ is answered by a different
+	// step. A boundary this machine cannot HOLD is answered by a narrower scope
+	// or a different kernel, and telling somebody the first sentence when the
+	// second is true sends them looking in the wrong place.
+	attempt, err := actor.Subject(stepCtx, claimed.Scope, step)
 	if err != nil {
+		var unconfinable *ErrUnconfinable
+		if errors.As(err, &unconfinable) {
+			_, perr := r.park(id, WhyUnconfined,
+				"I stopped without doing it: "+unconfinable.Because+".", step)
+			return false, perr
+		}
 		_, perr := r.park(id, WhyUnclear,
 			"I stopped because I couldn't tell what "+step.Tool+" would have touched, "+
 				"and I will not act inside a boundary I cannot check: "+err.Error(), step)
@@ -653,7 +689,7 @@ func (r *Runner) once(ctx context.Context, id string) (bool, error) {
 	}); err != nil {
 		return false, err
 	}
-	result, err := actor.Do(stepCtx, id, step)
+	result, err := actor.Do(stepCtx, id, claimed.Scope, step)
 	entry := Entry{At: r.now().UTC(), Intent: step.Intent, Tool: step.Tool}
 	switch {
 	case err != nil && ctx.Err() != nil:

@@ -117,13 +117,22 @@ another, and only the second can be enforced.
 
 **The sharpest consequence, stated rather than discovered: `shell.run` cannot be
 used inside a scoped job.** A shell command's filesystem subject cannot be read
-out of its text, so it cannot be checked against a directory. `subjectOf` in
+out of its text, so it cannot be checked against a directory. `Subject` in
 `internal/daemon/jobs.go` therefore has no entry for it, an unreadable subject
 parks the job, and a directory-scoped job that proposes a command stops. This is
 a real limitation and it is the honest one: the alternative is a scope that
 *looks* like a boundary and lets any command through. The way forward — a
 job-scoped working directory and an exec that cannot leave it — is a separate
 decision and is deliberately not taken here.
+
+> **Superseded on this point by [ADR 0068](0068-a-command-the-kernel-holds.md)**
+> (#222). The paragraph above is still right about the parser: a command's
+> subject genuinely cannot be read out of its text, and nothing in this daemon
+> does. What changed is that the question stopped being asked. A job's command
+> is now confined by the kernel to the scope's roots before `exec`, so its
+> attempt carries no paths and there is nothing to check against the boundary
+> — and on a machine where that confinement cannot be established the step is
+> refused rather than run. The rest of this ADR stands unchanged.
 
 ### Checkpointing and resumability
 
@@ -156,9 +165,10 @@ and the user approved the action they were shown.
 | `out_of_scope` | an attempt outside the boundary; nothing was done | no |
 | `refused` | the permission gate denied it outright | no |
 | `unclear` | the daemon could not read what the step would touch | no |
+| `unconfined` | this machine cannot *hold* the step inside the scope ([ADR 0068](0068-a-command-the-kernel-holds.md)) | no |
 | `stuck` | the planner failed, proposed nothing, or spent the step bound | no |
 
-The four unanswerable ones are unanswerable deliberately. A boundary and a
+The five unanswerable ones are unanswerable deliberately. A boundary and a
 denial are not opinions: the way out of an out-of-scope stop is a *new job with
 a scope that admits the work*, which is a decision the user makes deliberately
 rather than a yes/no they nod through. Declining an approval **stops** the job;
@@ -331,6 +341,8 @@ the user can see exactly what it spent them on.
   way — one `briefing.Source` and one adapter.
 - A job cannot run a shell command. See the decision above; this is the price of
   enforcing a scope rather than describing one, and it is paid deliberately.
+  (No longer true since [ADR 0068](0068-a-command-the-kernel-holds.md): the
+  price was paid until there was a boundary that did not need a parser.)
 - No window surface, no CLI, and no deterministic voice grammar. All three are
   deferred for ADR 0064's reason: the wire and the wording exist, and adding
   them is an addition rather than a reshaping. A job is startable, askable,
@@ -357,7 +369,8 @@ the user can see exactly what it spent them on.
 - **Letting a job run shell commands inside a working directory.** Not rejected
   — deferred. It needs an exec that cannot leave the directory, which is a
   security decision deserving its own ADR rather than one inherited from
-  whatever was convenient here.
+  whatever was convenient here. It got one:
+  [ADR 0068](0068-a-command-the-kernel-holds.md).
 - **One in-memory registry of running jobs beside the file.** Rejected: two
   records of the same fact disagree the first time one is written and the other
   is not, and the fact here is "what is this job waiting for", which a restart

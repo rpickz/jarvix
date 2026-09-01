@@ -62,6 +62,10 @@ type recordingActor struct {
 	verdict  func(Step) Verdict
 	result   func(Step) (Result, error)
 	dispatch []Step
+	// scoped is every scope the runner handed this actor, so a test can prove
+	// the boundary reaches the code that has to enforce it rather than assuming
+	// it from the interface's shape (#222).
+	scoped []Scope
 	// entered is closed on the first Do, and blocking waits on release, so a
 	// test can stop a job with a step genuinely in flight.
 	entered chan struct{}
@@ -69,7 +73,10 @@ type recordingActor struct {
 	once    sync.Once
 }
 
-func (a *recordingActor) Subject(_ context.Context, s Step) (Attempt, error) {
+func (a *recordingActor) Subject(_ context.Context, scope Scope, s Step) (Attempt, error) {
+	a.mu.Lock()
+	a.scoped = append(a.scoped, scope)
+	a.mu.Unlock()
 	if a.subject != nil {
 		return a.subject(s)
 	}
@@ -83,9 +90,10 @@ func (a *recordingActor) Judge(_ context.Context, s Step) Verdict {
 	return Verdict{Decision: Allow}
 }
 
-func (a *recordingActor) Do(ctx context.Context, _ string, s Step) (Result, error) {
+func (a *recordingActor) Do(ctx context.Context, _ string, scope Scope, s Step) (Result, error) {
 	a.mu.Lock()
 	a.dispatch = append(a.dispatch, s)
+	a.scoped = append(a.scoped, scope)
 	a.mu.Unlock()
 	if a.entered != nil {
 		a.once.Do(func() { close(a.entered) })
@@ -107,6 +115,12 @@ func (a *recordingActor) did() []Step {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]Step(nil), a.dispatch...)
+}
+
+func (a *recordingActor) scopes() []Scope {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]Scope(nil), a.scoped...)
 }
 
 // rig is one runner over one store, wired to a scripted planner and a
@@ -908,5 +922,110 @@ func waitForJob(t *testing.T, store *Store, id string, want func(Job) bool) Job 
 		if time.Now().After(deadline) {
 			t.Fatalf("the job never reached the state this test is about: %+v", job)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A boundary this machine cannot hold (#222, ADR 0068)
+// ---------------------------------------------------------------------------
+
+// TestAStepWhoseBoundaryCannotBeHeldParksWithItsOwnReason.
+//
+// The runner has two ways to stop before dispatching on what the Actor told it,
+// and they are deliberately not the same way. WhyUnclear is "I could not tell
+// what this would touch" and is answered by proposing a different step.
+// WhyUnconfined is "I could tell perfectly well and I could not stop it
+// touching anything else" — answered by a narrower scope or a different
+// machine. Telling somebody the first sentence when the second is true sends
+// them looking in the wrong place, so the two are pinned apart here.
+func TestAStepWhoseBoundaryCannotBeHeldParksWithItsOwnReason(t *testing.T) {
+	r := newRig(t, step("memory.search", "run a command"))
+	r.actor.subject = func(Step) (Attempt, error) {
+		return Attempt{}, &ErrUnconfinable{
+			Because: "this kernel has no way to hold a command inside the boundary"}
+	}
+	job := r.work(t, r.start(t).ID)
+	if job.State != Parked {
+		t.Fatalf("state = %q, want %q", job.State, Parked)
+	}
+	if job.Question.Why != WhyUnconfined {
+		t.Errorf("waiting on %q, want %q — the reason decides the sentence the user reads",
+			job.Question.Why, WhyUnconfined)
+	}
+	if !strings.Contains(job.Question.Ask, "no way to hold a command") {
+		t.Errorf("ask = %q, want the reason the machine gave", job.Question.Ask)
+	}
+	if len(r.actor.did()) != 0 {
+		t.Errorf("dispatched %+v; nothing may run when the boundary cannot be held",
+			r.actor.did())
+	}
+	if len(job.Ledger) != 0 {
+		t.Errorf("ledger = %+v, want nothing recorded for a step that never ran", job.Ledger)
+	}
+}
+
+// TestAnUnconfinableStepIsNotSomethingAYesCanSettle. A boundary this machine
+// cannot hold is not an opinion, so the job's own offers decline to carry it on
+// — the same treatment a scope violation gets, and for the same reason.
+func TestAnUnconfinableStepIsNotSomethingAYesCanSettle(t *testing.T) {
+	if WhyUnconfined.Answerable() {
+		t.Fatal("a kernel that cannot hold a boundary was made answerable by saying yes")
+	}
+	r := newRig(t, step("memory.search", "run a command"))
+	r.actor.subject = func(Step) (Attempt, error) {
+		return Attempt{}, &ErrUnconfinable{Because: "this kernel has no Landlock"}
+	}
+	job := r.work(t, r.start(t).ID)
+	if ok, because := job.AnswerOffer(); ok {
+		t.Error("the job offered to be carried on by an answer")
+	} else if !strings.Contains(because, "no Landlock") {
+		t.Errorf("refusal = %q, want it to repeat what stopped the job", because)
+	}
+	if _, err := r.runner.Answer("tidy", true, "go on"); err == nil {
+		t.Error("saying yes to an unholdable boundary was accepted")
+	}
+}
+
+// TestTheScopeReachesTheCodeThatHasToEnforceIt.
+//
+// Since #222 the Actor needs the roots — Subject to say whether the boundary
+// can be built at all, Do to build it — so the runner hands the scope to both.
+// A change that dropped one of the two would leave a command running with no
+// boundary or a boundary checked and never applied, and neither shows up in any
+// other test here.
+func TestTheScopeReachesTheCodeThatHasToEnforceIt(t *testing.T) {
+	r := newRig(t, step("memory.search", "look"))
+	r.work(t, r.start(t).ID)
+	seen := r.actor.scopes()
+	if len(seen) != 2 {
+		t.Fatalf("the actor was handed the scope %d times, want twice: once to check the "+
+			"boundary and once to build it", len(seen))
+	}
+	for i, got := range seen {
+		if len(got.Roots) != 1 || got.Roots[0] != r.scope.Roots[0] {
+			t.Errorf("call %d saw roots %v, want the job's own %v", i, got.Roots, r.scope.Roots)
+		}
+	}
+}
+
+// TestTheGateStillAsksAboutAStepThatIsAlsoConfined is the ticket's other
+// non-negotiable: confinement is an ADDITIONAL wall and never a substitute. A
+// step whose boundary can be held perfectly well still parks on the gate's
+// question, because "it cannot reach outside the scope" and "the user agreed to
+// this" are different facts and only the second is an approval.
+func TestTheGateStillAsksAboutAStepThatIsAlsoConfined(t *testing.T) {
+	r := newRig(t, step("memory.remember", "delete the lot"))
+	// A subject the boundary holds without complaint: no paths, exactly what a
+	// confined command produces.
+	r.actor.subject = func(s Step) (Attempt, error) { return Attempt{Tool: s.Tool}, nil }
+	r.actor.verdict = func(Step) Verdict {
+		return Verdict{Decision: Ask, Question: "Shall I delete the lot?"}
+	}
+	job := r.work(t, r.start(t).ID)
+	if job.State != Parked || job.Question.Why != WhyApproval {
+		t.Fatalf("state = %q waiting on %q, want a parked approval", job.State, job.Question.Why)
+	}
+	if len(r.actor.did()) != 0 {
+		t.Errorf("dispatched %+v before the user had answered", r.actor.did())
 	}
 }

@@ -195,7 +195,7 @@ All options: [docs/configuration.md](docs/configuration.md).
 | Call a window by a name you chose | **"Jarvix, call this window builds"** — the focused window gains a one-word nickname that works anywhere you'd describe a window ("focus builds", "move builds to workspace 3"), resolved before any app/title matching. "What are my windows called?" or `jarvix windows` lists them; names are per-session and released when the window closes ([ADR 0040](docs/adr/0040-window-nicknames.md)) |
 | Call a screen by a name you chose | **"Jarvix, call this monitor top"** — a one-word name for a monitor, usable anywhere a screen is named (`monitor = "top"` in a routine step, "put this on the bottom screen"). Names are resolved when the routine RUNS, so moving a cable is one correction rather than an edit to every routine; a screen that is unplugged says so — *"no monitor is called top right now: it means DP-2, which is not plugged in"* — and the rest of the routine still lands. "What are my screens called?", `jarvix monitors`, or Automations → Screens in the window ([ADR 0057](docs/adr/0057-monitor-nicknames.md)) |
 | Ask where everything is | **"Jarvix, what's going on?"** (or "where are we", "status report") — one short spoken answer about the whole machine, ordered by what deserves attention: what is waiting on you first (an AI session classified needs-you leads, by name), then what is still running, then what has finished since you last looked, then anything failing, then quiet housekeeping. Specifics, never categories, and a short honest *"Nothing needs you."* when there is nothing of note — never a manufactured list. A source that could not be read is named rather than dropped, and the report says so up front when a restart means its own record cannot cover the whole stretch. The **Situation** tab in the conversation window has the full version, every line linking to the thing it describes ([ADR 0061](docs/adr/0061-the-situation-report.md)) |
-| Give a direction, not a command | **"Jarvix, work on tidying my downloads"** — a **job**: work that outlives the conversation that asked for it. It has a goal in your own words, a **scope** you set (which directories, which applications, which tools), checkpoints it resumes from, and an honest report. The scope is stated back before it starts and then **enforced by the daemon before every single action** — never merely described to the model — so an attempt outside it stops the job and parks it with the reason, having done nothing. Anything that cannot be undone still stops and asks, however long the job has run; because nobody may be there, it **parks on the question** instead of interrupting, and answering later resumes it exactly where it stopped. A parked job turns up in "what's going on?" and in your return briefing. **"How's the tidy job?"** and **"stop the tidy job"** are sentences. It survives a restart, and a step it started and never saw the end of is reported as unknown rather than as done ([ADR 0065](docs/adr/0065-jobs-that-outlive-a-conversation.md)). You never have to ask a model to look: the window's **Jobs** tab and `jarvix jobs` show every job with its state, its goal, its scope and what it is waiting for, and answer, stop or resume it from there ([ADR 0067](docs/adr/0067-jobs-you-can-see-and-steer.md)) |
+| Give a direction, not a command | **"Jarvix, work on tidying my downloads"** — a **job**: work that outlives the conversation that asked for it. It has a goal in your own words, a **scope** you set (which directories, which applications, which tools), checkpoints it resumes from, and an honest report. The scope is stated back before it starts and then **enforced by the daemon before every single action** — never merely described to the model — so an attempt outside it stops the job and parks it with the reason, having done nothing. Anything that cannot be undone still stops and asks, however long the job has run; because nobody may be there, it **parks on the question** instead of interrupting, and answering later resumes it exactly where it stopped. A parked job turns up in "what's going on?" and in your return briefing. **"How's the tidy job?"** and **"stop the tidy job"** are sentences. It survives a restart, and a step it started and never saw the end of is reported as unknown rather than as done ([ADR 0065](docs/adr/0065-jobs-that-outlive-a-conversation.md)). A job can run shell commands too, held inside its scope by the kernel rather than by a reading of the command — and refused outright on a machine that cannot hold them there ([ADR 0068](docs/adr/0068-a-command-the-kernel-holds.md)). You never have to ask a model to look: the window's **Jobs** tab and `jarvix jobs` show every job with its state, its goal, its scope and what it is waiting for, and answer, stop or resume it from there ([ADR 0067](docs/adr/0067-jobs-you-can-see-and-steer.md)) |
 | Hand one window over, and keep the rest to yourself | **"Jarvix, take control of this terminal"** — Jarvix asks once, naming the window, and from then on it may read, move and type in that one. A window Jarvix opened is managed from birth. **Being managed is not permission to run anything:** text typed into a terminal is classified and confirmed exactly as a shell command is — the verbatim command on the card, compound commands split and judged part by part, risky words always asked about, deny rules refusing outright — so acquiring a terminal buys access, never execution. "Let this go" releases it immediately and is never gated. "What do you manage?", or Approvals → Windows Jarvix manages in the window ([ADR 0062](docs/adr/0062-managed-and-unmanaged-windows.md)) |
 | See what each window is for, at a glance | **Anchor, name, or hand over a window** and a tiny static chip appears in its top-right corner: a square mark for a window Jarvix manages, a thread badge (filled = active thread), the nickname tag, and — for an anchored AI session — a working / needs-you / done mark. Each mark is its own shape, so none of them depends on colour. Nothing animated, nothing clickable, unenrolled windows stay clean; `overlays.enabled = false` turns it all off. The bar shows the active thread's name beside the icon ([ADR 0044](docs/adr/0044-window-overlays.md)) |
 | Fresh conversation | `jarvix new` — the current thread is archived, not destroyed |
@@ -539,6 +539,37 @@ Asking out loud costs nothing either: **"what are my jobs doing?"** answers
 straight away rather than asking permission first. Stopping and answering
 still ask, because those change work you asked for. See
 [ADR 0067](docs/adr/0067-jobs-you-can-see-and-steer.md).
+
+**A job can run commands, and the boundary is the kernel's rather than a
+guess.** "Tidy my downloads" and "get the CI green" are commands, and until
+recently a job parked the moment it proposed one — honestly, because a
+command's files cannot be read out of its text and a boundary that cannot be
+checked is not a boundary. So Jarvix stopped trying to read them. A job's
+command is confined by **Landlock** to the scope's directories *before it
+starts*: it physically cannot read or write anything outside them, whether it
+names the path outright, reaches it through a symlink planted inside the
+scope, walks up with `../..`, builds it in a variable, or changes directory
+first. It inherits none of the daemon's environment, so none of your API keys
+are reachable, and it cannot touch Jarvix's own configuration — a job still
+cannot change what Jarvix is allowed to do.
+
+It also cannot talk to Jarvix itself. Landlock governs files and has no
+opinion about sockets, so confining a command to a folder would still have left
+it free to *ask the daemon* to rewrite the configuration it could not reach —
+the wall reached through a different door. A second, narrower wall goes up
+beside the first: a job's command cannot open a unix socket at all, so the
+daemon's own is unreachable, and nothing about how the window or the terminal
+talk to Jarvix changes.
+
+On a machine whose kernel cannot hold either boundary, **a job refuses to run
+the command and says so**, rather than running it half-confined. The permission
+gate is unchanged: anything irreversible still stops and asks, and confinement
+is an extra wall rather than a substitute for one. What the boundary does
+*not* cover — the network, signals, and the fact that a command can still see
+that a file outside exists without being able to read it — is written down
+rather than implied. See
+[ADR 0068](docs/adr/0068-a-command-the-kernel-holds.md) and
+[ADR 0069](docs/adr/0069-the-socket-a-confined-command-cannot-reach.md).
 
 ### Backing up the assistant's memory of you
 
